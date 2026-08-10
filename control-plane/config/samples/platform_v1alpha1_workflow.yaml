@@ -1,0 +1,169 @@
+# HOR-254 / ARCH-019: versioned single-active-node workflow graphs.
+# Tools are capabilities available inside agent_task nodes; there is no
+# top-level tool_call node. Every agent node finishes through complete_step.
+apiVersion: platform.iterabase.com/v1alpha1
+kind: Workflow
+metadata:
+  name: walter-quotation-processing
+  namespace: default
+spec:
+  key: walter/quotation-processing
+  version: "2"
+  poolRef: walter-agents
+  defaultModelRef: qwen3.6-27b
+
+  source:
+    type: graph_email
+    triggerBindings:
+      - name: quotation-inbox
+        graphEmail:
+          mailboxAddress: quotations@walter.example
+
+  skills:
+    - name: walter/quotation-processing
+      version: "1.0.0"
+      digest: sha256:replace-with-real-skill-digest
+
+  # Workflow-level maximum. Each agent node below exposes an explicit subset.
+  requestedCapabilities:
+    - tool: graph.email.read
+      maxEffectClass: read_only
+      actions: [graph.email.read]
+  graph:
+    entryNode: process-quotation
+    maxTransitions: 20
+    nodes:
+      - key: process-quotation
+        label:
+          en: Processing quotation
+          pt: A processar cotação
+        kind: agent_task
+        prompt: |
+          Inspect the quotation source and process it according to the assigned
+          quotation skill. If required information is missing, report the
+          needs_information outcome. Otherwise produce the authorized structured
+          result and downloadable CSV artifact, then report completed.
+        modelRef: qwen3.6-27b
+        skills: [walter/quotation-processing]
+        capabilities: [graph.email.read]
+        timeout: 10m
+        outcomes: [completed, needs_information]
+        outputSchema:
+          type: object
+          additionalProperties: false
+          required: [classification]
+          properties:
+            classification:
+              type: string
+              enum: [engineering, pricing]
+        resultPresentation:
+          outcomes:
+            - outcome: completed
+              summary:
+                en: Quotation request processed
+                pt: Pedido de cotação processado
+          fields:
+            - path: [classification]
+              label: {en: Classification, pt: Classificação}
+              options:
+                - value: engineering
+                  label: {en: Engineering, pt: Engenharia}
+                - value: pricing
+                  label: {en: Pricing, pt: Preços}
+
+      - key: request-information
+        label:
+          en: Waiting for information
+          pt: A aguardar informação
+        kind: human_gate
+        outcomes: [information_provided]
+        humanGate:
+          type: information
+          title:
+            en: Additional information required
+            pt: Informação adicional necessária
+          description:
+            en: Provide the missing information needed to process this quotation.
+            pt: Forneça a informação em falta necessária para processar este pedido.
+          responseSchema:
+            type: object
+            required: [information]
+            properties:
+              information: {type: string, minLength: 1}
+          presentation:
+            outcomes:
+              - {en: Information provided, pt: Informação fornecida}
+            fields:
+              - key: information
+                label: {en: Information, pt: Informação}
+
+    edges:
+      - from: process-quotation
+        outcome: needs_information
+        to: request-information
+      - from: request-information
+        outcome: information_provided
+        to: process-quotation
+
+    terminalOutcomes:
+      - node: process-quotation
+        outcome: completed
+
+  valueModelRef: walter-quotation-handling
+  presentation:
+    workflowTitle: Quotation processing
+    personaName: Marco
+    locale: en
+---
+# Generic exported-artifact workflow for XBS discovery. Customer-specific schema
+# and mapping remain in the immutable skill/artifact, not platform-core fields.
+apiVersion: platform.iterabase.com/v1alpha1
+kind: Workflow
+metadata:
+  name: xbs-exported-artifact
+  namespace: default
+spec:
+  key: xbs/exported-artifact
+  version: "2"
+  poolRef: xbs-agents
+  defaultModelRef: qwen3.6-27b
+  source:
+    type: operator_artifact
+    triggerBindings:
+      - name: discovery-exports
+        operatorArtifact:
+          sourceID: xbs-discovery-exports
+  skills:
+    - name: xbs/discovery-mapping
+      version: "1.0.0"
+      digest: sha256:replace-after-discovery
+  graph:
+    entryNode: process-export
+    maxTransitions: 10
+    nodes:
+      - key: process-export
+        label:
+          en: Processing exported data
+          pt: A processar dados exportados
+        kind: agent_task
+        prompt: Process the supplied exported artifact using the assigned discovery mapping.
+        skills: [xbs/discovery-mapping]
+        outcomes: [completed]
+        # Artifact-only discovery placeholder; replace with discovered closed
+        # properties and matching resultPresentation fields when available.
+        outputSchema:
+          type: object
+          additionalProperties: false
+        resultPresentation:
+          outcomes:
+            - outcome: completed
+              summary:
+                en: Exported data processed
+                pt: Dados exportados processados
+    terminalOutcomes:
+      - node: process-export
+        outcome: completed
+  presentation:
+    workflowTitle: Exported data processing
+    personaName: XBS Operations
+    locale: pt

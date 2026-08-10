@@ -1,0 +1,446 @@
+syntax = "proto3";
+
+package iterabase.harness.v1;
+
+// The AgentSandbox worker RPC contract (HOR-381 — warm supervisor + per-turn
+// pi child). The worker (Node supervisor) is the mTLS gRPC CLIENT; the
+// control-plane (HOR-249) is the gRPC SERVER. One long-lived `Work` bidi
+// stream per worker: the worker pulls turns (Ready -> AssignTurn), streams
+// durable TurnEvents (sequenced, cumulatively ACKed) + ephemeral TokenDeltas
+// (live token streaming, non-sequenced/non-ACKed), and heartbeats.
+//
+// Transport: native gRPC over HTTP/2 + mTLS (a SPIFFE URI SAN binds Pod/pool
+// identity, verified in Hello). No HTTP/1.1 Connect fallback.
+//
+// Per-turn stateless: the supervisor process is warm/long-lived; each turn
+// runs in a fresh pi child under a per-session UID/GID (setpriv launcher), then
+// the child exits. Durable audit events survive a supervisor crash via a local
+// WAL (emptyDir); token deltas are ephemeral (reconstructed from the durable
+// AssistantMessage).
+//
+// Ref: Platform Direction doc §4/§7/§9 (refined 2026-07-27); Linear HOR-381.
+
+option go_package = "github.com/nunocgoncalves/control-plane/internal/harnessrpc/iterabase/harness/v1;harnessv1";
+
+service Harness {
+  // Work is the one long-lived bidi stream per worker. Worker->CP: Hello,
+  // Ready, Heartbeat, TurnEvent (durable), TokenDelta (ephemeral). CP->worker:
+  // Welcome, AssignTurn, AbortTurn, EventAck, SessionEnd.
+  rpc Work(stream WorkerMessage) returns (stream ControlMessage);
+}
+
+// ---- Worker -> ControlPlane ----
+
+message WorkerMessage {
+  oneof kind {
+    Hello hello = 1;
+    Ready ready = 2;
+    Heartbeat heartbeat = 3;
+    TurnEvent turn_event = 4;   // durable, sequenced, cumulatively ACKed
+    TokenDelta token_delta = 5; // ephemeral, live token streaming
+  }
+}
+
+// Hello is the first message on every stream. The authenticated client cert is
+// authoritative: the Go server verifies worker_id/pool_id against a URI SAN
+// such as spiffe://iterabase.local/pools/<pool-uid>/workers/<pod-name>. A
+// mismatch terminates the stream with PermissionDenied.
+message Hello {
+  string worker_id = 1;  // Kubernetes Pod name (stable warm-worker slot, e.g. <pool>-worker-0)
+  string pool_id = 2;    // owning pool CR UID
+  string build_version = 3;
+  string protocol_version = 4;
+  repeated string capabilities = 5;
+}
+
+// Ready advertises one dispatch credit. Legal only after Welcome, after any
+// audit replay, with no live child, no pending cleanup, and no unacknowledged
+// final outcome. A second assignment before the next Ready is a protocol
+// violation (stream closed fail-closed).
+message Ready {}
+
+// Heartbeat is ephemeral control data, not a runtime audit event. Any worker
+// message renews the server-side lease; a heartbeat is needed only after an
+// otherwise silent interval. While active, it must be backed by an IPC
+// heartbeat from the child (a stale child heartbeat causes the supervisor to
+// terminate the child — liveness, not a total-duration limit).
+message Heartbeat {
+  WorkerState state = 1;
+  string turn_id = 2;            // when present
+  PiPhase pi_phase = 3;
+  string tool_call_id = 4;       // active tool call, when present
+  uint64 highest_sequence = 5;   // highest worker event sequence emitted
+}
+
+enum WorkerState {
+  WORKER_STATE_UNSPECIFIED = 0;
+  WORKER_STATE_IDLE = 1;
+  WORKER_STATE_STARTING = 2;
+  WORKER_STATE_RUNNING = 3;
+  WORKER_STATE_ABORTING = 4;
+  WORKER_STATE_CLEANING = 5;
+  WORKER_STATE_DRAINING = 6;
+}
+
+enum PiPhase {
+  PI_PHASE_UNSPECIFIED = 0;
+  PI_PHASE_SESSION_SETUP = 1;
+  PI_PHASE_MODEL_CALL = 2;
+  PI_PHASE_TOOL_CALL = 3;
+  PI_PHASE_COMPACTION = 4;
+  PI_PHASE_RETRY_BACKOFF = 5;
+  PI_PHASE_SHUTDOWN = 6;
+}
+
+// TurnEvent is a durable worker observation. The supervisor assigns a strictly
+// monotonic, one-based `sequence` per turn; the control-plane cumulatively
+// ACKs through a sequence after committing the events to Postgres. (turn_id,
+// sequence) provides deduplication on reconnect replay — audit delivery retry,
+// never execution replay.
+message TurnEvent {
+  string turn_id = 1;
+  uint64 sequence = 2;   // supervisor-assigned, monotonic per turn
+  int64 timestamp_ms = 3; // worker observation time (CP receipt is authoritative)
+  oneof kind {
+    ExecutionStarted execution_started = 10;
+    ModelCallStarted model_call_started = 11;
+    AssistantMessage assistant_message = 12;
+    ModelCallFailed model_call_failed = 13;
+    ModelRetryScheduled model_retry_scheduled = 14;
+    ModelRetryFinished model_retry_finished = 15;
+    ToolCallStarted tool_call_started = 16;
+    ToolResult tool_result = 17;
+    CompactionStarted compaction_started = 18;
+    CompactionFinished compaction_finished = 19;
+    HarnessError harness_error = 20;
+    WorkerOutcome worker_outcome = 21;
+    StepCompletion step_completion = 22; // HOR-254 reserved complete_step report
+  }
+}
+
+message ExecutionStarted {
+  string session_id = 1;
+  SandboxRef sandbox = 2;
+}
+
+message ModelCallStarted {
+  string model = 1;           // provider/modelId
+  string thinking_level = 2;  // off|low|medium|high|...
+}
+
+// AssistantMessage is the durable, complete assistant output for a model turn:
+// text + tool calls + usage. Emitted at pi message_end (role=assistant). Live
+// token deltas stream separately as TokenDelta; this carries the full text.
+message AssistantMessage {
+  string text = 1;
+  repeated ToolCall tool_calls = 2;
+  Usage usage = 3;
+  string stop_reason = 4;  // stop|length|toolUse|error|aborted
+  int64 timestamp_ms = 5;
+}
+
+message ToolCall {
+  string id = 1;
+  string name = 2;
+  string arguments_json = 3;  // the LLM's raw tool-call args (JSON string)
+}
+
+// ToolCallStarted marks the ambiguous side-effect boundary: an AssistantMessage
+// proposing a call does not prove execution began. If the worker disappears
+// before ToolResult, this identifies what may have started.
+message ToolCallStarted {
+  string tool_call_id = 1;
+  string tool_name = 2;
+  string arguments_json = 3;
+}
+
+// ToolResult is the granular per-call audit record (pi tool_execution_end).
+// Tool failures are NOT terminal — they return to the model (is_error=true) and
+// pi continues. There is no harness-level tool retry.
+message ToolResult {
+  string tool_call_id = 1;
+  string tool_name = 2;
+  string arguments_json = 3;
+  string result_text = 4;  // result content (text); large blobs offloaded by the CP
+  bool is_error = 5;
+  int64 timestamp_ms = 6;
+}
+
+message Usage {
+  int64 input_tokens = 1;
+  int64 output_tokens = 2;
+  int64 cache_read_tokens = 3;
+  int64 cache_write_tokens = 4;
+  double cost_usd = 5;
+}
+
+message ModelCallFailed {
+  ErrorDetail error = 1;
+}
+
+message ModelRetryScheduled {
+  uint32 attempt = 1;
+  uint32 max_attempts = 2;
+  int64 delay_ms = 3;
+  string error_message = 4;
+}
+
+message ModelRetryFinished {
+  bool success = 1;
+  uint32 attempt = 2;
+  string final_error = 3;  // when !success
+}
+
+message CompactionStarted {
+  string reason = 1;  // manual|threshold|overflow
+}
+
+message CompactionFinished {
+  string reason = 1;
+  bool aborted = 2;
+  bool will_retry = 3;
+  string error_message = 4;  // when failed
+}
+
+// HarnessError is reserved for failures that do not naturally belong to a model
+// call, tool result, or compaction result (setup/protocol/internal). Tool
+// errors stay in ToolResult; model errors in ModelCallFailed.
+message HarnessError {
+  ErrorDetail error = 1;
+}
+
+// A stable error envelope without inventing unreliable provider enums.
+message ErrorDetail {
+  string code = 1;                  // provider/tool code when available
+  string message = 2;
+  Retryability retryability = 3;
+  string details_json = 4;          // source-specific diagnostics
+}
+
+enum Retryability {
+  RETRYABILITY_UNSPECIFIED = 0;
+  RETRYABILITY_RETRYABLE = 1;
+  RETRYABILITY_NON_RETRYABLE = 2;
+  RETRYABILITY_UNKNOWN = 3;
+}
+
+// WorkerOutcome is the terminal event for a turn. COMPLETED only after
+// agent_settled + flush + session_shutdown + dispose + clean exit + ACK. A
+// successful assistant message followed by failed cleanup is FAILED. The CP may
+// independently terminalize (cancellation/worker-loss/lease); the worker's late
+// outcome is after_terminal audit and cannot overwrite CP terminal state.
+// StepCompletion is emitted exactly once by the reserved complete_step control
+// function. It is a completion candidate; the CP advances the graph only after
+// a clean WorkerOutcome=COMPLETED for the same turn (ARCH-020).
+message StepCompletion {
+  string outcome = 1;
+  string summary = 2;
+  string output_json = 3;
+  repeated StepArtifactRef artifact_refs = 4;
+}
+
+message StepArtifactRef {
+  string artifact_id = 1;
+  string role = 2;
+  string metadata_json = 3;
+}
+
+message WorkerOutcome {
+  Outcome outcome = 1;
+  string message = 2;  // human/audit detail
+}
+
+enum Outcome {
+  OUTCOME_UNSPECIFIED = 0;
+  OUTCOME_COMPLETED = 1;
+  OUTCOME_ABORTED = 2;
+  OUTCOME_FAILED = 3;
+}
+
+// TokenDelta is an ephemeral live-streaming token chunk (pi message_update ->
+// AssistantMessageEvent text_delta / thinking_delta). Non-sequenced,
+// non-ACKed, NOT WAL'd. The durable AssistantMessage carries the full text; a
+// dropped delta is acceptable (the UI catches up from the final message).
+message TokenDelta {
+  string turn_id = 1;
+  int32 content_index = 2;  // route the delta to the right content block
+  DeltaType type = 3;
+  string delta = 4;
+}
+
+enum DeltaType {
+  DELTA_TYPE_UNSPECIFIED = 0;
+  DELTA_TYPE_TEXT = 1;
+  DELTA_TYPE_THINKING = 2;
+}
+
+// ---- ControlPlane -> Worker ----
+
+message ControlMessage {
+  oneof kind {
+    Welcome welcome = 1;
+    AssignTurn assign_turn = 2;
+    AbortTurn abort_turn = 3;
+    EventAck event_ack = 4;
+    SessionEnd session_end = 5;
+  }
+}
+
+// Welcome is sent once after Hello auth + registration. A newly accepted
+// connection for the same worker_id atomically fences + closes the old
+// generation; any old active assignment is failed as worker loss.
+message Welcome {
+  string protocol_version = 1;
+  uint64 fencing_generation = 2;
+  int32 heartbeat_interval_ms = 3;
+  int32 lease_timeout_ms = 4;
+}
+
+// AssignTurn carries all per-turn business/session config and no boot infra.
+// Model and tool egress both cross the supervisor's authenticated gateway
+// bridges (ARCH-010/011): the supervisor holds the worker mTLS cert and opens
+// the inference-gateway stream + tool-gateway RPC; the child receives neither
+// endpoint nor credential. Gateway-tool descriptors are NOT carried here —
+// after assignment the supervisor discovers them via the tool gateway
+// (DiscoverEffectiveTools) and passes the non-secret descriptors to the child
+// over the dedicated IPC channel (ARCH-006). Validate IDs/ranges/sizes/MIME/
+// relative paths/sandbox ownership before spawning the child; a structurally
+// invalid assignment yields typed failure events + a failed outcome.
+message AssignTurn {
+  string turn_id = 1;
+  string session_id = 2;
+  SandboxRef sandbox = 3;
+  string persona = 4;                 // pi systemPromptOverride
+  ModelConfig model = 5;
+  bool workspace_tools = 6;           // ARCH-016: expose exactly read/write/edit/bash under session UID/GID; never widened per turn
+  string scope_identity_id = 7;       // validation/audit
+  string message = 8;                 // the user/task message
+  repeated Image images = 9;          // optional; the email demo is text-only
+  string run_id = 10;                 // workflow run id == attempt_id (HOR-254)
+  string node_execution_id = 11;      // exact append-only graph-node visit; empty for chat
+  string node_key = 12;               // immutable graph node key
+  string context_json = 13;           // bounded durable source/previous/latest-output context
+  repeated string completion_outcomes = 14; // allowed complete_step outcomes
+  string completion_output_schema_json = 15; // JSON Schema for complete_step.output
+  repeated SkillRef skills = 16;      // exact immutable node skill subset
+  string work_item_id = 17;           // stable customer-facing work item identity
+  // Exact authorized input set. The supervisor materializes these before the
+  // child starts; the child cannot request an arbitrary artifact id.
+  repeated ArtifactMaterialization materializations = 18;
+}
+
+message SkillRef {
+  string name = 1;
+  string version = 2;
+  string digest = 3;
+}
+
+message ArtifactRef {
+  string artifact_id = 1;
+  string mime_type = 2;
+  int64 size_bytes = 3;
+  string digest = 4;
+}
+
+message ArtifactMaterialization {
+  ArtifactRef ref = 1;
+  // Relative to workspace/. Must be clean, non-empty, and non-escaping. The
+  // dispatcher chooses it from durable context; customer filenames are never
+  // used as path segments without sanitization.
+  string relative_path = 2;
+}
+
+// SandboxRef identifies the session's private filesystem on the shared RWX PVC.
+// Under the HOR-381 provisioning rescope (founder-approved 2026-08-02), the
+// supervisor itself provisions this sandbox at AssignTurn: provisionSandbox
+// creates <sandbox-id>/{root,home,tmp,session,workspace} at mode 0700, chowned
+// to the assignment's stable session UID/GID beneath a root-owned 0711 mount
+// root, then runs validateSandbox as the post-provision integrity gate before
+// spawning the child. The supervisor remains validate-only for an existing
+// path: it never chowns/"completes" a mismatched or partial sandbox — a
+// crash-mid-provision root is refused as a typed FAILED (never silently
+// re-adopted). It reaps the sandbox on SessionEnd (see below).
+message SandboxRef {
+  string sandbox_id = 1;
+  uint32 uid = 2;       // stable per-session UID (supervisor chowns at provision)
+  uint32 gid = 3;
+  string working_dir = 4;  // relative to the sandbox root; never absolute/escaping
+}
+
+message ModelConfig {
+  string id = 1;
+  string api = 2;             // openai-completions (the gateway is OpenAI-compatible)
+  int32 context_window = 3;
+  int32 max_output_tokens = 4;
+  string thinking_level = 5;  // off|low|medium|high|...
+}
+
+message Image {
+  bytes data = 1;
+  string mime_type = 2;
+}
+
+// AbortTurn is idempotent for the matching turn; it cannot affect a later
+// assignment. Applies during sandbox validation, child startup, model/tool
+// execution, compaction, or shutdown.
+message AbortTurn {
+  string turn_id = 1;
+  AbortReason reason = 2;
+  string message = 3;  // human/audit
+}
+
+enum AbortReason {
+  ABORT_REASON_UNSPECIFIED = 0;
+  ABORT_REASON_USER_CANCEL = 1;
+  ABORT_REASON_WORKFLOW_CANCEL = 2;
+  ABORT_REASON_LEASE_EXPIRED = 3;
+  ABORT_REASON_WORKFLOW_TIMEOUT = 4;
+}
+
+// EventAck is a cumulative acknowledgment after the CP commits events to
+// Postgres. The supervisor retains a bounded in-memory outbox (+ WAL) until
+// ack; after a transient stream loss it aborts the execution, reconnects,
+// replays only unacknowledged audit events, then emits Ready.
+message EventAck {
+  string turn_id = 1;
+  uint64 through_sequence = 2;
+}
+
+// SessionEnd tells the worker a session has terminated and its per-session
+// sandbox may be reaped from the shared RWX PVC. The supervisor (which
+// provisioned the sandbox at AssignTurn under the HOR-245 provisioning
+// rescope) recursively removes `<sandbox-id>/` only after verifying it is a
+// non-symlink directory owned by the session (uid, gid); it never follows
+// symlinks and never reaps a foreign-owned or mismatched path. Reap errors
+// (symlink/foreign-owner/persist-after-remove/IO) are fatal — a SandboxError
+// surfaces a security invariant or a volume that silently ignores removal, so
+// the worker exits rather than leaks silently. Legal only when no turn is
+// active (idle/armed); a SessionEnd during an active turn is a fatal protocol
+// violation (dispatch sequences it after the final outcome EventAck).
+// Idempotent: a missing sandbox (never provisioned, or already reaped) is a
+// no-op.
+//
+// Reuse-safety contract (v1 safety floor, founder-approved): the CP MUST NOT
+// recycle a sandbox_id — and MUST NOT recycle the session (uid, gid) — before
+// the worker has reaped. v1 carries no reap-acknowledgment on the wire, so
+// the CP confirms reaping indirectly via (i) the supervisor's fail-closed
+// reap (any reap error is fatal, so a worker that returns to Ready did not
+// hit a reap error this connection) and (ii) a bounded grace exceeding the
+// max reap latency, during which the (sandbox_id, uid, gid) triple is
+// non-recyclable. The uid/gid ownership verification fences reuse: a stale
+// root owned by a prior session is refused (typed error -> fatal), never
+// silently re-adopted, so a recycled UID/GID cannot resurrect a prior
+// session's files.
+//
+// Accepted v1 limitation (founder-approved): v1 has no durable reap-ack +
+// retry/fencing contract on the wire — a stream loss before SessionEnd is
+// handled leaves the sandbox on the PVC until reconciled by a later
+// session-end or a follow-on reaper; v1 accepts this leak-and-reconcile
+// posture. The bounded grace + non-recycling + fail-closed reap is the v1
+// safety floor; a durable reap-ack is an explicit non-goal deferred to a
+// later hardening ticket.
+message SessionEnd {
+  string sandbox_id = 1;
+  uint32 uid = 2;  // session UID that owns the sandbox (verified before reaping)
+  uint32 gid = 3;
+}
