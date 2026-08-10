@@ -1,0 +1,12 @@
+# Dev/kind preset for the iterabase-platform umbrella. Enables the MetalLB L2
+# edge (LoadBalancer mode — the only edge mode) with a pool in the common `kind`
+# docker-bridge subnet (172.18.0.0/16) so `helm install -f values-kind.yaml`
+# works out of the box on kind. The CI computes the actual subnet dynamically
+# (see .github/workflows/ci.yml); this static range suits the default `kind`
+# network — adjust if yours differs (`docker network inspect kind`).
+metallb:
+  enabled: true
+metallb-config:
+  enabled: true
+  addresses:
+    - 172.18.255.200-172.18.255.250

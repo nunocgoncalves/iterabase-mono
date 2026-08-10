@@ -1,0 +1,3 @@
+Certificate substrate {{ .Chart.Version }} installed as release "{{ .Release.Name }}" in namespace "{{ .Release.Namespace }}".
+
+Wait for this release before installing the same-version iterabase-platform release.

@@ -1,0 +1,34 @@
+apiVersion: v2
+name: observability
+description: Observability stack for the iterabase platform — Prometheus, Grafana, Loki, Alertmanager (kube-prometheus-stack + loki) with default alert rules, a Loki Grafana datasource, and optional NVIDIA DCGM (GPU) scraping.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+dependencies:
+  # kube-prometheus-stack bundles Prometheus + Grafana + Alertmanager + the
+  # Prometheus Operator (which ships the ServiceMonitor / PodMonitor /
+  # PrometheusRule / AlertmanagerConfig CRDs) + node-exporter +
+  # kube-state-metrics. One upstream chart gives us the whole metrics/alerting
+  # substrate and the CRDs the per-component ServiceMonitors (owned by each
+  # iterabase subchart) depend on — the same composition style the umbrella uses
+  # for metallb/cert-manager (operator + CRDs in one chart).
+  - name: kube-prometheus-stack
+    version: 88.1.3
+    repository: https://prometheus-community.github.io/helm-charts
+    condition: kube-prometheus-stack.enabled
+  # Loki (single-binary, filesystem PV). PV-backed storage per HOR-408; long-term
+  # retention tuning is a non-goal. The overlay may switch to object storage
+  # (MinIO, in-cluster) by overriding loki.loki.storage.type + deploymentMode.
+  - name: loki
+    version: 7.1.0
+    repository: https://grafana.github.io/helm-charts
+    condition: loki.enabled
+  # Promtail: DaemonSet that tails every node's container logs and pushes them
+  # to the in-chart Loki, so platform workload logs are collected, stored, and
+  # queryable in Grafana (HOR-408 outcome). The client URL is Helm-templated by
+  # the chart (tpl'd config.clients) so it resolves to the release-scoped Loki
+  # SingleBinary service in any install.
+  - name: promtail
+    version: 6.16.6
+    repository: https://grafana.github.io/helm-charts
+    condition: promtail.enabled

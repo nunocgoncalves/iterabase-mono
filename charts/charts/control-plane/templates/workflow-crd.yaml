@@ -1,0 +1,551 @@
+{{- if .Values.enabled }}
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+  labels:
+    {{- include "control-plane.labels" . | nindent 4 }}
+  name: workflows.platform.iterabase.com
+spec:
+  group: platform.iterabase.com
+  names:
+    kind: Workflow
+    listKind: WorkflowList
+    plural: workflows
+    shortNames:
+    - wf
+    singular: workflow
+  scope: Namespaced
+  versions:
+  - name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: Workflow is an immutable, versioned operator-authored workflow
+          graph.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              WorkflowSpec defines one immutable, operator-authored customer workflow.
+              Workflow execution is a single-active-node directed graph (ARCH-019): agent
+              tasks use gateway tools as capabilities, while human gates pause the same
+              attempt for a customer response. There is deliberately no top-level
+              tool_call node.
+            properties:
+              defaultModelRef:
+                description: |-
+                  defaultModelRef is the Model natural key used by agent nodes that do not
+                  declare a narrower override. It is required when the graph has agent nodes.
+                type: string
+              graph:
+                description: graph is the immutable executable workflow graph.
+                properties:
+                  edges:
+                    description: edges deterministically map a reported outcome to
+                      the next node.
+                    items:
+                      description: WorkflowEdge maps exactly one node outcome to a
+                        target node.
+                      properties:
+                        from:
+                          type: string
+                        outcome:
+                          type: string
+                        to:
+                          type: string
+                      required:
+                      - from
+                      - outcome
+                      - to
+                      type: object
+                    type: array
+                  entryNode:
+                    description: entryNode is the first node for every initial or
+                      revised attempt.
+                    minLength: 1
+                    type: string
+                  maxTransitions:
+                    default: 100
+                    description: maxTransitions bounds edge traversals in one attempt.
+                    format: int32
+                    maximum: 10000
+                    minimum: 1
+                    type: integer
+                  nodes:
+                    description: nodes are immutable node definitions keyed within
+                      this graph.
+                    items:
+                      description: WorkflowNode is either an agent task or a customer-actionable
+                        human gate.
+                      properties:
+                        capabilities:
+                          description: |-
+                            capabilities narrows spec.requestedCapabilities by tool name for this
+                            agent node. Empty means expose none, not inherit all.
+                          items:
+                            type: string
+                          type: array
+                        humanGate:
+                          description: humanGate is required for human_gate and forbidden
+                            for agent_task.
+                          properties:
+                            description:
+                              description: LocalizedText carries approved English/Portuguese
+                                customer copy.
+                              properties:
+                                en:
+                                  type: string
+                                pt:
+                                  type: string
+                              type: object
+                            presentation:
+                              description: |-
+                                presentation supplies localized labels for every outcome and every
+                                customer-visible response field/enum option.
+                              properties:
+                                fields:
+                                  items:
+                                    description: HumanGateFieldPresentation localizes
+                                      one top-level response-schema property.
+                                    properties:
+                                      key:
+                                        minLength: 1
+                                        type: string
+                                      label:
+                                        description: LocalizedText carries approved
+                                          English/Portuguese customer copy.
+                                        properties:
+                                          en:
+                                            type: string
+                                          pt:
+                                            type: string
+                                        type: object
+                                      options:
+                                        description: options follows the field enum
+                                          order when the schema declares one.
+                                        items:
+                                          description: LocalizedText carries approved
+                                            English/Portuguese customer copy.
+                                          properties:
+                                            en:
+                                              type: string
+                                            pt:
+                                              type: string
+                                          type: object
+                                        type: array
+                                    required:
+                                    - key
+                                    - label
+                                    type: object
+                                  type: array
+                                outcomes:
+                                  items:
+                                    description: LocalizedText carries approved English/Portuguese
+                                      customer copy.
+                                    properties:
+                                      en:
+                                        type: string
+                                      pt:
+                                        type: string
+                                    type: object
+                                  minItems: 1
+                                  type: array
+                              required:
+                              - outcomes
+                              type: object
+                            responseSchema:
+                              description: |-
+                                responseSchema validates the response payload. V1 Dashboard forms accept
+                                an object with direct properties of type string, boolean, number, integer,
+                                unconstrained object, or unconstrained array (or enum). Validation keywords
+                                the form cannot enforce—including nested schemas, ranges, patterns,
+                                composition, and references—are rejected.
+                              x-kubernetes-preserve-unknown-fields: true
+                            title:
+                              description: title and description are localized customer-facing
+                                copy.
+                              properties:
+                                en:
+                                  type: string
+                                pt:
+                                  type: string
+                              type: object
+                            type:
+                              description: type is the customer action required.
+                              enum:
+                              - information
+                              - decision
+                              - approval
+                              - artifact
+                              type: string
+                          required:
+                          - description
+                          - presentation
+                          - title
+                          - type
+                          type: object
+                        key:
+                          description: key is unique within the graph and stable across
+                            repeated visits.
+                          minLength: 1
+                          type: string
+                        kind:
+                          description: kind selects agent execution or a durable customer
+                            blocker.
+                          enum:
+                          - agent_task
+                          - human_gate
+                          type: string
+                        label:
+                          description: |-
+                            label is the localized business-stage name shown to customers. Both v1
+                            locales are required by controller validation.
+                          properties:
+                            en:
+                              type: string
+                            pt:
+                              type: string
+                          type: object
+                        modelRef:
+                          description: modelRef optionally overrides spec.defaultModelRef
+                            for this agent node.
+                          type: string
+                        outcomes:
+                          description: outcomes are the only values complete_step
+                            (or a human response) may emit.
+                          items:
+                            type: string
+                          minItems: 1
+                          type: array
+                        outputSchema:
+                          description: |-
+                            outputSchema validates complete_step.output for agent_task nodes. It is a
+                            JSON Schema document and defaults to an unconstrained object when absent.
+                            Terminal agent tasks may omit it for an artifact-only outcome, or declare
+                            a closed direct object schema aligned with resultPresentation.
+                          x-kubernetes-preserve-unknown-fields: true
+                        prompt:
+                          description: prompt is required for agent_task and forbidden
+                            for human_gate.
+                          type: string
+                        resultPresentation:
+                          description: |-
+                            resultPresentation defines the immutable, localized outcome receipt for
+                            terminal outcomes. Controller validation requires it on every terminal
+                            node and aligns its fields and controlled values with the node schema.
+                          properties:
+                            fields:
+                              description: |-
+                                fields presents every structured-output property by its path. Paths retain
+                                object/array hierarchy without relying on raw schema keys as UI labels.
+                              items:
+                                description: |-
+                                  ResultFieldPresentation localizes one structured-result property path.
+                                  Array item objects use the same property path as one representative item;
+                                  array indexes never enter the immutable presentation contract.
+                                properties:
+                                  label:
+                                    description: LocalizedText carries approved English/Portuguese
+                                      customer copy.
+                                    properties:
+                                      en:
+                                        type: string
+                                      pt:
+                                        type: string
+                                    type: object
+                                  options:
+                                    description: |-
+                                      options provides localized labels for every enum value at this field (or
+                                      at the item schema for an array of controlled values).
+                                    items:
+                                      description: ResultValuePresentation localizes
+                                        one exact JSON-Schema enum value.
+                                      properties:
+                                        label:
+                                          description: LocalizedText carries approved
+                                            English/Portuguese customer copy.
+                                          properties:
+                                            en:
+                                              type: string
+                                            pt:
+                                              type: string
+                                          type: object
+                                        value:
+                                          x-kubernetes-preserve-unknown-fields: true
+                                      required:
+                                      - label
+                                      - value
+                                      type: object
+                                    type: array
+                                  path:
+                                    items:
+                                      type: string
+                                    minItems: 1
+                                    type: array
+                                required:
+                                - label
+                                - path
+                                type: object
+                              type: array
+                            outcomes:
+                              description: |-
+                                outcomes provides one localized completion summary for each terminal
+                                outcome declared for this node.
+                              items:
+                                description: ResultOutcomePresentation localizes one
+                                  terminal outcome receipt heading.
+                                properties:
+                                  outcome:
+                                    minLength: 1
+                                    type: string
+                                  summary:
+                                    description: LocalizedText carries approved English/Portuguese
+                                      customer copy.
+                                    properties:
+                                      en:
+                                        type: string
+                                      pt:
+                                        type: string
+                                    type: object
+                                required:
+                                - outcome
+                                - summary
+                                type: object
+                              minItems: 1
+                              type: array
+                          required:
+                          - outcomes
+                          type: object
+                        skills:
+                          description: skills narrows spec.skills by logical name
+                            for this agent node.
+                          items:
+                            type: string
+                          type: array
+                        timeout:
+                          description: timeout bounds one node execution. Zero uses
+                            the runtime default.
+                          type: string
+                        workspaceTools:
+                          description: |-
+                            workspaceTools requests the fixed read/write/edit/bash set. The referenced
+                            AgentPool must enable it; a workflow/node can never widen the pool.
+                          type: boolean
+                      required:
+                      - key
+                      - kind
+                      - label
+                      - outcomes
+                      type: object
+                    minItems: 1
+                    type: array
+                  terminalOutcomes:
+                    description: terminalOutcomes complete the attempt as Done without
+                      claiming correctness.
+                    items:
+                      description: WorkflowTerminalOutcome marks one node outcome
+                        as attempt completion.
+                      properties:
+                        node:
+                          type: string
+                        outcome:
+                          type: string
+                      required:
+                      - node
+                      - outcome
+                      type: object
+                    minItems: 1
+                    type: array
+                required:
+                - entryNode
+                - nodes
+                - terminalOutcomes
+                type: object
+              key:
+                description: |-
+                  key is the stable logical workflow key. It excludes ':' because the
+                  cross-schema definition identity is "<key>:<version>".
+                minLength: 1
+                pattern: ^[^:]+$
+                type: string
+              poolRef:
+                description: poolRef names the AgentPool security/integration boundary.
+                type: string
+              presentation:
+                description: presentation carries customer-facing workflow/persona
+                  labels.
+                properties:
+                  locale:
+                    enum:
+                    - en
+                    - pt
+                    type: string
+                  personaAvatar:
+                    type: string
+                  personaName:
+                    minLength: 1
+                    type: string
+                  workflowTitle:
+                    minLength: 1
+                    type: string
+                required:
+                - personaName
+                - workflowTitle
+                type: object
+              requestedCapabilities:
+                description: |-
+                  requestedCapabilities are the workflow-level maximum gateway capabilities.
+                  Agent nodes may expose a subset by tool name and can never widen this set.
+                items:
+                  description: RequestedCapability is one workflow-level gateway capability
+                    ceiling.
+                  properties:
+                    actions:
+                      items:
+                        type: string
+                      type: array
+                    maxEffectClass:
+                      enum:
+                      - read_only
+                      - idempotent_write
+                      - non_idempotent_write
+                      type: string
+                    tool:
+                      minLength: 1
+                      type: string
+                  required:
+                  - maxEffectClass
+                  - tool
+                  type: object
+                type: array
+              skills:
+                description: |-
+                  skills are exact immutable overlay skill identities available to the
+                  workflow. Agent nodes may expose a subset by logical name.
+                items:
+                  description: SkillReference identifies one immutable overlay skill.
+                  properties:
+                    digest:
+                      minLength: 1
+                      type: string
+                    name:
+                      minLength: 1
+                      type: string
+                    version:
+                      minLength: 1
+                      type: string
+                  required:
+                  - digest
+                  - name
+                  - version
+                  type: object
+                type: array
+              source:
+                description: source defines the installed source adapter and non-secret
+                  trigger routes.
+                properties:
+                  triggerBindings:
+                    items:
+                      description: TriggerBinding is one typed, non-secret source
+                        route.
+                      properties:
+                        graphEmail:
+                          description: GraphEmailTriggerBinding is a non-secret Graph
+                            mailbox route.
+                          properties:
+                            mailboxAddress:
+                              minLength: 3
+                              type: string
+                          required:
+                          - mailboxAddress
+                          type: object
+                        name:
+                          minLength: 1
+                          type: string
+                        operatorArtifact:
+                          description: OperatorArtifactTriggerBinding is a non-secret
+                            exported-artifact route.
+                          properties:
+                            sourceID:
+                              minLength: 1
+                              type: string
+                          required:
+                          - sourceID
+                          type: object
+                      required:
+                      - name
+                      type: object
+                    type: array
+                  type:
+                    enum:
+                    - graph_email
+                    - operator_artifact
+                    - manual_api
+                    type: string
+                required:
+                - type
+                type: object
+              valueModelRef:
+                description: valueModelRef references an operator-configured transparent
+                  value model.
+                type: string
+              version:
+                description: |-
+                  version is the immutable version component. Content changes require a new
+                  version and never mutate an existing definition.
+                minLength: 1
+                pattern: ^[^:]+$
+                type: string
+            required:
+            - graph
+            - key
+            - poolRef
+            - presentation
+            - source
+            - version
+            type: object
+          status:
+            description: WorkflowStatus is the reconciler-observed materialization
+              state.
+            properties:
+              definitionID:
+                type: string
+              message:
+                type: string
+              observedGeneration:
+                format: int64
+                type: integer
+              ready:
+                type: boolean
+              scopeIdentityID:
+                type: string
+              validationMessage:
+                type: string
+              validationStatus:
+                type: string
+              versionDigest:
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+{{- end }}

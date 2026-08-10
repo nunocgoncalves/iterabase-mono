@@ -1,0 +1,48 @@
+enabled: true
+
+image:
+  repository: postgres
+  tag: "16-alpine"
+  pullPolicy: IfNotPresent
+
+auth:
+  username: gateway
+  database: gateway
+  # password is generated into a Secret on first install (stable via lookup).
+  gatewayUser:
+    enabled: false
+    username: gateway
+
+persistence:
+  storageClass: "" # use cluster default (k3s local-path)
+  size: 10Gi
+
+# Internal TLS (opt-in; the umbrella's internalTLS.enabled fans this on in prod).
+# When enabled, postgres serves TLS (ssl=on) with a cert-manager leaf cert from
+# the internal CA, and enforces hostssl (rejects plaintext). Clients connect with
+# sslmode=verify-full + the internal CA. Server-only: it presents a cert, never
+# verifies one (no mTLS), so caSecretName is unused here (kept for contract
+# uniformity with the other component charts).
+tls:
+  enabled: false
+  issuerName: internal-ca      # ClusterIssuer that signs the server leaf cert
+  caSecretName: ""             # unused by the server (set by umbrella for uniformity)
+  caMountPath: /etc/iterabase/internal-ca/ca.crt
+
+resources: {}
+
+# Metrics (opt-in; flip on with observability — see values-observability.yaml).
+# A standalone postgres-exporter Deployment + Service + ServiceMonitor (best
+# practice: the exporter is a separate stateless pod, not a sidecar). Connects
+# with the main user password (from the chart-generated Secret) and the internal
+# CA (sslmode=verify-full) when TLS is on; sslmode=disable otherwise. The
+# ServiceMonitor is a Prometheus Operator CRD — rendered regardless but only
+# reconciled when the operator (from the observability chart) is installed.
+metrics:
+  enabled: false
+  image:
+    repository: quay.io/prometheuscommunity/postgres-exporter
+    tag: "v0.15.0"
+    pullPolicy: IfNotPresent
+  resources: {}
+  # scrapeInterval: 30s

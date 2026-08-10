@@ -1,0 +1,33 @@
+{{- if .Values.enabled }}
+{{- if (index .Values "kube-prometheus-stack" "enabled") }}
+# Loki datasource for Grafana. Loaded by the kube-prometheus-stack Grafana
+# datasource sidecar (label grafana_datasource=1), alongside the stack's own
+# Prometheus datasource. Keeps the Loki URL release-templated (the sidecar
+# approach avoids templating a static additionalDataSources URL).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-loki-datasource
+  labels:
+    {{- include "observability.labels" . | nindent 4 }}
+    grafana_datasource: "1"
+data:
+  loki-datasource.yaml: |-
+    apiVersion: 1
+    datasources:
+      - name: Loki
+        uid: loki
+        type: loki
+        access: proxy
+        url: {{ include "observability.lokiURL" . }}
+        isDefault: false
+        jsonData:
+          maxLines: 1000
+          {{- if (dig "internalTLS" "enabled" false (.Values.global | default (dict))) }}
+          # The internal CA is cert-manager-generated; mounting it into Grafana for
+          # proper datasource CA verification is a fast-follow. The connection is
+          # still TLS-encrypted (in-cluster).
+          tlsSkipVerify: true
+          {{- end }}
+{{- end }}
+{{- end }}

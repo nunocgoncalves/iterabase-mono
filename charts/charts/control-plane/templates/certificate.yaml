@@ -1,0 +1,33 @@
+{{- if and .Values.enabled (or .Values.tls.enabled (dig "internalTLS" "enabled" false (.Values.global | default (dict)))) }}
+{{- $name := include "control-plane.apiName" . }}
+{{- $ns := .Release.Namespace }}
+# API server leaf cert. SANs cover the Service DNS names (future in-cluster
+# callers like the §7 egress plane) PLUS localhost + 127.0.0.1 so the admin
+# port-forward (kubectl port-forward -> https://localhost:<port>) verifies
+# cleanly under sslmode-equivalent hostname checking. Pre-install/pre-upgrade
+# hook (weight after the CA) so the Certificate exists before the api
+# Deployment starts. The Go server (ListenAndServeTLS) loads TLS material at
+# startup only — a renewed Secret does NOT auto-reload it, so the Deployment is
+# annotated for Stakater Reloader to restart it on Secret change (umbrella `reloader` dep).
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "control-plane.apiTLSSecretName" . }}
+  labels:
+    {{- include "control-plane.labels" . | nindent 4 }}
+spec:
+  secretName: {{ include "control-plane.apiTLSSecretName" . }}
+  duration: 2160h      # 90d
+  renewBefore: 360h    # 15d
+  dnsNames:
+    - {{ $name }}
+    - {{ printf "%s.%s" $name $ns }}
+    - {{ printf "%s.%s.svc" $name $ns }}
+    - {{ printf "%s.%s.svc.cluster.local" $name $ns }}
+    - localhost
+  ipAddresses:
+    - 127.0.0.1
+  issuerRef:
+    name: {{ .Values.tls.issuerName | quote }}
+    kind: ClusterIssuer
+{{- end }}

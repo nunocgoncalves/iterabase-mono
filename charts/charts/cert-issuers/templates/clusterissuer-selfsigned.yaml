@@ -1,0 +1,12 @@
+{{- if .Values.enabled }}
+{{- if .Values.selfSigned.enabled }}
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: {{ .Values.selfSigned.name | quote }}
+  labels:
+    {{- include "cert-issuers.labels" . | nindent 4 }}
+spec:
+  selfSigned: {}
+{{- end }}
+{{- end }}

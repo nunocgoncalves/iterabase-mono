@@ -1,0 +1,28 @@
+{{- if and .Values.enabled .Values.certManager.metrics.enabled }}
+{{- $releaseName := default (printf "%s-cert-manager" .Release.Name) .Values.certManager.releaseName }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ printf "%s-cert-manager" .Release.Name }}
+  labels:
+    {{- include "observability.labels" . | nindent 4 }}
+    app.kubernetes.io/component: cert-manager
+spec:
+  jobLabel: app.kubernetes.io/name
+  selector:
+    matchExpressions:
+      - key: app.kubernetes.io/name
+        operator: In
+        values: [cainjector, cert-manager, webhook]
+      - key: app.kubernetes.io/instance
+        operator: In
+        values: [{{ $releaseName | quote }}]
+      - key: app.kubernetes.io/component
+        operator: In
+        values: [cainjector, controller, webhook]
+  endpoints:
+    - targetPort: http-metrics
+      path: /metrics
+      interval: 60s
+      scrapeTimeout: 30s
+{{- end }}

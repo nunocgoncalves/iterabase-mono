@@ -1,0 +1,89 @@
+{{- if .Values.enabled }}
+{{- if .Values.metrics.enabled }}
+{{- $tls := (or .Values.tls.enabled (dig "internalTLS" "enabled" false (.Values.global | default (dict)))) }}
+{{- $interval := .Values.metrics.scrapeInterval | default "30s" }}
+# --- control-plane api ServiceMonitor ---
+# Scrapes the api's /metrics endpoint. When internalTLS is on the api serves
+# HTTPS from a cert-manager leaf (SAN covers the Service DNS), so the scrape
+# uses HTTPS + the internal CA root Secret (the Prometheus Operator projects the
+# ca secret into the Prometheus pod). The /metrics endpoint is a service-repo
+# concern (HOR-408 tracked gap); this monitor scrapes once the endpoint ships.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "control-plane.apiName" . }}
+  labels:
+    {{- include "control-plane.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  jobLabel: app.kubernetes.io/name
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: control-plane
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: api
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: {{ $interval }}
+      {{- if $tls }}
+      scheme: https
+      tlsConfig:
+        ca:
+          secret:
+            name: {{ include "control-plane.tlsCASecretName" . }}
+            key: ca.crt
+        serverName: {{ include "control-plane.apiName" . }}.{{ .Release.Namespace }}.svc.cluster.local
+      {{- end }}
+---
+# --- control-plane manager PodMonitor ---
+# Scrapes the manager's controller-runtime metrics port directly on the pod (the
+# manager has no Service). DORMANT until the control-plane service repo binds
+# --metrics-bind-address to a port named {{ .Values.metrics.manager.port | default "http-metrics" }}
+# (HOR-408 tracked gap). With no matching port, Prometheus marks the target down.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: {{ include "control-plane.managerName" . }}
+  labels:
+    {{- include "control-plane.labels" . | nindent 4 }}
+    app.kubernetes.io/component: manager
+spec:
+  jobLabel: app.kubernetes.io/name
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: control-plane
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: manager
+  podMetricsEndpoints:
+    - port: {{ .Values.metrics.manager.port | default "http-metrics" | quote }}
+      path: /metrics
+      interval: {{ $interval }}
+{{- if .Values.metrics.vllm.enabled }}
+---
+# --- vLLM / model-backend PodMonitor ---
+# Scrapes the operator-managed model-backend (vLLM) pods. vLLM exposes /metrics
+# natively on its API port. The pods are operator-created, so the scrape target
+# (labels + port) depends on the operator's pod template — match it in the
+# overlay (or standardize via a service-repo ticket). namespaceSelector:any so it
+# discovers pods wherever the operator places them.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: {{ include "control-plane.name" . }}-vllm
+  labels:
+    {{- include "control-plane.labels" . | nindent 4 }}
+    app.kubernetes.io/component: model-backend
+spec:
+  jobLabel: app.kubernetes.io/name
+  namespaceSelector:
+    {{- toYaml .Values.metrics.vllm.namespaceSelector | nindent 4 }}
+  selector:
+    {{- toYaml .Values.metrics.vllm.selector | nindent 4 }}
+  podMetricsEndpoints:
+    - port: {{ .Values.metrics.vllm.port | quote }}
+      path: {{ .Values.metrics.vllm.path | quote }}
+      interval: {{ $interval }}
+{{- end }}
+{{- end }}
+{{- end }}

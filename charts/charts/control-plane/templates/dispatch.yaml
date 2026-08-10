@@ -1,0 +1,177 @@
+{{- if and .Values.enabled .Values.dispatch.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "control-plane.dispatchName" . }}
+  labels:
+    {{- include "control-plane.labels" . | nindent 4 }}
+    app.kubernetes.io/component: dispatch
+spec:
+  selector:
+    app.kubernetes.io/name: control-plane
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: dispatch
+  ports:
+    - name: grpc
+      port: {{ .Values.dispatch.service.port }}
+      targetPort: grpc
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "control-plane.dispatchName" . }}
+  labels:
+    {{- include "control-plane.labels" . | nindent 4 }}
+    app.kubernetes.io/component: dispatch
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: control-plane
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: dispatch
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: control-plane
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: dispatch
+      annotations:
+        # The dispatch reads its mTLS leaf + client CA (and DB) only at startup.
+        # Stakater Reloader restarts it when the mounted TLS Secret rotates
+        # (helm lookup keeps the leaf stable, but an explicit rotate + roll is
+        # operator-safe). The leaf/client CA Secret is regenerated rarely, so
+        # reload is defensive rather than routine.
+        reloader.stakater.com/auto: "true"
+    spec:
+      serviceAccountName: {{ include "control-plane.dispatchServiceAccountName" . }}
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: wait-for-postgres
+          image: postgres:16-alpine
+          securityContext:
+            runAsUser: 999
+            runAsGroup: 999
+          command:
+            - sh
+            - -c
+            - 'until pg_isready -h {{ include "control-plane.pgHost" . }} -p {{ .Values.postgresql.port }} -U {{ .Values.postgresql.auth.username }}; do echo waiting for postgres; sleep 2; done'
+          {{- if (or .Values.tls.enabled (dig "internalTLS" "enabled" false (.Values.global | default (dict)))) }}
+          env:
+            - name: PGSSLMODE
+              value: verify-full
+            - name: PGSSLROOTCERT
+              value: {{ .Values.tls.caMountPath | quote }}
+          volumeMounts:
+            - name: internal-ca
+              mountPath: {{ dir .Values.tls.caMountPath }}
+              readOnly: true
+          {{- end }}
+      containers:
+        - name: dispatch
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/dispatch"]
+          args: ["serve"]
+          env:
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "control-plane.pgSecret" . }}
+                  key: {{ .Values.postgresql.passwordKey }}
+            - name: DATABASE_URL
+              value: {{ include "control-plane.databaseURL" . | quote }}
+            - name: DISPATCH_ADDR
+              value: {{ .Values.dispatch.addr | quote }}
+            - name: DISPATCH_TLS_CERT_FILE
+              value: /etc/control-plane/dispatch-tls/tls.crt
+            - name: DISPATCH_TLS_KEY_FILE
+              value: /etc/control-plane/dispatch-tls/tls.key
+            - name: DISPATCH_CLIENT_CA_FILE
+              value: /etc/control-plane/dispatch-ca/ca.crt
+            - name: DISPATCH_TRUST_DOMAIN
+              value: {{ .Values.dispatch.trustDomain | quote }}
+            {{- /* The default model permission is customer/overlay-specific (there
+                 is no universal default model id/api). Rendered only when the
+                 overlay sets BOTH dispatch.defaultModel.id AND api; a partial
+                 config (only one set) is rejected at render rather than emitting
+                 an invalid model permission at runtime (HOR-249). An enabled
+                 dispatch with neither also fails closed at startup
+                 (ValidateDispatchServe). */ -}}
+            {{- if and .Values.dispatch.defaultModel.id .Values.dispatch.defaultModel.api }}
+            - name: DISPATCH_DEFAULT_MODEL_ID
+              value: {{ .Values.dispatch.defaultModel.id | quote }}
+            - name: DISPATCH_DEFAULT_MODEL_API
+              value: {{ .Values.dispatch.defaultModel.api | quote }}
+            {{- end }}
+            - name: LOG_LEVEL
+              value: {{ .Values.logLevel | default "info" | quote }}
+            - name: LOG_FORMAT
+              value: {{ .Values.logFormat | default "json" | quote }}
+          ports:
+            - name: grpc
+              containerPort: {{ .Values.dispatch.service.port }}
+          volumeMounts:
+            - name: dispatch-tls
+              mountPath: /etc/control-plane/dispatch-tls
+              readOnly: true
+            - name: dispatch-ca
+              mountPath: /etc/control-plane/dispatch-ca
+              readOnly: true
+            {{- if (or .Values.tls.enabled (dig "internalTLS" "enabled" false (.Values.global | default (dict)))) }}
+            - name: internal-ca
+              mountPath: {{ dir .Values.tls.caMountPath }}
+              readOnly: true
+            {{- end }}
+          # The Work server exposes only mandatory-mTLS Connect RPCs, so
+          # unauthenticated HTTP probes cannot reach an application endpoint.
+          # TCP probes still verify that the mTLS serving listener was created
+          # after DB/Migrate readiness (same rationale as the gateway).
+          startupProbe:
+            tcpSocket:
+              port: grpc
+            failureThreshold: 30
+            periodSeconds: 2
+          readinessProbe:
+            tcpSocket:
+              port: grpc
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: grpc
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          {{- with .Values.dispatch.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: dispatch-tls
+          secret:
+            secretName: {{ include "control-plane.dispatchTLSSecretName" . }}
+            defaultMode: 0640
+        # The shared platform workload CA (platform-spiffe-ca) — mount ONLY
+        # ca.crt as the client-CA bundle that verifies warm-worker leaves.
+        - name: dispatch-ca
+          secret:
+            secretName: {{ include "control-plane.spiffeCASecretName" . }}
+            items:
+              - key: ca.crt
+                path: ca.crt
+        {{- if (or .Values.tls.enabled (dig "internalTLS" "enabled" false (.Values.global | default (dict)))) }}
+        - name: internal-ca
+          secret:
+            secretName: {{ required "control-plane.tls.caSecretName is required when tls.enabled" (include "control-plane.tlsCASecretName" .) | quote }}
+            items:
+              - key: ca.crt
+                path: ca.crt
+        {{- end }}
+{{- end }}

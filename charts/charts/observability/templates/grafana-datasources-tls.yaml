@@ -1,0 +1,42 @@
+{{- if .Values.enabled }}
+{{- if (index .Values "kube-prometheus-stack" "enabled") }}
+{{- if (dig "internalTLS" "enabled" false (.Values.global | default (dict))) }}
+# Prometheus + Alertmanager Grafana datasources over HTTPS, rendered only when
+# internalTLS is on. The kube-prometheus-stack defaults render http:// datasources
+# with a hardcoded scheme (not value-overridable), so when TLS is on they are
+# disabled (values-tls.yaml: grafana.sidecar.datasources.defaultDatasourceEnabled
+# = false + alertmanager.enabled = false) and replaced by these https ones, which
+# keep the same uids (prometheus / alertmanager) so shipped dashboards resolve.
+# Loaded by the Grafana datasource sidecar (label grafana_datasource=1).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-iterabase-datasources-tls
+  labels:
+    {{- include "observability.labels" . | nindent 4 }}
+    grafana_datasource: "1"
+data:
+  iterabase-datasources-tls.yaml: |-
+    apiVersion: 1
+    datasources:
+      - name: Prometheus
+        uid: prometheus
+        type: prometheus
+        access: proxy
+        url: {{ include "observability.prometheusURL" . }}
+        isDefault: true
+        jsonData:
+          httpMethod: POST
+          tlsSkipVerify: true
+      - name: Alertmanager
+        uid: alertmanager
+        type: alertmanager
+        access: proxy
+        url: {{ include "observability.alertmanagerURL" . }}
+        jsonData:
+          implementation: prometheus
+          handleGrafanaManagedAlerts: true
+          tlsSkipVerify: true
+{{- end }}
+{{- end }}
+{{- end }}

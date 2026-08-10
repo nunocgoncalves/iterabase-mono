@@ -1,0 +1,38 @@
+enabled: true
+
+image:
+  repository: minio/minio
+  tag: RELEASE.2025-09-07T16-13-09Z
+  pullPolicy: IfNotPresent
+
+# Root credentials generated into a Secret on first install (stable via lookup).
+persistence:
+  storageClass: "" # use cluster default (k3s local-path)
+  size: 20Gi
+
+# Immutable artifact-service bucket (HOR-399). The provisioning Job uses the
+# MinIO root credential once to create this bucket + a dedicated bucket-scoped
+# user. API/gateway receive only the dedicated credential.
+artifactService:
+  enabled: true
+  bucket: iterabase-artifacts
+  credentialSecret: "" # default: <release>-minio-artifacts
+  mcImage:
+    repository: minio/mc
+    tag: RELEASE.2025-08-13T08-35-41Z
+    pullPolicy: IfNotPresent
+
+networkPolicy:
+  enabled: true
+
+resources: {}
+
+# Metrics (opt-in; flip on with observability — see values-observability.yaml).
+# MinIO exposes /minio/v2/metrics/cluster natively on the S3 port (no exporter
+# needed). Enabling this sets MINIO_PROMETHEUS_AUTH_TYPE=public on the server
+# (in-cluster scrape without S3 auth) and renders a ServiceMonitor. The
+# ServiceMonitor is a Prometheus Operator CRD — rendered regardless but only
+# reconciled when the operator (from the observability chart) is installed.
+metrics:
+  enabled: false
+  # scrapeInterval: 30s

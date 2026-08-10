@@ -1,0 +1,15 @@
+apiVersion: v2
+name: cert-manager-substrate
+description: Iterabase certificate substrate — cert-manager operator, CRDs, webhook, and CSI driver.
+type: application
+version: 0.3.9
+appVersion: "v1.21.0"
+dependencies:
+  - name: cert-manager
+    version: v1.21.0
+    repository: https://charts.jetstack.io
+    condition: cert-manager.enabled
+  - name: cert-manager-csi-driver
+    version: v0.15.0
+    repository: https://charts.jetstack.io
+    condition: cert-manager.enabled

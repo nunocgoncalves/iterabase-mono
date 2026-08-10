@@ -1,0 +1,18 @@
+{{- if and .Values.enabled (or .Values.tls.enabled (dig "internalTLS" "enabled" false (.Values.global | default (dict)))) }}
+{{- $name := include "postgresql.name" . }}
+# Enforced-TLS pg_hba: accept SSL (scram-sha-256) + local (entrypoint init), and
+# explicitly reject plaintext TCP. Mounted via -c hba_file so postgres uses this
+# instead of the initdb-generated $PGDATA/pg_hba.conf.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $name }}-pghba
+  labels:
+    {{- include "postgresql.labels" . | nindent 4 }}
+data:
+  pg_hba.conf: |
+    # TYPE  DATABASE  USER  ADDRESS  METHOD
+    local   all       all            trust
+    hostssl all       all   all      scram-sha-256
+    host    all       all   all      reject
+{{- end }}

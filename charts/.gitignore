@@ -1,0 +1,6 @@
+# Helm dependency cache (built by `helm dependency build`); baked into published
+# packages in CI, not committed.
+charts/*/charts/
+charts/*/Chart.lock
+*.tgz
+.cr-release/

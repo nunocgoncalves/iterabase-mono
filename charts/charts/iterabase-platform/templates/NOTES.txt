@@ -1,0 +1,14 @@
+iterabase platform {{ .Chart.AppVersion }} installed as release "{{ .Release.Name }}" in namespace "{{ .Release.Namespace }}".
+
+Components:
+  inference-gateway: {{ (index .Values "inference-gateway").enabled }}
+  control-plane:     {{ (index .Values "control-plane").enabled }} (provides the shared pgvector Postgres + the schemas the gateway reads)
+  redis:             {{ .Values.redis.enabled }}
+  minio:             {{ .Values.minio.enabled }}
+  ingress-nginx:     {{ (index .Values "ingress-nginx").enabled }}
+  cert-manager:      prerequisite release {{ .Release.Name }}-cert-manager
+  cert-issuers:      {{ (index .Values "cert-issuers").enabled }}
+  external-dns:      {{ (index .Values "external-dns").enabled }} (edge DNS → Cloudflare; annotates the gateway Ingress host)
+
+Get the gateway admin API key (for /admin/v1/snapshot):
+  kubectl get secret {{ .Release.Name }}-inference-gateway-admin -n {{ .Release.Namespace }} -o jsonpath='{.data.adminApiKey}' | base64 -d

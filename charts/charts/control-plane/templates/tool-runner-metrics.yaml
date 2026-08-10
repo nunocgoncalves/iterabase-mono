@@ -1,0 +1,26 @@
+{{- if and .Values.enabled .Values.gateway.enabled .Values.toolRunner.enabled (or .Values.metrics.enabled .Values.toolRunner.metrics.enabled) }}
+# Metrics follow the inference-gateway pattern: a metrics-only Service selected
+# by a ServiceMonitor. Both endpoints expose custom registries with bounded
+# labels; invocation traffic remains outbound over the gateway mTLS stream.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "control-plane.toolRunnerName" . }}
+  labels:
+    {{- include "control-plane.labels" . | nindent 4 }}
+    app.kubernetes.io/component: tool-runner
+spec:
+  jobLabel: app.kubernetes.io/name
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: control-plane
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: tool-runner
+  endpoints:
+    - port: mat-metrics
+      path: /metrics
+      interval: {{ .Values.metrics.scrapeInterval | default "30s" }}
+    - port: run-metrics
+      path: /metrics
+      interval: {{ .Values.metrics.scrapeInterval | default "30s" }}
+{{- end }}
