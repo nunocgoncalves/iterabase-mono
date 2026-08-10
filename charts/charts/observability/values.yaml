@@ -1,0 +1,185 @@
+enabled: true
+
+# Internal TLS: when global.internalTLS is on, the chart renders stack-
+# component leaf Certificates (stack-internal-tls.yaml) signed by this issuer
+# (the cert-issuers internal CA ClusterIssuer), and values-tls.yaml configures
+# the upstream charts to serve HTTPS + the Grafana datasources switch to https.
+tls:
+  issuerName: internal-ca
+
+# Cross-release scrape contract for the companion cert-manager substrate. The
+# release defaults to <platform-release>-cert-manager in the same namespace.
+certManager:
+  metrics:
+    enabled: true
+  releaseName: ""
+
+# --- Prometheus / Grafana / Alertmanager (kube-prometheus-stack) ---
+# The stack is configured here as the platform default: PV-backed Prometheus +
+# Alertmanager + Grafana, the operator's CRDs, node-exporter + kube-state-metrics
+# (infrastructure/cluster metrics for free), and the kubernetes-mixin default
+# rules. Prometheus discovers ALL ServiceMonitors / PodMonitors / PrometheusRules
+# cluster-wide (nil selectors) so the per-component ServiceMonitors owned by the
+# other iterabase subcharts (postgresql/redis/minio/inference-gateway/control-
+# plane) and the upstream charts' own ServiceMonitors are picked up regardless of
+# label. Alertmanager email routing is NOT baked in — it is overlay-owned
+# (HOR-408: OPO1 overlay carries the email receiver config via
+# observability.kube-prometheus-stack.alertmanager.config).
+kube-prometheus-stack:
+  enabled: true
+
+  # kubernetes-mixin default rules (node/etcd/apiserver/pod/...). These plus the
+  # iterabase-specific PrometheusRule (templates/iterabase-alerts.yaml) make up
+  # the shipped "default prod alert rules".
+  defaultRules:
+    create: true
+
+  # --- Alertmanager (PV-backed) ---
+  alertmanager:
+    enabled: true
+    alertmanagerSpec:
+      storage:
+        volumeClaimTemplate:
+          spec:
+            # storageClassName omitted => cluster default StorageClass; set in
+            # the overlay for prod (the Prometheus Operator CRD rejects null).
+            accessModes: ["ReadWriteOnce"]
+            resources:
+              requests:
+                storage: 5Gi
+    # config is left at the chart default (routes everything to a `null`
+    # receiver). The overlay sets alertmanager.config with the real receiver(s)
+    # — email for OPO1 (HOR-408), other destinations deferred (non-goal).
+
+  # --- Grafana (PV-backed; Loki datasource wired via the sidecar ConfigMap) ---
+  grafana:
+    enabled: true
+    persistence:
+      enabled: true
+      type: sts
+      accessModes: ["ReadWriteOnce"]
+      size: 5Gi
+      # storageClassName: set in the overlay for prod
+    # The datasource sidecar (enabled by default, label grafana_datasource=1)
+    # loads the Loki datasource rendered by this chart
+    # (templates/grafana-datasource-loki.yaml) alongside the stack's Prometheus
+    # datasource. No public ingress by default — reach Grafana via port-forward
+    # (kind/E2E) or flip grafana.ingress in the overlay for prod.
+    ingress:
+      enabled: false
+
+  # --- Prometheus (PV-backed; discovers all monitors/rules cluster-wide) ---
+  prometheus:
+    enabled: true
+    prometheusSpec:
+      replicas: 1
+      retention: 15d
+      # retentionSize is an absolute byte cap (the Prometheus Operator CRD
+      # requires a byte-size value, not a percentage); 18GB ~ 90% of the 20Gi PV.
+      retentionSize: 18GB
+      # Nil selectors => Prometheus selects every ServiceMonitor / PodMonitor /
+      # PrometheusRule in the cluster, so per-component monitors (owned by the
+      # other iterabase subcharts) and the upstream charts' native monitors are
+      # all discovered without label-matching plumbing.
+      serviceMonitorSelectorNilUsesHelmValues: false
+      podMonitorSelectorNilUsesHelmValues: false
+      ruleSelectorNilUsesHelmValues: false
+      storageSpec:
+        volumeClaimTemplate:
+          spec:
+            # storageClassName omitted => cluster default StorageClass; set in
+            # the overlay for prod (the Prometheus Operator CRD rejects null).
+            accessModes: ["ReadWriteOnce"]
+            resources:
+              requests:
+                storage: 20Gi
+
+# --- Loki (single-binary, filesystem PV) ---
+# SingleBinary + filesystem storage = PV-backed persistence across pod restarts
+# (HOR-408 acceptance). SimpleScalable/Distributed REQUIRE object storage, which
+# is a non-goal here; the overlay may switch to MinIO by overriding
+# deploymentMode + loki.loki.storage.type. retention/compactor tuning is deferred
+# (non-goal: long-term retention tuning beyond PV-backed storage).
+loki:
+  enabled: true
+  deploymentMode: SingleBinary
+  loki:
+    # Single-tenant mode for the in-cluster platform install: promtail/Alloy
+    # push without an X-Scope-OrgID header. The loki chart defaults
+    # auth_enabled=true (multi-tenant), which 401-rejects every promtail push
+    # ("no org id") so NO workload logs reach Loki. Flip to false for the
+    # single-tenant platform default; a multi-tenant overlay can re-enable.
+    auth_enabled: false
+    commonConfig:
+      replication_factor: 1
+    storage:
+      type: filesystem
+    # A real Loki install requires a schemaConfig (the chart ships none). TSDB
+    # store + v13 schema with filesystem object store for the single-binary PV
+    # path. If the overlay switches to object storage (MinIO/s3), override
+    # object_store + loki.loki.storage.type together.
+    schemaConfig:
+      configs:
+        - from: 2024-04-01
+          store: tsdb
+          object_store: filesystem
+          schema: v13
+          index:
+            prefix: index_
+            period: 24h
+  # SimpleScalable targets default to 3 replicas each; zero them for
+  # SingleBinary mode (only singleBinary.replicas runs).
+  write:
+    replicas: 0
+  read:
+    replicas: 0
+  backend:
+    replicas: 0
+  singleBinary:
+    replicas: 1
+    persistence:
+      enabled: true
+      size: 10Gi
+      # storageClassName: set in the overlay for prod
+  # SingleBinary + filesystem storage does not need the external memcached
+  # chunks/results caches (they add 2+ memcached pods the kind install does not
+  # need); disable them. An overlay switching to object storage / SimpleScalable
+  # may re-enable them.
+  chunksCache:
+    enabled: false
+  resultsCache:
+    enabled: false
+
+# --- Promtail (pod log collection -> Loki) ---
+# DaemonSet that tails every node's container logs (kubernetes_sd role=pod +
+# the cri pipeline stage for containerd/kind) and pushes them to the in-chart
+# Loki SingleBinary service, so control-plane, inference-gateway, vLLM, and
+# dependency logs are collected, stored, and queryable in Grafana (HOR-408
+# outcome: "logs are collected, stored, and routed"). The client URL is
+# Helm-templated (the promtail chart tpl's config.clients) so it resolves to the
+# release-scoped Loki service name in any install (umbrella release
+# `iterabase-platform-loki`, kind CI release `iterabase-loki`, etc.). RBAC +
+# ServiceAccount + the pod-discovery scrape config are the chart defaults.
+promtail:
+  enabled: true
+  config:
+    clients:
+      - url: http://{{ .Release.Name }}-loki:3100/loki/api/v1/push
+
+# --- NVIDIA DCGM (GPU metrics) scraping ---
+# gpu-operator (deployed out-of-band as infra on GPU nodes) runs dcgm-exporter as
+# a Service. We only scrape it — no DaemonSet of our own. Disabled by default;
+# GPU/inference overlays enable it. The ServiceMonitor matches the exporter by
+# label across any namespace (gpu-operator's install namespace varies), so it
+# survives wherever gpu-operator lands.
+dcgmExporter:
+  enabled: false
+  # The dcgm-exporter Service is matched by label (namespace-agnostic). Override
+  # the selector/port only if your gpu-operator install renames them.
+  namespaceSelector:
+    any: true
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: dcgm-exporter
+  port: http-metrics
+  path: /metrics

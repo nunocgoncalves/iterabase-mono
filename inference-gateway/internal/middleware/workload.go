@@ -1,0 +1,156 @@
+package middleware
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"log/slog"
+	"net/http"
+	"strconv"
+
+	"github.com/nunocgoncalves/inference-gateway/internal/spiffe"
+	"github.com/nunocgoncalves/inference-gateway/internal/workload"
+)
+
+// Turn-context headers supplied by the supervisor. These are VALIDATED against
+// durable state, never trusted as scope: the SPIFFE-derived pool + the turn
+// row + the active assignment (worker + generation) are the authoritative
+// scope (ARCH-004/010; HOR-249/DEC-041). Absent/invalid -> 403.
+const (
+	HeaderRunID             = "X-Iterabase-Run-Id"
+	HeaderTurnID            = "X-Iterabase-Turn-Id"
+	HeaderFencingGeneration = "X-Iterabase-Fencing-Generation"
+)
+
+// workloadCtxKey carries the resolved durable scope for a workload caller.
+type workloadCtxKey struct{}
+
+// WorkloadContext is the durable scope resolved for a supervisor caller. The
+// proxy handler uses AssignedModel to deny model-mismatched requests and
+// EffectiveIdentityID (also stamped via WithIdentityID) for catalogue authz,
+// usage, and rate limits.
+type WorkloadContext struct {
+	PoolID            string
+	PoolKey           string
+	RunID             string
+	TurnID            string
+	AssignedModel     string
+	EffectiveIdentity string
+}
+
+// WithWorkloadContext stores the resolved workload scope in the context.
+func WithWorkloadContext(ctx context.Context, wc WorkloadContext) context.Context {
+	return context.WithValue(ctx, workloadCtxKey{}, wc)
+}
+
+// WorkloadContextFromContext returns the workload scope, or false if the
+// request did not arrive on the workload (mTLS) path.
+func WorkloadContextFromContext(ctx context.Context) (WorkloadContext, bool) {
+	wc, ok := ctx.Value(workloadCtxKey{}).(WorkloadContext)
+	return wc, ok
+}
+
+// WorkloadAuth validates a supervisor's mTLS SPIFFE identity and active durable
+// turn context (HOR-398; ARCH-004/010). It runs AFTER tls verifies the chain
+// (RequireAndVerifyClientCert). The pool is resolved from the verified SPIFFE
+// id; the run/turn are validated against runtime state. On success it stamps
+// both the effective identity (via WithIdentityID, so the existing proxy
+// capability/usage/rate-limit pipeline works unchanged) and the WorkloadContext
+// (for the model-mismatch check). Any failure is 403 with an OpenAI-compatible
+// error; no fallback (REQ-010/SCN-009). An infrastructure failure (DB outage)
+// is reported as 503 — fail closed, but not mislabeled as an authorization
+// denial (AGENTS.md).
+func WorkloadAuth(store workload.Store, trustDomain string, logger *slog.Logger) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			id, err := spiffe.IdentityFromConnState(r.TLS, trustDomain)
+			if err != nil || id.Kind != spiffe.KindSupervisor {
+				writeWorkloadError(w, http.StatusForbidden, "unauthenticated workload identity", "invalid_workload_identity")
+				return
+			}
+			pool, err := store.ResolvePoolBySpiffePrefix(r.Context(), id.SPIFFEID)
+			if err != nil {
+				if errors.Is(err, workload.ErrInfrastructure) {
+					logger.Error("workload auth: infrastructure error resolving pool", "spiffe_id", id.SPIFFEID, "error", err)
+					writeWorkloadError(w, http.StatusServiceUnavailable, "workload scope temporarily unavailable", "scope_unavailable")
+					return
+				}
+				logger.Warn("workload auth: pool not resolved", "spiffe_id", id.SPIFFEID, "error", err)
+				writeWorkloadError(w, http.StatusForbidden, "workload identity not bound to an active pool", "pool_not_authorized")
+				return
+			}
+			runID := r.Header.Get(HeaderRunID)
+			turnID := r.Header.Get(HeaderTurnID)
+			if runID == "" || turnID == "" {
+				writeWorkloadError(w, http.StatusForbidden, "missing turn context", "missing_turn_context")
+				return
+			}
+			// The supervisor's current Welcome fencing generation (HOR-249/DEC-041).
+			// Parsed from the header and validated against the active assignment's
+			// generation; absent/invalid -> 403 (a fenced/old-generation caller is
+			// denied).
+			genStr := r.Header.Get(HeaderFencingGeneration)
+			if genStr == "" {
+				writeWorkloadError(w, http.StatusForbidden, "missing fencing generation", "missing_turn_context")
+				return
+			}
+			// Constrain to 63 bits (MaxInt64): the durable fencing_generation
+			// column is PostgreSQL bigint, so a header value > MaxInt64 cannot
+			// match any row and must be rejected here as a 403 caller-input
+			// denial — otherwise it would pass this check, fail pgx's bigint
+			// encoding in ResolveTurnScope, and surface as ErrInfrastructure/503,
+			// mislabeling bad input as an infrastructure failure (AGENTS.md).
+			fencingGeneration, err := strconv.ParseUint(genStr, 10, 63)
+			if err != nil {
+				writeWorkloadError(w, http.StatusForbidden, "invalid fencing generation", "missing_turn_context")
+				return
+			}
+			ts, err := store.ResolveTurnScope(r.Context(), pool.ID, runID, turnID, id.WorkerID, fencingGeneration)
+			if err != nil {
+				if errors.Is(err, workload.ErrInfrastructure) {
+					logger.Error("workload auth: infrastructure error resolving turn scope",
+						"spiffe_id", id.SPIFFEID, "pool", pool.Key, "run_id", runID, "turn_id", turnID, "error", err)
+					writeWorkloadError(w, http.StatusServiceUnavailable, "workload scope temporarily unavailable", "scope_unavailable")
+					return
+				}
+				logger.Warn("workload auth: turn scope denied",
+					"spiffe_id", id.SPIFFEID, "pool", pool.Key, "run_id", runID, "turn_id", turnID, "error", err)
+				writeWorkloadError(w, http.StatusForbidden, "turn not active or not assigned to this pool", "turn_not_authorized")
+				return
+			}
+			wc := WorkloadContext{
+				PoolID:            pool.ID,
+				PoolKey:           pool.Key,
+				RunID:             ts.RunID,
+				TurnID:            ts.TurnID,
+				AssignedModel:     ts.AssignedModel,
+				EffectiveIdentity: ts.ScopeIdentityID,
+			}
+			ctx := WithWorkloadContext(r.Context(), wc)
+			// Stamp the effective identity so the existing capability/usage/
+			// rate-limit pipeline (keyed on IdentityIDFromContext) serves the
+			// workload path unchanged.
+			ctx = WithIdentityID(ctx, ts.ScopeIdentityID)
+			// Mutate r in place so outer middleware (Logging/Metrics) can observe
+			// the resolved workload scope + effective identity when the request
+			// completes — without this, the enriched request only flows downstream
+			// and the completion log would carry no run/turn/identity.
+			*r = *r.WithContext(ctx)
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+func writeWorkloadError(w http.ResponseWriter, status int, message string, code string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	if err := json.NewEncoder(w).Encode(map[string]any{
+		"error": map[string]any{
+			"message": message,
+			"type":    "authentication_error",
+			"code":    code,
+		},
+	}); err != nil {
+		slog.Error("failed to write workload auth error response", "error", err)
+	}
+}

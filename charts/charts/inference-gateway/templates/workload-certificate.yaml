@@ -1,0 +1,30 @@
+{{- if and .Values.enabled .Values.workload.enabled }}
+# HOR-398 supervisor mTLS workload listener serving leaf. Signed by the shared
+# platform workflow CA (platform-spiffe-ca ClusterIssuer) — the same CA that
+# AgentPool worker leaves are issued from — so a warm worker (which verifies the
+# server chain against that CA's cert) accepts it. The leaf Secret (tls.crt/
+# tls.key) is mounted read-only at workload.certMountPath; the client CA (the
+# same platform CA) is mounted from the control-plane gateway CA Secret at
+# workload.clientCAMountPath.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "inference-gateway.workloadTLSSecretName" . }}
+  labels:
+    {{- include "inference-gateway.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gateway-workload
+spec:
+  secretName: {{ include "inference-gateway.workloadTLSSecretName" . }}
+  duration: 2160h
+  renewBefore: 720h
+  issuerRef:
+    name: {{ .Values.workload.issuer.name }}
+    kind: {{ .Values.workload.issuer.kind }}
+  dnsNames:
+    - {{ include "inference-gateway.name" . }}
+    - {{ printf "%s.%s" (include "inference-gateway.name" .) .Release.Namespace }}
+    - {{ printf "%s.%s.svc" (include "inference-gateway.name" .) .Release.Namespace }}
+    - {{ printf "%s.%s.svc.cluster.local" (include "inference-gateway.name" .) .Release.Namespace }}
+  usages:
+    - server auth
+{{- end }}

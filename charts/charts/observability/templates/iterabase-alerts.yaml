@@ -1,0 +1,81 @@
+{{- if .Values.enabled }}
+{{- if (index .Values "kube-prometheus-stack" "enabled") }}
+# Iterabase-platform alert rules ( supplement to kube-prometheus-stack's
+# kubernetes-mixin defaultRules). These cover platform-specific signals the
+# upstream mixin does not: scrape-target health for iterabase services, PV
+# pressure on the platform's stateful volumes, cert-manager cert expiry on the
+# edge/internal-CA certs, and (dormant until the service repos ship /metrics)
+# gateway error rate. Alertmanager routing/receivers are overlay-owned
+# (HOR-408); these rules only set severity + summary.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ .Release.Name }}-iterabase-alerts
+  labels:
+    {{- include "observability.labels" . | nindent 4 }}
+spec:
+  groups:
+    - name: iterabase-targets
+      rules:
+        # Any platform scrape target down for 5m. `up` exists for every scraped
+        # target regardless of whether the service exposes /metrics, so this
+        # fires immediately (a 404 still reports up=0... actually up=1 on 4xx;
+        # up=0 only on connection failure). Catches unreachable/mis-scraped
+        # services.
+        - alert: IterabaseTargetDown
+          expr: up{job=~"inference-gateway|control-plane.*|postgresql|redis|minio"} == 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "{{`{{ $labels.instance }}`}} (job {{`{{ $labels.job }}`}}) is down"
+            description: "Prometheus has been unable to scrape this iterabase target for 5m."
+
+    - name: iterabase-storage
+      rules:
+        # PV almost full on any platform volume (Postgres/Loki/Prometheus/MinIO/
+        # Grafana). kubelet_volume_stats_* come from kubelet (always available).
+        - alert: IterabasePersistentVolumeAlmostFull
+          expr: (1 - kubelet_volume_stats_available_bytes{namespace="{{ .Release.Namespace }}"} / kubelet_volume_stats_capacity_bytes{namespace="{{ .Release.Namespace }}"}) > 0.90
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "PV {{`{{ $labels.persistentvolumeclaim }}`}} is >90% full"
+            description: "The persistent volume backing {{`{{ $labels.persistentvolumeclaim }}`}} in {{ .Release.Namespace }} has been >90% full for 15m."
+
+    - name: iterabase-certificates
+      rules:
+        # cert-manager certificate expiring within 14d. Covers the edge TLS cert
+        # and the internal-CA leaves (when internalTLS is on). The kubernetes-mixin
+        # does not alert on cert-manager certs.
+        - alert: IterabaseCertificateExpiringSoon
+          expr: certmanager_certificate_expiration_timestamp_seconds - time() < 86400 * 14
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Certificate {{`{{ $labels.name }}`}} expires in <14d"
+            description: "cert-manager certificate {{`{{ $labels.name }}`}} (issuer {{`{{ $labels.issuer_name }}`}}) expires within 14 days — check renewal."
+
+    - name: iterabase-gateway
+      rules:
+        # Gateway 5xx error rate. DORMANT until the inference-gateway service repo
+        # ships a /metrics endpoint exposing http_requests_total (HOR-408 tracked
+        # gap — the ServiceMonitor is wired in this chart; the endpoint is not).
+        # With no http_requests_total series, this expression evaluates to empty
+        # and never fires.
+        - alert: IterabaseGatewayHighErrorRate
+          expr: |
+            sum(rate(http_requests_total{job="inference-gateway",code=~"5.."}[5m]))
+              /
+            clamp_min(sum(rate(http_requests_total{job="inference-gateway"}[5m])), 1)
+              > 0.05
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            summary: "inference-gateway 5xx error rate >5%"
+            description: "The inference gateway has returned >5% 5xx responses for 10m. (Requires the gateway /metrics endpoint — HOR-408 tracked gap.)"
+{{- end }}
+{{- end }}

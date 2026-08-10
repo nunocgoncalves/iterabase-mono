@@ -1,0 +1,22 @@
+{{- if .Values.enabled }}
+{{- if .Values.addresses }}
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: {{ include "metallb-config.name" . }}
+  annotations:
+    # MetalLB's CRDs ship in the same release (the community metallb subchart's
+    # `crds` subchart); helm can't apply a CR before its CRD is established, so
+    # apply it as a post-install/post-upgrade hook (after `helm --wait` confirms
+    # the MetalLB operator is Ready).
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "10"
+  labels:
+    {{- include "metallb-config.labels" . | nindent 4 }}
+spec:
+  addresses:
+    {{- toYaml .Values.addresses | nindent 4 }}
+  autoAssign: {{ .Values.autoAssign }}
+  avoidBuggyIPs: {{ .Values.avoidBuggyIPs }}
+{{- end }}
+{{- end }}

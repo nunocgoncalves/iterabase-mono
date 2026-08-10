@@ -1,0 +1,22 @@
+{{- if .Values.enabled }}
+{{- if .Values.letsencrypt.enabled }}
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: {{ .Values.letsencrypt.name | quote }}
+  labels:
+    {{- include "cert-issuers.labels" . | nindent 4 }}
+spec:
+  acme:
+    server: {{ .Values.letsencrypt.server | quote }}
+    email: {{ required "cert-issuers.letsencrypt.email is required when letsencrypt is enabled" .Values.letsencrypt.email | quote }}
+    privateKeySecretRef:
+      name: {{ printf "%s-account-key" .Values.letsencrypt.name | quote }}
+    solvers:
+      - dns01:
+          cloudflare:
+            apiTokenSecretRef:
+              name: {{ required "cert-issuers.letsencrypt.cloudflare.tokenSecretRef.name is required" .Values.letsencrypt.cloudflare.tokenSecretRef.name | quote }}
+              key: {{ required "cert-issuers.letsencrypt.cloudflare.tokenSecretRef.key is required" .Values.letsencrypt.cloudflare.tokenSecretRef.key | quote }}
+{{- end }}
+{{- end }}

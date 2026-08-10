@@ -1,0 +1,24 @@
+{{- if .Values.enabled }}
+{{- if .Values.dcgmExporter.enabled }}
+{{- $root := . }}
+# Scrape NVIDIA dcgm-exporter (GPU metrics). gpu-operator (out-of-band infra on
+# GPU nodes) runs dcgm-exporter as a Service; we only scrape it — no DaemonSet of
+# our own. Matched by label across any namespace so it survives wherever
+# gpu-operator is installed.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ .Release.Name }}-dcgm-exporter
+  labels:
+    {{- include "observability.labels" . | nindent 4 }}
+spec:
+  namespaceSelector:
+    {{- toYaml .Values.dcgmExporter.namespaceSelector | nindent 4 }}
+  selector:
+    {{- toYaml .Values.dcgmExporter.selector | nindent 4 }}
+  endpoints:
+    - port: {{ .Values.dcgmExporter.port | quote }}
+      path: {{ .Values.dcgmExporter.path | quote }}
+      interval: 30s
+{{- end }}
+{{- end }}

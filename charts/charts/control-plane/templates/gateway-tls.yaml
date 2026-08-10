@@ -1,0 +1,99 @@
+{{- /* The shared platform workload CA + ClusterIssuer (ARCH: the gateway,
+     dispatch Work server, and tool-runner workload-identity substrate).
+     Provisioned when either the gateway or the dispatch Work server (or both)
+     is enabled; each mTLS service also signs its own serving leaf from this
+     CA. AgentPool worker leaves are issued from the same CA (the controller's
+     CSI volume references the platform-spiffe-ca ClusterIssuer name), so the
+     CA private key remains in Kubernetes and warm workers verify the server
+     chains against it. */ -}}
+{{- $caName := include "control-plane.gatewayCASecretName" . }}
+{{- $tlsName := include "control-plane.gatewayTLSSecretName" . }}
+{{- $clusterResourceNamespace := default .Release.Namespace .Values.gateway.tls.clusterResourceNamespace }}
+{{- $existingCA := lookup "v1" "Secret" .Release.Namespace $caName }}
+{{- $ca := genCA (printf "%s platform workload CA" .Release.Name) 3650 }}
+{{- if $existingCA }}
+{{- $ca = buildCustomCert (index $existingCA.data "tls.crt") (index $existingCA.data "tls.key") }}
+{{- end }}
+{{- if and .Values.enabled (or .Values.gateway.enabled .Values.dispatch.enabled) }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $caName }}
+  labels:
+    {{- include "control-plane.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gateway-ca
+type: kubernetes.io/tls
+data:
+{{- if $existingCA }}
+{{- range $k, $v := $existingCA.data }}
+  {{ $k }}: {{ $v }}
+{{- end }}
+{{- else }}
+  ca.crt: {{ $ca.Cert | b64enc | quote }}
+  tls.crt: {{ $ca.Cert | b64enc | quote }}
+  tls.key: {{ $ca.Key | b64enc | quote }}
+{{- end }}
+{{- if ne $clusterResourceNamespace .Release.Namespace }}
+---
+# A ClusterIssuer resolves CA Secrets from cert-manager's configured
+# cluster-resource namespace. Standalone installs can mirror the stable CA
+# there; umbrella installs use the release namespace and need no duplicate.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $caName }}
+  namespace: {{ $clusterResourceNamespace }}
+  labels:
+    {{- include "control-plane.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gateway-ca
+    app.kubernetes.io/part-of: platform-workload-pki
+type: kubernetes.io/tls
+data:
+  ca.crt: {{ $ca.Cert | b64enc | quote }}
+  tls.crt: {{ $ca.Cert | b64enc | quote }}
+  tls.key: {{ $ca.Key | b64enc | quote }}
+{{- end }}
+{{- end }}
+{{- if and .Values.enabled .Values.gateway.enabled .Values.gateway.tls.generated }}
+---
+# The gateway's serving leaf, signed by the shared workload CA. Stable across
+# upgrades (helm lookup preserves the live Secret).
+{{- $existingTLS := lookup "v1" "Secret" .Release.Namespace $tlsName }}
+{{- $gatewayName := include "control-plane.gatewayName" . }}
+{{- $dnsNames := list $gatewayName (printf "%s.%s" $gatewayName .Release.Namespace) (printf "%s.%s.svc" $gatewayName .Release.Namespace) (printf "%s.%s.svc.cluster.local" $gatewayName .Release.Namespace) }}
+{{- $gatewayCert := genSignedCert $gatewayName nil $dnsNames 3650 $ca }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $tlsName }}
+  labels:
+    {{- include "control-plane.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gateway
+type: kubernetes.io/tls
+data:
+{{- if $existingTLS }}
+{{- range $k, $v := $existingTLS.data }}
+  {{ $k }}: {{ $v }}
+{{- end }}
+{{- else }}
+  tls.crt: {{ $gatewayCert.Cert | b64enc | quote }}
+  tls.key: {{ $gatewayCert.Key | b64enc | quote }}
+{{- end }}
+{{- end }}
+{{- if and .Values.enabled (or .Values.gateway.enabled .Values.dispatch.enabled) }}
+---
+# AgentPool worker leaves are issued from the same CA the gateway/dispatch
+# trust for client authentication. The controller's CSI volume intentionally
+# references this stable ClusterIssuer name; the CA private key remains in
+# Kubernetes.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: platform-spiffe-ca
+  labels:
+    {{- include "control-plane.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gateway-ca
+spec:
+  ca:
+    secretName: {{ $caName }}
+{{- end }}

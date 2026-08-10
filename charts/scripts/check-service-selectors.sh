@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+assert_service_selector() {
+  local chart="$1"
+  local template="$2"
+  local expected="$3"
+  shift 3
+  local rendered actual
+
+  rendered=$(helm template selector-check "charts/$chart" \
+    --set metrics.enabled=true \
+    "$@" \
+    --show-only "templates/$template")
+  actual=$(awk '
+    /^kind: Service$/ { service = 1; spec = 0; selector = 0; next }
+    service && /^spec:$/ { spec = 1; next }
+    service && spec && /^  selector:$/ { selector = 1; next }
+    service && selector && /^    app\.kubernetes\.io\/component:/ { print $2; exit }
+  ' <<<"$rendered")
+
+  if [[ "$actual" != "$expected" ]]; then
+    echo "ERROR: $chart/$template Service component selector: expected '$expected', got '${actual:-<missing>}'" >&2
+    return 1
+  fi
+  echo "OK: $chart/$template Service selects component=$expected"
+}
+
+assert_service_selector postgresql service.yaml database
+assert_service_selector postgresql exporter.yaml exporter
+assert_service_selector redis service.yaml cache
+assert_service_selector redis exporter.yaml exporter
+assert_service_selector control-plane gateway.yaml gateway --set gateway.enabled=true
+assert_service_selector control-plane dispatch.yaml dispatch \
+  --set dispatch.enabled=true --set dispatch.defaultModel.id=test --set dispatch.defaultModel.api=test

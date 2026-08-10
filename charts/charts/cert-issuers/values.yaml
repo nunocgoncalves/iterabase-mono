@@ -1,0 +1,44 @@
+enabled: true
+
+# cert-manager ClusterIssuers. The cert-manager operator itself is provided by
+# the umbrella's `cert-manager` dependency (jetstack chart); this subchart only
+# renders the issuer CRs the operator reconciles.
+
+# Self-signed ClusterIssuer — issues certificates with no external CA. Use for
+# kind/E2E where there is no real domain and no reachable ACME CA.
+selfSigned:
+  enabled: true
+  name: selfsigned
+
+# Let's Encrypt ClusterIssuer using DNS-01 via Cloudflare. DNS-01 needs no
+# ingress reachability for the challenge — only Cloudflare API access, sharing
+# the same API token external-dns consumes. Enable in prod overlays.
+letsencrypt:
+  enabled: false
+  name: letsencrypt-prod
+  server: https://acme-v02.api.letsencrypt.org/directory
+  email: "" # REQUIRED when enabled; set via the prod overlay
+  # Cloudflare API token — reference the SAME Secret external-dns consumes
+  # (external-dns.env[CF_API_TOKEN]). The Secret must be provisioned out-of-band
+  # (External Secrets / SealedSecrets / manual) in this namespace; both
+  # external-dns and this issuer reference it by name/key. Configure name/key via
+  # the overlay to match external-dns.
+  cloudflare:
+    tokenSecretRef:
+      name: cloudflare-api-token
+      key: api-token
+
+# Internal CA — a private self-signed root for in-cluster TLS (Postgres, Redis,
+# control-plane API). Rendered as a self-contained chain: a dedicated bootstrap
+# self-signed ClusterIssuer -> an isCA root Certificate (stored in the
+# <release>-internal-ca-root Secret) -> a CA-type ClusterIssuer (internal-ca)
+# that signs per-component leaf certs. Opt-in; the prod overlay flips
+# internal.enabled. Independent of the edge selfSigned/letsencrypt toggles (a
+# private CA is inherently self-signed). The root is long-lived (10y); leaf
+# certs auto-rotate (90d, cert-manager default). Root rotation is a fast-follow.
+internal:
+  enabled: false
+  ca:
+    name: internal-ca               # CA ClusterIssuer name (component leaf certs reference this via tls.issuerName)
+    commonName: iterabase-internal-ca
+    duration: 87600h                # 10y

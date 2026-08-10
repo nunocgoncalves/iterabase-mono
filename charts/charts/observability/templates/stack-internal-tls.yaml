@@ -1,0 +1,92 @@
+{{- if .Values.enabled }}
+{{- if (dig "internalTLS" "enabled" false (.Values.global | default (dict))) }}
+{{- $ca := (printf "%s-internal-ca-root" .Release.Name) }}
+{{- $ns := .Release.Namespace }}
+{{- $issuer := .Values.tls.issuerName | default "internal-ca" }}
+# Stack-component leaf certs (internal TLS). Issued by the internal CA
+# ClusterIssuer (cert-issuers, pre-install) when global.internalTLS is on, so
+# Prometheus/Grafana/Loki/Alertmanager serve HTTPS and the Grafana datasources
+# switch to https (see values-tls.yaml + grafana-datasources-*.yaml). Pre-install
+# hooks (weight 20, after the CA at 10-12) so the Secrets exist before the stack
+# pods start and mount them. Secret names are FIXED (not release-scoped) because
+# the upstream kube-prometheus-stack/loki charts reference them via static
+# values (web.tlsConfig / extraVolumes); the single-tenant platform installs
+# once per cluster, so a fixed name is safe. SANs are release-scoped (the
+# Service DNS clients connect on).
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: observability-prometheus-tls
+  labels:
+    {{- include "observability.labels" . | nindent 4 }}
+spec:
+  secretName: observability-prometheus-tls
+  duration: 2160h      # 90d
+  renewBefore: 360h    # 15d
+  dnsNames:
+    - {{ printf "%s-kube-prometheus-prometheus" .Release.Name }}
+    - {{ printf "%s-kube-prometheus-prometheus.%s" .Release.Name $ns }}
+    - {{ printf "%s-kube-prometheus-prometheus.%s.svc" .Release.Name $ns }}
+    - {{ printf "%s-kube-prometheus-prometheus.%s.svc.cluster.local" .Release.Name $ns }}
+  issuerRef:
+    name: {{ $issuer | quote }}
+    kind: ClusterIssuer
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: observability-alertmanager-tls
+  labels:
+    {{- include "observability.labels" . | nindent 4 }}
+spec:
+  secretName: observability-alertmanager-tls
+  duration: 2160h
+  renewBefore: 360h
+  dnsNames:
+    - {{ printf "%s-kube-prometheus-alertmanager" .Release.Name }}
+    - {{ printf "%s-kube-prometheus-alertmanager.%s" .Release.Name $ns }}
+    - {{ printf "%s-kube-prometheus-alertmanager.%s.svc" .Release.Name $ns }}
+    - {{ printf "%s-kube-prometheus-alertmanager.%s.svc.cluster.local" .Release.Name $ns }}
+  issuerRef:
+    name: {{ $issuer | quote }}
+    kind: ClusterIssuer
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: observability-grafana-tls
+  labels:
+    {{- include "observability.labels" . | nindent 4 }}
+spec:
+  secretName: observability-grafana-tls
+  duration: 2160h
+  renewBefore: 360h
+  dnsNames:
+    - {{ printf "%s-grafana" .Release.Name }}
+    - {{ printf "%s-grafana.%s" .Release.Name $ns }}
+    - {{ printf "%s-grafana.%s.svc" .Release.Name $ns }}
+    - {{ printf "%s-grafana.%s.svc.cluster.local" .Release.Name $ns }}
+  issuerRef:
+    name: {{ $issuer | quote }}
+    kind: ClusterIssuer
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: observability-loki-tls
+  labels:
+    {{- include "observability.labels" . | nindent 4 }}
+spec:
+  secretName: observability-loki-tls
+  duration: 2160h
+  renewBefore: 360h
+  dnsNames:
+    - {{ printf "%s-loki" .Release.Name }}
+    - {{ printf "%s-loki.%s" .Release.Name $ns }}
+    - {{ printf "%s-loki.%s.svc" .Release.Name $ns }}
+    - {{ printf "%s-loki.%s.svc.cluster.local" .Release.Name $ns }}
+  issuerRef:
+    name: {{ $issuer | quote }}
+    kind: ClusterIssuer
+{{- end }}
+{{- end }}

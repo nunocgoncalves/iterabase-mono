@@ -1,0 +1,23 @@
+{{- if .Values.enabled }}
+{{- if .Values.metrics.enabled }}
+# ServiceMonitor scraping MinIO's native /minio/v2/metrics/cluster endpoint on
+# the S3 port. (MINIO_PROMETHEUS_AUTH_TYPE=public is set on the server when
+# metrics.enabled — see statefulset.yaml — so no scrape auth is needed.)
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "minio.name" . }}
+  labels:
+    {{- include "minio.labels" . | nindent 4 }}
+spec:
+  jobLabel: app.kubernetes.io/name
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: minio
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  endpoints:
+    - port: s3
+      path: /minio/v2/metrics/cluster
+      interval: {{ .Values.metrics.scrapeInterval | default "30s" }}
+{{- end }}
+{{- end }}

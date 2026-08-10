@@ -1,0 +1,17 @@
+# buf module for the control-plane RPC contracts (harness HOR-351/381, gateway HOR-392).
+# Run `make proto` from the repo root (it cd's here and runs buf generate).
+version: v2
+modules:
+  - path: .
+lint:
+  use:
+    - STANDARD
+  except:
+    - RPC_REQUEST_STANDARD_NAME  # Work is a bidi stream: WorkerMessage/ControlMessage are
+                                 # bidirectional messages, not a Request/Response pair.
+    - RPC_RESPONSE_STANDARD_NAME # (same — ControlMessage is a streamed control message,
+                                 # not a FooResponse wrapper)
+    - SERVICE_SUFFIX              # Connect appends "Service" to the descriptor (Harness -> HarnessService)
+breaking:
+  use:
+    - FILE

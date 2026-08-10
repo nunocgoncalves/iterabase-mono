@@ -1,0 +1,225 @@
+# iterabase-platform umbrella defaults (single-node).
+
+# --- Internal TLS (opt-in; the prod overlay flips this one switch) ---
+# When true, every component enables in-cluster TLS off the internal CA
+# (cert-issuers.internal): Postgres (ssl=on + hostssl), Redis (TLS + AUTH),
+# the control-plane API (HTTPS), and the gateway connects with verify-full +
+# rediss://. Propagated to subcharts via `global.internalTLS` (helm shares
+# `global.*` with subcharts); each subchart reads it with a local override
+# escape hatch. Default false -> plaintext (kind/E2E). The CA Secret name is
+# computed (<release>-internal-ca-root), so the overlay sets only `enabled`.
+global:
+  internalTLS:
+    enabled: false
+
+# --- Data deps (self-contained subcharts; disable + override to BYO) ---
+# Postgres is provided by the control-plane chart (pgvector); the gateway reads
+# the control-plane's schemas (catalog/identity/permissions) from it.
+redis:
+  enabled: true
+  # metrics.enabled (default false): deploy a redis-exporter sidecar... no — a
+  # standalone redis-exporter Deployment + ServiceMonitor owned by the redis
+  # subchart. Flip on with observability (see values-observability.yaml).
+  metrics:
+    enabled: false
+minio:
+  enabled: true
+  artifactService:
+    enabled: true
+    bucket: iterabase-artifacts
+  # metrics.enabled (default false): a ServiceMonitor scraping MinIO's native
+  # /minio/v2/metrics/cluster endpoint (no exporter needed). Flip on with
+  # observability (see values-observability.yaml).
+  metrics:
+    enabled: false
+
+# --- Services ---
+inference-gateway:
+  enabled: true
+  # metrics.enabled (default false): a ServiceMonitor scraping the gateway's
+  # /metrics endpoint. The endpoint itself is a service-repo concern (HOR-408
+  # tracked gap); the ServiceMonitor is wired here and scrapes once the endpoint
+  # ships. Flip on with observability (see values-observability.yaml).
+  metrics:
+    enabled: false
+  ingress:
+    # Dev/kind default host (no real domain — pair with the self-signed issuer
+    # below). Override to the real public host in the prod overlay (e.g.
+    # gateway.opo1.example.com) alongside letsencrypt-prod + external-dns.
+    host: gateway.iterabase.local
+    tls:
+      # Public HTTPS edge via the prerequisite cert-manager substrate. This
+      # chart enables cert-issuers; clusterIssuer references its self-signed
+      # issuer (kind/E2E). Set letsencrypt-prod in the prod overlay.
+      enabled: true
+      clusterIssuer: selfsigned # cert-issuers.selfSigned.name
+control-plane:
+  enabled: true # provides the shared pgvector Postgres + the schemas the gateway reads
+  gateway:
+    enabled: true # mTLS workload/tool/artifact service; generated CA is stable across upgrades
+  dispatch:
+    enabled: true # durable Work bidi-stream server (HOR-249); AgentPool workers connect over mTLS
+    # defaultModel.id/api are CUSTOMER-SPECIFIC and set by the overlay (a
+    # dispatch enabled without them fails closed at startup) — not baked here.
+  toolRunner:
+    enabled: true # Node 24 runner + exact Flux GitRepository artifact generations (HOR-397)
+    allowedToolNamespaces: [platform] # overlays add reviewed namespaces (for example graph/client)
+  artifact:
+    enabled: true
+    endpoint: "" # default: <release>-minio:9000
+    bucket: iterabase-artifacts
+    credentialSecret: "" # default: <release>-minio-artifacts
+    defaultRetention: "" # indefinite unless the data agreement sets a duration
+  # metrics.enabled (default false): ServiceMonitors for the control-plane api,
+  # manager, trusted tool runner, and modelbackend (vLLM) pods. The tool runner
+  # and vLLM expose live /metrics endpoints; api/manager remain a service-repo
+  # concern (HOR-408 tracked gap). Flip on with observability.
+  metrics:
+    enabled: false
+  # Postgres metrics: a postgres-exporter Deployment + ServiceMonitor owned by
+  # the postgresql subchart (nested under control-plane). Connects with the
+  # internal CA when internalTLS is on.
+  postgresql:
+    metrics:
+      enabled: false
+
+# --- Ingress controller (bundled substrate) ---
+# The edge is always a LoadBalancer Service (no hostNetwork). The LB
+# implementation is pluggable: MetalLB (L2) for bare-metal/kind/OPO1 — enable the
+# metallb + metallb-config deps below — or the cloud LB for cloud deploys (set
+# provider annotations on ingress-nginx.controller.service). external-dns (prod
+# overlay) points the gateway host's Cloudflare record at the LB's external
+# address. The service ipFamilies must match the MetalLB pool family below.
+ingress-nginx:
+  enabled: true
+  controller:
+    kind: Deployment
+    hostNetwork: false
+    service:
+      enabled: true
+      type: LoadBalancer
+      # Dual-stack / family: must match the MetalLB pool addresses
+      # (metallb-config.addresses). Default IPv4; OPO1 = IPv6 (SingleStack,
+      # [IPv6]); dual-stack = PreferDualStack, [IPv4, IPv6].
+      ipFamilyPolicy: SingleStack
+      ipFamilies:
+        - IPv4
+    hostPort:
+      enabled: false
+    metrics:
+      enabled: false
+      serviceMonitor:
+        enabled: false # flip on with observability (needs the Prometheus Operator CRDs)
+
+# --- MetalLB (LoadBalancer implementation for bare-metal/kind/OPO1) ---
+# The edge's LoadBalancer Service needs an LB implementation. On cloud, the cloud
+# LB provisions it (leave metallb disabled + set provider annotations on
+# ingress-nginx.controller.service). On bare-metal/kind/OPO1, enable MetalLB L2:
+# the community metallb chart (operator + speaker + CRDs) + metallb-config
+# (IPAddressPool + L2Advertisement CRs, post-install hooks). The pool addresses
+# (metallb-config.addresses) must match ingress-nginx.controller.service.ipFamilies.
+# Disabled by default; the kind preset (values-kind.yaml) + the OPO1 overlay
+# enable both. frrk8s is off (L2-only — no BGP/frr overhead).
+metallb:
+  enabled: false
+  crds:
+    enabled: true
+  frrk8s:
+    enabled: false
+  # Metrics + ServiceMonitor (native to the metallb chart). Flip on with
+  # observability; off by default to keep the default render lean.
+  prometheus:
+    serviceMonitor:
+      enabled: false
+
+metallb-config:
+  enabled: false
+  # addresses: set in the overlay (kind preset / OPO1). CIDR or range; family
+  # must match ingress-nginx.controller.service.ipFamilies.
+  addresses: []
+
+# cert-manager and its CSI driver are cluster substrate. Install the companion
+# cert-manager-substrate release and wait for its webhook before this chart.
+# Forge enforces that ordering using the same platform version.
+
+cert-issuers:
+  enabled: true
+  selfSigned:
+    enabled: true # kind/E2E — no real domain
+  letsencrypt:
+    enabled: false # enable in prod overlay (needs email + Cloudflare token)
+
+# --- Stakater Reloader (cert reload for internal TLS) ---
+# When internalTLS is on, cert-manager renews the mounted cert Secrets (90d,
+# renewBefore 15d) but the TLS servers (Postgres/Redis/control-plane API) do not
+# hot-reload TLS material. Reloader watches the mounted Secrets and triggers a
+# rollout when one updates, so a renewed leaf is picked up without a manual
+# restart. The TLS-serving workloads carry reloader.stakater.com/auto only while
+# TLS is enabled. Disabled by default (kind/E2E plaintext has no annotated
+# workloads); flip on with internalTLS (see values-tls.yaml / the prod overlay).
+reloader:
+  enabled: false
+  # Metrics + ServiceMonitor (native to the reloader chart). Flip on with
+  # observability; off by default to keep the default render lean.
+  metrics:
+    enabled: false
+
+# --- external-dns (edge DNS → Cloudflare) ---
+# external-dns syncs the gateway Ingress host into Cloudflare (A record), sharing
+# the same Cloudflare API token Secret cert-issuers' Let's Encrypt DNS-01 solver
+# references. Disabled by default — there is no kind/E2E mode (it needs a real
+# Cloudflare zone + token); enable in the prod overlay.
+#
+# Prod overlay must:
+#   - set external-dns.enabled=true
+#   - set external-dns.domainFilters (e.g. ["opo1.example.com."]) to scope the zone
+#   - provision the cloudflare-api-token Secret out-of-band (External Secrets /
+#     SealedSecrets / manual) in this namespace — external-dns and cert-issuers
+#     both reference it by name/key below.
+#   - set inference-gateway.ingress.externalDns.enabled=true so the gateway
+#     Ingress is annotated with its host (external-dns then creates the A record).
+external-dns:
+  enabled: false
+  provider:
+    name: cloudflare
+  sources:
+    - ingress
+  policy: upsert-only # create/update only; never delete records (safe default; set `sync` in the overlay to also prune)
+  domainFilters: [] # REQUIRED when enabled — scope to your Cloudflare zone
+  # Cloudflare API token — same Secret cert-issuers.letsencrypt references.
+  env:
+    - name: CF_API_TOKEN
+      valueFrom:
+        secretKeyRef:
+          name: cloudflare-api-token # shared with cert-issuers.letsencrypt
+          key: api-token
+  extraArgs:
+    cloudflare-proxied: true # A records proxied through Cloudflare (orange cloud)
+  rbac:
+    create: true
+  serviceAccount:
+    create: true
+  # Metrics + ServiceMonitor (native to the external-dns chart). Flip on with
+  # observability; off by default to keep the default render lean.
+  metrics:
+    enabled: false
+  serviceMonitor:
+    enabled: false
+
+# --- Observability (HOR-408) ---
+# Prometheus + Grafana + Loki + Alertmanager (kube-prometheus-stack + loki) with
+# the Prometheus Operator CRDs (ServiceMonitor / PrometheusRule), default alert
+# rules, a Loki Grafana datasource, and optional NVIDIA DCGM (GPU) scraping. The
+# stack is composed by the `observability` subchart (file://../observability),
+# which itself depends on the two upstream charts.
+#
+# Disabled by default — kind/E2E stays lean. Enabling observability alone brings
+# up the stack (Prometheus auto-discovers all ServiceMonitors/PrometheusRules
+# cluster-wide via nil selectors); to actually scrape the platform components,
+# also flip each component's metrics.enabled (see values-observability.yaml,
+# which flips the stack + every metrics knob in one file). Alertmanager email
+# routing is overlay-owned (HOR-408: the OPO1 overlay sets
+# observability.kube-prometheus-stack.alertmanager.config); non-email
+# destinations are deferred (non-goal).
+observability:
+  enabled: false

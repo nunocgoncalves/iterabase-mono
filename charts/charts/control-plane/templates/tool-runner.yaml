@@ -1,0 +1,231 @@
+{{- if and .Values.enabled .Values.gateway.enabled .Values.toolRunner.enabled }}
+{{- $name := include "control-plane.toolRunnerName" . -}}
+{{- if not .Values.toolRunner.allowedToolNamespaces }}{{ fail "toolRunner.allowedToolNamespaces must contain at least one exact namespace" }}{{- end }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "control-plane.labels" . | nindent 4 }}
+    app.kubernetes.io/component: tool-runner
+automountServiceAccountToken: false
+{{- if or .Values.metrics.enabled .Values.toolRunner.metrics.enabled }}
+---
+# Metrics-only Service. Tool execution remains outbound over the gateway mTLS
+# stream; neither container exposes an invocation endpoint.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "control-plane.labels" . | nindent 4 }}
+    app.kubernetes.io/component: tool-runner
+spec:
+  selector:
+    app.kubernetes.io/name: control-plane
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: tool-runner
+  ports:
+    - name: mat-metrics
+      port: {{ .Values.toolRunner.metrics.materializerPort }}
+      targetPort: mat-metrics
+    - name: run-metrics
+      port: {{ .Values.toolRunner.metrics.runnerPort }}
+      targetPort: run-metrics
+{{- end }}
+---
+# The materializer polls one exact GitRepository by name in one exact Flux
+# namespace. Keep both constraints in a namespaced Role: resourceNames alone
+# would authorize a same-named source in every namespace through a ClusterRole.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Values.toolRunner.flux.namespace | quote }}
+  labels:
+    {{- include "control-plane.labels" . | nindent 4 }}
+    app.kubernetes.io/component: tool-materializer
+rules:
+  - apiGroups: ["source.toolkit.fluxcd.io"]
+    resources: ["gitrepositories"]
+    resourceNames: [{{ .Values.toolRunner.flux.sourceName | quote }}]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Values.toolRunner.flux.namespace | quote }}
+  labels:
+    {{- include "control-plane.labels" . | nindent 4 }}
+    app.kubernetes.io/component: tool-materializer
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $name }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $name }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "control-plane.labels" . | nindent 4 }}
+    app.kubernetes.io/component: tool-runner
+spec:
+  secretName: {{ include "control-plane.toolRunnerTLSSecretName" . }}
+  duration: 24h
+  renewBefore: 8h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+  usages: ["client auth"]
+  uris:
+    - {{ printf "spiffe://%s/tool-runners/%s/%s" .Values.gateway.trustDomain .Release.Namespace .Values.toolRunner.runnerId | quote }}
+  issuerRef:
+    name: platform-spiffe-ca
+    kind: ClusterIssuer
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "control-plane.labels" . | nindent 4 }}
+    app.kubernetes.io/component: tool-runner
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate # one stable runner identity; gateway stream fencing remains authoritative
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: control-plane
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: tool-runner
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: control-plane
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: tool-runner
+      annotations:
+        reloader.stakater.com/auto: "true"
+    spec:
+      serviceAccountName: {{ $name }}
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: materializer
+          image: "{{ .Values.toolRunner.image.repository }}:{{ .Values.toolRunner.image.tag }}"
+          imagePullPolicy: {{ .Values.toolRunner.image.pullPolicy }}
+          args: ["materialize"]
+          env:
+            - {name: FLUX_SOURCE_NAMESPACE, value: {{ .Values.toolRunner.flux.namespace | quote }}}
+            - {name: FLUX_SOURCE_NAME, value: {{ .Values.toolRunner.flux.sourceName | quote }}}
+            - {name: FLUX_POLL_MS, value: {{ .Values.toolRunner.flux.pollMs | quote }}}
+            - {name: FLUX_MAX_ARCHIVE_BYTES, value: {{ .Values.toolRunner.flux.maxArchiveBytes | quote }}}
+            - {name: TOOL_RUNNER_MAX_GENERATIONS, value: {{ .Values.toolRunner.maxGenerations | quote }}}
+            - {name: TOOL_RUNNER_MAX_LOADED_BYTES, value: {{ .Values.toolRunner.maxLoadedBytes | quote }}}
+            - {name: ARTIFACTS_ROOT, value: /artifacts}
+            - {name: CONTROL_ROOT, value: /control}
+            - {name: MATERIALIZER_METRICS_PORT, value: {{ .Values.toolRunner.metrics.materializerPort | quote }}}
+          ports:
+            - {name: mat-metrics, containerPort: {{ .Values.toolRunner.metrics.materializerPort }}}
+          volumeMounts:
+            - {name: artifacts, mountPath: /artifacts}
+            - {name: control, mountPath: /control}
+            - {name: kube-api, mountPath: /var/run/secrets/kubernetes.io/serviceaccount, readOnly: true}
+          readinessProbe:
+            exec: {command: ["test", "-f", "/control/materializer-ready"]}
+            periodSeconds: 5
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: {drop: ["ALL"]}
+          {{- with .Values.toolRunner.materializerResources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        - name: runner
+          image: "{{ .Values.toolRunner.image.repository }}:{{ .Values.toolRunner.image.tag }}"
+          imagePullPolicy: {{ .Values.toolRunner.image.pullPolicy }}
+          # /control is pod-scoped and survives a container restart. Clear the
+          # prior process's marker before exec so readiness is process-lifetime
+          # state and stays false until this runner validates a generation.
+          command: ["/bin/sh", "-ec"]
+          args: ["rm -f /control/runner-ready; exec node /app/dist/main.js run"]
+          env:
+            - {name: TOOL_GATEWAY_URL, value: {{ printf "https://%s:%v" (include "control-plane.gatewayName" .) .Values.gateway.service.port | quote }}}
+            - {name: TOOL_GATEWAY_SERVER_NAME, value: {{ include "control-plane.gatewayName" . | quote }}}
+            - {name: TOOL_GATEWAY_CA_FILE, value: /etc/tool-runner/ca/ca.crt}
+            - {name: TOOL_RUNNER_CERT_FILE, value: /etc/tool-runner/tls/tls.crt}
+            - {name: TOOL_RUNNER_KEY_FILE, value: /etc/tool-runner/tls/tls.key}
+            - {name: TOOL_RUNNER_ID, value: {{ .Values.toolRunner.runnerId | quote }}}
+            - {name: TOOL_RUNNER_CONCURRENCY, value: {{ .Values.toolRunner.concurrency | quote }}}
+            - {name: TOOL_RUNNER_MAX_GENERATIONS, value: {{ .Values.toolRunner.maxGenerations | quote }}}
+            - {name: TOOL_RUNNER_MAX_LOADED_BYTES, value: {{ .Values.toolRunner.maxLoadedBytes | quote }}}
+            - {name: TOOL_RUNNER_DRAIN_MAX_AGE, value: {{ .Values.toolRunner.drainMaxAge | quote }}}
+            - {name: CONTROL_ROOT, value: /control}
+            - {name: TOOL_RUNNER_METRICS_PORT, value: {{ .Values.toolRunner.metrics.runnerPort | quote }}}
+          ports:
+            - {name: run-metrics, containerPort: {{ .Values.toolRunner.metrics.runnerPort }}}
+          volumeMounts:
+            - {name: artifacts, mountPath: /artifacts, readOnly: true}
+            - {name: control, mountPath: /control}
+            - {name: runner-tls, mountPath: /etc/tool-runner/tls, readOnly: true}
+            - {name: gateway-ca, mountPath: /etc/tool-runner/ca, readOnly: true}
+          startupProbe:
+            exec: {command: ["test", "-f", "/control/runner-ready"]}
+            failureThreshold: 60
+            periodSeconds: 2
+          readinessProbe:
+            exec: {command: ["test", "-f", "/control/runner-ready"]}
+            periodSeconds: 5
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: {drop: ["ALL"]}
+          {{- with .Values.toolRunner.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: artifacts
+          emptyDir:
+            sizeLimit: 2Gi
+        - name: control
+          emptyDir:
+            sizeLimit: 16Mi
+        - name: runner-tls
+          secret:
+            secretName: {{ include "control-plane.toolRunnerTLSSecretName" . }}
+        - name: gateway-ca
+          secret:
+            secretName: {{ include "control-plane.gatewayCASecretName" . }}
+            items:
+              - {key: ca.crt, path: ca.crt}
+        - name: kube-api
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  expirationSeconds: 3600
+              - configMap:
+                  name: kube-root-ca.crt
+                  items:
+                    - {key: ca.crt, path: ca.crt}
+              - downwardAPI:
+                  items:
+                    - path: namespace
+                      fieldRef: {fieldPath: metadata.namespace}
+{{- end }}

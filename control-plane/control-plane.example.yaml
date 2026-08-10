@@ -1,0 +1,95 @@
+# control-plane example configuration. Copy to control-plane.yaml and edit.
+# Environment variables (DATABASE_URL, API_ADDR, LOG_LEVEL, LOG_FORMAT,
+# JWT_SIGNING_KEY_PATH, JWT_KEY_ID, IDENTITY_MODE, TLS_CERT_FILE, TLS_KEY_FILE)
+# override these values and are the preferred way to inject secrets in
+# Kubernetes.
+#
+# The manager binary reads only DATABASE_URL from the environment; it does not
+# load this file.
+
+api:
+  addr: ":8080"
+  # TLS is opt-in. Set both to serve HTTPS (cert-manager leaf cert from the
+  # internal CA, mounted by the control-plane chart when tls.enabled=true);
+  # leave both unset for plain HTTP (kind/E2E/dev). Both or neither — not one.
+  tls_cert_file: "${TLS_CERT_FILE}"   # e.g. /etc/control-plane/tls/tls.crt
+  tls_key_file: "${TLS_KEY_FILE}"     # e.g. /etc/control-plane/tls/tls.key
+
+# Tool gateway (cmd/gateway, HOR-392). mTLS is REQUIRED (the workload
+# boundary, not the dev HTTP API). The gateway serves the
+# iterabase.gateway.v1 gRPC contract (RunnerService + GatewayService) over
+# HTTP/2, verifying caller SPIFFE identities against client_ca_file. Env vars
+# GATEWAY_ADDR / GATEWAY_TLS_CERT_FILE / GATEWAY_TLS_KEY_FILE /
+# GATEWAY_CLIENT_CA_FILE / GATEWAY_TRUST_DOMAIN / GATEWAY_KUBE_NAMESPACE
+# override these.
+gateway:
+  addr: ":8090"
+  tls_cert_file: "${GATEWAY_TLS_CERT_FILE}"   # the gateway's workload leaf
+  tls_key_file: "${GATEWAY_TLS_KEY_FILE}"
+  client_ca_file: "${GATEWAY_CLIENT_CA_FILE}"  # SPIFFE/workload-identity CA bundle
+  trust_domain: "iterabase.local"
+  # Scopes Secret-read RBAC for credential-slot resolution (ARCH-008). The
+  # gateway reads only named K8s Secrets in this namespace.
+  kube_namespace: "${GATEWAY_KUBE_NAMESPACE}"
+  # Bounded inline JSON/text. Larger tool inputs/results use artifact refs.
+  inline_limit: 65536
+  # Exact deployment-owned identities; reconciled fail-closed at gateway start.
+  # Wildcards and empty namespace lists are rejected (HOR-397 / ARCH-015).
+  approved_runners:
+    - namespace: iterabase-system
+      runner_id: overlay-tools
+      spiffe_id: spiffe://iterabase.local/tool-runners/iterabase-system/overlay-tools
+      allowed_tool_namespaces: [platform, graph]
+
+# Immutable artifact service (HOR-399). API + gateway are the only MinIO
+# clients; supervisors/runners/sandboxes use the gateway ArtifactService.
+artifact:
+  enabled: true
+  endpoint: "${ARTIFACT_ENDPOINT}"       # e.g. iterabase-minio:9000
+  access_key: "${ARTIFACT_ACCESS_KEY}"   # dedicated bucket-scoped credential
+  secret_key: "${ARTIFACT_SECRET_KEY}"
+  bucket: "iterabase-artifacts"
+  secure: false                          # internal MinIO TLS when enabled
+  max_size_bytes: 1073741824             # 1 GiB
+  default_retention: ""                  # empty = indefinite
+  pending_ttl: "1h"
+  sweep_interval: "1m"
+
+# Dispatch Work server (cmd/dispatch, HOR-249). mTLS is REQUIRED. The dispatch
+# server serves the iterabase.harness.v1.Harness.Work bidi stream over HTTP/2,
+# verifying warm-worker (supervisor) SPIFFE identities against client_ca_file.
+# Env vars DISPATCH_ADDR / DISPATCH_TLS_CERT_FILE / DISPATCH_TLS_KEY_FILE /
+# DISPATCH_CLIENT_CA_FILE / DISPATCH_TRUST_DOMAIN override these.
+dispatch:
+  addr: ":8091"
+  tls_cert_file: "${DISPATCH_TLS_CERT_FILE}"   # the dispatch server's workload leaf
+  tls_key_file: "${DISPATCH_TLS_KEY_FILE}"
+  client_ca_file: "${DISPATCH_CLIENT_CA_FILE}"  # SPIFFE/workload-identity CA bundle
+  trust_domain: "iterabase.local"
+
+database:
+  url: "${DATABASE_URL}"      # required; e.g. postgres://cp:cp@postgres:5432/controlplane?sslmode=disable
+  max_open_conns: 25
+  max_idle_conns: 10
+
+logging:
+  level: info                  # debug | info | warn | error
+  format: json                 # json | text
+
+# JWT issuance (cmd/api serve). The signing key is an RSA private key PEM,
+# mounted from a Kubernetes Secret (forge-provisioned). The manager does not
+# read this key; only the api issues JWTs and serves JWKS.
+jwt:
+  signing_key_path: "${JWT_SIGNING_KEY_PATH}"   # e.g. /etc/control-plane/jwt/private.pem
+  key_id: "control-plane-1"                      # kid published in JWKS + JWT header
+  issuer: "control-plane"                        # iss claim
+  audience: "inference-gateway"                  # aud claim (validated by the gateway)
+  ttl: "15m"                                     # token lifetime
+
+# Identity-resolution mode.
+#   enrolled - linked IdentityMapping required; unlinked surface users are
+#              denied (S8 default). Fine-grained narrowing is HOR-243.
+#   open     - auto-provision any workspace member with all capabilities
+#              (deferred, HOR-313; the token endpoint returns 501).
+identity:
+  mode: enrolled

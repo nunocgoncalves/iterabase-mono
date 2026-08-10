@@ -1,0 +1,135 @@
+{{- if .Values.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "inference-gateway.name" . }}
+  labels:
+    {{- include "inference-gateway.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: inference-gateway
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: inference-gateway
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: gateway
+    spec:
+      {{- $internalTLS := (or .Values.tls.enabled (dig "internalTLS" "enabled" false (.Values.global | default (dict)))) -}}
+      {{- if (or $internalTLS .Values.workload.enabled) }}
+      volumes:
+        {{- if $internalTLS }}
+        # Internal CA root — ca.crt only (never tls.key, the CA private key) for
+        # client-side verify (Postgres verify-full + Redis RootCAs).
+        - name: internal-ca
+          secret:
+            secretName: {{ required "inference-gateway.tls.caSecretName is required when tls.enabled" (include "inference-gateway.tlsCASecretName" .) | quote }}
+            items:
+              - key: ca.crt
+                path: ca.crt
+        {{- end }}
+        {{- if .Values.workload.enabled }}
+        # HOR-398 supervisor mTLS workload listener: serving leaf + the platform
+        # workflow CA (client CA that worker leaves are chained to).
+        - name: workload-tls
+          secret:
+            secretName: {{ include "inference-gateway.workloadTLSSecretName" . | quote }}
+        - name: workload-client-ca
+          secret:
+            secretName: {{ include "inference-gateway.workloadCASecretName" . | quote }}
+            items:
+              - key: {{ .Values.workload.clientCAKey }}
+                path: ca.crt
+        {{- end }}
+      {{- end }}
+      containers:
+        - name: gateway
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.port }}
+            {{- if .Values.workload.enabled }}
+            - name: workload
+              containerPort: {{ .Values.workload.port }}
+            {{- end }}
+          env:
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "inference-gateway.pgSecret" . }}
+                  key: {{ .Values.postgresql.passwordKey }}
+            - name: DATABASE_URL
+              value: {{ include "inference-gateway.databaseURL" . | quote }}
+            {{- if (or .Values.tls.enabled (dig "internalTLS" "enabled" false (.Values.global | default (dict)))) }}
+            # REDIS_PASSWORD must precede REDIS_URL: k8s expands $(REDIS_PASSWORD)
+            # from previously-defined env vars only (like PGPASSWORD/DATABASE_URL).
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "inference-gateway.redisSecret" . }}
+                  key: {{ .Values.redis.passwordKey }}
+            {{- end }}
+            - name: REDIS_URL
+              value: {{ include "inference-gateway.redisURL" . | quote }}
+            {{- if (or .Values.tls.enabled (dig "internalTLS" "enabled" false (.Values.global | default (dict)))) }}
+            # Points the gateway's redisOptions at the internal CA for rediss:// verify.
+            - name: REDIS_TLS_CA_FILE
+              value: {{ .Values.tls.caMountPath | quote }}
+            {{- end }}
+            - name: ADMIN_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "inference-gateway.adminSecretName" . }}
+                  key: {{ .Values.adminApiKey.key }}
+            {{- if .Values.workload.enabled }}
+            # HOR-398 supervisor mTLS workload listener (default off in binary).
+            - name: WORKLOAD_ENABLED
+              value: "true"
+            - name: WORKLOAD_PORT
+              value: {{ .Values.workload.port | quote }}
+            - name: WORKLOAD_TRUST_DOMAIN
+              value: {{ .Values.workload.trustDomain | quote }}
+            - name: WORKLOAD_SERVER_CERT_FILE
+              value: {{ printf "%s/tls.crt" .Values.workload.certMountPath | quote }}
+            - name: WORKLOAD_SERVER_KEY_FILE
+              value: {{ printf "%s/tls.key" .Values.workload.certMountPath | quote }}
+            - name: WORKLOAD_CLIENT_CA_FILE
+              value: {{ printf "%s/ca.crt" .Values.workload.clientCAMountPath | quote }}
+            {{- end }}
+          {{- if (or $internalTLS .Values.workload.enabled) }}
+          volumeMounts:
+            {{- if $internalTLS }}
+            - name: internal-ca
+              mountPath: {{ dir .Values.tls.caMountPath }}
+              readOnly: true
+            {{- end }}
+            {{- if .Values.workload.enabled }}
+            - name: workload-tls
+              mountPath: {{ .Values.workload.certMountPath }}
+              readOnly: true
+            - name: workload-client-ca
+              mountPath: {{ .Values.workload.clientCAMountPath }}
+              readOnly: true
+            {{- end }}
+          {{- end }}
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+{{- end }}

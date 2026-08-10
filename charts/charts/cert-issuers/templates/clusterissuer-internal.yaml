@@ -1,0 +1,48 @@
+{{- if .Values.enabled }}
+{{- if (or .Values.internal.enabled (dig "internalTLS" "enabled" false (.Values.global | default (dict)))) }}
+{{- $caSecret := printf "%s-internal-ca-root" .Release.Name }}
+{{- $bootstrap := printf "%s-internal-ca-bootstrap" .Release.Name }}
+# Bootstrap self-signed ClusterIssuer for the internal CA root. Dedicated to the
+# internal CA so this block is self-contained (independent of the edge
+# selfSigned/letsencrypt toggles). A private CA is inherently self-signed; this
+# issuer exists only to mint the root Certificate below.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: {{ $bootstrap | quote }}
+  labels:
+    {{- include "cert-issuers.labels" . | nindent 4 }}
+spec:
+  selfSigned: {}
+---
+# The internal root CA certificate (isCA), issued by the bootstrap issuer and
+# stored in the <release>-internal-ca-root Secret. Clients mount this Secret's
+# ca.crt as their trust root; the CA ClusterIssuer below signs leaves with it.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ $caSecret | quote }}
+  labels:
+    {{- include "cert-issuers.labels" . | nindent 4 }}
+spec:
+  isCA: true
+  duration: {{ .Values.internal.ca.duration | quote }}
+  secretName: {{ $caSecret | quote }}
+  commonName: {{ .Values.internal.ca.commonName | quote }}
+  issuerRef:
+    name: {{ $bootstrap | quote }}
+    kind: ClusterIssuer
+---
+# The CA ClusterIssuer component leaf certs reference (tls.issuerName). Signs
+# leaves that chain to the internal root; clients verify against the root CA.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: {{ .Values.internal.ca.name | quote }}
+  labels:
+    {{- include "cert-issuers.labels" . | nindent 4 }}
+spec:
+  ca:
+    secretName: {{ $caSecret | quote }}
+{{- end }}
+{{- end }}

@@ -1,0 +1,83 @@
+# Observability preset for the iterabase-platform umbrella (CI: static
+# kubeconform via `make check-observability`). Enables the observability stack
+# (Prometheus + Grafana + Loki + Alertmanager + the Prometheus Operator CRDs)
+# AND every component's metrics knob so the full ServiceMonitor / exporter /
+# PrometheusRule render path is exercised. kind/E2E stays lean by default (this
+# file is opt-in); the prod overlay carries the same flips plus Alertmanager
+# email routing (HOR-408).
+#
+# Pair with values-kind.yaml for a kind install (the stack needs a StorageClass;
+# kind ships local-path by default).
+
+# --- The stack (Prometheus / Grafana / Loki / Alertmanager + operator CRDs) ---
+observability:
+  enabled: true
+  # Enable NVIDIA DCGM (GPU) scraping in GPU/inference deploys; off here (no GPU
+  # in kind). gpu-operator must be installed out-of-band for the target Service
+  # to exist.
+  dcgmExporter:
+    enabled: false
+
+# --- Component metrics knobs (ServiceMonitors / exporters) ---
+inference-gateway:
+  metrics:
+    enabled: true
+
+control-plane:
+  metrics:
+    # Also creates the trusted tool runner's metrics-only ServiceMonitor for its
+    # live materializer + runner endpoints.
+    enabled: true
+    # vLLM / model-backend pods are operator-created over the ModelBackend CRD;
+    # vLLM exposes /metrics natively on its serving port (http). The control-
+    # plane chart's default selector matches any model-backend pod by the
+    # `platform.iterabase.com/modelbackend` label (presence; the instance name is
+    # dynamic) — the actual labels set by the operator's backendLabels(). Enabled
+    # here so the PodMonitor renders; in kind there are no model-backend pods so
+    # the monitor has no targets. The OPO1 overlay enables it for live scraping.
+    vllm:
+      enabled: true
+  # postgresql is a subchart of control-plane; its exporter is nested here.
+  postgresql:
+    metrics:
+      enabled: true
+
+redis:
+  metrics:
+    enabled: true
+
+minio:
+  metrics:
+    enabled: true
+
+# --- Upstream charts' native metrics + ServiceMonitors ---
+ingress-nginx:
+  controller:
+    metrics:
+      enabled: true
+      serviceMonitor:
+        enabled: true
+
+metallb:
+  # metallb's ServiceMonitor creates a RoleBinding that requires the release-
+  # scoped Prometheus ServiceAccount + namespace
+  # (prometheus.serviceAccount / prometheus.namespace), which this static preset
+  # cannot know. metallb metrics scraping is therefore overlay-owned (the prod
+  # overlay sets both with the install release name/namespace). metallb itself
+  # is enabled by the kind-edge / prod overlay; without the ServiceMonitor its
+  # metrics Service is simply unscraped here.
+  prometheus:
+    serviceMonitor:
+      enabled: false
+
+external-dns:
+  metrics:
+    enabled: true
+  serviceMonitor:
+    enabled: true
+  # external-dns is disabled by default (no kind mode); the ServiceMonitor is
+  # harmless without it.
+
+reloader:
+  metrics:
+    enabled: true

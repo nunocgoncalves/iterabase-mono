@@ -1,0 +1,21 @@
+{{- if .Values.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "inference-gateway.name" . }}
+  labels:
+    {{- include "inference-gateway.labels" . | nindent 4 }}
+spec:
+  selector:
+    app.kubernetes.io/name: inference-gateway
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: http
+    {{- if .Values.workload.enabled }}
+    - name: workload
+      port: {{ .Values.workload.servicePort }}
+      targetPort: workload
+    {{- end }}
+{{- end }}

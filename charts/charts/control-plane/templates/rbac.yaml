@@ -1,0 +1,174 @@
+{{- if .Values.enabled }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "control-plane.serviceAccountName" . }}
+  labels:
+    {{- include "control-plane.labels" . | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "control-plane.serviceAccountName" . }}
+  labels:
+    {{- include "control-plane.labels" . | nindent 4 }}
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  - persistentvolumeclaims
+  - pods
+  - services
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - get
+- apiGroups:
+  - apps
+  resources:
+  - deployments
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - networking.k8s.io
+  resources:
+  - networkpolicies
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - platform.iterabase.com
+  resources:
+  - agentpools
+  - egressroutes
+  - identitymappings
+  - modelbackends
+  - models
+  - permissionpolicies
+  - workflows
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - platform.iterabase.com
+  resources:
+  - agentpools/finalizers
+  - egressroutes/finalizers
+  - identitymappings/finalizers
+  - modelbackends/finalizers
+  - models/finalizers
+  - permissionpolicies/finalizers
+  - workflows/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - platform.iterabase.com
+  resources:
+  - agentpools/status
+  - egressroutes/status
+  - identitymappings/status
+  - modelbackends/status
+  - models/status
+  - permissionpolicies/status
+  - workflows/status
+  verbs:
+  - get
+  - patch
+  - update
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "control-plane.serviceAccountName" . }}
+  labels:
+    {{- include "control-plane.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "control-plane.serviceAccountName" . }}
+subjects:
+- kind: ServiceAccount
+  name: {{ include "control-plane.serviceAccountName" . }}
+  namespace: {{ .Release.Namespace }}
+{{- if .Values.gateway.enabled }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "control-plane.gatewayServiceAccountName" . }}
+  labels:
+    {{- include "control-plane.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gateway
+---
+# Credential bindings resolve to operator-approved Secret names at runtime.
+# Keep this namespace-scoped and separate from the manager's cluster RBAC.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "control-plane.gatewayServiceAccountName" . }}
+  labels:
+    {{- include "control-plane.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gateway
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "control-plane.gatewayServiceAccountName" . }}
+  labels:
+    {{- include "control-plane.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gateway
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "control-plane.gatewayServiceAccountName" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "control-plane.gatewayServiceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}
+{{- if .Values.dispatch.enabled }}
+---
+# The dispatch Work server connects only to Postgres (PGPASSWORD + DATABASE_URL
+# from Secrets mounted as volumes/SecretKeyRef, resolved by kubelet) and serves
+# mTLS traffic; it never calls the Kubernetes API, so it gets a bare, least-
+# privilege ServiceAccount with no Role bindings.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "control-plane.dispatchServiceAccountName" . }}
+  labels:
+    {{- include "control-plane.labels" . | nindent 4 }}
+    app.kubernetes.io/component: dispatch
+{{- end }}
+{{- end }}

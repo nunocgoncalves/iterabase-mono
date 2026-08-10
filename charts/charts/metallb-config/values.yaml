@@ -1,0 +1,21 @@
+enabled: true
+
+# MetalLB L2 config. The MetalLB operator (controller + speaker + CRDs) is the
+# umbrella's community `metallb` dep (gated by metallb.enabled); this subchart
+# only renders the IPAddressPool + L2Advertisement CRs the operator reconciles.
+# Enable metallb + metallb-config together in the overlay (kind preset / OPO1);
+# on cloud leave both off and let the cloud LB provision the ingress-nginx
+# LoadBalancer Service (via ingress-nginx.controller.service.annotations).
+#
+# addresses: MetalLB-allocatable IP range(s) for the ingress-nginx LoadBalancer
+# Service. CIDR (10.0.0.0/28) or range (10.0.0.10-10.0.0.20). The family (v4/v6)
+# must match ingress-nginx.controller.service.ipFamilies. OPO1 = VLAN30 IPv6
+# range; kind = the kind docker-bridge subnet (see values-kind.yaml); cloud =
+# leave metallb disabled.
+addresses: []
+# autoAssign / avoidBuggyIPs pass through to the IPAddressPool spec.
+autoAssign: true
+avoidBuggyIPs: false
+# interfaces: restrict which node interfaces MetalLB announces the LB IP from.
+# Empty = all interfaces (default; fine for single-node/kind/OPO1).
+interfaces: []

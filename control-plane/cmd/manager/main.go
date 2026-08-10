@@ -1,0 +1,306 @@
+// Command manager runs the control-plane Kubernetes operator (controller-runtime
+// manager). In the skeleton it reconciles nothing — CRD kinds + reconcilers land
+// with their owning tickets (HOR-245/306/268/242/243). Logging goes through slog,
+// bridged to logr for controller-runtime.
+package main
+
+import (
+	"context"
+	"crypto/tls"
+	"flag"
+	"net/http"
+	"os"
+	"time"
+
+	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
+	// to ensure that exec-entrypoint and run can make use of them.
+	_ "k8s.io/client-go/plugin/pkg/client/auth"
+
+	"github.com/go-logr/logr"
+	"k8s.io/apimachinery/pkg/runtime"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/healthz"
+	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
+	"sigs.k8s.io/controller-runtime/pkg/webhook"
+
+	"github.com/nunocgoncalves/control-plane/api/v1alpha1"
+	"github.com/nunocgoncalves/control-plane/internal/catalog"
+	"github.com/nunocgoncalves/control-plane/internal/config"
+	"github.com/nunocgoncalves/control-plane/internal/controller"
+	"github.com/nunocgoncalves/control-plane/internal/database"
+	"github.com/nunocgoncalves/control-plane/internal/gateway"
+	"github.com/nunocgoncalves/control-plane/internal/identity"
+	"github.com/nunocgoncalves/control-plane/internal/logging"
+	"github.com/nunocgoncalves/control-plane/internal/permissions"
+	"github.com/nunocgoncalves/control-plane/internal/version"
+	"github.com/nunocgoncalves/control-plane/internal/workflow"
+	// +kubebuilder:scaffold:imports
+)
+
+var (
+	scheme   = runtime.NewScheme()
+	setupLog = ctrl.Log.WithName("setup")
+)
+
+func init() {
+	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+	utilruntime.Must(v1alpha1.AddToScheme(scheme))
+
+	// +kubebuilder:scaffold:scheme
+}
+
+func main() {
+	os.Exit(run())
+}
+
+// run configures and starts the manager, returning a process exit code so that
+// deferred cleanup (e.g. closing the DB pool) runs before the process exits.
+//
+// nolint:gocyclo
+func run() int {
+	var metricsAddr string
+	var metricsCertPath, metricsCertName, metricsCertKey string
+	var webhookCertPath, webhookCertName, webhookCertKey string
+	var enableLeaderElection bool
+	var probeAddr string
+	var secureMetrics bool
+	var enableHTTP2 bool
+	var logLevel, logFormat string
+	var tlsOpts []func(*tls.Config)
+
+	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
+		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
+	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
+	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
+		"Enable leader election for controller manager. "+
+			"Enabling this will ensure there is only one active controller manager.")
+	flag.BoolVar(&secureMetrics, "metrics-secure", true,
+		"If set, the metrics endpoint is served securely via HTTPS. Use --metrics-secure=false to use HTTP instead.")
+	flag.StringVar(&webhookCertPath, "webhook-cert-path", "", "The directory that contains the webhook certificate.")
+	flag.StringVar(&webhookCertName, "webhook-cert-name", "tls.crt", "The name of the webhook certificate file.")
+	flag.StringVar(&webhookCertKey, "webhook-cert-key", "tls.key", "The name of the webhook key file.")
+	flag.StringVar(&metricsCertPath, "metrics-cert-path", "",
+		"The directory that contains the metrics server certificate.")
+	flag.StringVar(&metricsCertName, "metrics-cert-name", "tls.crt", "The name of the metrics server certificate file.")
+	flag.StringVar(&metricsCertKey, "metrics-cert-key", "tls.key", "The name of the metrics server key file.")
+	flag.BoolVar(&enableHTTP2, "enable-http2", false,
+		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
+	flag.StringVar(&logLevel, "log-level", getenv("LOG_LEVEL", "info"), "Log level (debug|info|warn|error).")
+	flag.StringVar(&logFormat, "log-format", getenv("LOG_FORMAT", "json"), "Log format (json|text).")
+	flag.Parse()
+
+	// Single slog backend, bridged to logr for controller-runtime.
+	_, handler := logging.New(logLevel, logFormat)
+	ctrl.SetLogger(logr.FromSlogHandler(handler))
+
+	setupLog.Info("starting control-plane manager",
+		"version", version.Version(), "commit", version.Commit(), "date", version.Date())
+
+	// if the enable-http2 flag is false (the default), http/2 should be disabled
+	// due to its vulnerabilities. More specifically, disabling http/2 will
+	// prevent from being vulnerable to the HTTP/2 Stream Cancellation and
+	// Rapid Reset CVEs. For more information see:
+	// - https://github.com/advisories/GHSA-qppj-fm5r-hxr3
+	// - https://github.com/advisories/GHSA-4374-p667-p6c8
+	disableHTTP2 := func(c *tls.Config) {
+		setupLog.Info("Disabling HTTP/2")
+		c.NextProtos = []string{"http/1.1"}
+	}
+
+	if !enableHTTP2 {
+		tlsOpts = append(tlsOpts, disableHTTP2)
+	}
+
+	// Initial webhook TLS options
+	webhookTLSOpts := tlsOpts
+	webhookServerOptions := webhook.Options{
+		TLSOpts: webhookTLSOpts,
+	}
+
+	if len(webhookCertPath) > 0 {
+		setupLog.Info("Initializing webhook certificate watcher using provided certificates",
+			"webhook-cert-path", webhookCertPath, "webhook-cert-name", webhookCertName, "webhook-cert-key", webhookCertKey)
+
+		webhookServerOptions.CertDir = webhookCertPath
+		webhookServerOptions.CertName = webhookCertName
+		webhookServerOptions.KeyName = webhookCertKey
+	}
+
+	webhookServer := webhook.NewServer(webhookServerOptions)
+
+	// Metrics endpoint is enabled in 'config/default/kustomization.yaml'. The Metrics options configure the server.
+	// More info:
+	// - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.24.1/pkg/metrics/server
+	// - https://book.kubebuilder.io/reference/metrics.html
+	metricsServerOptions := metricsserver.Options{
+		BindAddress:   metricsAddr,
+		SecureServing: secureMetrics,
+		TLSOpts:       tlsOpts,
+	}
+
+	if secureMetrics {
+		// FilterProvider is used to protect the metrics endpoint with authn/authz.
+		// These configurations ensure that only authorized users and service accounts
+		// can access the metrics endpoint. The RBAC are configured in 'config/rbac/kustomization.yaml'. More info:
+		// https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.24.1/pkg/metrics/filters#WithAuthenticationAndAuthorization
+		metricsServerOptions.FilterProvider = filters.WithAuthenticationAndAuthorization
+	}
+
+	// If the certificate is not specified, controller-runtime will automatically
+	// generate self-signed certificates for the metrics server. While convenient for development and testing,
+	// this setup is not recommended for production.
+	//
+	// TODO(user): If you enable certManager, uncomment the following lines:
+	// - [METRICS-WITH-CERTS] at config/default/kustomization.yaml to generate and use certificates
+	// managed by cert-manager for the metrics server.
+	// - [PROMETHEUS-WITH-CERTS] at config/prometheus/kustomization.yaml for TLS certification.
+	if len(metricsCertPath) > 0 {
+		setupLog.Info("Initializing metrics certificate watcher using provided certificates",
+			"metrics-cert-path", metricsCertPath, "metrics-cert-name", metricsCertName, "metrics-cert-key", metricsCertKey)
+
+		metricsServerOptions.CertDir = metricsCertPath
+		metricsServerOptions.CertName = metricsCertName
+		metricsServerOptions.KeyName = metricsCertKey
+	}
+
+	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+		Scheme:                 scheme,
+		Metrics:                metricsServerOptions,
+		WebhookServer:          webhookServer,
+		HealthProbeBindAddress: probeAddr,
+		LeaderElection:         enableLeaderElection,
+		LeaderElectionID:       "0fbbcfbc.iterabase.com",
+		// LeaderElectionReleaseOnCancel defines if the leader should step down voluntarily
+		// when the Manager ends. This requires the binary to immediately end when the
+		// manager is stopped, otherwise, this setting is unsafe. Setting this significantly
+		// speeds up voluntary leader transitions as the new leader don't have to wait
+		// LeaseDuration time first.
+		//
+		// In the default scaffold provided, the program ends immediately after
+		// the manager stops, so would be fine to enable this option. However,
+		// if you are doing or is intended to do any operation such as perform cleanups
+		// after the manager stops then its usage might be unsafe.
+		// LeaderElectionReleaseOnCancel: true,
+	})
+	if err != nil {
+		setupLog.Error(err, "Failed to start manager")
+		return 1
+	}
+
+	// +kubebuilder:scaffold:builder
+
+	// Connect to Postgres (DATABASE_URL). The manager materializes CRs into the
+	// identity store; the api reads it (HOR-242 Q1/Q8). The manager reads only
+	// DATABASE_URL from the environment; it does not load YAML config.
+	dbCfg, err := config.DatabaseFromEnv()
+	if err != nil {
+		setupLog.Error(err, "DATABASE_URL is required")
+		return 1
+	}
+	connectCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	pool, err := database.Connect(connectCtx, dbCfg)
+	cancel()
+	if err != nil {
+		setupLog.Error(err, "Failed to connect to database")
+		return 1
+	}
+	defer pool.Close()
+
+	store := identity.NewStore(pool)
+
+	if err = (&controller.IdentityMappingReconciler{
+		Client: mgr.GetClient(),
+		Scheme: scheme,
+		Store:  store,
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "Failed to set up IdentityMapping reconciler")
+		return 1
+	}
+
+	if err = (&controller.PermissionPolicyReconciler{
+		Client: mgr.GetClient(),
+		Scheme: scheme,
+		Store:  permissions.NewStore(pool),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "Failed to set up PermissionPolicy reconciler")
+		return 1
+	}
+
+	if err = (&controller.ModelBackendReconciler{
+		Client: mgr.GetClient(),
+		Scheme: scheme,
+		Store:  catalog.NewStore(pool),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "Failed to set up ModelBackend reconciler")
+		return 1
+	}
+
+	if err = (&controller.ModelReconciler{
+		Client: mgr.GetClient(),
+		Scheme: scheme,
+		Store:  catalog.NewStore(pool),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "Failed to set up Model reconciler")
+		return 1
+	}
+
+	if err = (&controller.AgentPoolReconciler{
+		Client:    mgr.GetClient(),
+		Scheme:    scheme,
+		APIReader: mgr.GetAPIReader(),
+		Store:     gateway.NewStore(pool),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "Failed to set up AgentPool reconciler")
+		return 1
+	}
+
+	if err = (&controller.WorkflowReconciler{
+		Client:     mgr.GetClient(),
+		Scheme:     scheme,
+		Store:      workflow.NewStore(pool),
+		Pools:      gateway.NewStore(pool),
+		Identities: identity.NewStore(pool),
+		// manual_api is installed because the existing authenticated work-item
+		// start API is its adapter (ARCH-026). graph_email/operator_artifact stay
+		// unregistered here until HOR-356/HOR-393 land their ingress adapters, so
+		// enum recognition alone never marks an uninstalled source Ready.
+		SourceAdapters: controller.StaticSourceAdapterRegistry{
+			v1alpha1.SourceManualAPI: {},
+		},
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "Failed to set up Workflow reconciler")
+		return 1
+	}
+
+	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
+		setupLog.Error(err, "Failed to set up health check")
+		return 1
+	}
+	readyCheck := func(*http.Request) error {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		return pool.Ping(ctx)
+	}
+	if err := mgr.AddReadyzCheck("readyz", readyCheck); err != nil {
+		setupLog.Error(err, "Failed to set up ready check")
+		return 1
+	}
+
+	setupLog.Info("Starting manager")
+	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
+		setupLog.Error(err, "Failed to run manager")
+		return 1
+	}
+	return 0
+}
+
+// getenv returns the value of the named env var, or fallback if unset/empty.
+func getenv(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}

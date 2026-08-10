@@ -1,0 +1,1438 @@
+package lifecycle
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/nunocgoncalves/forge/internal/config"
+	"github.com/nunocgoncalves/forge/internal/deployer"
+	"github.com/nunocgoncalves/forge/internal/fluxer"
+	"github.com/nunocgoncalves/forge/internal/provisioner"
+)
+
+const (
+	minKubeconfig   = "apiVersion: v1\nclusters:\n- name: default\n  cluster:\n    server: https://127.0.0.1:6443\n"
+	canonicalDigest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+)
+
+func testConfig() *config.Cluster {
+	return &config.Cluster{
+		APIVersion: config.APIVersion,
+		Kind:       config.Kind,
+		Metadata:   config.Metadata{Name: "opo1"},
+		Spec: config.Spec{
+			Mode: config.ModeSingleNode,
+			Hosts: []config.Host{{
+				Address: "10.20.0.10", SSHUser: "forge", SSHKeyPath: "/dev/null",
+				Role: config.RoleControlPlaneWorker,
+			}},
+			K3s: config.K3s{
+				Version:       "v1.31.5",
+				ClusterCIDR:   "10.42.0.0/16",
+				ServiceCIDR:   "10.43.0.0/16",
+				DualStack:     true,
+				ClusterCIDRv6: "fd42::/48",
+				ServiceCIDRv6: "fd43::/112",
+				Disable:       []string{"traefik", "servicelb"},
+			},
+		},
+	}
+}
+
+type installCall struct {
+	version string
+	args    []string
+}
+
+// fakeProv is a controllable provisioner.Provisioner for lifecycle tests.
+type fakeProv struct {
+	pf                provisioner.PreflightResult
+	state             provisioner.HostState
+	ready             bool
+	readyAfterInstall bool
+	kubeconfig        []byte
+	installErr        error
+	installs          []installCall
+	ensureDepsErr     error
+	ensureDepsCalls   int
+	gpuReady          bool
+}
+
+func (f *fakeProv) Preflight(_ context.Context) (*provisioner.PreflightResult, error) {
+	return &f.pf, nil
+}
+func (f *fakeProv) Install(_ context.Context, version string, args []string) error {
+	f.installs = append(f.installs, installCall{version, args})
+	if f.installErr != nil {
+		return f.installErr
+	}
+	f.state.Installed = true
+	if f.readyAfterInstall {
+		f.ready = true
+	}
+	return nil
+}
+func (f *fakeProv) Upgrade(ctx context.Context, v string, a []string) error {
+	return f.Install(ctx, v, a)
+}
+func (f *fakeProv) Uninstall(_ context.Context) error {
+	f.state.Installed = false
+	return nil
+}
+func (f *fakeProv) FetchKubeconfig(_ context.Context) ([]byte, error) { return f.kubeconfig, nil }
+func (f *fakeProv) ReadState(_ context.Context) (*provisioner.HostState, error) {
+	s := f.state
+	return &s, nil
+}
+func (f *fakeProv) NodeReady(_ context.Context) (bool, error) { return f.ready, nil }
+func (f *fakeProv) EnsureDriverBuildDeps(_ context.Context) error {
+	f.ensureDepsCalls++
+	return f.ensureDepsErr
+}
+func (f *fakeProv) GPUReady(_ context.Context) (bool, error) { return f.gpuReady, nil }
+
+func readyPf() provisioner.PreflightResult {
+	return provisioner.PreflightResult{HasSudo: true, HasCurl: true, HasSystemd: true, HasIPv6: true}
+}
+
+func inSyncState() provisioner.HostState {
+	return provisioner.HostState{
+		Installed:   true,
+		Version:     "v1.31.5+k3s1",
+		ClusterCIDR: "10.42.0.0/16,fd42::/48",
+		ServiceCIDR: "10.43.0.0/16,fd43::/112",
+		DualStack:   true,
+	}
+}
+
+func useTempHome(t *testing.T) {
+	t.Helper()
+	t.Setenv("FORGE_HOME", t.TempDir())
+}
+
+func TestPlan_Install(t *testing.T) {
+	p := &fakeProv{pf: readyPf()} // not installed
+	plan, err := Plan(context.Background(), testConfig(), p)
+	require.NoError(t, err)
+	assert.Equal(t, ActionInstall, plan.Action)
+	assert.False(t, plan.Preflight.Installed)
+}
+
+func TestPlan_Skip(t *testing.T) {
+	p := &fakeProv{pf: readyPf(), state: inSyncState()}
+	p.pf.Installed = true
+	plan, err := Plan(context.Background(), testConfig(), p)
+	require.NoError(t, err)
+	assert.Equal(t, ActionSkip, plan.Action)
+	assert.Equal(t, "v1.31.5+k3s1", plan.HaveVersion)
+}
+
+func TestPlan_RefuseImmutable(t *testing.T) {
+	st := inSyncState()
+	st.ClusterCIDR = "10.99.0.0/16,fd42::/48"
+	p := &fakeProv{pf: readyPf(), state: st}
+	p.pf.Installed = true
+	plan, err := Plan(context.Background(), testConfig(), p)
+	require.NoError(t, err)
+	assert.Equal(t, ActionRefuseImmutable, plan.Action)
+	assert.Contains(t, plan.ImmutableDiff, "k3s.clusterCIDR")
+}
+
+func TestPlan_RefuseUpgrade(t *testing.T) {
+	st := inSyncState()
+	st.Version = "v1.30.0+k3s1"
+	p := &fakeProv{pf: readyPf(), state: st}
+	p.pf.Installed = true
+	plan, err := Plan(context.Background(), testConfig(), p)
+	require.NoError(t, err)
+	assert.Equal(t, ActionRefuseUpgrade, plan.Action)
+}
+
+func TestPlan_PreflightNoSudo(t *testing.T) {
+	pf := readyPf()
+	pf.HasSudo = false
+	p := &fakeProv{pf: pf}
+	_, err := Plan(context.Background(), testConfig(), p)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "sudo")
+}
+
+func TestPlan_PreflightNoIPv6DualStack(t *testing.T) {
+	pf := readyPf()
+	pf.HasIPv6 = false
+	p := &fakeProv{pf: pf}
+	_, err := Plan(context.Background(), testConfig(), p)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "IPv6")
+}
+
+func TestApply_Install(t *testing.T) {
+	useTempHome(t)
+	p := &fakeProv{
+		pf:                readyPf(),
+		kubeconfig:        []byte(minKubeconfig),
+		readyAfterInstall: true,
+	}
+	res, err := Apply(context.Background(), testConfig(), p, nil, nil, nil, ApplyOpts{
+		ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	require.Len(t, p.installs, 1)
+	assert.Equal(t, "v1.31.5", p.installs[0].version)
+	assert.Contains(t, p.installs[0].args, "server")
+	assert.True(t, res.NodeReady)
+
+	// kubeconfig written to artifacts with rewritten server
+	kc, err := os.ReadFile(filepath.Join(os.Getenv("FORGE_HOME"), "opo1", "kubeconfig.yaml"))
+	require.NoError(t, err)
+	assert.Contains(t, string(kc), "https://10.20.0.10:6443")
+}
+
+func TestApply_DryRun(t *testing.T) {
+	useTempHome(t)
+	p := &fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig)}
+	res, err := Apply(context.Background(), testConfig(), p, nil, nil, nil, ApplyOpts{DryRun: true})
+	require.NoError(t, err)
+	assert.Equal(t, ActionInstall, res.Plan.Action)
+	assert.Empty(t, p.installs) // no install
+	_, err = os.Stat(filepath.Join(os.Getenv("FORGE_HOME"), "opo1"))
+	assert.True(t, os.IsNotExist(err)) // no artifacts written
+}
+
+func TestApply_RefuseImmutable(t *testing.T) {
+	useTempHome(t)
+	st := inSyncState()
+	st.ClusterCIDR = "10.99.0.0/16,fd42::/48"
+	p := &fakeProv{pf: readyPf(), state: st, kubeconfig: []byte(minKubeconfig)}
+	p.pf.Installed = true
+	_, err := Apply(context.Background(), testConfig(), p, nil, nil, nil, ApplyOpts{})
+	require.Error(t, err)
+	assert.Empty(t, p.installs)
+	assert.Contains(t, err.Error(), "immutable")
+}
+
+func TestApply_NodeNotReady(t *testing.T) {
+	useTempHome(t)
+	p := &fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig), ready: false}
+	_, err := Apply(context.Background(), testConfig(), p, nil, nil, nil, ApplyOpts{
+		ReadyTimeout: 100 * time.Millisecond, ReadyInterval: 20 * time.Millisecond,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not ready")
+}
+
+func TestApply_KubeconfigOut(t *testing.T) {
+	useTempHome(t)
+	out := filepath.Join(t.TempDir(), "kc.yaml")
+	p := &fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig), readyAfterInstall: true}
+	res, err := Apply(context.Background(), testConfig(), p, nil, nil, nil, ApplyOpts{
+		KubeconfigOut: out, ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, out, res.KubeconfigPath)
+	kc, err := os.ReadFile(out)
+	require.NoError(t, err)
+	assert.Contains(t, string(kc), "https://10.20.0.10:6443")
+}
+
+func TestUpgrade(t *testing.T) {
+	useTempHome(t)
+	p := &fakeProv{pf: readyPf(), state: inSyncState(), kubeconfig: []byte(minKubeconfig), ready: true}
+	p.pf.Installed = true
+	res, err := Upgrade(context.Background(), testConfig(), p, "v1.32.0+k3s1", ApplyOpts{
+		ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	require.Len(t, p.installs, 1) // Upgrade delegates to Install
+	assert.Equal(t, "v1.32.0+k3s1", p.installs[0].version)
+	assert.True(t, res.NodeReady)
+}
+
+func TestUpgrade_NotInstalled(t *testing.T) {
+	useTempHome(t)
+	p := &fakeProv{pf: readyPf()} // not installed
+	_, err := Upgrade(context.Background(), testConfig(), p, "v1.32.0", ApplyOpts{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not installed")
+}
+
+type applyCall struct {
+	release, repository, version, namespace string
+	values, valueFiles                      []string
+	noWait                                  bool
+}
+type repoCall struct{ name, url string }
+type uninstallCall struct{ release, namespace string }
+type ownershipTransferCall struct{ selector, release, namespace string }
+type restartCall struct{ selector, namespace string }
+
+// fakeDeployer is a controllable deployer.Deployer for lifecycle chart tests.
+type fakeDeployer struct {
+	applyCalls               []applyCall
+	repoCalls                []repoCall
+	uninstallCalls           []uninstallCall
+	applyKustomizeCalls      []string
+	deleteKustomizeCalls     []string
+	applyManifestCalls       []string // captured manifests (JSON) piped via stdin
+	ownershipTransfers       []ownershipTransferCall
+	hookOwnershipTransfers   []ownershipTransferCall
+	restarts                 []restartCall
+	order                    []string // ordered op log for phase-ordering assertions
+	statusStates             map[string]deployer.ChartState
+	crdsOwnedByTarget        bool
+	crdsMigrationComplete    bool
+	applyErr                 error
+	applyManifestErr         error
+	ownershipTransferErr     error
+	hookOwnershipTransferErr error
+}
+
+func (f *fakeDeployer) Apply(_ context.Context, opts deployer.ApplyOpts) error {
+	f.applyCalls = append(f.applyCalls, applyCall{
+		release: opts.Release, repository: opts.Repository,
+		version: opts.Version, namespace: opts.Namespace,
+		values: opts.Values, valueFiles: opts.ValueFiles, noWait: opts.NoWait,
+	})
+	f.order = append(f.order, "apply")
+	if f.applyErr != nil {
+		return f.applyErr
+	}
+	if f.statusStates == nil {
+		f.statusStates = make(map[string]deployer.ChartState)
+	}
+	f.statusStates[opts.Release] = deployer.ChartState{Installed: true, Status: "deployed", Version: opts.Version}
+	return nil
+}
+
+func (f *fakeDeployer) ApplyKustomize(_ context.Context, dir string) error {
+	f.applyKustomizeCalls = append(f.applyKustomizeCalls, dir)
+	f.order = append(f.order, "kustomize")
+	return nil
+}
+
+func (f *fakeDeployer) DeleteKustomize(_ context.Context, dir string) error {
+	f.deleteKustomizeCalls = append(f.deleteKustomizeCalls, dir)
+	return nil
+}
+func (f *fakeDeployer) ApplyManifest(_ context.Context, manifest string) error {
+	f.applyManifestCalls = append(f.applyManifestCalls, manifest)
+	f.order = append(f.order, "manifest")
+	return f.applyManifestErr
+}
+func (f *fakeDeployer) EnsureRepo(_ context.Context, name, url string) error {
+	f.repoCalls = append(f.repoCalls, repoCall{name, url})
+	return nil
+}
+func (f *fakeDeployer) Status(_ context.Context, release, _ string) (*deployer.ChartState, error) {
+	s := f.statusStates[release]
+	return &s, nil
+}
+func (f *fakeDeployer) CRDOwnedBy(_ context.Context, _, _, _ string) (bool, error) {
+	return f.crdsOwnedByTarget, nil
+}
+func (f *fakeDeployer) CRDsAnnotated(_ context.Context, _, _, _ string) (bool, error) {
+	return f.crdsMigrationComplete, nil
+}
+func (f *fakeDeployer) AnnotateCRDs(_ context.Context, _, _, _ string) error {
+	f.crdsMigrationComplete = true
+	f.order = append(f.order, "annotate-crds")
+	return nil
+}
+func (f *fakeDeployer) TransferCertificateHookOwnership(_ context.Context, selector, release, namespace string) error {
+	f.hookOwnershipTransfers = append(f.hookOwnershipTransfers, ownershipTransferCall{selector, release, namespace})
+	f.order = append(f.order, "hook-transfer")
+	return f.hookOwnershipTransferErr
+}
+func (f *fakeDeployer) TransferCRDOwnership(_ context.Context, selector, release, namespace string) error {
+	f.ownershipTransfers = append(f.ownershipTransfers, ownershipTransferCall{selector, release, namespace})
+	f.order = append(f.order, "crd-transfer")
+	if f.ownershipTransferErr != nil {
+		return f.ownershipTransferErr
+	}
+	f.crdsOwnedByTarget = true
+	return nil
+}
+func (f *fakeDeployer) RestartDeployment(_ context.Context, selector, namespace string) error {
+	f.restarts = append(f.restarts, restartCall{selector, namespace})
+	f.order = append(f.order, "restart")
+	return nil
+}
+func (f *fakeDeployer) UninstallChart(_ context.Context, release, ns string) error {
+	f.uninstallCalls = append(f.uninstallCalls, uninstallCall{release, ns})
+	return nil
+}
+
+// fakeOverlayer is a controllable overlayer.Overlayer for lifecycle overlay tests.
+type fakeOverlayer struct {
+	ensureGitErr    error
+	cloneCommit     string
+	cloneErr        error
+	cloneCalls      []cloneCall
+	removeCalls     []string
+	readFileContent string
+	readFileErr     error
+	readFileCalls   []readFileCall
+}
+
+type cloneCall struct {
+	repo, ref, dest string
+	hasToken        bool
+}
+
+type readFileCall struct{ dest, relPath string }
+
+func (f *fakeOverlayer) EnsureGit(_ context.Context) error { return f.ensureGitErr }
+func (f *fakeOverlayer) Clone(_ context.Context, repo, ref, dest string, token []byte) (string, error) {
+	f.cloneCalls = append(f.cloneCalls, cloneCall{repo, ref, dest, len(token) > 0})
+	if f.cloneErr != nil {
+		return "", f.cloneErr
+	}
+	return f.cloneCommit, nil
+}
+func (f *fakeOverlayer) Remove(_ context.Context, dest string) error {
+	f.removeCalls = append(f.removeCalls, dest)
+	return nil
+}
+func (f *fakeOverlayer) ReadFile(_ context.Context, dest, relPath string) (string, error) {
+	f.readFileCalls = append(f.readFileCalls, readFileCall{dest, relPath})
+	if f.readFileErr != nil {
+		return "", f.readFileErr
+	}
+	return f.readFileContent, nil
+}
+
+func testConfigWithChart() *config.Cluster {
+	c := testConfig()
+	c.Spec.Chart = config.Chart{
+		Version:    "0.3.0",
+		Repository: "oci://ghcr.io/nunocgoncalves/iterabase-platform",
+		Release:    "opo1",
+		Namespace:  "iterabase-system",
+	}
+	return c
+}
+
+func TestCertificateSubstrateRepository(t *testing.T) {
+	required, err := certificateSubstrateRequired("0.2.2")
+	require.NoError(t, err)
+	assert.False(t, required)
+	required, err = certificateSubstrateRequired("v0.3.0-rc.1")
+	require.NoError(t, err)
+	assert.False(t, required, "SemVer prereleases sort before the 0.3.0 boundary")
+	required, err = certificateSubstrateRequired("0.3.0+build.1")
+	require.NoError(t, err)
+	assert.True(t, required, "build metadata does not change SemVer precedence")
+	_, err = certificateSubstrateRequired("0.3.0-invalid..prerelease")
+	require.ErrorContains(t, err, "invalid chart version")
+
+	repository, err := certificateSubstrateRepository("oci://ghcr.io/nunocgoncalves/iterabase-charts/iterabase-platform")
+	require.NoError(t, err)
+	assert.Equal(t, "oci://ghcr.io/nunocgoncalves/iterabase-charts/cert-manager-substrate", repository)
+
+	_, err = certificateSubstrateRepository("oci://example.invalid/custom-platform")
+	require.ErrorContains(t, err, "must end in /iterabase-platform")
+}
+
+func TestApply_Chart(t *testing.T) {
+	useTempHome(t)
+	p := &fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig), readyAfterInstall: true}
+	d := &fakeDeployer{}
+	res, err := Apply(context.Background(), testConfigWithChart(), p, d, nil, &fakeFluxer{}, ApplyOpts{
+		ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	assert.True(t, res.CertificateSubstrateApplied)
+	assert.True(t, res.ChartApplied)
+	require.Len(t, d.applyCalls, 2)
+	substrate, platform := d.applyCalls[0], d.applyCalls[1]
+	assert.Equal(t, "0.3.0", substrate.version)
+	assert.Equal(t, "opo1-cert-manager", substrate.release)
+	assert.Equal(t, "oci://ghcr.io/nunocgoncalves/cert-manager-substrate", substrate.repository)
+	assert.Equal(t, []string{"cert-manager.prometheus.servicemonitor.enabled=false"}, substrate.values)
+	assert.Equal(t, "0.3.0", platform.version)
+	assert.Equal(t, "opo1", platform.release)
+	assert.Equal(t, "iterabase-system", platform.namespace)
+}
+
+func TestApply_Chart_MigratesPreSubstrateOwnershipBeforeCompanion(t *testing.T) {
+	useTempHome(t)
+	p := &fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig), readyAfterInstall: true}
+	d := &fakeDeployer{statusStates: map[string]deployer.ChartState{
+		"opo1": {Installed: true, Status: "deployed", Version: "0.2.2"},
+	}}
+	res, err := Apply(context.Background(), testConfigWithChart(), p, d, nil, &fakeFluxer{}, ApplyOpts{
+		ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	assert.True(t, res.CertificateSubstrateApplied)
+	assert.True(t, res.ChartApplied)
+	require.Len(t, d.applyCalls, 4)
+	assert.Equal(t, "opo1", d.applyCalls[0].release, "old platform owner upgrades before companion install")
+	assert.Equal(t, []string{"control-plane.toolRunner.enabled=false"}, d.applyCalls[0].values)
+	assert.Equal(t, "opo1-cert-manager", d.applyCalls[1].release)
+	assert.Equal(t, "opo1", d.applyCalls[2].release, "final gateway config publishes without waiting on its runner")
+	assert.True(t, d.applyCalls[2].noWait)
+	assert.Equal(t, "opo1", d.applyCalls[3].release, "normal waited values reconcile after the gateway restarts")
+	assert.Empty(t, d.applyCalls[3].values)
+	require.Equal(t, []ownershipTransferCall{{
+		selector: certificateHookLabelSelector("opo1"), release: "opo1", namespace: "iterabase-system",
+	}}, d.hookOwnershipTransfers)
+	require.Equal(t, []ownershipTransferCall{{
+		selector: certificateCRDLabelSelector, release: "opo1-cert-manager", namespace: "iterabase-system",
+	}}, d.ownershipTransfers)
+	require.Equal(t, []restartCall{{
+		selector:  "app.kubernetes.io/name=control-plane,app.kubernetes.io/instance=opo1,app.kubernetes.io/component=gateway",
+		namespace: "iterabase-system",
+	}}, d.restarts)
+	assert.True(t, d.crdsMigrationComplete)
+	assert.Equal(t, []string{"hook-transfer", "apply", "crd-transfer", "apply", "apply", "restart", "apply", "annotate-crds"}, d.order)
+}
+
+func TestApply_Chart_ResumesAfterCRDOwnershipBeforeGatewayRestart(t *testing.T) {
+	useTempHome(t)
+	p := &fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig), readyAfterInstall: true}
+	d := &fakeDeployer{
+		statusStates: map[string]deployer.ChartState{
+			"opo1": {Installed: true, Status: "deployed", Version: "0.3.0"},
+		},
+		crdsOwnedByTarget: true,
+	}
+	res, err := Apply(context.Background(), testConfigWithChart(), p, d, nil, &fakeFluxer{}, ApplyOpts{
+		ReadyTimeout: time.Second, ReadyInterval: 10 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	assert.True(t, res.CertificateSubstrateApplied)
+	assert.True(t, d.crdsMigrationComplete)
+	require.Len(t, d.restarts, 1, "missing completion checkpoint must replay the staged gateway rollout")
+	require.Len(t, d.applyCalls, 4)
+	assert.Equal(t, []string{"control-plane.toolRunner.enabled=false"}, d.applyCalls[0].values)
+	assert.True(t, d.applyCalls[2].noWait)
+}
+
+func TestApply_Chart_ResumesOwnershipTransferAfterFailure(t *testing.T) {
+	useTempHome(t)
+	pf := readyPf()
+	pf.Installed = true
+	p := &fakeProv{
+		pf: pf, state: inSyncState(), kubeconfig: []byte(minKubeconfig), ready: true,
+	}
+	d := &fakeDeployer{
+		statusStates: map[string]deployer.ChartState{
+			"opo1": {Installed: true, Status: "deployed", Version: "0.2.2"},
+		},
+		ownershipTransferErr: errors.New("annotation interrupted"),
+	}
+	opts := ApplyOpts{ReadyTimeout: time.Second, ReadyInterval: 10 * time.Millisecond}
+
+	_, err := Apply(context.Background(), testConfigWithChart(), p, d, nil, &fakeFluxer{}, opts)
+	require.ErrorContains(t, err, "certificate substrate ownership migration")
+	require.Len(t, d.applyCalls, 1)
+	assert.Equal(t, "0.3.0", d.statusStates["opo1"].Version, "successful platform upgrade is live state on retry")
+	assert.False(t, d.crdsOwnedByTarget)
+
+	d.ownershipTransferErr = nil
+	res, err := Apply(context.Background(), testConfigWithChart(), p, d, nil, &fakeFluxer{}, opts)
+	require.NoError(t, err)
+	assert.True(t, res.CertificateSubstrateApplied)
+	assert.True(t, res.ChartApplied)
+	require.Len(t, d.ownershipTransfers, 2, "retry resumes the incomplete ownership hand-off")
+	assert.True(t, d.crdsOwnedByTarget)
+	require.Len(t, d.applyCalls, 5)
+	assert.Equal(t, []string{"control-plane.toolRunner.enabled=false"}, d.applyCalls[1].values)
+	assert.Equal(t, "opo1-cert-manager", d.applyCalls[2].release)
+	assert.True(t, d.applyCalls[3].noWait)
+	assert.Equal(t, "opo1", d.applyCalls[4].release)
+}
+
+func TestApply_Chart_RequiresFluxArtifactBeforeSubstrate(t *testing.T) {
+	useTempHome(t)
+	d := &fakeDeployer{}
+	_, err := Apply(context.Background(), testConfigWithChart(),
+		&fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig), readyAfterInstall: true},
+		d, nil, &fakeFluxer{artifactNotReady: true}, ApplyOpts{
+			ReadyTimeout: time.Second, ReadyInterval: 10 * time.Millisecond,
+		})
+	require.ErrorContains(t, err, "requires an exact Ready Flux artifact before Helm")
+	assert.Empty(t, d.applyCalls, "unsupported fresh installs fail before certificate substrate or platform mutation")
+}
+
+func TestApply_Chart_PreSubstrateVersionRemainsCompatible(t *testing.T) {
+	useTempHome(t)
+	cfg := testConfigWithChart()
+	cfg.Spec.Chart.Version = "0.2.2"
+	d := &fakeDeployer{}
+	res, err := Apply(context.Background(), cfg,
+		&fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig), readyAfterInstall: true},
+		d, nil, nil, ApplyOpts{ReadyTimeout: time.Second, ReadyInterval: 10 * time.Millisecond})
+	require.NoError(t, err)
+	assert.False(t, res.CertificateSubstrateApplied)
+	require.Len(t, d.applyCalls, 1)
+	assert.Equal(t, "opo1", d.applyCalls[0].release)
+}
+
+func TestApply_SkipChart(t *testing.T) {
+	useTempHome(t)
+	p := &fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig), readyAfterInstall: true}
+	d := &fakeDeployer{}
+	_, err := Apply(context.Background(), testConfigWithChart(), p, d, nil, &fakeFluxer{}, ApplyOpts{
+		SkipChart: true, ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	assert.Empty(t, d.applyCalls)
+}
+
+func TestDestroy_Chart(t *testing.T) {
+	p := &fakeProv{pf: readyPf(), state: inSyncState()}
+	p.pf.Installed = true
+	d := &fakeDeployer{}
+	require.NoError(t, Destroy(context.Background(), testConfigWithChart(), p, d, nil, nil))
+	require.Len(t, d.uninstallCalls, 2)
+	assert.Equal(t, "opo1", d.uninstallCalls[0].release)
+	assert.Equal(t, "opo1-cert-manager", d.uninstallCalls[1].release)
+	assert.False(t, p.state.Installed) // k3s uninstalled too
+}
+
+func TestDestroy_NoChart(t *testing.T) {
+	p := &fakeProv{pf: readyPf(), state: inSyncState()}
+	p.pf.Installed = true
+	d := &fakeDeployer{}
+	require.NoError(t, Destroy(context.Background(), testConfig(), p, d, nil, nil))
+	assert.Empty(t, d.uninstallCalls) // no chart configured
+	assert.False(t, p.state.Installed)
+}
+
+func testConfigWithGPU() *config.Cluster {
+	c := testConfigWithChart()
+	c.Spec.GPU = config.GPU{Enabled: true}
+	c.Spec.GPU.Operator = config.GPUOperator{
+		Version:    "v26.3.3",
+		Repository: "https://helm.ngc.nvidia.com/nvidia",
+		Chart:      "gpu-operator",
+		Release:    "opo1-gpu-operator",
+		Namespace:  "gpu-operator",
+	}
+	return c
+}
+
+func gpuReadyPf() provisioner.PreflightResult {
+	pf := readyPf()
+	pf.OS = "Ubuntu 24.04 LTS"
+	pf.HasNVIDIAGPU = true
+	pf.KernelHeadersInstalled = true
+	return pf
+}
+
+func TestPlan_GPUEnabled(t *testing.T) {
+	p := &fakeProv{pf: gpuReadyPf()} // not installed
+	plan, err := Plan(context.Background(), testConfigWithGPU(), p)
+	require.NoError(t, err)
+	assert.True(t, plan.GPUEnabled)
+	assert.Equal(t, "v26.3.3", plan.GPUOperatorVersion)
+	assert.Equal(t, ActionInstall, plan.Action)
+}
+
+func TestPlan_GPUEnabledNoGPU(t *testing.T) {
+	pf := gpuReadyPf()
+	pf.HasNVIDIAGPU = false
+	p := &fakeProv{pf: pf}
+	_, err := Plan(context.Background(), testConfigWithGPU(), p)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no NVIDIA GPU")
+}
+
+func TestPlan_GPUEnabledNonUbuntu(t *testing.T) {
+	pf := gpuReadyPf()
+	pf.OS = "Debian GNU/Linux 12 (bookworm)"
+	p := &fakeProv{pf: pf}
+	_, err := Plan(context.Background(), testConfigWithGPU(), p)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "Ubuntu")
+}
+
+func TestApply_GPU(t *testing.T) {
+	useTempHome(t)
+	p := &fakeProv{
+		pf:                gpuReadyPf(),
+		kubeconfig:        []byte(minKubeconfig),
+		readyAfterInstall: true,
+		gpuReady:          true,
+	}
+	d := &fakeDeployer{}
+	res, err := Apply(context.Background(), testConfigWithGPU(), p, d, nil, &fakeFluxer{}, ApplyOpts{
+		ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
+		GPUReadyTimeout: 1 * time.Second, GPUReadyInterval: 10 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	// GPU operator and certificate substrate are applied before the platform.
+	require.Len(t, d.applyCalls, 3)
+	op, chart := d.applyCalls[0], d.applyCalls[2]
+	assert.Equal(t, "opo1-gpu-operator", op.release)
+	assert.Equal(t, "nvidia/gpu-operator", op.repository)
+	assert.Equal(t, "v26.3.3", op.version)
+	assert.Equal(t, "gpu-operator", op.namespace)
+	assert.Equal(t, []string{
+		"cdi.enabled=true",
+		"driver.enabled=true",
+		"toolkit.enabled=true",
+		"devicePlugin.enabled=true",
+		"gfd.enabled=true",
+		"toolkit.env[0].name=CONTAINERD_CONFIG",
+		"toolkit.env[0].value=/var/lib/rancher/k3s/agent/etc/containerd/config.toml",
+		"toolkit.env[1].name=CONTAINERD_SOCKET",
+		"toolkit.env[1].value=/run/k3s/containerd/containerd.sock",
+		"toolkit.env[2].name=CONTAINERD_RUNTIME_CLASS",
+		"toolkit.env[2].value=nvidia",
+		"driver.upgradePolicy.gpuPodDeletion.deleteEmptyDir=true",
+		"driver.upgradePolicy.drain.enable=false",
+	}, op.values)
+	assert.Equal(t, "opo1", chart.release)
+	assert.Equal(t, "0.3.0", chart.version)
+	assert.Equal(t, 1, p.ensureDepsCalls) // build deps ensured once
+	require.Len(t, d.repoCalls, 1)
+	assert.Equal(t, "nvidia", d.repoCalls[0].name)
+	assert.Equal(t, "https://helm.ngc.nvidia.com/nvidia", d.repoCalls[0].url)
+	assert.True(t, res.GPUOperatorApplied)
+	assert.True(t, res.GPUReady)
+	assert.True(t, res.ChartApplied)
+}
+
+func TestApply_GPU_EmptyDriverOmitsSet(t *testing.T) {
+	// Empty driver version => no driver.version Helm --set emitted (chart default).
+	// Mirrors the existing TestApply_GPU values assertion but asserts the plan/result
+	// fields are empty too.
+	p := &fakeProv{pf: gpuReadyPf()}
+	plan, err := Plan(context.Background(), testConfigWithGPU(), p)
+	require.NoError(t, err)
+	assert.Empty(t, plan.GPUDriverVersion)
+
+	useTempHome(t)
+	p = &fakeProv{
+		pf:                gpuReadyPf(),
+		kubeconfig:        []byte(minKubeconfig),
+		readyAfterInstall: true,
+		gpuReady:          true,
+	}
+	d := &fakeDeployer{}
+	res, err := Apply(context.Background(), testConfigWithGPU(), p, d, nil, &fakeFluxer{}, ApplyOpts{
+		ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
+		GPUReadyTimeout: 1 * time.Second, GPUReadyInterval: 10 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	require.Len(t, d.applyCalls, 3)
+	op := d.applyCalls[0]
+	for _, v := range op.values {
+		assert.NotContains(t, v, "driver.version")
+	}
+	assert.Empty(t, res.GPUDriverVersion)
+}
+
+func TestApply_GPU_PinnedDriverEmitsSet(t *testing.T) {
+	cfg := testConfigWithGPU()
+	cfg.Spec.GPU.Driver = config.GPUDriver{Version: "570.186"}
+
+	p := &fakeProv{pf: gpuReadyPf()}
+	plan, err := Plan(context.Background(), cfg, p)
+	require.NoError(t, err)
+	assert.Equal(t, "570.186", plan.GPUDriverVersion)
+
+	useTempHome(t)
+	p = &fakeProv{
+		pf:                gpuReadyPf(),
+		kubeconfig:        []byte(minKubeconfig),
+		readyAfterInstall: true,
+		gpuReady:          true,
+	}
+	d := &fakeDeployer{}
+	res, err := Apply(context.Background(), cfg, p, d, nil, &fakeFluxer{}, ApplyOpts{
+		ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
+		GPUReadyTimeout: 1 * time.Second, GPUReadyInterval: 10 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	require.Len(t, d.applyCalls, 3)
+	op := d.applyCalls[0]
+	assert.Contains(t, op.values, "driver.version=570.186")
+	// ordering / other values unchanged — driver.version appended after the base set.
+	assert.Equal(t, []string{
+		"cdi.enabled=true",
+		"driver.enabled=true",
+		"toolkit.enabled=true",
+		"devicePlugin.enabled=true",
+		"gfd.enabled=true",
+		"toolkit.env[0].name=CONTAINERD_CONFIG",
+		"toolkit.env[0].value=/var/lib/rancher/k3s/agent/etc/containerd/config.toml",
+		"toolkit.env[1].name=CONTAINERD_SOCKET",
+		"toolkit.env[1].value=/run/k3s/containerd/containerd.sock",
+		"toolkit.env[2].name=CONTAINERD_RUNTIME_CLASS",
+		"toolkit.env[2].value=nvidia",
+		"driver.upgradePolicy.gpuPodDeletion.deleteEmptyDir=true",
+		"driver.upgradePolicy.drain.enable=false",
+		"driver.version=570.186",
+	}, op.values)
+	assert.Equal(t, "570.186", res.GPUDriverVersion)
+}
+
+// TestApply_GPU_DriverUpgradePolicy pins the HOR-411 driver-upgrade values that
+// keep a single-node inference cluster schedulable across a driver bump:
+// emptyDir deletion is allowed so the upgrade can pass pod-deletion-required,
+// and full-node drain stays disabled so the control plane is not evicted.
+func TestApply_GPU_DriverUpgradePolicy(t *testing.T) {
+	useTempHome(t)
+	p := &fakeProv{
+		pf:                gpuReadyPf(),
+		kubeconfig:        []byte(minKubeconfig),
+		readyAfterInstall: true,
+		gpuReady:          true,
+	}
+	d := &fakeDeployer{}
+	_, err := Apply(context.Background(), testConfigWithGPU(), p, d, nil, &fakeFluxer{}, ApplyOpts{
+		ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
+		GPUReadyTimeout: 1 * time.Second, GPUReadyInterval: 10 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	require.Len(t, d.applyCalls, 3)
+	op := d.applyCalls[0]
+	assert.Contains(t, op.values,
+		"driver.upgradePolicy.gpuPodDeletion.deleteEmptyDir=true")
+	assert.Contains(t, op.values,
+		"driver.upgradePolicy.drain.enable=false")
+	// Full-node drain must never be enabled by forge.
+	for _, v := range op.values {
+		assert.NotContains(t, v, "drain.enable=true")
+	}
+}
+
+func TestApply_SkipGPU(t *testing.T) {
+	useTempHome(t)
+	p := &fakeProv{
+		pf:                gpuReadyPf(),
+		kubeconfig:        []byte(minKubeconfig),
+		readyAfterInstall: true,
+		gpuReady:          true,
+	}
+	d := &fakeDeployer{}
+	res, err := Apply(context.Background(), testConfigWithGPU(), p, d, nil, &fakeFluxer{}, ApplyOpts{
+		SkipGPU: true, ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	assert.Empty(t, d.repoCalls)          // no GPU operator repo
+	assert.Equal(t, 0, p.ensureDepsCalls) // no build deps
+	require.Len(t, d.applyCalls, 2)       // certificate substrate + platform
+	assert.Equal(t, "opo1", d.applyCalls[1].release)
+	// Skipped phase does not claim the operator ran.
+	assert.False(t, res.GPUOperatorApplied)
+	assert.False(t, res.GPUReady)
+	// No pin configured => result stays empty (apply report shows chart default).
+	assert.Empty(t, res.GPUDriverVersion)
+}
+
+func TestApply_SkipGPU_SurfacesConfiguredPin(t *testing.T) {
+	// HOR-401: with --skip-gpu and a configured pin, the apply report must
+	// surface the configured driver version rather than claiming chart-default
+	// semantics — the pin is what the config requests even though no GPU
+	// reconciliation ran.
+	useTempHome(t)
+	cfg := testConfigWithGPU()
+	cfg.Spec.GPU.Driver = config.GPUDriver{Version: "570.186"}
+	p := &fakeProv{
+		pf:                gpuReadyPf(),
+		kubeconfig:        []byte(minKubeconfig),
+		readyAfterInstall: true,
+		gpuReady:          true,
+	}
+	d := &fakeDeployer{}
+	res, err := Apply(context.Background(), cfg, p, d, nil, &fakeFluxer{}, ApplyOpts{
+		SkipGPU: true, ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	require.Len(t, d.applyCalls, 2) // certificate substrate + platform; GPU skipped
+	assert.False(t, res.GPUOperatorApplied)
+	assert.Equal(t, "570.186", res.GPUDriverVersion)
+}
+
+func TestApply_GPU_NotReady(t *testing.T) {
+	useTempHome(t)
+	p := &fakeProv{
+		pf:                gpuReadyPf(),
+		kubeconfig:        []byte(minKubeconfig),
+		readyAfterInstall: true,
+		gpuReady:          false, // ClusterPolicy never reaches ready
+	}
+	d := &fakeDeployer{}
+	_, err := Apply(context.Background(), testConfigWithGPU(), p, d, nil, nil, ApplyOpts{
+		ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
+		GPUReadyTimeout: 100 * time.Millisecond, GPUReadyInterval: 20 * time.Millisecond,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "gpu not ready")
+}
+
+func TestDestroy_GPU(t *testing.T) {
+	p := &fakeProv{pf: gpuReadyPf(), state: inSyncState()}
+	p.pf.Installed = true
+	d := &fakeDeployer{}
+	require.NoError(t, Destroy(context.Background(), testConfigWithGPU(), p, d, nil, nil))
+	require.Len(t, d.uninstallCalls, 3)
+	assert.Equal(t, "opo1", d.uninstallCalls[0].release)
+	assert.Equal(t, "opo1-cert-manager", d.uninstallCalls[1].release)
+	assert.Equal(t, "opo1-gpu-operator", d.uninstallCalls[2].release)
+	assert.False(t, p.state.Installed)
+}
+
+func TestApply_Overlay(t *testing.T) {
+	useTempHome(t)
+	p := &fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig), readyAfterInstall: true}
+	d := &fakeDeployer{}
+	o := &fakeOverlayer{cloneCommit: "deadbeef"}
+	cfg := testConfigWithChart()
+	cfg.Spec.Overlay = config.Overlay{Repo: "https://github.com/example/iterabase-overlay.git", Ref: "master"}
+
+	res, err := Apply(context.Background(), cfg, p, d, o, &fakeFluxer{}, ApplyOpts{
+		ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	assert.True(t, res.OverlayApplied)
+	assert.Equal(t, "deadbeef", res.OverlayCommit)
+
+	// overlay cloned with the configured repo/ref + dest; no token (public).
+	require.Len(t, o.cloneCalls, 1)
+	assert.Equal(t, "https://github.com/example/iterabase-overlay.git", o.cloneCalls[0].repo)
+	assert.Equal(t, "master", o.cloneCalls[0].ref)
+	assert.Equal(t, "/var/lib/forge/overlay/opo1", o.cloneCalls[0].dest)
+	assert.False(t, o.cloneCalls[0].hasToken)
+
+	// Substrate and platform receive the same overlay value files.
+	require.Len(t, d.applyCalls, 2)
+	valueFiles := []string{"/var/lib/forge/overlay/opo1/values.yaml", "/var/lib/forge/overlay/opo1/values.client.yaml"}
+	assert.Equal(t, valueFiles, d.applyCalls[0].valueFiles)
+	assert.Equal(t, valueFiles, d.applyCalls[1].valueFiles)
+
+	// CRD instances applied via kustomize AFTER the chart (ordering: clone -> chart -> crds).
+	require.Len(t, d.applyKustomizeCalls, 1)
+	assert.Equal(t, "/var/lib/forge/overlay/opo1/crds/client", d.applyKustomizeCalls[0])
+}
+
+func TestApply_Overlay_TokenPassthrough(t *testing.T) {
+	useTempHome(t)
+	p := &fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig), readyAfterInstall: true}
+	d := &fakeDeployer{}
+	o := &fakeOverlayer{cloneCommit: "abc"}
+	cfg := testConfigWithChart()
+	cfg.Spec.Overlay = config.Overlay{Repo: "https://github.com/example/iterabase-overlay.git", Ref: "master"}
+
+	fx := &fakeFluxer{artifact: fluxer.GitRepositoryArtifact{
+		Ready: true, Revision: "main@sha1:abc", Digest: canonicalDigest,
+	}}
+	_, err := Apply(context.Background(), cfg, p, d, o, fx, ApplyOpts{
+		ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
+		OverlayToken: []byte("ghp_secret"),
+	})
+	require.NoError(t, err)
+	require.Len(t, o.cloneCalls, 1)
+	assert.True(t, o.cloneCalls[0].hasToken, "token passed through to Clone")
+}
+
+func TestApply_Overlay_SkippedWhenNoRepo(t *testing.T) {
+	useTempHome(t)
+	p := &fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig), readyAfterInstall: true}
+	d := &fakeDeployer{}
+	o := &fakeOverlayer{}
+	cfg := testConfigWithChart() // no overlay
+
+	res, err := Apply(context.Background(), cfg, p, d, o, &fakeFluxer{}, ApplyOpts{
+		ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	assert.False(t, res.OverlayApplied)
+	assert.Empty(t, o.cloneCalls, "no clone when overlay.repo is empty")
+	assert.Empty(t, d.applyKustomizeCalls, "no kustomize apply when no overlay")
+	require.Len(t, d.applyCalls, 2)
+	assert.Empty(t, d.applyCalls[0].valueFiles)
+	assert.Empty(t, d.applyCalls[1].valueFiles, "platform applied with no value files when no overlay")
+}
+
+func TestApply_Overlay_SkipFlag(t *testing.T) {
+	useTempHome(t)
+	p := &fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig), readyAfterInstall: true}
+	d := &fakeDeployer{}
+	o := &fakeOverlayer{}
+	cfg := testConfigWithChart()
+	cfg.Spec.Overlay = config.Overlay{Repo: "https://github.com/example/iterabase-overlay.git", Ref: "master"}
+
+	res, err := Apply(context.Background(), cfg, p, d, o, &fakeFluxer{}, ApplyOpts{
+		ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
+		SkipOverlay: true,
+	})
+	require.NoError(t, err)
+	assert.False(t, res.OverlayApplied)
+	assert.Empty(t, o.cloneCalls, "SkipOverlay skips the clone")
+}
+
+func TestDestroy_Overlay(t *testing.T) {
+	p := &fakeProv{}
+	d := &fakeDeployer{}
+	o := &fakeOverlayer{}
+	cfg := testConfigWithChart()
+	cfg.Spec.Overlay = config.Overlay{Repo: "https://github.com/example/iterabase-overlay.git", Ref: "master"}
+
+	require.NoError(t, Destroy(context.Background(), cfg, p, d, o, nil))
+	require.Len(t, o.removeCalls, 1)
+	assert.Equal(t, "/var/lib/forge/overlay/opo1", o.removeCalls[0])
+}
+
+type fakeSecretResolver struct {
+	value string
+	unset bool
+	calls []resolveCall
+}
+
+type resolveCall struct{ name, envVar string }
+
+func (f *fakeSecretResolver) Resolve(_ context.Context, name, envVar string) (string, error) {
+	f.calls = append(f.calls, resolveCall{name, envVar})
+	if f.unset {
+		return "", fmt.Errorf("secret %q: env var %q is unset (set it in the operator's gitignored .env)", name, envVar)
+	}
+	return f.value, nil
+}
+
+func testConfigWithOverlay() *config.Cluster {
+	c := testConfigWithChart()
+	c.Spec.Overlay = config.Overlay{Repo: "https://github.com/example/iterabase-overlay.git", Ref: "master"}
+	return c
+}
+
+// overlaySecretsYAML is a minimal overlay secrets.yaml for the secret-sync tests.
+func overlaySecretsYAML() string {
+	return `secrets:
+  - name: cloudflare-api-token
+    namespace: iterabase-system
+    key: api-token
+    envVar: FORGE_CLOUDFLARE_API_TOKEN
+`
+}
+
+func TestApply_Secrets(t *testing.T) {
+	useTempHome(t)
+	p := &fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig), readyAfterInstall: true}
+	d := &fakeDeployer{}
+	o := &fakeOverlayer{cloneCommit: "deadbeef", readFileContent: overlaySecretsYAML()}
+	r := &fakeSecretResolver{value: "supersecret-token"}
+	res, err := Apply(context.Background(), testConfigWithOverlay(), p, d, o, &fakeFluxer{}, ApplyOpts{
+		ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond, SecretResolver: r,
+	})
+	require.NoError(t, err)
+	assert.True(t, res.SecretsApplied)
+
+	// the resolver was called for the declared secret (env-or-prompt happens there).
+	require.Len(t, r.calls, 1)
+	assert.Equal(t, "cloudflare-api-token", r.calls[0].name)
+	assert.Equal(t, "FORGE_CLOUDFLARE_API_TOKEN", r.calls[0].envVar)
+
+	// namespace pre-create, then the secret manifest (stringData), via stdin.
+	require.Len(t, d.applyManifestCalls, 2)
+	assert.Contains(t, d.applyManifestCalls[0], `"Namespace"`)
+	assert.Contains(t, d.applyManifestCalls[0], `"iterabase-system"`)
+	assert.Contains(t, d.applyManifestCalls[1], `"Secret"`)
+	assert.Contains(t, d.applyManifestCalls[1], `"cloudflare-api-token"`)
+	assert.Contains(t, d.applyManifestCalls[1], `"api-token"`)
+	assert.Contains(t, d.applyManifestCalls[1], "supersecret-token", "value piped via stdin manifest")
+
+	// the value never reaches helm values (it stays out of the release secret).
+	for _, c := range d.applyCalls {
+		for _, v := range c.values {
+			assert.NotContains(t, v, "supersecret-token")
+		}
+	}
+
+	// secrets.yaml was read from the cloned overlay.
+	require.Len(t, o.readFileCalls, 1)
+	assert.Equal(t, "secrets.yaml", o.readFileCalls[0].relPath)
+
+	// secrets are applied AFTER the overlay clone + BEFORE the chart so
+	// cert-manager finds them on first reconcile.
+	manifestIdx, applyIdx := -1, -1
+	for i, op := range d.order {
+		if op == "manifest" && manifestIdx == -1 {
+			manifestIdx = i
+		}
+		if op == "apply" && applyIdx == -1 {
+			applyIdx = i
+		}
+	}
+	assert.GreaterOrEqual(t, manifestIdx, 0)
+	assert.GreaterOrEqual(t, applyIdx, 0)
+	assert.Less(t, manifestIdx, applyIdx, "secrets applied before chart")
+}
+
+func TestApply_Secrets_UnsetEnv(t *testing.T) {
+	useTempHome(t)
+	p := &fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig), readyAfterInstall: true}
+	d := &fakeDeployer{}
+	o := &fakeOverlayer{cloneCommit: "deadbeef", readFileContent: overlaySecretsYAML()}
+	r := &fakeSecretResolver{unset: true} // resolver can't provide a value (env unset + non-interactive)
+	_, err := Apply(context.Background(), testConfigWithOverlay(), p, d, o, &fakeFluxer{}, ApplyOpts{
+		ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond, SecretResolver: r,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "FORGE_CLOUDFLARE_API_TOKEN")
+	assert.Contains(t, err.Error(), "unset")
+	assert.Empty(t, d.applyCalls, "chart not applied when a secret value is missing")
+	assert.Len(t, d.applyManifestCalls, 1, "namespace pre-created before the resolve fails")
+}
+
+func TestApply_SkipSecrets(t *testing.T) {
+	useTempHome(t)
+	p := &fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig), readyAfterInstall: true}
+	d := &fakeDeployer{}
+	o := &fakeOverlayer{cloneCommit: "deadbeef", readFileContent: overlaySecretsYAML()}
+	res, err := Apply(context.Background(), testConfigWithOverlay(), p, d, o, &fakeFluxer{}, ApplyOpts{
+		SkipSecrets: true, ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	assert.False(t, res.SecretsApplied)
+	assert.Empty(t, d.applyManifestCalls, "SkipSecrets skips materialization")
+	assert.Empty(t, o.readFileCalls, "SkipSecrets skips reading secrets.yaml")
+}
+
+func TestApply_Secrets_NoSecretsFile(t *testing.T) {
+	useTempHome(t)
+	p := &fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig), readyAfterInstall: true}
+	d := &fakeDeployer{}
+	// overlay cloned but has no secrets.yaml (ReadFile returns not-found).
+	o := &fakeOverlayer{cloneCommit: "deadbeef", readFileErr: errors.New("overlay read secrets.yaml: No such file or directory")}
+	res, err := Apply(context.Background(), testConfigWithOverlay(), p, d, o, &fakeFluxer{}, ApplyOpts{
+		ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	assert.False(t, res.SecretsApplied)
+	assert.Empty(t, d.applyManifestCalls, "no secrets.yaml ⇒ no materialization")
+}
+
+func TestApply_Secrets_NoOverlay(t *testing.T) {
+	useTempHome(t)
+	p := &fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig), readyAfterInstall: true}
+	d := &fakeDeployer{}
+	o := &fakeOverlayer{} // no overlay.repo ⇒ no clone
+	res, err := Apply(context.Background(), testConfigWithChart(), p, d, o, &fakeFluxer{}, ApplyOpts{
+		ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	assert.False(t, res.SecretsApplied)
+	assert.Empty(t, d.applyManifestCalls, "no overlay ⇒ no secrets")
+}
+
+// fakeFluxer is a controllable fluxer.Fluxer for lifecycle flux tests.
+type fakeFluxer struct {
+	ensureVersion    string
+	ensureErr        error
+	ensureCalls      int
+	uninstallCalls   int
+	artifact         fluxer.GitRepositoryArtifact
+	artifactErr      error
+	artifactNotReady bool
+}
+
+func (f *fakeFluxer) EnsureFlux(_ context.Context, version string) error {
+	f.ensureCalls++
+	f.ensureVersion = version
+	return f.ensureErr
+}
+func (f *fakeFluxer) UninstallFlux(_ context.Context) error {
+	f.uninstallCalls++
+	return nil
+}
+func (f *fakeFluxer) GitRepositoryArtifact(_ context.Context, _ string) (fluxer.GitRepositoryArtifact, error) {
+	if f.artifactErr != nil {
+		return fluxer.GitRepositoryArtifact{}, f.artifactErr
+	}
+	if f.artifactNotReady {
+		return fluxer.GitRepositoryArtifact{}, nil
+	}
+	if f.artifact.Revision == "" {
+		return fluxer.GitRepositoryArtifact{Ready: true, Revision: "main@sha1:deadbeef", Digest: canonicalDigest}, nil
+	}
+	return f.artifact, nil
+}
+
+// testConfigWithFlux extends the overlay config (chart + https overlay) with
+// Flux enabled at a pinned version.
+func testConfigWithFlux() *config.Cluster {
+	c := testConfigWithOverlay()
+	c.Spec.Flux = config.Flux{Enabled: true, Version: "v2.4.0"}
+	return c
+}
+
+func TestApply_Flux(t *testing.T) {
+	useTempHome(t)
+	p := &fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig), readyAfterInstall: true}
+	d := &fakeDeployer{}
+	o := &fakeOverlayer{cloneCommit: "deadbeef"}
+	fx := &fakeFluxer{}
+	cfg := testConfigWithFlux()
+
+	res, err := Apply(context.Background(), cfg, p, d, o, fx, ApplyOpts{
+		ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
+		OverlayToken: []byte("ghp_secret"),
+	})
+	require.NoError(t, err)
+	assert.True(t, res.FluxInstalled)
+	assert.Equal(t, "ready=True revision=main@sha1:deadbeef digest="+canonicalDigest, res.GitRepositoryStatus)
+
+	// EnsureFlux called with the configured version.
+	require.Equal(t, 1, fx.ensureCalls)
+	assert.Equal(t, "v2.4.0", fx.ensureVersion)
+
+	// Four Flux resources are applied in lifecycle order: source credentials →
+	// GitRepository → artifact policy before Helm, then Kustomization afterward.
+	require.Len(t, d.applyManifestCalls, 4)
+	sec, repo, policy, kust := d.applyManifestCalls[0], d.applyManifestCalls[1], d.applyManifestCalls[2], d.applyManifestCalls[3]
+	assert.Contains(t, sec, `"Secret"`)
+	assert.Contains(t, sec, `"overlay-git-auth"`)
+	assert.Contains(t, sec, "ghp_secret", "token piped via stdin manifest (stringData)")
+	assert.Contains(t, repo, `"GitRepository"`)
+	assert.Contains(t, repo, `"overlay"`)
+	assert.Contains(t, repo, `"secretRef"`)
+	assert.Contains(t, repo, `"overlay-git-auth"`)
+	assert.Contains(t, kust, `"Kustomization"`)
+	assert.Contains(t, kust, `"overlay-crds"`)
+	assert.Contains(t, kust, `"./crds/client"`)
+	assert.Contains(t, kust, `"prune":true`)
+	assert.Contains(t, policy, `"NetworkPolicy"`)
+	assert.Contains(t, policy, `"app":"source-controller"`)
+	assert.Contains(t, policy, `"tool-runner"`)
+	assert.Contains(t, policy, `"iterabase-system"`)
+
+	// The token never reaches helm values (it stays in the stdin Secret).
+	for _, c := range d.applyCalls {
+		for _, v := range c.values {
+			assert.NotContains(t, v, "ghp_secret")
+		}
+	}
+
+	// Source manifests precede Helm so the runner can load a generation during
+	// --wait; continuous reconciliation starts only after the one-time CR apply.
+	require.Equal(t, []string{"apply", "manifest", "manifest", "manifest", "apply", "annotate-crds", "kustomize", "manifest"}, d.order)
+}
+
+func TestApply_Flux_PublicRepoNoToken(t *testing.T) {
+	useTempHome(t)
+	p := &fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig), readyAfterInstall: true}
+	d := &fakeDeployer{}
+	o := &fakeOverlayer{cloneCommit: "deadbeef"}
+	fx := &fakeFluxer{}
+	cfg := testConfigWithFlux()
+
+	res, err := Apply(context.Background(), cfg, p, d, o, fx, ApplyOpts{
+		ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
+		// no OverlayToken => public repo => Flux clones anonymously.
+	})
+	require.NoError(t, err)
+	assert.True(t, res.FluxInstalled)
+
+	// No token Secret (GitRepository + artifact ingress policy before Helm,
+	// Kustomization after); GitRepository has no secretRef.
+	require.Len(t, d.applyManifestCalls, 3)
+	repo, policy, kust := d.applyManifestCalls[0], d.applyManifestCalls[1], d.applyManifestCalls[2]
+	assert.Contains(t, repo, `"GitRepository"`)
+	assert.NotContains(t, repo, `"secretRef"`, "public repo => no secretRef")
+	assert.NotContains(t, repo, "ghp_secret")
+	assert.Contains(t, kust, `"Kustomization"`)
+	assert.Contains(t, policy, `"NetworkPolicy"`)
+}
+
+func TestApply_Flux_SkipFlag(t *testing.T) {
+	useTempHome(t)
+	p := &fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig), readyAfterInstall: true}
+	d := &fakeDeployer{}
+	o := &fakeOverlayer{cloneCommit: "deadbeef"}
+	fx := &fakeFluxer{}
+	cfg := testConfigWithFlux()
+
+	res, err := Apply(context.Background(), cfg, p, d, o, fx, ApplyOpts{
+		SkipFlux: true, ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	assert.False(t, res.FluxInstalled)
+	assert.Equal(t, 0, fx.ensureCalls, "SkipFlux skips EnsureFlux")
+	assert.Empty(t, d.applyManifestCalls, "SkipFlux skips the sync resources")
+}
+
+func TestApply_Flux_SkipFlagRejectsFreshChartInstall(t *testing.T) {
+	useTempHome(t)
+	d := &fakeDeployer{}
+	_, err := Apply(context.Background(), testConfigWithFlux(),
+		&fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig), readyAfterInstall: true},
+		d, &fakeOverlayer{cloneCommit: "deadbeef"}, &fakeFluxer{artifactNotReady: true}, ApplyOpts{
+			SkipFlux: true, ReadyTimeout: time.Second, ReadyInterval: 10 * time.Millisecond,
+		})
+	require.ErrorContains(t, err, "requires an exact Ready Flux artifact before Helm")
+	assert.Empty(t, d.applyCalls)
+	assert.Empty(t, d.applyManifestCalls)
+}
+
+func TestApply_Flux_DisabledReusesEstablishedSource(t *testing.T) {
+	useTempHome(t)
+	p := &fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig), readyAfterInstall: true}
+	d := &fakeDeployer{}
+	o := &fakeOverlayer{cloneCommit: "deadbeef"}
+	fx := &fakeFluxer{}
+	cfg := testConfigWithOverlay() // flux not enabled
+
+	res, err := Apply(context.Background(), cfg, p, d, o, fx, ApplyOpts{
+		ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	assert.False(t, res.FluxInstalled)
+	assert.Equal(t, 0, fx.ensureCalls, "Flux disabled => phase skipped even with a fluxer wired")
+	assert.Empty(t, d.applyManifestCalls)
+}
+
+func TestApply_Flux_NoFluxerWired(t *testing.T) {
+	useTempHome(t)
+	p := &fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig), readyAfterInstall: true}
+	d := &fakeDeployer{}
+	o := &fakeOverlayer{cloneCommit: "deadbeef"}
+	cfg := testConfigWithFlux()
+
+	_, err := Apply(context.Background(), cfg, p, d, o, nil, ApplyOpts{
+		ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "fluxer")
+}
+
+func TestApply_Flux_EnsureFluxFails(t *testing.T) {
+	useTempHome(t)
+	p := &fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig), readyAfterInstall: true}
+	d := &fakeDeployer{}
+	o := &fakeOverlayer{cloneCommit: "deadbeef"}
+	fx := &fakeFluxer{ensureErr: fmt.Errorf("flux install: network")}
+	cfg := testConfigWithFlux()
+
+	_, err := Apply(context.Background(), cfg, p, d, o, fx, ApplyOpts{
+		ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "flux install")
+	assert.Empty(t, d.applyManifestCalls, "sync resources not applied when EnsureFlux fails")
+}
+
+func TestApply_Flux_WaitsForExactArtifactBeforeChart(t *testing.T) {
+	useTempHome(t)
+	p := &fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig), readyAfterInstall: true}
+	d := &fakeDeployer{}
+	o := &fakeOverlayer{cloneCommit: "deadbeef"}
+	fx := &fakeFluxer{artifact: fluxer.GitRepositoryArtifact{
+		Ready: true, Revision: "main@sha1:stale", Digest: canonicalDigest,
+	}}
+
+	_, err := Apply(context.Background(), testConfigWithFlux(), p, d, o, fx, ApplyOpts{
+		ReadyTimeout: 30 * time.Millisecond, ReadyInterval: 5 * time.Millisecond,
+	})
+	require.ErrorContains(t, err, `did not publish Ready commit "deadbeef"`)
+	require.Len(t, d.applyCalls, 1)
+	assert.Equal(t, "opo1-cert-manager", d.applyCalls[0].release)
+	assert.NotEmpty(t, d.applyManifestCalls, "the source is established before polling")
+}
+
+func TestApply_Flux_RejectsNonCanonicalArtifactDigestBeforeChart(t *testing.T) {
+	useTempHome(t)
+	d := &fakeDeployer{}
+	fx := &fakeFluxer{artifact: fluxer.GitRepositoryArtifact{
+		Ready: true, Revision: "main@sha1:deadbeef", Digest: "sha256:garbage",
+	}}
+
+	_, err := Apply(context.Background(), testConfigWithFlux(),
+		&fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig), readyAfterInstall: true},
+		d, &fakeOverlayer{cloneCommit: "deadbeef"}, fx, ApplyOpts{
+			ReadyTimeout: 30 * time.Millisecond, ReadyInterval: 5 * time.Millisecond,
+		})
+	require.ErrorContains(t, err, "with a canonical sha256 digest")
+	require.Len(t, d.applyCalls, 1)
+	assert.Equal(t, "opo1-cert-manager", d.applyCalls[0].release)
+}
+
+func TestApply_Flux_ArtifactReadFailureStopsBeforeChart(t *testing.T) {
+	useTempHome(t)
+	p := &fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig), readyAfterInstall: true}
+	d := &fakeDeployer{}
+	o := &fakeOverlayer{cloneCommit: "deadbeef"}
+	fx := &fakeFluxer{artifactErr: errors.New("api unavailable")}
+
+	_, err := Apply(context.Background(), testConfigWithFlux(), p, d, o, fx, ApplyOpts{
+		ReadyTimeout: time.Second, ReadyInterval: 5 * time.Millisecond,
+	})
+	require.ErrorContains(t, err, "read Flux GitRepository artifact")
+	require.Len(t, d.applyCalls, 1)
+	assert.Equal(t, "opo1-cert-manager", d.applyCalls[0].release)
+}
+
+func TestDestroy_Flux(t *testing.T) {
+	p := &fakeProv{pf: readyPf(), state: inSyncState()}
+	p.pf.Installed = true
+	d := &fakeDeployer{}
+	o := &fakeOverlayer{}
+	fx := &fakeFluxer{}
+	cfg := testConfigWithFlux()
+
+	require.NoError(t, Destroy(context.Background(), cfg, p, d, o, fx))
+	assert.Equal(t, 1, fx.uninstallCalls, "Flux uninstalled on destroy")
+}
+
+func TestDestroy_Flux_Disabled(t *testing.T) {
+	p := &fakeProv{pf: readyPf(), state: inSyncState()}
+	p.pf.Installed = true
+	d := &fakeDeployer{}
+	o := &fakeOverlayer{}
+	fx := &fakeFluxer{}
+	cfg := testConfigWithOverlay() // flux not enabled
+
+	require.NoError(t, Destroy(context.Background(), cfg, p, d, o, fx))
+	assert.Equal(t, 0, fx.uninstallCalls, "Flux disabled => not uninstalled")
+}
+
+func TestDestroy_Flux_NoFluxer(t *testing.T) {
+	p := &fakeProv{pf: readyPf(), state: inSyncState()}
+	p.pf.Installed = true
+	d := &fakeDeployer{}
+	o := &fakeOverlayer{}
+	cfg := testConfigWithFlux()
+
+	// nil fluxer + flux enabled => best-effort skip (k3s-uninstall wipes it).
+	require.NoError(t, Destroy(context.Background(), cfg, p, d, o, nil))
+}
+
+func TestFluxManifest_GitRepository_RefBranchVsTag(t *testing.T) {
+	// A branch ref => ref.branch.
+	branch := gitRepositoryManifest("overlay", "flux-system", "https://example/o.git", "master", "")
+	assert.Contains(t, branch, `"branch":"master"`)
+	assert.NotContains(t, branch, `"tag"`)
+	// A semver tag ref => ref.tag.
+	tag := gitRepositoryManifest("overlay", "flux-system", "https://example/o.git", "v0.1.0", "")
+	assert.Contains(t, tag, `"tag":"v0.1.0"`)
+	assert.NotContains(t, tag, `"branch"`)
+}
+
+func TestFluxManifest_GitRepository_SecretRefOmission(t *testing.T) {
+	withRef := gitRepositoryManifest("overlay", "flux-system", "https://example/o.git", "master", "overlay-git-auth")
+	assert.Contains(t, withRef, `"secretRef"`)
+	assert.Contains(t, withRef, `"overlay-git-auth"`)
+	withoutRef := gitRepositoryManifest("overlay", "flux-system", "https://example/o.git", "master", "")
+	assert.NotContains(t, withoutRef, `"secretRef"`)
+}
+
+func TestFluxManifest_TokenSecret(t *testing.T) {
+	m := fluxTokenSecretManifest("overlay-git-auth", "flux-system", "git", []byte("ghp_secret"))
+	assert.Contains(t, m, `"Secret"`)
+	assert.Contains(t, m, `"Opaque"`)
+	assert.Contains(t, m, `"username":"git"`)
+	assert.Contains(t, m, `"password":"ghp_secret"`)
+}

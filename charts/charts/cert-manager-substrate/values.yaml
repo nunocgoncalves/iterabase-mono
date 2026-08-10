@@ -1,0 +1,16 @@
+cert-manager:
+  enabled: true
+  crds:
+    enabled: true
+    keep: true
+  prometheus:
+    enabled: true
+    # The platform observability chart owns the cross-release ServiceMonitor so
+    # this substrate can be installed before Prometheus Operator CRDs exist.
+    servicemonitor:
+      enabled: false
+
+cert-manager-csi-driver:
+  metrics:
+    podmonitor:
+      enabled: false

@@ -1,0 +1,102 @@
+enabled: true
+
+image:
+  repository: ghcr.io/nunocgoncalves/inference-gateway
+  tag: "0.2.5"
+  pullPolicy: IfNotPresent
+
+replicaCount: 1
+
+service:
+  port: 8080
+
+ingress:
+  enabled: true
+  className: nginx
+  host: "" # catch-all when empty (HTTP only); REQUIRED when tls.enabled (cert SAN)
+  # TLS via the prerequisite cert-manager substrate plus this platform's
+  # cert-issuers dependency: clusterIssuer names a rendered ClusterIssuer
+  # (selfsigned for kind/E2E, letsencrypt-prod for the prod overlay). cert-manager's
+  # ingress-shim issues the cert into secretName (stable across upgrades) and
+  # ingress-nginx serves it. Disable (tls.enabled=false) for a plain-HTTP edge.
+  tls:
+    enabled: false
+    secretName: "" # default: <release>-gateway-tls
+    clusterIssuer: "" # e.g. selfsigned (kind/E2E) / letsencrypt-prod (prod overlay)
+  # external-dns integration (prod edge). When enabled, annotate this Ingress so
+  # external-dns (source: ingress) creates the Cloudflare A record for the host.
+  # Set inference-gateway.ingress.externalDns.enabled=true in the prod overlay
+  # alongside external-dns.enabled=true (umbrella). No-op on kind/E2E.
+  externalDns:
+    enabled: false
+    hostname: "" # DNS record name; defaults to ingress.host when empty
+    target: "" # optional A-record target (IP/host); if unset external-dns uses the Ingress status.loadBalancer
+
+# PostgreSQL connection. Defaults match the bundled postgresql subchart.
+# To BYO: set postgresql.enabled=false (umbrella) and override these.
+postgresql:
+  host: "" # default: <release>-postgresql
+  port: 5432
+  database: controlplane
+  username: gateway
+  passwordSecret: "" # default: <release>-postgresql
+  passwordKey: gateway-password
+
+# Redis connection. Defaults match the bundled redis subchart.
+redis:
+  host: "" # default: <release>-redis
+  port: 6379
+  passwordSecret: "" # default: <release>-redis (the redis chart's AUTH Secret)
+  passwordKey: redis-password
+
+# Internal TLS (opt-in; the umbrella's internalTLS.enabled fans this on). The
+# gateway is a TLS client only (no internal HTTPS server — its public edge is
+# via ingress-shim). When enabled: DATABASE_URL uses sslmode=verify-full + the
+# internal CA, REDIS_URL becomes rediss:// with the AUTH password, and
+# REDIS_TLS_CA_FILE points the gateway at the mounted CA. caSecretName is
+# required when enabled (the <release>-internal-ca-root Secret, set by umbrella).
+tls:
+  enabled: false
+  caSecretName: ""   # required when enabled: the internal CA root Secret
+  caMountPath: /etc/iterabase/internal-ca/ca.crt
+
+# Admin API key — generated into a Secret on first install (stable via lookup).
+adminApiKey:
+  secret: "" # default: <release>-gateway-admin
+  key: adminApiKey
+
+# Supervisor mTLS workload listener (HOR-398). Default OFF; an overlay opts in
+# when AgentPool workers (SPIFFE leaves from the shared platform workflow CA)
+# must reach the private model path at <port>/v1/chat/completions. Requires a
+# serving leaf signed by the same CA + that CA mounted as the client CA.
+workload:
+  enabled: false
+  port: 8443
+  servicePort: 8443
+  trustDomain: iterabase.local
+  # The serving leaf: rendered as a cert-manager Certificate referencing the
+  # platform workflow CA (issuer below). Secret holds tls.crt/tls.key.
+  tlsSecretName: "" # default: <release>-gateway-workload-tls
+  issuer:
+    name: platform-spiffe-ca   # ClusterIssuer backing AgentPool worker leaves
+    kind: ClusterIssuer
+  # The platform workflow CA cert worker leaves are chained to (client CA).
+  # Default: <release>-control-plane-gateway-ca (the secret backing the issuer).
+  clientCASecretName: "" # default: <release>-control-plane-gateway-ca
+  clientCAKey: ca.crt
+  certMountPath: /etc/iterabase/workload/tls
+  clientCAMountPath: /etc/iterabase/workload/ca
+
+resources: {}
+
+# Metrics (opt-in; flip on with observability — see values-observability.yaml).
+# A ServiceMonitor scraping the gateway's /metrics endpoint on its http port.
+# The gateway is a TLS client only (its public edge is via ingress-shim), so its
+# in-cluster Service is plaintext http — no scrape TLS config needed. The
+# /metrics endpoint itself is a service-repo concern (HOR-408 tracked gap);
+# this ServiceMonitor scrapes once the endpoint ships. The ServiceMonitor is a
+# Prometheus Operator CRD — rendered regardless but only reconciled when the
+# operator (from the observability chart) is installed.
+metrics:
+  enabled: false
+  # scrapeInterval: 30s

@@ -1,0 +1,181 @@
+{{- if and .Values.enabled .Values.gateway.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "control-plane.gatewayName" . }}-config
+  labels:
+    {{- include "control-plane.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gateway
+data:
+  gateway.yaml: |
+    {{- include "control-plane.gatewayConfig" . | nindent 4 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "control-plane.gatewayName" . }}
+  labels:
+    {{- include "control-plane.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gateway
+spec:
+  selector:
+    app.kubernetes.io/name: control-plane
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: gateway
+  ports:
+    - name: grpc
+      port: {{ .Values.gateway.service.port }}
+      targetPort: grpc
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "control-plane.gatewayName" . }}
+  labels:
+    {{- include "control-plane.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gateway
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: control-plane
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: gateway
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: control-plane
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: gateway
+      annotations:
+        # The gateway reads approved runner identities/namespaces only at startup.
+        # Roll whenever the exact rendered static config changes.
+        checksum/gateway-config: {{ include "control-plane.gatewayConfig" . | sha256sum | quote }}
+        # The gateway loads its mandatory mTLS leaf and client CA at startup.
+        reloader.stakater.com/auto: "true"
+    spec:
+      serviceAccountName: {{ include "control-plane.gatewayServiceAccountName" . }}
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: wait-for-postgres
+          image: postgres:16-alpine
+          securityContext:
+            runAsUser: 999
+            runAsGroup: 999
+          command:
+            - sh
+            - -c
+            - 'until pg_isready -h {{ include "control-plane.pgHost" . }} -p {{ .Values.postgresql.port }} -U {{ .Values.postgresql.auth.username }}; do echo waiting for postgres; sleep 2; done'
+          {{- if (or .Values.tls.enabled (dig "internalTLS" "enabled" false (.Values.global | default (dict)))) }}
+          env:
+            - name: PGSSLMODE
+              value: verify-full
+            - name: PGSSLROOTCERT
+              value: {{ .Values.tls.caMountPath | quote }}
+          volumeMounts:
+            - name: internal-ca
+              mountPath: {{ dir .Values.tls.caMountPath }}
+              readOnly: true
+          {{- end }}
+      containers:
+        - name: gateway
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/gateway"]
+          args: ["--config", "/etc/control-plane/gateway/gateway.yaml", "serve"]
+          env:
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "control-plane.pgSecret" . }}
+                  key: {{ .Values.postgresql.passwordKey }}
+            - name: DATABASE_URL
+              value: {{ include "control-plane.databaseURL" . | quote }}
+            - name: GATEWAY_ADDR
+              value: {{ .Values.gateway.addr | quote }}
+            - name: GATEWAY_TLS_CERT_FILE
+              value: /etc/control-plane/gateway-tls/tls.crt
+            - name: GATEWAY_TLS_KEY_FILE
+              value: /etc/control-plane/gateway-tls/tls.key
+            - name: GATEWAY_CLIENT_CA_FILE
+              value: /etc/control-plane/gateway-ca/ca.crt
+            - name: GATEWAY_TRUST_DOMAIN
+              value: {{ .Values.gateway.trustDomain | quote }}
+            - name: GATEWAY_KUBE_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            {{- include "control-plane.artifactEnv" . | nindent 12 }}
+            - name: LOG_LEVEL
+              value: {{ .Values.logLevel | default "info" | quote }}
+            - name: LOG_FORMAT
+              value: {{ .Values.logFormat | default "json" | quote }}
+          ports:
+            - name: grpc
+              containerPort: {{ .Values.gateway.service.port }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/control-plane/gateway
+              readOnly: true
+            - name: gateway-tls
+              mountPath: /etc/control-plane/gateway-tls
+              readOnly: true
+            - name: gateway-ca
+              mountPath: /etc/control-plane/gateway-ca
+              readOnly: true
+            {{- if (or .Values.tls.enabled (dig "internalTLS" "enabled" false (.Values.global | default (dict)))) }}
+            - name: internal-ca
+              mountPath: {{ dir .Values.tls.caMountPath }}
+              readOnly: true
+            {{- end }}
+          # The gateway exposes only mandatory-mTLS Connect RPCs, so unauthenticated
+          # HTTP probes cannot reach an application endpoint. TCP probes still
+          # verify that the serving listener was created after DB/MinIO readiness.
+          startupProbe:
+            tcpSocket:
+              port: grpc
+            failureThreshold: 30
+            periodSeconds: 2
+          readinessProbe:
+            tcpSocket:
+              port: grpc
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: grpc
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          {{- with .Values.gateway.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "control-plane.gatewayName" . }}-config
+        - name: gateway-tls
+          secret:
+            secretName: {{ include "control-plane.gatewayTLSSecretName" . }}
+        - name: gateway-ca
+          secret:
+            secretName: {{ include "control-plane.gatewayCASecretName" . }}
+            items:
+              - key: ca.crt
+                path: ca.crt
+        {{- if (or .Values.tls.enabled (dig "internalTLS" "enabled" false (.Values.global | default (dict)))) }}
+        - name: internal-ca
+          secret:
+            secretName: {{ required "control-plane.tls.caSecretName is required when tls.enabled" (include "control-plane.tlsCASecretName" .) | quote }}
+            items:
+              - key: ca.crt
+                path: ca.crt
+        {{- end }}
+{{- end }}

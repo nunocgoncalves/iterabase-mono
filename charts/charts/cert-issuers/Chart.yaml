@@ -1,0 +1,6 @@
+apiVersion: v2
+name: cert-issuers
+description: cert-manager ClusterIssuers for the iterabase platform — Let's Encrypt DNS-01 (edge) + self-signed (kind/E2E) + an internal CA for in-cluster TLS.
+type: application
+version: 0.2.0
+appVersion: "0.2.0"

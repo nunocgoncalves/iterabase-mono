@@ -1,0 +1,92 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: manager-role
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  - persistentvolumeclaims
+  - pods
+  - services
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - get
+- apiGroups:
+  - apps
+  resources:
+  - deployments
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - networking.k8s.io
+  resources:
+  - networkpolicies
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - platform.iterabase.com
+  resources:
+  - agentpools
+  - identitymappings
+  - modelbackends
+  - models
+  - permissionpolicies
+  - workflows
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - platform.iterabase.com
+  resources:
+  - agentpools/finalizers
+  - identitymappings/finalizers
+  - modelbackends/finalizers
+  - models/finalizers
+  - permissionpolicies/finalizers
+  - workflows/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - platform.iterabase.com
+  resources:
+  - agentpools/status
+  - identitymappings/status
+  - modelbackends/status
+  - models/status
+  - permissionpolicies/status
+  - workflows/status
+  verbs:
+  - get
+  - patch
+  - update

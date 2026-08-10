@@ -1,0 +1,70 @@
+{{- if .Values.enabled }}
+{{- if .Values.ingress.enabled }}
+{{- /* The api serves the same-origin work-management Dashboard (static UI at /
+    and /assets/*) plus the authenticated /v1/work-* APIs. Exposing both means
+    landing them on one public ingress host (HOR-428). */ -}}
+{{- $ednsHostname := "" -}}
+{{- $ednsTarget := "" -}}
+{{- if .Values.ingress.externalDns.enabled -}}
+{{- $ednsHostname = .Values.ingress.externalDns.hostname | default .Values.ingress.host -}}
+{{- $ednsTarget = .Values.ingress.externalDns.target -}}
+{{- end -}}
+{{- /* TLS via cert-manager. cert-manager's ingress-shim issues a cert for
+    ingress.host (the SAN) into secretName using clusterIssuer, and ingress-nginx
+    serves it. host + clusterIssuer are required when enabled. */ -}}
+{{- $tlsEnabled := .Values.ingress.tls.enabled -}}
+{{- $tlsSecret := "" -}}
+{{- if $tlsEnabled -}}
+{{- $_ := required "control-plane.ingress.host is required when ingress.tls.enabled" .Values.ingress.host -}}
+{{- $_ = required "control-plane.ingress.tls.clusterIssuer is required when ingress.tls.enabled" .Values.ingress.tls.clusterIssuer -}}
+{{- $tlsSecret = .Values.ingress.tls.secretName | default (printf "%s-control-plane-api-tls" .Release.Name) -}}
+{{- end -}}
+{{- /* Unlike the inference-gateway (plain HTTP on its port even under
+    internalTLS), the control-plane api serves HTTPS from an internal-CA leaf
+    when the umbrella's internalTLS is enabled (TLS_CERT_FILE/TLS_KEY_FILE,
+    HOR-371). @edge nginx must therefore talk HTTPS to the backend, else the
+    same-origin UI and /v1/work-* calls break. */ -}}
+{{- $backendHTTPS := (or .Values.tls.enabled (dig "internalTLS" "enabled" false (.Values.global | default (dict)))) -}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "control-plane.apiName" . }}
+  labels:
+    {{- include "control-plane.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+  {{- if or $tlsEnabled $ednsHostname $ednsTarget $backendHTTPS }}
+  annotations:
+    {{- if $tlsEnabled }}
+    cert-manager.io/cluster-issuer: {{ .Values.ingress.tls.clusterIssuer | quote }}
+    {{- end }}
+    {{- if $ednsHostname }}
+    external-dns.alpha.kubernetes.io/hostname: {{ $ednsHostname | quote }}
+    {{- end }}
+    {{- if $ednsTarget }}
+    external-dns.alpha.kubernetes.io/target: {{ $ednsTarget | quote }}
+    {{- end }}
+    {{- if $backendHTTPS }}
+    nginx.ingress.kubernetes.io/backend-protocol: HTTPS
+    {{- end }}
+  {{- end }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- if $tlsEnabled }}
+  tls:
+    - hosts:
+        - {{ .Values.ingress.host | quote }}
+      secretName: {{ $tlsSecret | quote }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.ingress.host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "control-plane.apiName" . }}
+                port:
+                  number: {{ .Values.service.port }}
+{{- end }}
+{{- end }}

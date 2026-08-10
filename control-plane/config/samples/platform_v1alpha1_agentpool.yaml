@@ -1,0 +1,97 @@
+apiVersion: platform.iterabase.com/v1alpha1
+kind: AgentPool
+metadata:
+  name: walter-pool
+  namespace: platform
+spec:
+  # replicas is the bounded warm-worker pod count the operator maintains.
+  # v1 reconciles a static set (<pool>-worker-<i>); scaling is HOR-249.
+  replicas: 2
+  # workerImage is the harness image (HOR-351/381): supervisor + per-turn child.
+  workerImage: control-plane-harness:latest
+  terminationGracePeriodSeconds: 30
+  podSecurity: baseline  # CAP_SETUID/SETGID for the per-turn UID launcher (HOR-381)
+
+  # Per-pod SPIFFE leaf certs are issued by the cert-manager CSI driver
+  # (annotated on each pod) with URI SAN
+  # spiffe://<trustDomain>/pools/<pool-uid>/workers/<pod-name>. The operator
+  # never holds the CA key; cert-manager owns the CA in platform-ca.
+  identity:
+    trustDomain: iterabase.local
+    caSecretRef:
+      name: platform-ca
+    certMountPath: /etc/harness/tls
+
+  # Shared sandbox PVC. ReadWriteMany is required for multi-worker pools
+  # (concurrent per-turn children share it). ReadWriteOnce is supported only
+  # as a single-worker deployment mode (replicas: 1) on an ordinary RWO
+  # StorageClass, and is not the production multi-worker storage backend.
+  # Per-session subdirs are 0700 owned by the session UID/GID (provisioning by
+  # the supervisor, HOR-381). The PVC request is the per-pool storage quota.
+  sandbox:
+    storageClassName: rwx-fast
+    accessMode: ReadWriteMany
+    size: 100Gi
+    mountPath: /data/sandboxes
+
+  # Supervisor platform endpoints (ARCH-010). The child receives none. Each
+  # endpoint's selector restricts NetworkPolicy egress to that gateway's pods
+  # on the URL's port (REQ-010).
+  gateways:
+    controlPlane:
+      url: https://control-plane.platform.svc:8443
+      serverName: control-plane
+      selector:
+        podSelector:
+          matchLabels: {app.kubernetes.io/name: control-plane}
+    toolGateway:
+      url: https://gateway.platform.svc:8443
+      serverName: tool-gateway
+      selector:
+        podSelector:
+          matchLabels: {app.kubernetes.io/name: tool-gateway}
+    inferenceGateway:
+      url: https://inference-gateway.platform.svc:8443
+      serverName: inference-gateway
+      selector:
+        podSelector:
+          matchLabels: {app.kubernetes.io/name: inference-gateway}
+
+  # ARCH-003 deny-by-default egress. `denied` = DNS pods + the three gateways
+  # only; `internet` additionally allows non-cluster Internet (per-pool opt-in
+  # for e.g. coding agents). Customer-system credentialed access always routes
+  # through the gateway regardless — the sandbox holds no customer creds.
+  networkPolicy:
+    egress: denied
+    # dnsSelector defaults to kube-system / k8s-app=kube-dns when omitted.
+
+  # ARCH-016: deny-by-default local-workspace tools. true exposes exactly
+  # read/write/edit/bash; false exposes none.
+  workspaceTools: false
+
+  # ARCH-018: maximum gateway capability grants (a turn cannot widen these).
+  # Mirrors toolgateway.pool_grants: tool + max effect class + allowed actions.
+  gatewayGrants:
+    - tool: graph.email.read
+      maxEffectClass: read_only
+      # V1 undecomposed descriptors use the tool name as effective action.
+      allowedActions: [graph.email.read]
+    - tool: graph.excel.write
+      maxEffectClass: idempotent_write
+      allowedActions: [graph.excel.write]
+
+  # ARCH-008/018: logical credential slots -> scheme-specific K8s Secret refs.
+  # VALUES never enter the CRD; the gateway resolves them at invocation.
+  credentialBindings:
+    - toolName: graph.email.read
+      slot: graphToken
+      scheme: bearer
+      bearer:
+        valueSecretRef: {name: graph-creds, key: token}
+      resourceConstraints:
+        - resource: site
+          value: walter
+
+  piDirs: [/pi/product, /pi/client]
+  walDir: /var/harness/wal
+  probe: { port: 8081 }

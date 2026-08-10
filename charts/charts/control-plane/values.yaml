@@ -1,0 +1,223 @@
+enabled: true # standalone install renders everything; the umbrella toggles this via condition
+
+image:
+  repository: ghcr.io/nunocgoncalves/control-plane
+  tag: "0.0.25"
+  pullPolicy: IfNotPresent
+
+# One image, three Deployments selected via command (see control-plane Dockerfile).
+#   manager: ["/manager"]                — controller-runtime operator
+#   api:     ["/api","serve"]            — HTTP API (JWKS, work, artifacts)
+#   gateway: ["/gateway","serve"]        — mTLS workload/tool/artifact gRPC
+# migrate + bootstrap run as RBAC-less init containers on the api Deployment.
+manager:
+  args:
+    - --health-probe-bind-address=:8081
+  resources: {}
+api:
+  addr: ":8080"
+  resources: {}
+
+gateway:
+  # Standalone installs opt in after providing cert-manager and either using
+  # generated TLS or supplying serverSecret + clientCASecret with generated=false.
+  # The umbrella enables the gateway and generated platform CA by default.
+  enabled: false
+  addr: ":8090"
+  service:
+    port: 8090
+  trustDomain: iterabase.local
+  inlineLimit: 65536
+  tls:
+    generated: true
+    serverSecret: "" # default: <release>-control-plane-gateway-tls
+    clientCASecret: "" # default: <release>-control-plane-gateway-ca
+    # ClusterIssuers read CA Secrets from cert-manager's cluster-resource
+    # namespace. Empty uses this release namespace (the umbrella default).
+    clusterResourceNamespace: ""
+  resources: {}
+
+dispatch:
+  # The durable Work bidi-stream gRPC server (HOR-249): warm-agent workers
+  # connect over mTLS, receive durable graph-node assignments and return
+  # completion events. Standalone installs opt in after providing cert-manager
+  # and the shared workload CA (platform-spiffe-ca, provisioned with the
+  # gateway or dispatch). The umbrella enables it by default.
+  enabled: false
+  addr: ":8091"
+  service:
+    port: 8091
+  trustDomain: iterabase.local
+  # Every AssignTurn carries a model permission; dispatch refuses to run
+  # without a configured default model (DISPATCH_DEFAULT_MODEL_ID/API). The
+  # default model is CUSTOMER/OVERLAY-SPECIFIC (there is no universal default
+  # id/api) — leave empty here and set it in the overlay that enables dispatch.
+  defaultModel:
+    id: ""
+    api: ""
+  tls:
+    generated: true
+    serverSecret: "" # default: <release>-control-plane-dispatch-tls
+  resources: {}
+
+toolRunner:
+  enabled: false # umbrella enables; requires gateway + Flux GitRepository
+  image:
+    repository: ghcr.io/nunocgoncalves/control-plane-tool-runner
+    tag: "0.0.25"
+    pullPolicy: IfNotPresent
+  runnerId: overlay-tools
+  # Exact first segment(s) of dotted tool names this reviewed runner may publish.
+  # No wildcard/empty approval is accepted. Client overlays add namespaces here.
+  allowedToolNamespaces: [platform]
+  flux:
+    namespace: flux-system
+    sourceName: overlay
+    pollMs: 5000
+    maxArchiveBytes: 536870912
+  concurrency: 8
+  maxGenerations: 8
+  maxLoadedBytes: 536870912
+  drainMaxAge: 24h
+  metrics:
+    enabled: false # also enabled by the chart-wide metrics.enabled observability knob
+    materializerPort: 9091
+    runnerPort: 9092
+  resources: {}
+  materializerResources: {}
+
+# Immutable artifact service (HOR-399). The umbrella's MinIO subchart creates
+# the bucket + dedicated credential. For standalone/BYO MinIO, override endpoint
+# and credentialSecret with an equivalent bucket-scoped credential.
+artifact:
+  enabled: false # umbrella enables; standalone/BYO must configure endpoint + Secret
+  endpoint: "" # default: <release>-minio:9000
+  bucket: iterabase-artifacts
+  credentialSecret: "" # default: <release>-minio-artifacts
+  secure: false
+  maxSizeBytes: 1073741824
+  defaultRetention: "" # empty = indefinite
+  pendingTTL: 1h
+  sweepInterval: 1m
+
+service:
+  port: 8080
+
+# Public HTTPS edge for the same-origin work-management Dashboard (HOR-428). The
+# api serves the static Dashboard UI (at / and /assets/*) plus the authenticated
+# /v1/work-* APIs; expose both on one ingress host. TLS terminates at
+# ingress-nginx via cert-manager (clusterIssuer: selfsigned for kind/E2E,
+# letsencrypt-prod for the prod overlay). Backend protocol is set automatically:
+# HTTPS when the umbrella internalTLS is on (the api serves an internal-CA leaf),
+# HTTP otherwise. Enabled in the prod overlay.
+ingress:
+  enabled: false
+  className: nginx
+  host: "" # REQUIRED when tls.enabled (cert SAN); e.g. app.example.com
+  tls:
+    enabled: false
+    secretName: "" # default: <release>-control-plane-api-tls
+    clusterIssuer: "" # e.g. selfsigned (kind/E2E) / letsencrypt-prod (prod overlay)
+  # external-dns integration (prod edge): create the Cloudflare A record for the
+  # host when enabled (source: ingress). No-op on kind/E2E.
+  externalDns:
+    enabled: false
+    hostname: "" # DNS record name; defaults to ingress.host when empty
+    target: "" # optional A-record target; if unset external-dns uses Ingress status.loadBalancer
+
+# JWT issuance (api only; the manager never reads this key). The signing key is
+# an RSA private key, auto-generated into a Secret on first install (stable via
+# helm lookup) and mounted read-only into the api container.
+jwt:
+  keyId: control-plane-1
+  signingKeyPath: /etc/control-plane/jwt/private.pem
+  secret: "" # default: <release>-control-plane-jwt
+
+# Identity-resolution mode (enrolled | open). Enrolled = a linked
+# IdentityMapping is required; unlinked surface users are denied.
+identity:
+  mode: enrolled
+
+# Service accounts seeded by `bootstrap --service-account <name>` (scope=token).
+bootstrap:
+  serviceAccounts:
+    - agent-fleet
+
+# PostgreSQL connection. Defaults match the bundled pgvector postgresql
+# subchart. To BYO: set postgresql.enabled=false and override host/secret.
+postgresql:
+  enabled: true
+  # pgvector image override (the bundled postgresql subchart defaults to
+  # postgres:16-alpine, which lacks the pgvector extension the control-plane
+  # migration requires).
+  image:
+    repository: pgvector/pgvector
+    tag: "pg16"
+  auth:
+    username: controlplane
+    database: controlplane
+    gatewayUser:
+      enabled: true
+      username: gateway
+  # control-plane-local connection values (defaults match the subchart).
+  host: "" # default: <release>-postgresql
+  port: 5432
+  passwordSecret: "" # default: <release>-postgresql
+  passwordKey: password
+  # Internal TLS for the bundled Postgres (mirrored to the postgresql subchart).
+  # The umbrella sets this together with the top-level tls.enabled below.
+  tls:
+    enabled: false
+    issuerName: internal-ca
+
+# Internal TLS for the control-plane itself (api HTTPS + Postgres client
+# verify-full). When enabled: the api serves HTTPS from a cert-manager leaf
+# cert (TLS_CERT_FILE/TLS_KEY_FILE), and DATABASE_URL uses sslmode=verify-full
+# + the internal CA (mounted read-only). The umbrella's internalTLS.enabled
+# fans this on; caSecretName is required when enabled (the
+# <release>-internal-ca-root Secret, set by the umbrella).
+tls:
+  enabled: false
+  issuerName: internal-ca
+  caSecretName: ""   # required when enabled: the internal CA root Secret
+  caMountPath: /etc/iterabase/internal-ca/ca.crt
+
+resources: {}
+
+# Metrics (opt-in; flip on with observability — see values-observability.yaml).
+# ServiceMonitors/PodMonitors for the control-plane. The tool runner ships live
+# materializer + runner /metrics endpoints. The api endpoint and manager
+# controller-runtime metrics port remain service-repo concerns (HOR-408 tracked
+# gap); those monitors scrape once the endpoints ship. The api monitor scrapes
+# over HTTPS with the internal CA when
+# internalTLS is on (the api serves HTTPS from a cert-manager leaf). The
+# ServiceMonitors/PodMonitors are Prometheus Operator CRDs — rendered regardless
+# but only reconciled when the operator (from the observability chart) is
+# installed.
+metrics:
+  enabled: false
+  # scrapeInterval: 30s
+  # The manager's controller-runtime metrics port (name). DORMANT until the
+  # control-plane service repo binds --metrics-bind-address to a port named
+  # http-metrics (HOR-408 tracked gap). Override the port name here once shipped.
+  manager:
+    port: http-metrics
+  # vLLM / model-backend pods (managed by this chart's operator over the
+  # modelbackends CRD). vLLM exposes /metrics natively on its serving port. The
+  # pods are operator-created with the label
+  # `platform.iterabase.com/modelbackend=<instance>` (see backendLabels() in the
+  # control-plane service repo) and a container port named `http` (default 8000);
+  # the selector below matches any model-backend pod by label existence (the
+  # instance name is dynamic). Disabled even when metrics.enabled — opt in here
+  # or (for prod) in the overlay. namespaceSelector:any so it discovers pods
+  # wherever the operator places them.
+  vllm:
+    enabled: false
+    port: http
+    path: /metrics
+    namespaceSelector:
+      any: true
+    selector:
+      matchExpressions:
+        - key: platform.iterabase.com/modelbackend
+          operator: Exists
