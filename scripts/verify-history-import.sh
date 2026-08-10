@@ -50,13 +50,13 @@ while IFS=$'\t' read -r component repository branch source_head relocation_sha m
   fi
 
   if ! git log --follow --format='%H' "${target}" -- "${component}/${representative_file}" \
-      | grep -Fqx "${follow_sha}"; then
+      | grep -Fx "${follow_sha}" >/dev/null; then
     echo "error: git log --follow did not cross the ${component} relocation" >&2
     exit 1
   fi
 
   if ! git blame --line-porcelain "${target}" -- "${component}/${representative_file}" \
-      | grep -Eq "^${blame_sha} "; then
+      | grep -E "^${blame_sha} " >/dev/null; then
     echo "error: blame did not retain pre-relocation attribution for ${component}" >&2
     exit 1
   fi
