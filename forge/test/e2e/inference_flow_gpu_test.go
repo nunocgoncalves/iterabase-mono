@@ -1,0 +1,292 @@
+// Package e2e inference-flow GPU scenario: a full request→completion happy
+// path on a real GPU droplet — forge bootstraps k3s + the GPU operator + the
+// iterabase-platform chart, the control-plane deploys a real vLLM backend, and
+// a curl to the gateway with an API key returns a real completion.
+package e2e
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/nunocgoncalves/forge/test/e2e/internal/kindtest"
+	"github.com/stretchr/testify/require"
+)
+
+// The GPU scenario's platform and inference stages run the full happy path on
+// the same cheapest-creatable GPU droplet used by the substrate smoke:
+//
+//	forge apply (k3s + GPU operator + iterabase-platform umbrella chart)
+//	  -> apply ModelBackend(kind: vLLM, Qwen/Qwen3.5-0.8B) + Model (alias)
+//	  -> the control-plane deploys vLLM (downloads the model, serves on /health)
+//	  -> apply IdentityMapping CR (identity) + POST /v1/api-keys (gateway key)
+//	  -> wait for the gateway snapshot to mark the model available (vLLM ready)
+//	  -> curl /v1/chat/completions with the gateway key -> a real completion
+//
+// Skips loudly when no GPU capacity is available so DO scarcity doesn't block
+// PRs. The contract-propagation layer is covered by the isolated Kind scenario;
+// this stage proves real serving.
+func applyInferencePlatformStage(t *testing.T, state *digitalOceanGPUState) {
+	// GPU readiness was already proven on this host. Reconcile the same config
+	// with the platform chart while skipping a redundant GPU-operator upgrade.
+	cfgPath := writeForgeConfigInferenceGPU(t, state.runID, state.vm.IP, state.privKeyPath, state.chartVersion)
+	out := applyWithRetryArgs(t, state.forgeBin, state.forgeHome, cfgPath, "--skip-gpu")
+	assertApplyMarkers(t, out, "action:     skip", "node ready: true", "certificate substrate applied: true",
+		"chart applied: true", "overlay applied: true", "flux installed: true", "gitrepository: ready=True")
+	t.Logf("apply output:\n%s", out)
+}
+
+func runInferenceGPUStage(t *testing.T, state *digitalOceanGPUState) {
+	runID := state.runID
+	forgeHome := state.forgeHome
+
+	// Wrap the fetched kubeconfig with the kindtest helpers (kubectl +
+	//    port-forward against the remote k3s cluster, no Kind cluster created).
+	kcPath := filepath.Join(forgeHome, runID, "kubeconfig.yaml")
+	c := kindtest.UseCluster(t, runID, kcPath)
+	namespace := "iterabase-system"
+	const (
+		alias       = "qwen35"
+		mbName      = "qwen35-backend"
+		release     = "itb"
+		apiService  = "svc/itb-control-plane-api"
+		apiSelector = "app.kubernetes.io/component=api"
+		svcPort     = 8080
+	)
+
+	// 4. apply a ModelBackend (vLLM, Qwen/Qwen3.5-0.8B) + a Model (alias). The
+	//    control-plane deploys vLLM on the GPU node (requests nvidia.com/gpu: 1,
+	//    downloads the model, serves on /health).
+	catManifest := fmt.Sprintf(`apiVersion: platform.iterabase.com/v1alpha1
+kind: ModelBackend
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  kind: vLLM
+  model: Qwen/Qwen3.5-0.8B
+  # extraArgs (HOR-370): a safe serving flag appended after the
+  # controller-managed --model/--port/--host. --max-model-len caps context
+  # (well within Qwen3.5-0.8B's limit); asserted on the rendered pod below.
+  extraArgs:
+    - --max-model-len
+    - "8192"
+---
+apiVersion: platform.iterabase.com/v1alpha1
+kind: Model
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  modelID: %s
+  displayName: Qwen3.5 0.8B
+  backendRef: %s
+  transforms:
+    rewrite_model_name: true
+`, mbName, namespace, mbName, namespace, alias, mbName)
+	catPath := filepath.Join(t.TempDir(), "catalog.yaml")
+	require.NoError(t, os.WriteFile(catPath, []byte(catManifest), 0o600))
+	c.Kubectl(t, "apply", "-f", catPath, "-n", namespace)
+
+	// 5. capture the control-plane admin key (bootstrap init container) + apply
+	//    an IdentityMapping CR (the identity — CRD path).
+	apiPod := c.FirstPodName(t, namespace, apiSelector)
+	logs := c.PodLogs(t, namespace, apiPod, "bootstrap")
+	adminKey := mustFindKey(t, logs, "scope=admin")
+	t.Logf("captured control-plane admin key (prefix=%s)", keyPrefix(adminKey))
+
+	imManifest := fmt.Sprintf(`apiVersion: platform.iterabase.com/v1alpha1
+kind: IdentityMapping
+metadata:
+  name: inference-user
+  namespace: %s
+spec:
+  identity:
+    kind: user
+    displayName: Inference GPU E2E User
+  bindings:
+    - provider: teams
+      type: user
+      externalID: aad:inference-gpu-user
+`, namespace)
+	imPath := filepath.Join(t.TempDir(), "identitymapping.yaml")
+	require.NoError(t, os.WriteFile(imPath, []byte(imManifest), 0o600))
+	c.ApplyAndWait(t, imPath, namespace,
+		"identitymapping.platform.iterabase.com/inference-user",
+		"jsonpath={.status.ready}=true", 60*time.Second)
+	identityID := strings.TrimSpace(c.Kubectl(t, "get", "-n", namespace,
+		"identitymapping.platform.iterabase.com", "inference-user",
+		"-o", "jsonpath={.status.identityID}"))
+	require.NotEmpty(t, identityID, "IdentityMapping has no status.identityID")
+
+	// 6. port-forward the control-plane API + issue a gateway-scoped API key.
+	apiBase, _ := c.PortForward(t, namespace, apiService, svcPort, 18080)
+	apiClient := kindtest.HTTPClient()
+	gatewayKey := createAPIKey(t, apiClient, apiBase+"/v1/api-keys", adminKey, identityID, "gateway")
+	t.Logf("issued gateway-scoped API key (prefix=%s)", keyPrefix(gatewayKey))
+
+	// 7. get the gateway's admin key + port-forward the gateway. Port-forward
+	//    (not the droplet IP / ingress) so the readiness poll + the completion
+	//    request depend only on the gateway pod being up — not on ingress-nginx
+	//    scheduling on the GPU node (which can lag or be tainted differently).
+	gatewayAdminKey := getSecretKey(t, c, namespace, release+"-gateway-admin", "adminApiKey")
+	gwBase, _ := c.PortForward(t, namespace, "svc/"+release+"-gateway", svcPort, 18081)
+	gwClient := &http.Client{Timeout: 300 * time.Second} // long timeout for inference
+
+	// 8. wait for vLLM to be ready: the gateway snapshot marks the model
+	//    available (the control-plane's ModelBackend reconciler sets healthy=true
+	//    once the vLLM Deployment is Available — model downloaded + serving).
+	entry, ok := waitForModelAvailable(t, c.Kubeconfig, namespace, mbName, gwClient, gwBase, gatewayAdminKey, alias, 25*time.Minute)
+	if !ok {
+		dumpVLLMDiagnostics(t, c.Kubeconfig, namespace, mbName)
+		t.Fatalf("model %q never became available within 25m (vLLM pod not healthy; see diagnostics above)", alias)
+	}
+	t.Logf("model available: alias=%s backend=%s", entry.ModelID, entry.BackendURL)
+
+	// HOR-375: assert spec.extraArgs are appended to the vLLM container args
+	// (the control-plane renders them after --model/--port/--host). Validates
+	// the extraArgs field end-to-end on the real vLLM serving path.
+	renderedArgs := strings.TrimSpace(c.Kubectl(t, "get", "deployment", mbName, "-n", namespace,
+		"-o", "jsonpath={.spec.template.spec.containers[0].args}"))
+	require.Contains(t, renderedArgs, "--max-model-len",
+		"HOR-370: spec.extraArgs (--max-model-len) must be appended to the vLLM container args")
+	require.Contains(t, renderedArgs, "8192",
+		"HOR-370: spec.extraArgs value must be appended to the vLLM container args")
+
+	// 9. curl /v1/chat/completions with the gateway key -> a real completion.
+	status, body := chatCompletionsStatus(t, gwClient, gwBase, gatewayKey, alias)
+	if status != http.StatusOK {
+		dumpVLLMDiagnostics(t, c.Kubeconfig, namespace, mbName)
+		t.Fatalf("chat completions: status %d, want 200 (real completion)\n%s", status, body)
+	}
+	content := extractCompletion(body)
+	if content == "" {
+		t.Fatalf("completion response has no content:\n%s", body)
+	}
+	preview := content
+	if len(preview) > 120 {
+		preview = preview[:120] + "…"
+	}
+	t.Logf("real completion (%s): %q", alias, preview)
+}
+
+// writeForgeConfigInferenceGPU writes the current production-ordered GPU
+// fixture: exact public Flux source, certificate substrate, then platform.
+func writeForgeConfigInferenceGPU(t *testing.T, name, ip, keyPath, chartVersion string) string {
+	return writeForgeConfigSpec(t, forgeConfigSpec{
+		Name: name, Address: ip, SSHKeyPath: keyPath, GPU: true,
+		ChartVersion: chartVersion, ChartRelease: "itb", ChartNamespace: "iterabase-system",
+		OverlayRepo: "https://github.com/nunocgoncalves/iterabase-overlay.git",
+		OverlayRef:  envOr("FORGE_E2E_OVERLAY_REF", "e2e"),
+		Flux:        true,
+	})
+}
+
+// waitForModelAvailable polls the gateway's /admin/v1/snapshot until the given
+// alias is present AND available=true (vLLM ready). The generous timeout covers
+// the vLLM image pull + model download + startup on the GPU droplet. Logs the
+// last status + body periodically, and dumps vLLM pod diagnostics once at the
+// 5m mark (so a crash/image-pull issue is visible without waiting the full
+// timeout). Returns (entry, false) on timeout so the caller can dump final
+// diagnostics before failing.
+func waitForModelAvailable(t *testing.T, kubeconfig, namespace, mbName string, client *http.Client, baseURL, adminKey, alias string, timeout time.Duration) (catalogEntry, bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var lastStatus int
+	nextLog := time.Now().Add(2 * time.Minute)
+	earlyDiag := time.Now().Add(5 * time.Minute)
+	dumpedEarly := false
+	for time.Now().Before(deadline) {
+		catalog, status, err := snapshotCatalog(client, baseURL, adminKey)
+		if err == nil {
+			lastStatus = status
+			if status == http.StatusOK {
+				for _, e := range catalog {
+					if e.ModelID == alias && e.Available {
+						return e, true
+					}
+				}
+			}
+		}
+		if time.Now().After(nextLog) {
+			t.Logf("waiting for %s: last status=%d", alias, lastStatus)
+			nextLog = time.Now().Add(2 * time.Minute)
+		}
+		// Early diagnostics at 5m: if the model is still unavailable, dump the
+		// vLLM pod state + logs so the cause is visible without waiting 25m.
+		if !dumpedEarly && time.Now().After(earlyDiag) {
+			dumpedEarly = true
+			t.Logf("model %s still unavailable after 5m; dumping vLLM diagnostics", alias)
+			dumpVLLMDiagnostics(t, kubeconfig, namespace, mbName)
+		}
+		time.Sleep(15 * time.Second)
+	}
+	return catalogEntry{}, false
+}
+
+// kubectlAllowFail runs kubectl with the given kubeconfig + returns (output,
+// error) without fataling — for best-effort diagnostics where a failing command
+// shouldn't abort the rest (mirrors sshRun in this package).
+func kubectlAllowFail(t *testing.T, kubeconfig string, args ...string) (string, error) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer cancel()
+	full := append([]string{"--kubeconfig", kubeconfig}, args...)
+	out, err := exec.CommandContext(ctx, "kubectl", full...).CombinedOutput()
+	return string(out), err
+}
+
+// dumpVLLMDiagnostics queries the vLLM backend state when the model never
+// becomes available (or a completion fails), so the cause (unschedulable
+// nodeSelector, image pull, crash, slow startup) is visible in the test log
+// rather than just "not ready". Best-effort — mirrors dumpGPUDiagnostics: each
+// command is logged with its error + a failure doesn't abort the rest.
+func dumpVLLMDiagnostics(t *testing.T, kubeconfig, namespace, mbName string) {
+	t.Helper()
+	t.Log("=== vLLM backend diagnostics ===")
+	label := "platform.iterabase.com/modelbackend=" + mbName
+	type kCmd struct {
+		desc string
+		args []string
+	}
+	cmds := []kCmd{
+		{"kubectl get modelbackend " + mbName + " -o yaml", []string{"get", "modelbackend", mbName, "-n", namespace, "-o", "yaml"}},
+		{"kubectl get deployment " + mbName + " -o wide", []string{"get", "deployment", mbName, "-n", namespace, "-o", "wide"}},
+		{"kubectl get pods -l " + label + " -o wide", []string{"get", "pods", "-n", namespace, "-l", label, "-o", "wide"}},
+		{"kubectl describe pod -l " + label, []string{"describe", "pod", "-n", namespace, "-l", label}},
+		{"kubectl get nodes --show-labels (nvidia labels?)", []string{"get", "nodes", "--show-labels"}},
+		{"kubectl logs -l " + label + " --tail=100 --all-containers=true (current)", []string{"logs", "-n", namespace, "-l", label, "--tail=100", "--all-containers=true"}},
+		{"kubectl logs -l " + label + " --previous --tail=100 (crash reason)", []string{"logs", "-n", namespace, "-l", label, "--previous", "--tail=100", "--all-containers=true"}},
+		{"kubectl get events -n " + namespace + " --sort-by=.lastTimestamp", []string{"get", "events", "-n", namespace, "--sort-by=.lastTimestamp"}},
+	}
+	for _, cm := range cmds {
+		out, err := kubectlAllowFail(t, kubeconfig, cm.args...)
+		t.Logf("$ %s\n%s(err=%v)", cm.desc, out, err)
+	}
+}
+
+// extractCompletion pulls the text content from an OpenAI chat-completion
+// response (choices[0].message.content).
+func extractCompletion(body string) string {
+	var resp struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal([]byte(body), &resp); err != nil {
+		return ""
+	}
+	if len(resp.Choices) == 0 {
+		return ""
+	}
+	return resp.Choices[0].Message.Content
+}
