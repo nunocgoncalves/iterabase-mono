@@ -31,6 +31,20 @@ Relocation and merge commit SHAs depend on the reproducer's commit identity and
 time. The original source SHAs do not: the script verifies each pinned head before
 adding any commits.
 
+## Integrate the bootstrap pull request
+
+HOR-472 is the one exception to the repositories' usual rebase-only merge policy.
+Merge its pull request with **Create a merge commit** so GitHub does not replay or
+flatten the recorded relocation and unrelated-history merges. Immediately after it
+lands, restore the standard rebase-only pull-request protection:
+
+```sh
+./scripts/restore-rebase-protection.sh
+```
+
+The restoration retains required pull requests and deletion/non-fast-forward
+protection while disabling merge and squash commits for subsequent work.
+
 ## Verify the import
 
 Run the committed verification against the ticket branch or `master`:
