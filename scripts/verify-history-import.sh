@@ -12,7 +12,7 @@ if [[ ! -f "${manifest}" ]]; then
 fi
 
 source_heads=()
-expected_top_level=(README.md charts control-plane docs forge inference-gateway scripts)
+expected_top_level=(.gitleaks.toml README.md charts control-plane docs forge inference-gateway scripts)
 
 while IFS=$'\t' read -r component repository branch source_head relocation_sha merge_sha sample_sha follow_sha blame_sha representative_file; do
   if [[ "${component}" == "component" || -z "${component}" ]]; then

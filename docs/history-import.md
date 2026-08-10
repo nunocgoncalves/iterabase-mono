@@ -71,6 +71,17 @@ source SHA unchanged also proves its original metadata, message, tree, and paren
 are unchanged. `git show --no-patch --format=fuller <sample-sha>` displays that
 evidence directly.
 
+Scan all reachable history for secrets with:
+
+```sh
+gitleaks git --config .gitleaks.toml .
+```
+
+The narrow allowlist covers only the literal `your-admin-secret` and
+`ml-YOUR_KEY_HERE` documentation placeholders in preserved inference-gateway
+history. It does not suppress any credential-shaped value outside the
+`curl-auth-header` rule.
+
 ## Repository and release boundaries
 
 No generic overlay, customer overlay, Iterabase deployment overlay, or marketing

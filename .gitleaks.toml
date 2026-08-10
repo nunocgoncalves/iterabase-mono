@@ -1,0 +1,12 @@
+title = "iterabase-mono secret scanning"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Public inference-gateway README placeholders preserved by the exact-history import"
+targetRules = ["curl-auth-header"]
+regexes = [
+  '''your-admin-secret''',
+  '''ml-YOUR_KEY_HERE''',
+]
