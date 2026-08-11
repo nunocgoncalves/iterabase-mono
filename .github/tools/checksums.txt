@@ -1,6 +1,6 @@
 # tool version platform sha256 URL
-helm v3.18.0 linux-amd64 961e587fc2c03807f8a99ac25ef063fa9e6915f1894729399cbb95d2a79af931 https://get.helm.sh/helm-v3.18.0-linux-amd64.tar.gz
-helm v3.18.0 linux-arm64 489c9d2d3ea4e095331249d74b4407fb5ac1d338c28429d70cdedccfe6e2b029 https://get.helm.sh/helm-v3.18.0-linux-arm64.tar.gz
+helm v4.2.3 linux-amd64 e9b88b4ee95b18c706839c28d3a0220e5bc470e9cd9262410c90793c45ff8b7c https://get.helm.sh/helm-v4.2.3-linux-amd64.tar.gz
+helm v4.2.3 linux-arm64 21abd9354d39b2cd79a8d76be6912cd137a983cbf997193503fb8a6a6e2f2785 https://get.helm.sh/helm-v4.2.3-linux-arm64.tar.gz
 kind v0.24.0 linux-amd64 b89aada5a39d620da3fcd16435b7f28d858927dd53f92cbac77686b0588b600d https://github.com/kubernetes-sigs/kind/releases/download/v0.24.0/kind-linux-amd64
 kind v0.24.0 linux-arm64 2968808d916e12d0a25c56d07c9a1c987163f972513fa8a94a2125a69f9c50eb https://github.com/kubernetes-sigs/kind/releases/download/v0.24.0/kind-linux-arm64
 kubectl v1.31.0 linux-amd64 7c27adc64a84d1c0cc3dcf7bf4b6e916cc00f3f576a2dbac51b318d926032437 https://dl.k8s.io/release/v1.31.0/bin/linux/amd64/kubectl
