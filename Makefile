@@ -6,7 +6,7 @@ GO_MODULE_FILES := $(foreach module,$(GO_MODULES),$(module)/go.mod $(module)/go.
 WORKSPACE_FILES := go.work go.work.sum $(GO_MODULE_FILES)
 CONTAINER_TOOL ?= docker
 
-.PHONY: workspace-sync workspace-check workspace-list fmt-check vet build test lint codegen-check charts-check docker-build check install-hooks pre-commit clean
+.PHONY: workspace-sync workspace-check workspace-list fmt-check vet build test lint codegen-check charts-check release-check release-security-audit docker-build check install-hooks pre-commit clean
 
 workspace-sync:
 	go work sync
@@ -64,6 +64,13 @@ codegen-check:
 charts-check:
 	$(MAKE) -C charts check
 
+release-check:
+	python3 .github/scripts/test_release.py
+	python3 .github/scripts/release.py validate
+
+release-security-audit:
+	.github/scripts/audit_release_security.sh
+
 # Preserve the existing runtime image names while using component-scoped
 # monorepo build contexts.
 docker-build:
@@ -73,12 +80,12 @@ docker-build:
 	$(CONTAINER_TOOL) build -t control-plane-tool-runner:latest -f control-plane/tool-runner/Dockerfile control-plane/tool-runner
 	$(CONTAINER_TOOL) build -t inference-gateway:latest inference-gateway
 
-check: workspace-check fmt-check vet build test lint codegen-check charts-check docker-build
+check: workspace-check fmt-check vet build test lint codegen-check charts-check release-check docker-build
 
 install-hooks:
 	git config core.hooksPath .githooks
 
-pre-commit: workspace-check fmt-check vet build lint
+pre-commit: workspace-check fmt-check vet build lint release-check
 
 clean:
 	$(MAKE) -C control-plane clean

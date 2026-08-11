@@ -230,8 +230,8 @@ template; match them in the overlay or via a service-repo ticket.
 
 ## Release
 
-Per-chart tags publish to GHCR OCI:
-
-```sh
-git tag iterabase-platform-0.1.0 && git push --tags
-```
+Raw tags do not publish. Chart candidates are packaged once, validated through
+the protected exact-candidate suite, and promoted unchanged only after founder
+approval. Update `release/compatibility.json` in a reviewed monorepo PR, then use
+the root **Protected release** workflow with the exact master SHA and selected
+chart version. See [`../docs/release.md`](../docs/release.md).

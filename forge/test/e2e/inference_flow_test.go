@@ -87,6 +87,7 @@ func runInferenceFlowContract(t *testing.T) {
 		"control-plane.dispatch.enabled":   "false",
 		"control-plane.toolRunner.enabled": "false",
 	}
+	applyCandidateImageOverrides(values)
 	c.HelmInstall(t, release, chartRef, chartVersion, namespace, localChart, values)
 
 	// 3. capture the control-plane admin key from the api pod's bootstrap init

@@ -44,6 +44,8 @@ make test             # component Go tests + Forge nested E2E harness tests
 make lint             # all Go modules, including Forge E2E
 make codegen-check    # protobuf freshness
 make charts-check     # Helm/static chart validation
+make release-check    # compatibility manifest, suite mapping, and release request contracts
+make release-security-audit # authenticated GitHub environment, deploy-key, and tag-ruleset audit
 make docker-build     # control-plane and inference-gateway images
 make check            # complete local matrix above
 make install-hooks    # shared monorepo pre-commit hook

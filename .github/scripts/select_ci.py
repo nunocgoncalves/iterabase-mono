@@ -70,7 +70,7 @@ def selection(paths: list[str], select_all: bool = False) -> dict[str, object]:
 
             # Root build/workspace contracts and CI implementation fan out to
             # every owner. Component-local Makefiles remain component-scoped.
-            if path.startswith(".github/") or path in {
+            if path.startswith((".github/", "release/")) or path in {
                 "Makefile",
                 "go.work",
                 "go.work.sum",

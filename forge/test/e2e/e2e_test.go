@@ -379,6 +379,19 @@ func sshDial(ip, keyPath string) (*ssh.Client, error) {
 
 func buildForge(t *testing.T) string {
 	t.Helper()
+	if candidate := os.Getenv("FORGE_E2E_BINARY"); candidate != "" {
+		absolute, err := filepath.Abs(candidate)
+		if err != nil {
+			t.Fatalf("resolve FORGE_E2E_BINARY: %v", err)
+		}
+		if info, err := os.Stat(absolute); err != nil {
+			t.Fatalf("candidate Forge binary unavailable: %v", err)
+		} else if info.Mode()&0o111 == 0 {
+			t.Fatalf("candidate Forge binary %s is not executable", absolute)
+		}
+		t.Logf("using exact candidate Forge binary %s", absolute)
+		return absolute
+	}
 	wd, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("getwd: %v", err)

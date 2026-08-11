@@ -12,18 +12,19 @@ import (
 // writers vary only the fields relevant to the contract they exercise, so the
 // common k3s/host recipe cannot drift across files.
 type forgeConfigSpec struct {
-	Name           string
-	Address        string
-	SSHKeyPath     string
-	RunLabel       bool
-	DualStack      bool
-	GPU            bool
-	ChartVersion   string
-	ChartRelease   string
-	ChartNamespace string
-	OverlayRepo    string
-	OverlayRef     string
-	Flux           bool
+	Name            string
+	Address         string
+	SSHKeyPath      string
+	RunLabel        bool
+	DualStack       bool
+	GPU             bool
+	ChartVersion    string
+	ChartRepository string
+	ChartRelease    string
+	ChartNamespace  string
+	OverlayRepo     string
+	OverlayRef      string
+	Flux            bool
 }
 
 func writeForgeConfigSpec(t *testing.T, spec forgeConfigSpec) string {
@@ -67,6 +68,9 @@ spec:
 		fmt.Fprintf(&cfg, `  chart:
     version: %s
 `, spec.ChartVersion)
+		if spec.ChartRepository != "" {
+			fmt.Fprintf(&cfg, "    repository: %s\n", spec.ChartRepository)
+		}
 		if spec.ChartRelease != "" {
 			fmt.Fprintf(&cfg, "    release: %s\n", spec.ChartRelease)
 		}

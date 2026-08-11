@@ -60,6 +60,12 @@
     "images": ["control-plane", "control-plane-harness", "control-plane-harness-isolation", "control-plane-tool-runner", "inference-gateway"]
   },
   {
+    "name": "release compatibility contract fans out to every owner",
+    "paths": ["release/compatibility.json"],
+    "true": ["control_plane", "ui", "harness", "tool_runner", "proto", "inference_gateway", "forge", "forge_e2e", "forge_real_e2e", "charts", "images"],
+    "images": ["control-plane", "control-plane-harness", "control-plane-harness-isolation", "control-plane-tool-runner", "inference-gateway"]
+  },
+  {
     "name": "cross-component PR unions owners",
     "paths": ["control-plane/harness/src/index.ts", "inference-gateway/internal/auth/auth.go"],
     "true": ["harness", "inference_gateway", "images"],

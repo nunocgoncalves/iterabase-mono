@@ -165,6 +165,9 @@ func runDigitalOceanGPU(t *testing.T) {
 
 	vm, err := state.provisioner.Provision(ctx, state.runID, pubKey, privKeyPath)
 	if errors.Is(err, ErrNoGPUCapacity) {
+		if os.Getenv("FORGE_E2E_REQUIRE_CAPACITY") == "true" {
+			t.Fatalf("mandatory GPU release validation incomplete — no capacity: %v", err)
+		}
 		t.Skipf("GPU e2e skipped — no GPU capacity (try later or add Verda): %v", err)
 	}
 	require.NoError(t, err)
