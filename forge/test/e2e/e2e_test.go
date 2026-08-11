@@ -173,10 +173,21 @@ func assertCurrentPlatformStage(t *testing.T, state *digitalOceanCPUState) {
 
 func reapplyCurrentPlatformStage(t *testing.T, state *digitalOceanCPUState) {
 	t.Helper()
-	out := applyWithRetry(t, state.forgeBin, state.forgeHome,
-		writeCurrentOverlayForgeConfig(t, state.runID, state.ip, state.privKeyPath, state.chartVersion))
-	assertApplyMarkers(t, out, "action:     skip", "node ready: true", "certificate substrate applied: true",
-		"chart applied: true", "overlay applied: true", "flux installed: true")
+	overlayRepository, overlayRef := prepareCandidateOverlay(
+		t, state.runID, state.ip, state.privKeyPath,
+	)
+	flux := overlayRepository == candidateOverlayRepository
+	cfgPath := writeCurrentOverlayForgeConfig(
+		t, state.runID, state.ip, state.privKeyPath, state.chartVersion,
+		overlayRepository, overlayRef, flux,
+	)
+	out := applyWithRetry(t, state.forgeBin, state.forgeHome, cfgPath)
+	markers := []string{"action:     skip", "node ready: true", "certificate substrate applied: true",
+		"chart applied: true", "overlay applied: true"}
+	if flux {
+		markers = append(markers, "flux installed: true")
+	}
+	assertApplyMarkers(t, out, markers...)
 }
 
 func assertRemoteHelmChartVersion(t *testing.T, sc *ssh.Client, release, namespace, want string) {

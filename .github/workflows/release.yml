@@ -637,14 +637,14 @@ jobs:
         run: |
           manifest_value() { jq -r "$1" <<<"$PLAN"; }
           set_env() { printf '%s\n' "$1" >> "$GITHUB_ENV"; }
-          set_env "ITERABASE_CHART_VERSION=$(manifest_value '.compatibility.charts[\"iterabase-platform\"].version')"
-          set_env "CONTROL_PLANE_CHART_VERSION=$(manifest_value '.compatibility.charts[\"control-plane\"].version')"
+          set_env "ITERABASE_CHART_VERSION=$(manifest_value '.compatibility.charts["iterabase-platform"].version')"
+          set_env "CONTROL_PLANE_CHART_VERSION=$(manifest_value '.compatibility.charts["control-plane"].version')"
           set_env "CONTROL_PLANE_IMAGE_REPO=ghcr.io/nunocgoncalves/control-plane"
-          set_env "CONTROL_PLANE_IMAGE_TAG=$(manifest_value '.compatibility.components[\"control-plane\"].version')"
+          set_env "CONTROL_PLANE_IMAGE_TAG=$(manifest_value '.compatibility.components["control-plane"].version')"
           set_env "INFERENCE_GATEWAY_IMAGE_REPO=ghcr.io/nunocgoncalves/inference-gateway"
-          set_env "INFERENCE_GATEWAY_IMAGE_TAG=$(manifest_value '.compatibility.components[\"inference-gateway\"].version')"
+          set_env "INFERENCE_GATEWAY_IMAGE_TAG=$(manifest_value '.compatibility.components["inference-gateway"].version')"
           set_env "TOOL_RUNNER_IMAGE_REPO=ghcr.io/nunocgoncalves/control-plane-tool-runner"
-          set_env "TOOL_RUNNER_IMAGE_TAG=$(manifest_value '.compatibility.components[\"control-plane\"].version')"
+          set_env "TOOL_RUNNER_IMAGE_TAG=$(manifest_value '.compatibility.components["control-plane"].version')"
 
           for metadata in candidates/candidate-*.json; do
             [ -f "$metadata" ] || continue
@@ -694,23 +694,10 @@ jobs:
             inference_version="$(basename "$inference" | sed -E 's/^inference-gateway-//;s/\.tgz$//')"
             rm -f candidate-local/iterabase-platform/charts/inference-gateway-*.tgz
             cp "$inference" candidate-local/iterabase-platform/charts/
-            python3 - candidate-local/iterabase-platform/Chart.yaml "$inference_version" <<'PY'
-          import pathlib, sys
-          path, version = pathlib.Path(sys.argv[1]), sys.argv[2]
-          lines = path.read_text(encoding="utf-8").splitlines()
-          selected = False
-          for index, line in enumerate(lines):
-              if line.strip() == "- name: inference-gateway":
-                  selected = True
-                  continue
-              if selected and line.strip().startswith("version:"):
-                  indent = line[: len(line) - len(line.lstrip())]
-                  lines[index] = f"{indent}version: {version}"
-                  break
-          else:
-              raise SystemExit("platform chart has no inference-gateway dependency")
-          path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-          PY
+            python3 .github/scripts/release.py replace-chart-dependency \
+              --chart candidate-local/iterabase-platform/Chart.yaml \
+              --dependency inference-gateway \
+              --version "$inference_version"
             cmp "$inference" "candidate-local/iterabase-platform/charts/$(basename "$inference")"
           fi
 
@@ -784,7 +771,7 @@ jobs:
           PLAN: ${{ needs.preflight.outputs.plan }}
         run: |
           set_env() { printf '%s\n' "$1" >> "$GITHUB_ENV"; }
-          set_env "ITERABASE_CHART_VERSION=$(jq -r '.compatibility.charts[\"iterabase-platform\"].version' <<<"$PLAN")"
+          set_env "ITERABASE_CHART_VERSION=$(jq -r '.compatibility.charts["iterabase-platform"].version' <<<"$PLAN")"
           archive="$(find candidates/forge -name 'forge_*_linux_amd64.tar.gz' -print -quit 2>/dev/null || true)"
           if [ -n "$archive" ]; then
             mkdir -p candidate-bin

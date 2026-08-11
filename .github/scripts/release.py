@@ -181,6 +181,34 @@ def compact(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
 
+def replace_chart_dependency_version(chart: Path, dependency: str, version: str) -> None:
+    """Replace one dependency version in source or Helm-normalized Chart.yaml."""
+    require_semver(version, f"chart dependency {dependency} version")
+    try:
+        lines = chart.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise ReleaseError(f"cannot read {chart}: {exc}") from exc
+
+    selected = False
+    for index, line in enumerate(lines):
+        if re.match(rf"^\s*(?:-\s+)?name:\s*{re.escape(dependency)}\s*$", line):
+            selected = True
+            continue
+        if selected:
+            match = re.match(r"^(\s*)(-\s+)?version:\s*\S+\s*$", line)
+            if match:
+                marker = match.group(2) or ""
+                lines[index] = f"{match.group(1)}{marker}version: {version}"
+                try:
+                    chart.write_text("\n".join(lines) + "\n", encoding="utf-8")
+                except OSError as exc:
+                    raise ReleaseError(f"cannot write {chart}: {exc}") from exc
+                return
+            if re.match(r"^\s*-\s+", line):
+                break
+    raise ReleaseError(f"chart {chart} has no {dependency} dependency version")
+
+
 def selected_request(args: argparse.Namespace) -> dict[str, str]:
     selected: dict[str, str] = {}
     for input_name, target in INPUT_TARGETS.items():
@@ -439,6 +467,11 @@ def parser() -> argparse.ArgumentParser:
     for input_name in INPUT_TARGETS:
         plan.add_argument("--" + input_name.replace("_", "-"), default="")
 
+    dependency = sub.add_parser("replace-chart-dependency")
+    dependency.add_argument("--chart", type=Path, required=True)
+    dependency.add_argument("--dependency", required=True)
+    dependency.add_argument("--version", required=True)
+
     evidence = sub.add_parser("evidence")
     evidence.add_argument("--plan", type=Path, required=True)
     evidence.add_argument("--assets", type=Path, required=True)
@@ -479,6 +512,9 @@ def main() -> int:
             if args.github_output:
                 write_outputs(plan, args.github_output)
             print(json.dumps(plan, indent=2, sort_keys=True))
+        elif args.command == "replace-chart-dependency":
+            replace_chart_dependency_version(args.chart, args.dependency, args.version)
+            print(f"updated {args.dependency} dependency to {args.version} in {args.chart}")
         elif args.command == "evidence":
             plan = load_json(args.plan)
             evidence = assemble_evidence(plan, args.assets)

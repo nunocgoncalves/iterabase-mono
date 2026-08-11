@@ -95,6 +95,22 @@ class ReleaseContractTests(unittest.TestCase):
         manifest["components"]["control-plane"]["version"] = "0.0.26"
         release.validate_contract(manifest, self.targets)
 
+    def test_dependency_injection_accepts_source_and_helm_key_order(self) -> None:
+        fixtures = (
+            """dependencies:\n  - name: inference-gateway\n    version: 0.2.8\n    repository: file://../inference-gateway\n""",
+            """dependencies:\n- condition: inference-gateway.enabled\n  name: inference-gateway\n  repository: file://../inference-gateway\n  version: 0.2.8\n""",
+        )
+        for source in fixtures:
+            with self.subTest(source=source), tempfile.TemporaryDirectory() as directory:
+                chart = Path(directory) / "Chart.yaml"
+                chart.write_text(source, encoding="utf-8")
+                release.replace_chart_dependency_version(chart, "inference-gateway", "0.2.9")
+                self.assertIn("version: 0.2.9", chart.read_text(encoding="utf-8"))
+
+    def test_release_workflow_has_no_shell_escaped_jq_keys(self) -> None:
+        workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+        self.assertNotIn(r'[\"', workflow)
+
     def test_fixture_drift_is_rejected(self) -> None:
         manifest = copy.deepcopy(self.manifest)
         manifest["fixtures"]["platform_chart"] = "9.9.9"

@@ -35,15 +35,30 @@ import (
 // this stage proves real serving.
 func applyInferencePlatformStage(t *testing.T, state *digitalOceanGPUState) {
 	loginCandidateRegistry(t, state.vm.IP, state.privKeyPath)
+	var fluxOut string
+	if candidateOverlayValues(t) != "" {
+		fluxConfig := writeForgeConfigInferenceGPU(
+			t, state.runID, state.vm.IP, state.privKeyPath, state.chartVersion,
+			candidateOverlayRepository, candidateOverlayRef, true,
+		)
+		fluxOut = applyWithRetryArgs(
+			t, state.forgeBin, state.forgeHome, fluxConfig, "--skip-gpu", "--skip-chart",
+		)
+	}
+	overlayRepository, overlayRef := prepareCandidateOverlay(
+		t, state.runID, state.vm.IP, state.privKeyPath,
+	)
+	flux := overlayRepository == candidateOverlayRepository
 	// GPU readiness was already proven on this host. Reconcile the same config
 	// with the platform chart while skipping a redundant GPU-operator upgrade.
-	cfgPath := writeForgeConfigInferenceGPU(t, state.runID, state.vm.IP, state.privKeyPath, state.chartVersion)
-	out := applyWithRetryArgs(t, state.forgeBin, state.forgeHome, cfgPath, "--skip-gpu")
-	assertApplyMarkers(t, out, "action:     skip", "node ready: true", "certificate substrate applied: true",
+	candidateConfig := writeForgeConfigInferenceGPU(
+		t, state.runID, state.vm.IP, state.privKeyPath, state.chartVersion,
+		overlayRepository, overlayRef, flux,
+	)
+	out := applyWithRetryArgs(t, state.forgeBin, state.forgeHome, candidateConfig, "--skip-gpu")
+	assertApplyMarkers(t, fluxOut+"\n"+out, "action:     skip", "node ready: true", "certificate substrate applied: true",
 		"chart applied: true", "overlay applied: true", "flux installed: true", "gitrepository: ready=True")
 	t.Logf("apply output:\n%s", out)
-	applyCandidateImagesOnHost(t, state.vm.IP, state.privKeyPath, "itb", "iterabase-system",
-		os.Getenv("FORGE_E2E_CHART_REPOSITORY"), state.chartVersion)
 	candidateCluster := kindtest.UseCluster(t, state.runID, filepath.Join(state.forgeHome, state.runID, "kubeconfig.yaml"))
 	assertCandidateImageDigests(t, candidateCluster, "iterabase-system",
 		controlPlaneDigestEnv, inferenceGatewayDigestEnv, toolRunnerDigestEnv)
@@ -185,14 +200,15 @@ spec:
 
 // writeForgeConfigInferenceGPU writes the current production-ordered GPU
 // fixture: exact public Flux source, certificate substrate, then platform.
-func writeForgeConfigInferenceGPU(t *testing.T, name, ip, keyPath, chartVersion string) string {
+func writeForgeConfigInferenceGPU(
+	t *testing.T, name, ip, keyPath, chartVersion, overlayRepository, overlayRef string, flux bool,
+) string {
 	return writeForgeConfigSpec(t, forgeConfigSpec{
 		Name: name, Address: ip, SSHKeyPath: keyPath, GPU: true,
 		ChartVersion: chartVersion, ChartRepository: os.Getenv("FORGE_E2E_CHART_REPOSITORY"),
 		ChartRelease: "itb", ChartNamespace: "iterabase-system",
-		OverlayRepo: "https://github.com/nunocgoncalves/iterabase-overlay.git",
-		OverlayRef:  envOr("FORGE_E2E_OVERLAY_REF", "e2e"),
-		Flux:        true,
+		OverlayRepo: overlayRepository, OverlayRef: overlayRef,
+		Flux: flux,
 	})
 }
 
