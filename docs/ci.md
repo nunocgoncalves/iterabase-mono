@@ -42,8 +42,10 @@ silent CI removals.
 
 ## Path ownership
 
-`.github/scripts/select_ci.py` is the source of truth and
-`.github/ci/path-selection-fixtures.json` proves representative docs-only,
+`.github/scripts/collect_changed_paths.py` is the shared diff collector for both
+workflows. It includes deletions and disables rename collapsing so both sides of
+a move retain their owners. `.github/scripts/select_ci.py` is the owner-mapping
+source of truth, and its tests prove deletion-only, cross-owner move, docs-only,
 single-component, shared-contract, and cross-component changes.
 
 - Root workflow, root Makefile, and Go workspace metadata fan out to every owner.

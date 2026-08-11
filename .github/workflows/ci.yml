@@ -49,20 +49,7 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: |
-          set -euo pipefail
-          if [ "$EVENT_NAME" = workflow_dispatch ]; then
-            echo "all=true" >> "$GITHUB_OUTPUT"
-            : > /tmp/changed-paths
-          elif [[ -z "$BASE_SHA" || "$BASE_SHA" =~ ^0+$ ]]; then
-            git diff-tree --root --no-commit-id --name-only -r "$HEAD_SHA" > /tmp/changed-paths
-          elif [ "$EVENT_NAME" = pull_request ]; then
-            git diff --name-only --diff-filter=ACMRT "$BASE_SHA...$HEAD_SHA" > /tmp/changed-paths
-          else
-            git diff --name-only --diff-filter=ACMRT "$BASE_SHA" "$HEAD_SHA" > /tmp/changed-paths
-          fi
-          echo "Changed paths:"
-          cat /tmp/changed-paths
+        run: python3 .github/scripts/collect_changed_paths.py --all-event workflow_dispatch
       - name: Select CI owners
         id: select
         run: |
@@ -317,7 +304,7 @@ jobs:
           cache-to: type=gha,mode=max,scope=ci-${{ matrix.name }}
 
   required:
-    name: required
+    name: CI / required
     if: always()
     needs:
       - changes
