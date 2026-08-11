@@ -53,11 +53,11 @@ test-e2e-tool-runner:
 test-e2e-inference:
 	cd test/e2e && go test -v -race -count=1 -timeout 15m -run '^TestE2E$$/^kind-inference-contract$$' .
 
-# Compile the scenario package without infrastructure, then run pure harness
-# unit tests (runner + kind/chart helpers). The nested module is outside the
-# root module's ./... and therefore needs this explicit CI target.
+# Run package-level pure tests while excluding the infrastructure scenario
+# entrypoint, then run pure harness unit tests (runner + kind/chart helpers).
+# The nested module is outside the root module's ./... and needs this CI target.
 test-e2e-unit:
-	cd test/e2e && go test -run '^$$' .
+	cd test/e2e && go test -race -count=1 -skip '^TestE2E$$' .
 	cd test/e2e && go test -race -count=1 ./internal/...
 
 lint:

@@ -89,30 +89,21 @@ func runDigitalOceanCPU(t *testing.T) {
 
 func provisionCPUStage(t *testing.T, state *digitalOceanCPUState) {
 	t.Helper()
-	const maxAttempts = 2
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		d, err := createDroplet(state.ctx, state.client, state.runID, state.pubKey)
-		if err != nil {
-			t.Logf("create droplet attempt %d/%d failed: %v", attempt, maxAttempts, err)
-			if attempt < maxAttempts {
-				time.Sleep(5 * time.Second)
-				continue
-			}
-			t.Fatalf("create droplet failed after %d attempts: %v", maxAttempts, err)
-		}
-		ip, err := waitForIP(state.ctx, state.client, d.ID)
-		if err == nil {
-			err = waitForHostReady(state.ctx, ip, state.privKeyPath)
-		}
-		if err == nil {
-			state.droplet, state.ip = d, ip
-			t.Logf("droplet ip %s (attempt %d/%d)", ip, attempt, maxAttempts)
-			return
-		}
-		t.Logf("host readiness attempt %d/%d failed: %v", attempt, maxAttempts, err)
-		deleteDroplet(state.ctx, state.client, d.ID)
+	d, err := createDroplet(state.ctx, state.client, state.runID, state.pubKey)
+	if err != nil {
+		t.Fatalf("create droplet: %v", err)
 	}
-	t.Fatalf("host never became ready after %d droplet attempts", maxAttempts)
+	ip, err := waitForIP(state.ctx, state.client, d.ID)
+	if err != nil {
+		deleteDroplet(state.ctx, state.client, d.ID)
+		t.Fatalf("wait for droplet IP: %v", err)
+	}
+	if err := waitForHostReady(state.ctx, ip, state.privKeyPath); err != nil {
+		deleteDroplet(state.ctx, state.client, d.ID)
+		t.Fatalf("wait for host readiness: %v", err)
+	}
+	state.droplet, state.ip = d, ip
+	t.Logf("droplet ip %s", ip)
 }
 
 func rejectGPUOnCPUStage(t *testing.T, state *digitalOceanCPUState) {
