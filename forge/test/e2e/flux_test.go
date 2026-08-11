@@ -28,7 +28,7 @@ func runFluxStage(t *testing.T, state *digitalOceanCPUState) {
 	cfgPath := writeFluxForgeConfig(t, state.runID, state.ip, state.privKeyPath, state.chartVersion)
 	// The platform chart is already proven by the baseline/overlay stages. Flux
 	// owns only continuous overlay reconciliation, so keep this phase isolated.
-	out := applyWithRetryArgs(t, state.forgeBin, state.forgeHome, cfgPath, "--skip-chart")
+	out := applyOnceArgs(t, state.forgeBin, state.forgeHome, cfgPath, "--skip-chart")
 	assertApplyMarkers(t, out, "action:     skip", "node ready: true", "flux installed: true")
 	t.Logf("apply output:\n%s", out)
 

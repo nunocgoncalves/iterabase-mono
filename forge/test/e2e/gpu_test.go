@@ -188,7 +188,7 @@ func runDigitalOceanGPU(t *testing.T) {
 
 func applyGPUSubstrateStage(t *testing.T, state *digitalOceanGPUState) {
 	cfgPath := writeForgeConfigGPU(t, state.runID, state.vm.IP, state.privKeyPath)
-	out := applyWithRetry(t, state.forgeBin, state.forgeHome, cfgPath)
+	out := applyOnce(t, state.forgeBin, state.forgeHome, cfgPath)
 	assertApplyMarkers(t, out, "node ready: true", "gpu ready: true")
 	t.Logf("apply output:\n%s", out)
 }
