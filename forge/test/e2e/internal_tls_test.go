@@ -52,6 +52,7 @@ func runInternalTLS(t *testing.T) {
 	// Disable the edge substrate (ingress-nginx + MetalLB) + external-dns + minio
 	// — not needed to prove internal TLS, and they'd need a MetalLB pool on kind.
 	// Keep control-plane + Postgres + Redis + gateway + cert-manager + cert-issuers.
+	// Dispatch is outside this scenario and requires an overlay-owned default model.
 	edgeOff := map[string]string{
 		"ingress-nginx.enabled":            "false",
 		"metallb.enabled":                  "false",
@@ -59,6 +60,7 @@ func runInternalTLS(t *testing.T) {
 		"external-dns.enabled":             "false",
 		"minio.enabled":                    "false",
 		"control-plane.artifact.enabled":   "false",
+		"control-plane.dispatch.enabled":   "false",
 		"control-plane.toolRunner.enabled": "false",
 	}
 
