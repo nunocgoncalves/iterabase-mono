@@ -367,11 +367,21 @@ def candidate_image_metadata(directory: Path) -> list[tuple[Path, dict[str, Any]
     if not directory.exists():
         return []
     result = []
-    required = ("name", "target", "repository", "version", "candidate_tag", "digest")
+    required = (
+        "name",
+        "target",
+        "repository",
+        "version",
+        "candidate_tag",
+        "digest",
+        "source_sha",
+    )
     for path in sorted(directory.glob("candidate-*.json")):
         if path.name.endswith(".spdx.json"):
             continue
         metadata = load_json(path)
+        if metadata.get("schema_version") != 1:
+            raise ReleaseError(f"{path}.schema_version must be 1")
         missing = [
             field
             for field in required
@@ -380,6 +390,8 @@ def candidate_image_metadata(directory: Path) -> list[tuple[Path, dict[str, Any]
         if missing:
             raise ReleaseError(f"{path} is missing candidate image fields: {', '.join(missing)}")
         require_semver(metadata["version"], f"{path}.version")
+        if not SHA.fullmatch(metadata["source_sha"]):
+            raise ReleaseError(f"{path}.source_sha must be a full lowercase commit SHA")
         if not re.fullmatch(r"sha256:[0-9a-f]{64}", metadata["digest"]):
             raise ReleaseError(f"{path}.digest must be an immutable sha256 digest")
         result.append((path, metadata))
@@ -408,6 +420,10 @@ def validate_candidate_image_evidence(plan: dict[str, Any], assets: Path) -> Non
                 raise ReleaseError(
                     f"candidate image evidence {name}.{field} does not match the release plan"
                 )
+        if metadata["source_sha"] != plan["master_sha"]:
+            raise ReleaseError(
+                f"candidate image evidence {name}.source_sha does not match the release plan"
+            )
 
 
 def new_promotion_ledger(plan: dict[str, Any]) -> dict[str, Any]:
