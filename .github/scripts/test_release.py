@@ -131,12 +131,14 @@ class ReleaseContractTests(unittest.TestCase):
             images.mkdir()
             for planned in plan["image_matrix"]:
                 metadata = {
+                    "schema_version": 1,
                     "name": planned["name"],
                     "target": planned["target"],
                     "repository": planned["repository"],
                     "version": planned["version"],
                     "candidate_tag": planned["candidate_tag"],
                     "digest": "sha256:" + "1" * 64,
+                    "source_sha": self.sha,
                 }
                 (images / f"candidate-{planned['name']}.json").write_text(
                     release.compact(metadata), encoding="utf-8"
@@ -153,7 +155,26 @@ class ReleaseContractTests(unittest.TestCase):
             evidence = release.assemble_evidence(plan, assets)
             self.assertEqual(evidence["validation"]["status"], "passed")
 
-            (images / "candidate-control-plane.json").unlink()
+            control_metadata = images / "candidate-control-plane.json"
+            original = release.load_json(control_metadata)
+            mismatched = {**original, "source_sha": "b" * 40}
+            control_metadata.write_text(release.compact(mismatched), encoding="utf-8")
+            with self.assertRaisesRegex(release.ReleaseError, "source_sha does not match"):
+                release.assemble_evidence(plan, assets)
+
+            missing_source = original.copy()
+            missing_source.pop("source_sha")
+            control_metadata.write_text(release.compact(missing_source), encoding="utf-8")
+            with self.assertRaisesRegex(release.ReleaseError, "missing.*source_sha"):
+                release.assemble_evidence(plan, assets)
+
+            missing_schema = original.copy()
+            missing_schema.pop("schema_version")
+            control_metadata.write_text(release.compact(missing_schema), encoding="utf-8")
+            with self.assertRaisesRegex(release.ReleaseError, "schema_version must be 1"):
+                release.assemble_evidence(plan, assets)
+
+            control_metadata.unlink()
             with self.assertRaisesRegex(release.ReleaseError, "candidate image evidence mismatch"):
                 release.assemble_evidence(plan, assets)
 
