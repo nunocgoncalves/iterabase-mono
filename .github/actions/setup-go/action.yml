@@ -1,0 +1,57 @@
+name: Set up pinned Go with immutable caches
+description: Install an exact Go version and restore module/build caches keyed by every supplied go.sum.
+inputs:
+  go-version:
+    description: Exact Go patch version.
+    required: true
+  cache-dependency-path:
+    description: Newline-separated go.sum paths that define the cache.
+    required: true
+  cache-scope:
+    description: Job-owner scope that prevents concurrent partial cache saves.
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Install Go ${{ inputs.go-version }}
+      uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+      with:
+        go-version: ${{ inputs.go-version }}
+        cache: false
+        check-latest: false
+    - name: Compute content-addressed Go cache key
+      id: cache-key
+      shell: bash
+      env:
+        DEPENDENCY_PATHS: ${{ inputs.cache-dependency-path }}
+      run: |
+        set -euo pipefail
+        cd "$GITHUB_WORKSPACE"
+        files=()
+        while IFS= read -r path; do
+          [ -z "$path" ] && continue
+          [ -f "$path" ] || { echo "missing Go cache dependency: $path" >&2; exit 1; }
+          files+=("$path")
+        done <<< "$DEPENDENCY_PATHS"
+        digest=$(python3 "$GITHUB_WORKSPACE/.github/scripts/content_digest.py" "${files[@]}")
+        version=$(go env GOVERSION)
+        key="${{ runner.os }}-${{ runner.arch }}-go-${version}-${{ inputs.cache-scope }}-${digest}"
+        echo "key=$key" >> "$GITHUB_OUTPUT"
+        echo "Go cache key: $key"
+        printf 'Go cache inputs:\n%s\n' "$DEPENDENCY_PATHS"
+    - name: Restore exact Go dependency/build cache
+      id: cache
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      with:
+        path: |
+          ~/go/pkg/mod
+          ~/.cache/go-build
+        key: ${{ steps.cache-key.outputs.key }}
+    - name: Report Go cache source
+      shell: bash
+      run: |
+        if [ "${{ steps.cache.outputs.cache-hit }}" = "true" ]; then
+          echo "Go cache source: exact key ${{ steps.cache-key.outputs.key }}"
+        else
+          echo "Go cache source: cold (will save ${{ steps.cache-key.outputs.key }})"
+        fi

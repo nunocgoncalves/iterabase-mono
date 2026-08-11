@@ -1,0 +1,47 @@
+name: Set up pinned Node with immutable npm cache
+description: Install an exact Node version and cache npm downloads by the selected lockfile.
+inputs:
+  node-version:
+    description: Exact Node patch version.
+    required: true
+  cache-dependency-path:
+    description: package-lock.json that defines the npm download cache.
+    required: true
+  cache-scope:
+    description: Job-owner scope that prevents concurrent partial cache saves.
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Install Node ${{ inputs.node-version }}
+      uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      with:
+        node-version: ${{ inputs.node-version }}
+        check-latest: false
+    - name: Compute content-addressed npm cache key
+      id: cache-key
+      shell: bash
+      run: |
+        set -euo pipefail
+        cd "$GITHUB_WORKSPACE"
+        lock='${{ inputs.cache-dependency-path }}'
+        [ -f "$lock" ] || { echo "missing npm cache dependency: $lock" >&2; exit 1; }
+        digest=$(python3 "$GITHUB_WORKSPACE/.github/scripts/content_digest.py" "$lock")
+        key="${{ runner.os }}-${{ runner.arch }}-npm-node-$(node --version)-${{ inputs.cache-scope }}-${digest}"
+        echo "key=$key" >> "$GITHUB_OUTPUT"
+        echo "path=$(npm config get cache)" >> "$GITHUB_OUTPUT"
+        echo "npm cache key: $key (lockfile: $lock)"
+    - name: Restore exact npm download cache
+      id: cache
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      with:
+        path: ${{ steps.cache-key.outputs.path }}
+        key: ${{ steps.cache-key.outputs.key }}
+    - name: Report npm cache source
+      shell: bash
+      run: |
+        if [ "${{ steps.cache.outputs.cache-hit }}" = "true" ]; then
+          echo "npm cache source: exact key ${{ steps.cache-key.outputs.key }}"
+        else
+          echo "npm cache source: cold (will save ${{ steps.cache-key.outputs.key }})"
+        fi

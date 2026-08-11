@@ -164,15 +164,36 @@ ui-test: ## Run Dashboard component, interaction, a11y, and localization tests.
 
 HARNESS_IMG ?= control-plane-harness:latest
 HARNESS_ISOLATION_IMG ?= control-plane-harness-isolation:latest
-BUF ?= buf
+BUF ?= $(LOCALBIN)/buf
+PROTOC_GEN_GO ?= $(LOCALBIN)/protoc-gen-go
+PROTOC_GEN_CONNECT_GO ?= $(LOCALBIN)/protoc-gen-connect-go
+PROTOC_GEN_ES ?= $(LOCALBIN)/protoc-gen-es
+BUF_VERSION ?= v1.72.0
+PROTOC_GEN_GO_VERSION ?= v1.36.12
+PROTOC_GEN_CONNECT_GO_VERSION ?= v1.20.0
+PROTOC_GEN_ES_VERSION ?= 2.13.0
 
-.PHONY: proto-tools
-proto-tools: ## Install buf + protoc plugins (proto lint + codegen). buf: brew install buf (or GOBIN=$$PWD/bin go install github.com/bufbuild/buf/cmd/buf@latest).
-	@command -v $(BUF) >/dev/null 2>&1 || GOBIN="$(LOCALBIN)" go install github.com/bufbuild/buf/cmd/buf@latest
-	@command -v protoc-gen-go >/dev/null 2>&1 || GOBIN="$(LOCALBIN)" go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
-	@command -v protoc-gen-connect-go >/dev/null 2>&1 || GOBIN="$(LOCALBIN)" go install connectrpc.com/connect/cmd/protoc-gen-connect-go@latest
-	@command -v protoc-gen-es >/dev/null 2>&1 || npm install -g @bufbuild/protoc-gen-es
+.PHONY: proto-tools buf-tool protoc-gen-go-tool protoc-gen-connect-go-tool protoc-gen-es-tool
+proto-tools: buf-tool protoc-gen-go-tool protoc-gen-connect-go-tool protoc-gen-es-tool ## Install pinned buf + protoc plugins (proto lint + codegen).
 	@PATH="$(LOCALBIN):$$PATH" $(BUF) --version
+
+buf-tool: $(LOCALBIN)
+	$(call go-install-tool,$(BUF),github.com/bufbuild/buf/cmd/buf,$(BUF_VERSION))
+
+protoc-gen-go-tool: $(LOCALBIN)
+	$(call go-install-tool,$(PROTOC_GEN_GO),google.golang.org/protobuf/cmd/protoc-gen-go,$(PROTOC_GEN_GO_VERSION))
+
+protoc-gen-connect-go-tool: $(LOCALBIN)
+	$(call go-install-tool,$(PROTOC_GEN_CONNECT_GO),connectrpc.com/connect/cmd/protoc-gen-connect-go,$(PROTOC_GEN_CONNECT_GO_VERSION))
+
+protoc-gen-es-tool: $(LOCALBIN)
+	@set -e; \
+	prefix="$(LOCALBIN)/protoc-gen-es-$(PROTOC_GEN_ES_VERSION)"; \
+	if [ ! -x "$$prefix/node_modules/.bin/protoc-gen-es" ]; then \
+		rm -rf "$$prefix"; \
+		npm install --silent --no-save --prefix "$$prefix" @bufbuild/protoc-gen-es@$(PROTOC_GEN_ES_VERSION); \
+	fi; \
+	ln -sf "$$prefix/node_modules/.bin/protoc-gen-es" "$(PROTOC_GEN_ES)"
 
 .PHONY: proto
 proto: proto-tools ## Generate Go+TS stubs from proto/: harness -> internal/harnessrpc + harness/src/gen; gateway -> internal/gatewayrpc.
@@ -271,10 +292,8 @@ GOLANGCI_LINT = $(LOCALBIN)/golangci-lint
 KUSTOMIZE_VERSION ?= v5.8.1
 CONTROLLER_TOOLS_VERSION ?= v0.21.0
 
-# setup-envtest is its own module (sigs.k8s.io/controller-runtime/tools/setup-envtest),
-# not versioned with controller-runtime; @latest resolves it. Pin a specific
-# setup-envtest release here if you need reproducibility.
-ENVTEST_VERSION ?= latest
+# setup-envtest is its own module; keep CI/local generation reproducible.
+ENVTEST_VERSION ?= v0.24.1
 
 # ENVTEST_K8S_VERSION is derived from k8s.io/api in go.mod (e.g. 1.36).
 ENVTEST_K8S_VERSION ?= $(shell v='$(call gomodver,k8s.io/api)'; \

@@ -1,0 +1,35 @@
+name: Set up checksummed Kubernetes tools
+description: Restore verified archives and install exact Helm, Kind, kubectl, and kubeconform versions.
+runs:
+  using: composite
+  steps:
+    - name: Compute immutable tool cache key
+      id: cache-key
+      shell: bash
+      run: |
+        set -euo pipefail
+        digest=$(python3 "$GITHUB_WORKSPACE/.github/scripts/content_digest.py" "$GITHUB_WORKSPACE/.github/tools/checksums.txt")
+        key="${{ runner.os }}-${{ runner.arch }}-kubernetes-tools-${digest}"
+        echo "key=$key" >> "$GITHUB_OUTPUT"
+        echo "tool cache key: $key"
+    - name: Restore exact checksummed tool archives
+      id: cache
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      with:
+        path: ~/.cache/iterabase/tools
+        key: ${{ steps.cache-key.outputs.key }}
+    - name: Verify archives and install tools
+      shell: bash
+      run: "$GITHUB_WORKSPACE/.github/scripts/install_kubernetes_tools.sh"
+    - name: Report tool cache source and versions
+      shell: bash
+      run: |
+        if [ "${{ steps.cache.outputs.cache-hit }}" = "true" ]; then
+          echo "tool cache source: exact key ${{ steps.cache-key.outputs.key }}"
+        else
+          echo "tool cache source: cold (will save ${{ steps.cache-key.outputs.key }})"
+        fi
+        helm version --short
+        kind version
+        kubectl version --client=true
+        kubeconform -v
