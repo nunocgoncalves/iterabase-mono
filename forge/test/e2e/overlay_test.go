@@ -25,14 +25,26 @@ func runOverlayStage(t *testing.T, state *digitalOceanCPUState) {
 		t.Fatal("FORGE_OVERLAY_TOKEN must be unset for this test (public repo, tokenless)")
 	}
 	loginCandidateRegistry(t, state.ip, state.privKeyPath)
-
-	cfgPath := writeCurrentOverlayForgeConfig(t, state.runID, state.ip, state.privKeyPath, state.chartVersion)
-	out := applyWithRetry(t, state.forgeBin, state.forgeHome, cfgPath)
-	assertApplyMarkers(t, out, "action:     skip", "node ready: true", "certificate substrate applied: true",
+	var fluxOut string
+	if candidateOverlayValues(t) != "" {
+		fluxConfig := writeCurrentOverlayForgeConfig(
+			t, state.runID, state.ip, state.privKeyPath, state.chartVersion,
+			candidateOverlayRepository, candidateOverlayRef, true,
+		)
+		fluxOut = applyWithRetryArgs(t, state.forgeBin, state.forgeHome, fluxConfig, "--skip-chart")
+	}
+	overlayRepository, overlayRef := prepareCandidateOverlay(
+		t, state.runID, state.ip, state.privKeyPath,
+	)
+	flux := overlayRepository == candidateOverlayRepository
+	candidateConfig := writeCurrentOverlayForgeConfig(
+		t, state.runID, state.ip, state.privKeyPath, state.chartVersion,
+		overlayRepository, overlayRef, flux,
+	)
+	out := applyWithRetry(t, state.forgeBin, state.forgeHome, candidateConfig)
+	assertApplyMarkers(t, fluxOut+"\n"+out, "action:     skip", "node ready: true", "certificate substrate applied: true",
 		"chart applied: true", "overlay applied: true", "overlay commit:", "flux installed: true", "gitrepository: ready=True")
 	t.Logf("apply output:\n%s", out)
-	applyCandidateImagesOnHost(t, state.ip, state.privKeyPath, state.runID, "iterabase-system",
-		os.Getenv("FORGE_E2E_CHART_REPOSITORY"), state.chartVersion)
 	candidateCluster := kindtest.UseCluster(t, state.runID, filepath.Join(state.forgeHome, state.runID, "kubeconfig.yaml"))
 	assertCandidateImageDigests(t, candidateCluster, "iterabase-system",
 		controlPlaneDigestEnv, inferenceGatewayDigestEnv, toolRunnerDigestEnv)
@@ -49,16 +61,17 @@ func runOverlayStage(t *testing.T, state *digitalOceanCPUState) {
 	}
 }
 
-// writeCurrentOverlayForgeConfig uses the public exact-Flux fixture. Until its
-// fixture PR lands on e2e, FORGE_E2E_OVERLAY_REF can select the coordinated
-// ticket branch; the committed default returns to e2e before this PR merges.
-func writeCurrentOverlayForgeConfig(t *testing.T, name, ip, keyPath, chartVersion string) string {
+// writeCurrentOverlayForgeConfig uses the public exact-Flux fixture or the
+// ephemeral host-local derivative that injects selected release candidates.
+func writeCurrentOverlayForgeConfig(
+	t *testing.T, name, ip, keyPath, chartVersion, overlayRepository, overlayRef string, flux bool,
+) string {
 	return writeForgeConfigSpec(t, forgeConfigSpec{
 		Name: name, Address: ip, SSHKeyPath: keyPath, RunLabel: true, DualStack: true,
 		ChartVersion:    chartVersion,
 		ChartRepository: os.Getenv("FORGE_E2E_CHART_REPOSITORY"),
-		OverlayRepo:     "https://github.com/nunocgoncalves/iterabase-overlay.git",
-		OverlayRef:      envOr("FORGE_E2E_OVERLAY_REF", "e2e"),
-		Flux:            true,
+		OverlayRepo:     overlayRepository,
+		OverlayRef:      overlayRef,
+		Flux:            flux,
 	})
 }

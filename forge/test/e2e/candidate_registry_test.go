@@ -62,67 +62,6 @@ func loginCandidateRegistry(t *testing.T, ip, keyPath string) {
 	t.Log("authenticated Forge's isolated root Helm config to the candidate chart registry")
 }
 
-// applyCandidateImagesOnHost reapplies the already-installed exact chart with
-// immutable image identities while retaining the real overlay values Forge
-// applied. This keeps coordinated real-machine validation on the normal Forge
-// chart/release and proves the selected image union on the provisioned host.
-func applyCandidateImagesOnHost(t *testing.T, ip, keyPath, release, namespace, chartRepository, chartVersion string) {
-	t.Helper()
-	values := make([]string, 0, 6)
-	add := func(repositoryEnv, digestEnv, valuePrefix string) {
-		digest := os.Getenv(digestEnv)
-		if digest == "" {
-			return
-		}
-		repository := os.Getenv(repositoryEnv)
-		if repository == "" {
-			t.Fatalf("%s requires %s", digestEnv, repositoryEnv)
-		}
-		tag := os.Getenv(strings.TrimSuffix(digestEnv, "_DIGEST") + "_TAG")
-		if tag == "" {
-			t.Fatalf("%s requires its immutable *_IMAGE_TAG reference", digestEnv)
-		}
-		values = append(values,
-			valuePrefix+".repository="+repository,
-			valuePrefix+".tag="+tag,
-		)
-	}
-	add("CONTROL_PLANE_IMAGE_REPO", controlPlaneDigestEnv, "control-plane.image")
-	add("INFERENCE_GATEWAY_IMAGE_REPO", inferenceGatewayDigestEnv, "inference-gateway.image")
-	add("TOOL_RUNNER_IMAGE_REPO", toolRunnerDigestEnv, "control-plane.toolRunner.image")
-	if len(values) == 0 {
-		return
-	}
-	if chartRepository == "" {
-		chartRepository = "oci://ghcr.io/nunocgoncalves/iterabase-charts/iterabase-platform"
-	}
-	args := []string{
-		"sudo", "helm",
-		"--kubeconfig", "/etc/rancher/k3s/k3s.yaml",
-		"--registry-config", candidateRegistryConfigPath,
-		"upgrade", release, chartRepository,
-		"--version", chartVersion,
-		"--namespace", namespace,
-		"--reuse-values", "--wait", "--timeout", "10m",
-	}
-	for _, value := range values {
-		args = append(args, "--set-string", value)
-	}
-	quoted := make([]string, len(args))
-	for i, arg := range args {
-		quoted[i] = candidateShellQuote(arg)
-	}
-	client, err := sshDial(ip, keyPath)
-	if err != nil {
-		t.Fatalf("dial candidate host for immutable image apply: %v", err)
-	}
-	defer client.Close()
-	if output, err := sshOutput(client, strings.Join(quoted, " ")); err != nil {
-		t.Fatalf("apply immutable candidate images: %v\n%s", err, output)
-	}
-	t.Log("reapplied real-machine chart with selected immutable image digests")
-}
-
 func candidateShellQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
 }
