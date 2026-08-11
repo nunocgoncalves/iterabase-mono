@@ -1,0 +1,98 @@
+{
+  "schema_version": 1,
+  "temporary_until": "HOR-476",
+  "targets": {
+    "control-plane": {
+      "manifest_section": "components",
+      "manifest_name": "control-plane",
+      "tag_prefix": "control-plane-v",
+      "kind_scenarios": [
+        "controlplane-identity",
+        "inference-contract",
+        "internal-tls",
+        "tool-runner-contract"
+      ],
+      "source_suites": ["control-plane"],
+      "real_machine": false,
+      "images": [
+        {
+          "name": "control-plane",
+          "repository": "ghcr.io/nunocgoncalves/control-plane",
+          "context": "control-plane",
+          "dockerfile": "control-plane/Dockerfile"
+        },
+        {
+          "name": "control-plane-harness",
+          "repository": "ghcr.io/nunocgoncalves/control-plane-harness",
+          "context": "control-plane/harness",
+          "dockerfile": "control-plane/harness/Dockerfile"
+        },
+        {
+          "name": "control-plane-tool-runner",
+          "repository": "ghcr.io/nunocgoncalves/control-plane-tool-runner",
+          "context": "control-plane/tool-runner",
+          "dockerfile": "control-plane/tool-runner/Dockerfile"
+        }
+      ]
+    },
+    "inference-gateway": {
+      "manifest_section": "components",
+      "manifest_name": "inference-gateway",
+      "tag_prefix": "inference-gateway-v",
+      "kind_scenarios": ["inference-contract", "internal-tls"],
+      "source_suites": ["inference-gateway"],
+      "real_machine": false,
+      "images": [
+        {
+          "name": "inference-gateway",
+          "repository": "ghcr.io/nunocgoncalves/inference-gateway",
+          "context": "inference-gateway",
+          "dockerfile": "inference-gateway/Dockerfile"
+        }
+      ]
+    },
+    "forge": {
+      "manifest_section": "components",
+      "manifest_name": "forge",
+      "tag_prefix": "forge-v",
+      "kind_scenarios": [],
+      "source_suites": ["forge"],
+      "real_machine": true,
+      "images": []
+    },
+    "control-plane-chart": {
+      "manifest_section": "charts",
+      "manifest_name": "control-plane",
+      "tag_prefix": "control-plane-",
+      "kind_scenarios": ["controlplane-identity", "tool-runner-contract"],
+      "source_suites": ["charts"],
+      "real_machine": false,
+      "chart": "control-plane"
+    },
+    "inference-gateway-chart": {
+      "manifest_section": "charts",
+      "manifest_name": "inference-gateway",
+      "tag_prefix": "inference-gateway-",
+      "kind_scenarios": ["inference-contract", "internal-tls"],
+      "source_suites": ["charts"],
+      "real_machine": false,
+      "chart": "inference-gateway"
+    },
+    "iterabase-platform-chart": {
+      "manifest_section": "charts",
+      "manifest_name": "iterabase-platform",
+      "tag_prefix": "iterabase-platform-",
+      "kind_scenarios": [
+        "controlplane-identity",
+        "inference-contract",
+        "cert-issuers",
+        "internal-tls",
+        "tool-runner-contract"
+      ],
+      "source_suites": ["charts"],
+      "real_machine": true,
+      "chart": "iterabase-platform",
+      "companions": ["cert-manager-substrate"]
+    }
+  }
+}

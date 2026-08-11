@@ -21,6 +21,7 @@ func runOverlayStage(t *testing.T, state *digitalOceanCPUState) {
 	if _, ok := os.LookupEnv("FORGE_OVERLAY_TOKEN"); ok {
 		t.Fatal("FORGE_OVERLAY_TOKEN must be unset for this test (public repo, tokenless)")
 	}
+	loginCandidateRegistry(t, state.ip, state.privKeyPath)
 
 	cfgPath := writeCurrentOverlayForgeConfig(t, state.runID, state.ip, state.privKeyPath, state.chartVersion)
 	out := applyWithRetry(t, state.forgeBin, state.forgeHome, cfgPath)
@@ -46,9 +47,10 @@ func runOverlayStage(t *testing.T, state *digitalOceanCPUState) {
 func writeCurrentOverlayForgeConfig(t *testing.T, name, ip, keyPath, chartVersion string) string {
 	return writeForgeConfigSpec(t, forgeConfigSpec{
 		Name: name, Address: ip, SSHKeyPath: keyPath, RunLabel: true, DualStack: true,
-		ChartVersion: chartVersion,
-		OverlayRepo:  "https://github.com/nunocgoncalves/iterabase-overlay.git",
-		OverlayRef:   envOr("FORGE_E2E_OVERLAY_REF", "e2e"),
-		Flux:         true,
+		ChartVersion:    chartVersion,
+		ChartRepository: os.Getenv("FORGE_E2E_CHART_REPOSITORY"),
+		OverlayRepo:     "https://github.com/nunocgoncalves/iterabase-overlay.git",
+		OverlayRef:      envOr("FORGE_E2E_OVERLAY_REF", "e2e"),
+		Flux:            true,
 	})
 }

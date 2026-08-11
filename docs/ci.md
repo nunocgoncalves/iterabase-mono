@@ -33,12 +33,13 @@ Branch protection therefore does not depend on a changing matrix job name.
 | charts `ci / install-observability-tls` | `E2E / charts-runtime / install-observability-tls` | Ported |
 | component Docker build smoke | `CI / image-*` | Explicit per-image BuildKit jobs |
 
-Component release workflows are intentionally not activated from their nested
-locations. Candidate construction, promotion, and namespaced release triggers
-belong to HOR-473. Forge's scheduled droplet reaper remains active in the legacy
-Forge repository until source-authority cutover in HOR-474; it is operational
-cleanup rather than a source quality gate. These are documented deferrals, not
-silent CI removals.
+The former nested component release workflows have been removed. The root
+`Protected release` workflow is the sole publication path: manual exact-master
+request, compatibility-manifest validation, build-once candidates, complete
+relevant suites, founder approval, and promotion without rebuild. See
+[`release.md`](release.md). Forge's scheduled droplet reaper remains active in
+the legacy Forge repository until source-authority cutover in HOR-474; it is
+operational cleanup rather than a source quality gate.
 
 ## Path ownership
 
@@ -48,7 +49,7 @@ a move retain their owners. `.github/scripts/select_ci.py` is the owner-mapping
 source of truth, and its tests prove deletion-only, cross-owner move, docs-only,
 single-component, shared-contract, and cross-component changes.
 
-- Root workflow, root Makefile, and Go workspace metadata fan out to every owner.
+- Root workflow, release contract, root Makefile, and Go workspace metadata fan out to every owner.
 - Control-plane UI, harness, tool-runner, and protobuf contracts select their
   focused checks. Protobuf changes fan out to both generated Node consumers.
 - Forge source/E2E changes retain the existing Forge unit, real-machine, and

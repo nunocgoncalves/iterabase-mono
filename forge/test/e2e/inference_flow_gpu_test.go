@@ -34,6 +34,7 @@ import (
 // PRs. The contract-propagation layer is covered by the isolated Kind scenario;
 // this stage proves real serving.
 func applyInferencePlatformStage(t *testing.T, state *digitalOceanGPUState) {
+	loginCandidateRegistry(t, state.vm.IP, state.privKeyPath)
 	// GPU readiness was already proven on this host. Reconcile the same config
 	// with the platform chart while skipping a redundant GPU-operator upgrade.
 	cfgPath := writeForgeConfigInferenceGPU(t, state.runID, state.vm.IP, state.privKeyPath, state.chartVersion)
@@ -182,7 +183,8 @@ spec:
 func writeForgeConfigInferenceGPU(t *testing.T, name, ip, keyPath, chartVersion string) string {
 	return writeForgeConfigSpec(t, forgeConfigSpec{
 		Name: name, Address: ip, SSHKeyPath: keyPath, GPU: true,
-		ChartVersion: chartVersion, ChartRelease: "itb", ChartNamespace: "iterabase-system",
+		ChartVersion: chartVersion, ChartRepository: os.Getenv("FORGE_E2E_CHART_REPOSITORY"),
+		ChartRelease: "itb", ChartNamespace: "iterabase-system",
 		OverlayRepo: "https://github.com/nunocgoncalves/iterabase-overlay.git",
 		OverlayRef:  envOr("FORGE_E2E_OVERLAY_REF", "e2e"),
 		Flux:        true,

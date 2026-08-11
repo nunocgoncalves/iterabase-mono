@@ -1,0 +1,906 @@
+name: Protected release
+
+on:
+  workflow_dispatch:
+    inputs:
+      master_sha:
+        description: Full commit SHA contained in master
+        required: true
+        type: string
+      control_plane_version:
+        description: Control-plane component version (optional)
+        required: false
+        type: string
+      inference_gateway_version:
+        description: Inference-gateway component version (optional)
+        required: false
+        type: string
+      forge_version:
+        description: Forge component version (optional)
+        required: false
+        type: string
+      control_plane_chart_version:
+        description: Control-plane chart version (optional)
+        required: false
+        type: string
+      inference_gateway_chart_version:
+        description: Inference-gateway chart version (optional)
+        required: false
+        type: string
+      platform_chart_version:
+        description: Iterabase-platform chart version (optional)
+        required: false
+        type: string
+      dry_run:
+        description: Exercise protected non-production promotion only
+        required: true
+        default: false
+        type: boolean
+
+concurrency:
+  group: protected-release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    name: Request preflight
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      plan: ${{ steps.plan.outputs.plan }}
+      selected_matrix: ${{ steps.plan.outputs.selected_matrix }}
+      image_matrix: ${{ steps.plan.outputs.image_matrix }}
+      chart_matrix: ${{ steps.plan.outputs.chart_matrix }}
+      kind_matrix: ${{ steps.plan.outputs.kind_matrix }}
+      has_images: ${{ steps.plan.outputs.has_images }}
+      has_charts: ${{ steps.plan.outputs.has_charts }}
+      has_forge: ${{ steps.plan.outputs.has_forge }}
+      has_platform_chart: ${{ steps.plan.outputs.has_platform_chart }}
+      run_control_plane: ${{ steps.plan.outputs.run_control_plane }}
+      run_inference_gateway: ${{ steps.plan.outputs.run_inference_gateway }}
+      run_forge: ${{ steps.plan.outputs.run_forge }}
+      run_charts: ${{ steps.plan.outputs.run_charts }}
+      run_kind: ${{ steps.plan.outputs.run_kind }}
+      run_real_machine: ${{ steps.plan.outputs.run_real_machine }}
+      candidate_suffix: ${{ steps.plan.outputs.candidate_suffix }}
+      dry_run: ${{ steps.plan.outputs.dry_run }}
+    steps:
+      - name: Require the protected workflow from master
+        env:
+          WORKFLOW_REF: ${{ github.ref }}
+        run: |
+          test "$WORKFLOW_REF" = refs/heads/master || {
+            echo "Protected releases must dispatch the workflow from master, not $WORKFLOW_REF" >&2
+            exit 1
+          }
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ inputs.master_sha }}
+          fetch-depth: 0
+      - name: Verify requested source is contained in master
+        env:
+          REQUESTED_SHA: ${{ inputs.master_sha }}
+        run: |
+          git fetch --no-tags origin master
+          test "$(git rev-parse HEAD)" = "$REQUESTED_SHA"
+          git merge-base --is-ancestor "$REQUESTED_SHA" origin/master || {
+            echo "$REQUESTED_SHA is not contained in origin/master" >&2
+            exit 1
+          }
+      - name: Validate repository release contract
+        run: |
+          python3 .github/scripts/test_release.py
+          python3 .github/scripts/release.py validate
+      - name: Resolve request and deterministic suite union
+        id: plan
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+          MASTER_SHA: ${{ inputs.master_sha }}
+          CONTROL_PLANE_VERSION: ${{ inputs.control_plane_version }}
+          INFERENCE_GATEWAY_VERSION: ${{ inputs.inference_gateway_version }}
+          FORGE_VERSION: ${{ inputs.forge_version }}
+          CONTROL_PLANE_CHART_VERSION: ${{ inputs.control_plane_chart_version }}
+          INFERENCE_GATEWAY_CHART_VERSION: ${{ inputs.inference_gateway_chart_version }}
+          PLATFORM_CHART_VERSION: ${{ inputs.platform_chart_version }}
+        run: |
+          args=()
+          if [ "$DRY_RUN" = true ]; then args+=(--dry-run); fi
+          python3 .github/scripts/release.py plan \
+            --master-sha "$MASTER_SHA" \
+            --run-id '${{ github.run_id }}' \
+            --control-plane-version "$CONTROL_PLANE_VERSION" \
+            --inference-gateway-version "$INFERENCE_GATEWAY_VERSION" \
+            --forge-version "$FORGE_VERSION" \
+            --control-plane-chart-version "$CONTROL_PLANE_CHART_VERSION" \
+            --inference-gateway-chart-version "$INFERENCE_GATEWAY_CHART_VERSION" \
+            --platform-chart-version "$PLATFORM_CHART_VERSION" \
+            "${args[@]}" --output release-plan.json --github-output "$GITHUB_OUTPUT"
+      - name: Reject conflicting existing tags or package versions
+        env:
+          PLAN: ${{ steps.plan.outputs.plan }}
+          REQUESTED_SHA: ${{ inputs.master_sha }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          while IFS= read -r tag; do
+            direct="$(git ls-remote --tags origin "refs/tags/$tag" | awk '{print $1}')"
+            peeled="$(git ls-remote --tags origin "refs/tags/$tag^{}" | awk '{print $1}')"
+            existing="${peeled:-$direct}"
+            if [ -n "$existing" ] && [ "$existing" != "$REQUESTED_SHA" ]; then
+              echo "release tag $tag already targets conflicting commit $existing" >&2
+              exit 1
+            fi
+            if [ -n "$existing" ]; then
+              echo "idempotent retry: $tag already targets requested source"
+            fi
+          done < <(jq -r '.selected[].release_tag' release-plan.json)
+
+          if [ "$DRY_RUN" != true ]; then
+            idempotent_target() {
+              local target="$1" tag existing
+              tag="$(jq -r --arg target "$target" '.selected[] | select(.target == $target) | .release_tag' release-plan.json)"
+              existing="$(git ls-remote --tags origin "refs/tags/$tag^{}" | awk '{print $1}')"
+              [ "$existing" = "$REQUESTED_SHA" ]
+            }
+            while IFS=$'\t' read -r target ref; do
+              if docker manifest inspect "$ref" >/dev/null 2>&1 && ! idempotent_target "$target"; then
+                echo "semantic package tag already exists before this request: $ref" >&2
+                exit 1
+              fi
+            done < <(jq -r '.image_matrix[] | [.target, (.repository + ":" + .version)] | @tsv' release-plan.json)
+            while IFS=$'\t' read -r target ref; do
+              if docker manifest inspect "$ref" >/dev/null 2>&1 && ! idempotent_target "$target"; then
+                echo "semantic chart version already exists before this request: $ref" >&2
+                exit 1
+              fi
+            done < <(jq -r '.chart_matrix[] as $entry | ([$entry.chart] + $entry.companions)[] as $chart | [$entry.target, ("ghcr.io/nunocgoncalves/iterabase-charts/" + $chart + ":" + $entry.version)] | @tsv' release-plan.json)
+          fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-plan
+          path: release-plan.json
+          retention-days: 30
+
+  control-plane-source:
+    name: Control-plane complete owner checks
+    needs: preflight
+    if: needs.preflight.outputs.run_control_plane == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ inputs.master_sha }}
+      - uses: ./.github/actions/setup-go
+        with:
+          go-version: 1.26.5
+          cache-dependency-path: |
+            control-plane/go.sum
+            inference-gateway/go.sum
+            forge/go.sum
+            forge/test/e2e/go.sum
+          cache-scope: release-control-plane
+      - uses: ./.github/actions/setup-node
+        with:
+          node-version: 24.19.0
+          cache-dependency-path: control-plane/ui/package-lock.json
+          cache-scope: release-control-plane-ui
+      - name: Go, Dashboard, and generated contracts
+        working-directory: control-plane
+        run: |
+          make ui-deps
+          make fmt-check lint test
+          make ui-lint ui-test ui-build
+          make proto-check
+      - uses: ./.github/actions/setup-node
+        with:
+          node-version: 22.23.2
+          cache-dependency-path: control-plane/harness/package-lock.json
+          cache-scope: release-control-plane-harness
+      - name: Harness checks
+        working-directory: control-plane
+        run: |
+          make harness-deps harness-lint harness-test
+      - uses: ./.github/actions/setup-node
+        with:
+          node-version: 24.19.0
+          cache-dependency-path: control-plane/tool-runner/package-lock.json
+          cache-scope: release-control-plane-tool-runner
+      - name: Tool-runner checks
+        working-directory: control-plane
+        run: |
+          make tool-runner-deps tool-runner-lint tool-runner-test tool-runner-build
+
+  inference-gateway-source:
+    name: Inference-gateway complete owner checks
+    needs: preflight
+    if: needs.preflight.outputs.run_inference_gateway == 'true'
+    runs-on: ubuntu-latest
+    env:
+      GOWORK: "off"
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ inputs.master_sha }}
+      - uses: ./.github/actions/setup-go
+        with:
+          go-version: 1.25.12
+          cache-dependency-path: inference-gateway/go.sum
+          cache-scope: release-inference-gateway
+      - name: Complete gateway checks
+        working-directory: inference-gateway
+        run: |
+          go install golang.org/x/tools/cmd/goimports@v0.48.0
+          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
+          make fmt-check lint build test
+
+  forge-source:
+    name: Forge complete owner checks
+    needs: preflight
+    if: needs.preflight.outputs.run_forge == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ inputs.master_sha }}
+      - uses: ./.github/actions/setup-go
+        with:
+          go-version: 1.26.5
+          cache-dependency-path: |
+            forge/go.sum
+            forge/test/e2e/go.sum
+          cache-scope: release-forge
+      - name: Complete Forge checks
+        working-directory: forge
+        run: |
+          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
+          make fmt-check lint build test test-e2e-unit
+      - name: GoReleaser configuration
+        uses: goreleaser/goreleaser-action@ec59f474b9834571250b370d4735c50f8e2d1e29 # v7.0.0
+        with:
+          version: v2.12.7
+          args: check
+          workdir: forge
+
+  charts-source:
+    name: Charts complete static checks
+    needs: preflight
+    if: needs.preflight.outputs.run_charts == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ inputs.master_sha }}
+      - uses: ./.github/actions/setup-kubernetes-tools
+      - uses: ./.github/actions/cache-helm
+        with:
+          cache-scope: release-charts
+      - run: .github/scripts/add_helm_repositories.sh
+      - name: Complete chart static matrix
+        working-directory: charts
+        run: make check check-tls check-observability
+
+  charts-runtime:
+    name: Charts complete runtime checks
+    needs: preflight
+    if: needs.preflight.outputs.run_charts == 'true'
+    uses: ./.github/workflows/charts-runtime.yml
+    with:
+      source_ref: ${{ inputs.master_sha }}
+
+  image-candidates:
+    name: Candidate image — ${{ matrix.name }}
+    needs: preflight
+    if: needs.preflight.outputs.has_images == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.preflight.outputs.image_matrix) }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ inputs.master_sha }}
+      - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and stage exact candidate once
+        id: build
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          push: true
+          tags: ${{ matrix.repository }}:${{ matrix.candidate_tag }}
+          labels: |
+            org.opencontainers.image.version=${{ matrix.version }}
+            org.opencontainers.image.revision=${{ inputs.master_sha }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          build-args: |
+            VERSION=${{ matrix.version }}
+            COMMIT=${{ inputs.master_sha }}
+          provenance: mode=max
+          sbom: true
+          cache-from: type=gha,scope=release-${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=release-${{ matrix.name }}
+      - name: Generate portable SPDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.20.6
+        with:
+          image: ${{ matrix.repository }}@${{ steps.build.outputs.digest }}
+          syft-version: v1.51.0
+          format: spdx-json
+          output-file: candidate-${{ matrix.name }}.spdx.json
+          registry-username: ${{ github.actor }}
+          registry-password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Record immutable image identity
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          jq -n \
+            --arg name '${{ matrix.name }}' \
+            --arg target '${{ matrix.target }}' \
+            --arg repository '${{ matrix.repository }}' \
+            --arg candidate_tag '${{ matrix.candidate_tag }}' \
+            --arg version '${{ matrix.version }}' \
+            --arg digest "$DIGEST" \
+            --arg source_sha '${{ inputs.master_sha }}' \
+            '{schema_version:1,name:$name,target:$target,repository:$repository,candidate_tag:$candidate_tag,version:$version,digest:$digest,source_sha:$source_sha}' \
+            > candidate-${{ matrix.name }}.json
+          docker buildx imagetools inspect '${{ matrix.repository }}@${{ steps.build.outputs.digest }}'
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: image-${{ matrix.name }}
+          path: |
+            candidate-${{ matrix.name }}.json
+            candidate-${{ matrix.name }}.spdx.json
+          retention-days: 30
+
+  chart-candidates:
+    name: Candidate chart — ${{ matrix.chart }}
+    needs: preflight
+    if: needs.preflight.outputs.has_charts == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.preflight.outputs.chart_matrix) }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ inputs.master_sha }}
+      - uses: ./.github/actions/setup-kubernetes-tools
+      - run: .github/scripts/add_helm_repositories.sh
+      - name: Package exact candidate archives
+        run: |
+          mkdir -p candidate-charts
+          helm dependency build charts/charts/control-plane
+          helm dependency build charts/charts/observability
+          helm dependency build charts/charts/cert-manager-substrate
+          helm dependency build charts/charts/iterabase-platform
+          helm package 'charts/charts/${{ matrix.chart }}' --destination candidate-charts
+          for companion in $(jq -r '.[]' <<<'${{ toJSON(matrix.companions) }}'); do
+            helm package "charts/charts/$companion" --destination candidate-charts
+          done
+          # shellcheck disable=SC2035 # generated filenames are controlled chart names
+          (cd candidate-charts && sha256sum -- *.tgz > 'checksums-${{ matrix.chart }}.txt')
+      - name: Log in and stage exact charts in candidate OCI namespace
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Push and verify candidate archive checksums
+        env:
+          CANDIDATE_NAMESPACE: ${{ matrix.candidate_namespace }}
+        run: |
+          echo '${{ secrets.GITHUB_TOKEN }}' | helm registry login ghcr.io -u '${{ github.actor }}' --password-stdin
+          mkdir -p pulled
+          # shellcheck disable=SC2035 # generated filenames are controlled chart names
+          for package in candidate-charts/*.tgz; do
+            helm push "$package" "oci://ghcr.io/${{ github.repository_owner }}/$CANDIDATE_NAMESPACE"
+            chart="$(basename "$package" | sed -E 's/-[0-9]+\.[0-9]+\.[0-9]+\.tgz$//')"
+            version="$(basename "$package" | sed -E "s/^${chart}-//;s/\.tgz$//")"
+            helm pull "oci://ghcr.io/${{ github.repository_owner }}/$CANDIDATE_NAMESPACE/$chart" --version "$version" --destination pulled
+          done
+          # shellcheck disable=SC2035 # generated filenames are controlled chart names
+          (cd pulled && sha256sum -- *.tgz | sort) > pulled.txt
+          # shellcheck disable=SC2035 # generated filenames are controlled chart names
+          (cd candidate-charts && sha256sum -- *.tgz | sort) > original.txt
+          diff -u original.txt pulled.txt
+          jq -n \
+            --arg target '${{ matrix.target }}' \
+            --arg chart '${{ matrix.chart }}' \
+            --arg version '${{ matrix.version }}' \
+            --arg namespace "$CANDIDATE_NAMESPACE" \
+            --arg source_sha '${{ inputs.master_sha }}' \
+            '{schema_version:1,target:$target,chart:$chart,version:$version,candidate_namespace:$namespace,source_sha:$source_sha}' \
+            > 'candidate-chart-${{ matrix.chart }}.json'
+      - name: Generate chart SPDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.20.6
+        with:
+          path: charts/charts/${{ matrix.chart }}
+          syft-version: v1.51.0
+          format: spdx-json
+          output-file: candidate-chart-${{ matrix.chart }}.spdx.json
+      - name: Attest exact chart archives and evidence
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.3.0
+        with:
+          subject-path: |
+            candidate-charts/*.tgz
+            candidate-charts/checksums-${{ matrix.chart }}.txt
+            candidate-chart-${{ matrix.chart }}.spdx.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: chart-${{ matrix.chart }}
+          path: |
+            candidate-charts/*
+            candidate-chart-${{ matrix.chart }}.json
+            candidate-chart-${{ matrix.chart }}.spdx.json
+          retention-days: 30
+
+  forge-candidate:
+    name: Candidate Forge archives
+    needs: preflight
+    if: needs.preflight.outputs.has_forge == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ inputs.master_sha }}
+          fetch-depth: 0
+      - uses: ./.github/actions/setup-go
+        with:
+          go-version: 1.26.5
+          cache-dependency-path: forge/go.sum
+          cache-scope: release-forge-candidate
+      - name: Install pinned Syft for GoReleaser archive SBOMs
+        uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0.20.6
+        with:
+          syft-version: v1.51.0
+      - name: Create local GoReleaser SemVer identity
+        run: git -c tag.gpgSign=false tag 'v${{ inputs.forge_version }}' '${{ inputs.master_sha }}'
+      - name: Build exact archives once without publishing
+        uses: goreleaser/goreleaser-action@ec59f474b9834571250b370d4735c50f8e2d1e29 # v7.0.0
+        with:
+          version: v2.12.7
+          args: release --clean --skip=publish
+          workdir: forge
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # GoReleaser requires raw SemVer locally; only the protected
+          # namespaced forge-v* tag is pushed during promotion.
+          GORELEASER_CURRENT_TAG: v${{ inputs.forge_version }}
+      - name: Record checksums and source
+        run: |
+          test -f forge/dist/checksums.txt
+          jq -n \
+            --arg target forge \
+            --arg version '${{ inputs.forge_version }}' \
+            --arg source_sha '${{ inputs.master_sha }}' \
+            '{schema_version:1,target:$target,version:$version,source_sha:$source_sha}' \
+            > forge/dist/candidate-forge.json
+      - name: Generate Forge SPDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.20.6
+        with:
+          path: forge/dist
+          syft-version: v1.51.0
+          format: spdx-json
+          output-file: forge/dist/candidate-forge.spdx.json
+      - name: Attest exact Forge archives and evidence
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.3.0
+        with:
+          subject-path: |
+            forge/dist/*.tar.gz
+            forge/dist/checksums.txt
+            forge/dist/candidate-forge.spdx.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: forge-candidate
+          path: forge/dist/
+          retention-days: 30
+
+  kind-candidates:
+    name: Exact candidate Kind — ${{ matrix.name }}
+    needs: [preflight, image-candidates, chart-candidates]
+    if: >-
+      always() && needs.preflight.result == 'success' &&
+      needs.preflight.outputs.run_kind == 'true' &&
+      (needs.image-candidates.result == 'success' || needs.image-candidates.result == 'skipped') &&
+      (needs.chart-candidates.result == 'success' || needs.chart-candidates.result == 'skipped')
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ matrix.timeout }}
+    permissions:
+      contents: read
+      packages: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.preflight.outputs.kind_matrix) }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ inputs.master_sha }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        if: needs.preflight.outputs.has_images == 'true'
+        with:
+          pattern: image-*
+          path: candidates
+          merge-multiple: true
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        if: needs.preflight.outputs.has_charts == 'true'
+        with:
+          pattern: chart-*
+          path: candidates
+          merge-multiple: true
+      - uses: ./.github/actions/setup-go
+        with:
+          go-version: 1.26.5
+          cache-dependency-path: forge/test/e2e/go.sum
+          cache-scope: release-kind-${{ matrix.name }}
+      - uses: ./.github/actions/setup-kubernetes-tools
+      - run: .github/scripts/add_helm_repositories.sh
+      - name: Resolve exact candidate and manifest-pinned fixtures
+        env:
+          PLAN: ${{ needs.preflight.outputs.plan }}
+        run: |
+          manifest_value() { jq -r "$1" <<<"$PLAN"; }
+          set_env() { printf '%s\n' "$1" >> "$GITHUB_ENV"; }
+          set_env "ITERABASE_CHART_VERSION=$(manifest_value '.compatibility.charts[\"iterabase-platform\"].version')"
+          set_env "CONTROL_PLANE_CHART_VERSION=$(manifest_value '.compatibility.charts[\"control-plane\"].version')"
+          set_env "CONTROL_PLANE_IMAGE_REPO=ghcr.io/nunocgoncalves/control-plane"
+          set_env "CONTROL_PLANE_IMAGE_TAG=$(manifest_value '.compatibility.components[\"control-plane\"].version')"
+          set_env "INFERENCE_GATEWAY_IMAGE_REPO=ghcr.io/nunocgoncalves/inference-gateway"
+          set_env "INFERENCE_GATEWAY_IMAGE_TAG=$(manifest_value '.compatibility.components[\"inference-gateway\"].version')"
+          set_env "TOOL_RUNNER_IMAGE_REPO=ghcr.io/nunocgoncalves/control-plane-tool-runner"
+          set_env "TOOL_RUNNER_IMAGE_TAG=$(manifest_value '.compatibility.components[\"control-plane\"].version')"
+
+          for metadata in candidates/candidate-*.json; do
+            [ -f "$metadata" ] || continue
+            name="$(jq -r '.name // empty' "$metadata")"
+            repository="$(jq -r '.repository // empty' "$metadata")"
+            tag="$(jq -r '.candidate_tag // empty' "$metadata")"
+            case "$name" in
+              control-plane)
+                set_env "CONTROL_PLANE_IMAGE_REPO=$repository"
+                set_env "CONTROL_PLANE_IMAGE_TAG=$tag" ;;
+              inference-gateway)
+                set_env "INFERENCE_GATEWAY_IMAGE_REPO=$repository"
+                set_env "INFERENCE_GATEWAY_IMAGE_TAG=$tag" ;;
+              control-plane-tool-runner)
+                set_env "TOOL_RUNNER_IMAGE_REPO=$repository"
+                set_env "TOOL_RUNNER_IMAGE_TAG=$tag" ;;
+            esac
+          done
+
+          mkdir -p candidate-local
+          platform="$(find candidates -name 'iterabase-platform-*.tgz' -print -quit)"
+          if [ -n "$platform" ]; then
+            tar -xzf "$platform" -C candidate-local
+            substrate="$(find candidates -name 'cert-manager-substrate-*.tgz' -print -quit)"
+            test -n "$substrate"
+            tar -xzf "$substrate" -C candidate-local
+            set_env "ITERABASE_LOCAL_CHART=$GITHUB_WORKSPACE/candidate-local/iterabase-platform"
+            set_env "ITERABASE_PLATFORM_LOCAL_CHART=$GITHUB_WORKSPACE/candidate-local/iterabase-platform"
+            set_env "ITERABASE_CHART_VERSION="
+          fi
+          control="$(find candidates -name 'control-plane-*.tgz' -print -quit)"
+          if [ -n "$control" ]; then
+            tar -xzf "$control" -C candidate-local
+            set_env "CONTROL_PLANE_LOCAL_CHART=$GITHUB_WORKSPACE/candidate-local/control-plane"
+            set_env "CONTROL_PLANE_CHART_VERSION="
+          fi
+      - name: Run candidate-backed scenario
+        working-directory: forge
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: make ${{ matrix.target }}
+
+  real-machine-candidates:
+    name: Exact candidate real machine — ${{ matrix.name }}
+    needs: [preflight, forge-candidate, chart-candidates]
+    if: >-
+      always() && needs.preflight.result == 'success' &&
+      needs.preflight.outputs.run_real_machine == 'true' &&
+      (needs.forge-candidate.result == 'success' || needs.forge-candidate.result == 'skipped') &&
+      (needs.chart-candidates.result == 'success' || needs.chart-candidates.result == 'skipped')
+    runs-on: ubuntu-latest
+    timeout-minutes: 70
+    permissions:
+      contents: read
+      packages: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: cpu
+            target: test-e2e
+          - name: gpu
+            target: test-e2e-gpu
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ inputs.master_sha }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        if: needs.preflight.outputs.has_forge == 'true'
+        with:
+          name: forge-candidate
+          path: candidates/forge
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        if: needs.preflight.outputs.has_platform_chart == 'true'
+        with:
+          pattern: chart-iterabase-platform
+          path: candidates/charts
+          merge-multiple: true
+      - uses: ./.github/actions/setup-go
+        with:
+          go-version: 1.26.5
+          cache-dependency-path: forge/test/e2e/go.sum
+          cache-scope: release-real-${{ matrix.name }}
+      - name: Resolve candidate binary and OCI chart fixture
+        env:
+          PLAN: ${{ needs.preflight.outputs.plan }}
+        run: |
+          set_env() { printf '%s\n' "$1" >> "$GITHUB_ENV"; }
+          set_env "ITERABASE_CHART_VERSION=$(jq -r '.compatibility.charts[\"iterabase-platform\"].version' <<<"$PLAN")"
+          archive="$(find candidates/forge -name 'forge_*_linux_amd64.tar.gz' -print -quit 2>/dev/null || true)"
+          if [ -n "$archive" ]; then
+            mkdir -p candidate-bin
+            tar -xzf "$archive" -C candidate-bin
+            chmod +x candidate-bin/forge
+            set_env "FORGE_E2E_BINARY=$GITHUB_WORKSPACE/candidate-bin/forge"
+          fi
+          metadata="$(find candidates/charts -name 'candidate-chart-iterabase-platform.json' -print -quit 2>/dev/null || true)"
+          if [ -n "$metadata" ]; then
+            namespace="$(jq -r '.candidate_namespace' "$metadata")"
+            version="$(jq -r '.version' "$metadata")"
+            set_env "ITERABASE_CHART_VERSION=$version"
+            set_env "FORGE_E2E_CHART_REPOSITORY=oci://ghcr.io/${{ github.repository_owner }}/$namespace/iterabase-platform"
+            set_env "FORGE_E2E_REGISTRY_USERNAME=${{ github.actor }}"
+          fi
+      - name: Run mandatory exact-candidate real-machine suite
+        working-directory: forge
+        env:
+          DIGITALOCEAN_TOKEN: ${{ secrets.DIGITALOCEAN_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FORGE_E2E_REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FORGE_E2E_REQUIRE_CAPACITY: "true"
+        run: make ${{ matrix.target }}
+
+  validation-gate:
+    name: Release validation / required
+    if: always()
+    needs:
+      - preflight
+      - control-plane-source
+      - inference-gateway-source
+      - forge-source
+      - charts-source
+      - charts-runtime
+      - image-candidates
+      - chart-candidates
+      - forge-candidate
+      - kind-candidates
+      - real-machine-candidates
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every selected release suite
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          needs = json.loads(os.environ["NEEDS"])
+          failed = {name: job["result"] for name, job in needs.items() if job["result"] not in {"success", "skipped"}}
+          print("release validation results:", json.dumps({name: job["result"] for name, job in needs.items()}, sort_keys=True))
+          if failed:
+              raise SystemExit("release validation incomplete: " + json.dumps(failed, sort_keys=True))
+          PY
+
+  evidence:
+    name: Assemble and attest release evidence
+    needs: [preflight, validation-gate]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ inputs.master_sha }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        if: needs.preflight.outputs.has_images == 'true'
+        with:
+          pattern: image-*
+          path: evidence-assets/images
+          merge-multiple: true
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        if: needs.preflight.outputs.has_charts == 'true'
+        with:
+          pattern: chart-*
+          path: evidence-assets/charts
+          merge-multiple: true
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        if: needs.preflight.outputs.has_forge == 'true'
+        with:
+          name: forge-candidate
+          path: evidence-assets/forge
+      - name: Assemble checksummed compatibility and validation evidence
+        env:
+          PLAN: ${{ needs.preflight.outputs.plan }}
+        run: |
+          printf '%s\n' "$PLAN" > release-plan.json
+          mkdir -p evidence-assets
+          python3 .github/scripts/release.py evidence --plan release-plan.json --assets evidence-assets --output release-evidence.json
+      - name: Attest release evidence
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.3.0
+        with:
+          subject-path: release-evidence.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-evidence
+          path: |
+            release-plan.json
+            release-evidence.json
+            evidence-assets/
+          retention-days: 90
+
+  promote:
+    name: Founder-approved exact promotion
+    needs: [preflight, evidence]
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ inputs.master_sha }}
+          fetch-depth: 0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-evidence
+          path: release-evidence
+      - uses: ./.github/actions/setup-kubernetes-tools
+      - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Configure environment-scoped release deploy key
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG_SSH_KEY: ${{ secrets.RELEASE_TAG_SSH_KEY }}
+        run: |
+          test -n "$RELEASE_TAG_SSH_KEY"
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$RELEASE_TAG_SSH_KEY" > ~/.ssh/release-tag
+          chmod 600 ~/.ssh/release-tag
+          gh api meta --jq '.ssh_keys[] | "github.com " + .' > ~/.ssh/known_hosts
+          git remote set-url origin 'git@github.com:${{ github.repository }}.git'
+          git config core.sshCommand 'ssh -i ~/.ssh/release-tag -o IdentitiesOnly=yes'
+          git config user.name 'iterabase-release'
+          git config user.email 'release@iterabase.com'
+      - name: Promote exact image digests without rebuild
+        env:
+          DRY_RUN: ${{ needs.preflight.outputs.dry_run }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          for metadata in release-evidence/evidence-assets/images/candidate-*.json; do
+            [ -f "$metadata" ] || continue
+            repository="$(jq -r '.repository' "$metadata")"
+            version="$(jq -r '.version' "$metadata")"
+            digest="$(jq -r '.digest' "$metadata")"
+            candidate="$repository@$digest"
+            destination="$repository:$version"
+            if [ "$DRY_RUN" = true ]; then destination="$repository:dry-run-$version-$RUN_ID"; fi
+            existing="$(docker buildx imagetools inspect "$destination" --format '{{json .Manifest.Digest}}' 2>/dev/null | tr -d '"' || true)"
+            if [ -n "$existing" ] && [ "$existing" != "$digest" ]; then
+              echo "$destination already has conflicting digest $existing" >&2
+              exit 1
+            fi
+            if [ -z "$existing" ]; then
+              docker buildx imagetools create --tag "$destination" "$candidate"
+            fi
+            promoted="$(docker buildx imagetools inspect "$destination" --format '{{json .Manifest.Digest}}' | tr -d '"')"
+            test "$promoted" = "$digest"
+          done
+      - name: Promote unchanged chart archives
+        env:
+          DRY_RUN: ${{ needs.preflight.outputs.dry_run }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          echo '${{ secrets.GITHUB_TOKEN }}' | helm registry login ghcr.io -u '${{ github.actor }}' --password-stdin
+          namespace=iterabase-charts
+          if [ "$DRY_RUN" = true ]; then namespace="iterabase-release-dry-run/$RUN_ID"; fi
+          while IFS= read -r -d '' package; do
+            chart="$(basename "$package" | sed -E 's/-[0-9]+\.[0-9]+\.[0-9]+\.tgz$//')"
+            version="$(basename "$package" | sed -E "s/^${chart}-//;s/\.tgz$//")"
+            repository="oci://ghcr.io/${{ github.repository_owner }}/$namespace/$chart"
+            pulled="$(mktemp -d)"
+            if helm pull "$repository" --version "$version" --destination "$pulled" >/dev/null 2>&1; then
+              cmp "$package" "$pulled/$(basename "$package")" || {
+                echo "$repository:$version already has conflicting content" >&2
+                exit 1
+              }
+              continue
+            fi
+            helm push "$package" "oci://ghcr.io/${{ github.repository_owner }}/$namespace"
+          done < <(find release-evidence/evidence-assets/charts -type f -name '*.tgz' -print0)
+      - name: Create protected tags at the exact source
+        env:
+          PLAN: ${{ needs.preflight.outputs.plan }}
+        run: |
+          while IFS= read -r tag; do
+            direct="$(git ls-remote --tags origin "refs/tags/$tag" | awk '{print $1}')"
+            peeled="$(git ls-remote --tags origin "refs/tags/$tag^{}" | awk '{print $1}')"
+            existing="${peeled:-$direct}"
+            if [ -n "$existing" ]; then
+              test "$existing" = '${{ inputs.master_sha }}'
+              continue
+            fi
+            git -c tag.gpgSign=false tag -a "$tag" '${{ inputs.master_sha }}' -m "Protected release $tag from ${{ inputs.master_sha }}"
+            git push origin "refs/tags/$tag"
+          done < <(jq -r '.selected[].release_tag' <<<"$PLAN")
+      - name: Create or complete GitHub Releases with exact evidence
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PLAN: ${{ needs.preflight.outputs.plan }}
+          DRY_RUN: ${{ needs.preflight.outputs.dry_run }}
+        run: |
+          # shellcheck disable=SC2035 # release assets are generated controlled filenames
+          while IFS= read -r selected; do
+            target="$(jq -r '.target' <<<"$selected")"
+            tag="$(jq -r '.release_tag' <<<"$selected")"
+            version="$(jq -r '.version' <<<"$selected")"
+            notes="$(mktemp)"
+            cat > "$notes" <<EOF
+          Protected release of **$target $version** from \`${{ inputs.master_sha }}\`.
+
+          Exact candidate validation and compatibility evidence are attached. This release was promoted without rebuilding.
+          EOF
+            assets=(release-evidence/release-evidence.json release-evidence/release-plan.json)
+            case "$target" in
+              control-plane)
+                while IFS= read -r file; do assets+=("$file"); done < <(find release-evidence/evidence-assets/images -type f -name 'candidate-control-plane*' | sort) ;;
+              inference-gateway)
+                while IFS= read -r file; do assets+=("$file"); done < <(find release-evidence/evidence-assets/images -type f -name 'candidate-inference-gateway*' | sort) ;;
+              forge)
+                while IFS= read -r file; do assets+=("$file"); done < <(find release-evidence/evidence-assets/forge -type f | sort) ;;
+              *-chart)
+                chart="$(jq -r '.manifest_name' <<<"$selected")"
+                while IFS= read -r file; do assets+=("$file"); done < <(find release-evidence/evidence-assets/charts -type f \( -name "$chart-*.tgz" -o -name "candidate-chart-$chart*" -o -name "checksums-$chart.txt" \) | sort)
+                if [ "$chart" = iterabase-platform ]; then
+                  while IFS= read -r file; do assets+=("$file"); done < <(find release-evidence/evidence-assets/charts -type f -name 'cert-manager-substrate-*.tgz' | sort)
+                fi ;;
+            esac
+            if gh release view "$tag" >/dev/null 2>&1; then
+              gh release upload "$tag" "${assets[@]}" --clobber
+            else
+              prerelease=()
+              if [ "$DRY_RUN" = true ]; then prerelease+=(--prerelease); fi
+              gh release create "$tag" "${assets[@]}" --verify-tag --title "$tag" --notes-file "$notes" "${prerelease[@]}"
+            fi
+          done < <(jq -c '.selected[]' <<<"$PLAN")

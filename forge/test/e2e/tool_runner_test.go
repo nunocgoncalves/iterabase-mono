@@ -130,6 +130,19 @@ spec:
 		controlValues["toolRunner.image.repository"] = "forge-tool-contract-runner"
 		controlValues["toolRunner.image.tag"] = "dev"
 		controlValues["toolRunner.image.pullPolicy"] = "Never"
+	} else {
+		if repository := os.Getenv("CONTROL_PLANE_IMAGE_REPO"); repository != "" {
+			controlValues["image.repository"] = repository
+		}
+		if tag := os.Getenv("CONTROL_PLANE_IMAGE_TAG"); tag != "" {
+			controlValues["image.tag"] = tag
+		}
+		if repository := os.Getenv("TOOL_RUNNER_IMAGE_REPO"); repository != "" {
+			controlValues["toolRunner.image.repository"] = repository
+		}
+		if tag := os.Getenv("TOOL_RUNNER_IMAGE_TAG"); tag != "" {
+			controlValues["toolRunner.image.tag"] = tag
+		}
 	}
 	cluster.HelmUpgrade(t, release, artifacts.controlChartRef, artifacts.controlChartVersion,
 		namespace, artifacts.controlChartLocal, controlValues)

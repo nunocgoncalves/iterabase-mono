@@ -63,6 +63,7 @@ func runInternalTLS(t *testing.T) {
 		"control-plane.dispatch.enabled":   "false",
 		"control-plane.toolRunner.enabled": "false",
 	}
+	applyCandidateImageOverrides(edgeOff)
 
 	// 1. Kind cluster and the platform's version-matched certificate substrate.
 	c := kindtest.CreateCluster(t, "forge-internal-tls-e2e")

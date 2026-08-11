@@ -41,6 +41,10 @@ jobs:
           fetch-depth: 0
       - name: Test path-selection fixture matrix
         run: python3 .github/scripts/test_select_ci.py
+      - name: Test protected release contracts
+        run: |
+          python3 .github/scripts/test_release.py
+          python3 .github/scripts/release.py validate
       - name: Test cache invalidation and exclusions
         run: python3 .github/scripts/test_cache_contract.py
       - name: Collect changed paths

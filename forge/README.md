@@ -10,7 +10,7 @@ Walking skeleton (HOR-238). Implements single-node k3s bootstrap + the `forge` C
 
 ## Install
 
-Pre-built binaries are published on the [GitHub Releases](https://github.com/nunocgoncalves/forge/releases) page (linux/darwin × amd64/arm64), with checksums and an SBOM.
+Pre-built binaries are published from the monorepo's protected release workflow on the [GitHub Releases](https://github.com/nunocgoncalves/iterabase-mono/releases) page (linux/darwin × amd64/arm64), with checksums, an SBOM, provenance, compatibility, and validation evidence. Raw tags do not publish; see [`../docs/release.md`](../docs/release.md).
 
 > Homebrew tap: deferred — `goreleaser` deprecated its `brews` section; the tap will return once the replacement stabilizes.
 
