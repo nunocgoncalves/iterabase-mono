@@ -646,12 +646,14 @@ jobs:
           set_env "TOOL_RUNNER_IMAGE_REPO=ghcr.io/nunocgoncalves/control-plane-tool-runner"
           set_env "TOOL_RUNNER_IMAGE_TAG=$(manifest_value '.compatibility.components["control-plane"].version')"
 
-          for metadata in candidates/candidate-*.json; do
-            [ -f "$metadata" ] || continue
-            name="$(jq -r '.name // empty' "$metadata")"
-            repository="$(jq -r '.repository // empty' "$metadata")"
-            candidate_tag="$(jq -r '.candidate_tag // empty' "$metadata")"
-            digest="$(jq -r '.digest // empty' "$metadata")"
+          metadata_list="$(mktemp)"
+          python3 .github/scripts/release.py candidate-image-metadata \
+            --directory candidates > "$metadata_list"
+          while IFS= read -r metadata; do
+            name="$(jq -r '.name' "$metadata")"
+            repository="$(jq -r '.repository' "$metadata")"
+            candidate_tag="$(jq -r '.candidate_tag' "$metadata")"
+            digest="$(jq -r '.digest' "$metadata")"
             immutable_tag="$candidate_tag@$digest"
             case "$name" in
               control-plane)
@@ -667,7 +669,7 @@ jobs:
                 set_env "TOOL_RUNNER_IMAGE_TAG=$immutable_tag"
                 set_env "TOOL_RUNNER_IMAGE_DIGEST=$digest" ;;
             esac
-          done
+          done < "$metadata_list"
 
           mkdir -p candidate-local
           platform="$(find candidates -name 'iterabase-platform-*.tgz' -print -quit)"
@@ -789,12 +791,14 @@ jobs:
             set_env "FORGE_E2E_CHART_REPOSITORY=oci://ghcr.io/${{ github.repository_owner }}/$namespace/iterabase-platform"
             set_env "FORGE_E2E_REGISTRY_USERNAME=${{ github.actor }}"
           fi
-          for image in candidates/images/candidate-*.json; do
-            [ -f "$image" ] || continue
-            name="$(jq -r '.name // empty' "$image")"
-            repository="$(jq -r '.repository // empty' "$image")"
-            candidate_tag="$(jq -r '.candidate_tag // empty' "$image")"
-            digest="$(jq -r '.digest // empty' "$image")"
+          metadata_list="$(mktemp)"
+          python3 .github/scripts/release.py candidate-image-metadata \
+            --directory candidates/images > "$metadata_list"
+          while IFS= read -r image; do
+            name="$(jq -r '.name' "$image")"
+            repository="$(jq -r '.repository' "$image")"
+            candidate_tag="$(jq -r '.candidate_tag' "$image")"
+            digest="$(jq -r '.digest' "$image")"
             immutable_tag="$candidate_tag@$digest"
             case "$name" in
               control-plane)
@@ -810,7 +814,7 @@ jobs:
                 set_env "TOOL_RUNNER_IMAGE_TAG=$immutable_tag"
                 set_env "TOOL_RUNNER_IMAGE_DIGEST=$digest" ;;
             esac
-          done
+          done < "$metadata_list"
       - name: Require mandatory real-machine credentials
         env:
           DIGITALOCEAN_TOKEN: ${{ secrets.DIGITALOCEAN_TOKEN }}
@@ -931,8 +935,10 @@ jobs:
           DRY_RUN: ${{ needs.preflight.outputs.dry_run }}
           RUN_ID: ${{ github.run_id }}
         run: |
-          for metadata in release-evidence/evidence-assets/images/candidate-*.json; do
-            [ -f "$metadata" ] || continue
+          metadata_list="$(mktemp)"
+          python3 .github/scripts/release.py candidate-image-metadata \
+            --directory release-evidence/evidence-assets/images > "$metadata_list"
+          while IFS= read -r metadata; do
             repository="$(jq -r '.repository' "$metadata")"
             version="$(jq -r '.version' "$metadata")"
             digest="$(jq -r '.digest' "$metadata")"
@@ -943,7 +949,7 @@ jobs:
               echo "$destination already has conflicting digest $existing" >&2
               exit 1
             fi
-          done
+          done < "$metadata_list"
 
           echo '${{ secrets.GITHUB_TOKEN }}' | helm registry login ghcr.io -u '${{ github.actor }}' --password-stdin
           namespace=iterabase-charts
@@ -1010,6 +1016,9 @@ jobs:
           DRY_RUN: ${{ needs.preflight.outputs.dry_run }}
           RUN_ID: ${{ github.run_id }}
         run: |
+          metadata_list="$(mktemp)"
+          python3 .github/scripts/release.py candidate-image-metadata \
+            --directory release-evidence/evidence-assets/images > "$metadata_list"
           current_target=''
           current_phase=''
           record_failure() {
@@ -1023,8 +1032,7 @@ jobs:
             exit "$status"
           }
           trap record_failure ERR
-          for metadata in release-evidence/evidence-assets/images/candidate-*.json; do
-            [ -f "$metadata" ] || continue
+          while IFS= read -r metadata; do
             name="$(jq -r '.name' "$metadata")"
             current_target="$(jq -r '.target' "$metadata")"
             current_phase="image:$name"
@@ -1050,7 +1058,7 @@ jobs:
               --target "$current_target" --phase "$current_phase" --status completed --identity-json "$identity"
             current_target=''
             current_phase=''
-          done
+          done < "$metadata_list"
           trap - ERR
       - name: Promote unchanged chart archives
         env:
