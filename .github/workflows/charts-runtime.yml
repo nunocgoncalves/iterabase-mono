@@ -1,49 +1,29 @@
-name: ci
+name: Charts runtime
 
 on:
-  pull_request:
-  push:
-    branches: [master]
+  workflow_call:
 
 permissions:
   contents: read
 
-jobs:
-  lint:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: azure/setup-helm@v4
-      - name: install kubeconform
-        run: |
-          curl -sLo kubeconform.tar.gz https://github.com/yannh/kubeconform/releases/download/v0.7.0/kubeconform-linux-amd64.tar.gz
-          tar -xzf kubeconform.tar.gz
-          sudo mv kubeconform /usr/local/bin/
-      - name: helm repo add external chart repositories
-        run: |
-          helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
-          helm repo add metallb https://metallb.github.io/metallb
-          helm repo add jetstack https://charts.jetstack.io
-          helm repo add external-dns https://kubernetes-sigs.github.io/external-dns/
-          helm repo add stakater https://stakater.github.io/stakater-charts
-          helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
-          helm repo add grafana https://grafana.github.io/helm-charts
-      - name: check (lint + template + kubeconform)
-        run: make check
-      - name: check-tls (static render + kubeconform with internal TLS on)
-        run: make check-tls
+defaults:
+  run:
+    working-directory: charts
 
+jobs:
   certificate-ownership-migration:
     # Platform <=0.2.2 owned cert-manager/CSI inside the umbrella release. Prove
     # the 0.3.0 platform-first hand-off and inverse rollback against the actual
     # released chart so fresh-install-only CI cannot hide Helm ownership clashes.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: azure/setup-helm@v4
-      - uses: helm/kind-action@v1
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: ./.github/actions/setup-kubernetes-tools
+      - uses: ./.github/actions/cache-helm
         with:
-          version: v0.24.0
+          cache-scope: certificate-ownership-migration
+      - name: create isolated Kind cluster
+        run: kind create cluster --name kind --wait 120s
       - name: helm repo add external chart repositories
         run: |
           helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
@@ -61,11 +41,13 @@ jobs:
   install:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: azure/setup-helm@v4
-      - uses: helm/kind-action@v1
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: ./.github/actions/setup-kubernetes-tools
+      - uses: ./.github/actions/cache-helm
         with:
-          version: v0.24.0
+          cache-scope: install
+      - name: create isolated Kind cluster
+        run: kind create cluster --name kind --wait 120s
       - name: helm repo add external chart repositories
         run: |
           helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
@@ -286,11 +268,13 @@ jobs:
     # target evidence are split to HOR-414.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: azure/setup-helm@v4
-      - uses: helm/kind-action@v1
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: ./.github/actions/setup-kubernetes-tools
+      - uses: ./.github/actions/cache-helm
         with:
-          version: v0.24.0
+          cache-scope: install-observability
+      - name: create isolated Kind cluster
+        run: kind create cluster --name kind --wait 120s
       - name: helm repo add external chart repositories
         run: |
           helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
@@ -496,11 +480,13 @@ jobs:
     # stack-component and client TLS maintainable across chart bumps.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: azure/setup-helm@v4
-      - uses: helm/kind-action@v1
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: ./.github/actions/setup-kubernetes-tools
+      - uses: ./.github/actions/cache-helm
         with:
-          version: v0.24.0
+          cache-scope: install-observability-tls
+      - name: create isolated Kind cluster
+        run: kind create cluster --name kind --wait 120s
       - name: helm repo add external chart repositories
         run: |
           helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx

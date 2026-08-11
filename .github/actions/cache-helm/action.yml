@@ -1,0 +1,37 @@
+name: Restore immutable Helm download cache
+description: Cache only Helm downloads, never rendered or vendored chart state.
+inputs:
+  cache-scope:
+    description: Job-owner scope that prevents concurrent partial cache saves.
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Compute Helm lock/version cache key
+      id: cache-key
+      shell: bash
+      run: |
+        set -euo pipefail
+        cd "$GITHUB_WORKSPACE"
+        mapfile -t metadata < <(find charts/charts -type f \( -name Chart.lock -o -name Chart.yaml \) -print | sort)
+        [ "${#metadata[@]}" -gt 0 ] || { echo "no Helm metadata found" >&2; exit 1; }
+        digest=$(python3 .github/scripts/content_digest.py .github/tools/checksums.txt "${metadata[@]}")
+        key="${{ runner.os }}-${{ runner.arch }}-helm-downloads-$(helm version --template '{{.Version}}')-${{ inputs.cache-scope }}-${digest}"
+        echo "key=$key" >> "$GITHUB_OUTPUT"
+        echo "Helm cache key: $key"
+        printf 'Helm cache metadata: %s\n' "${metadata[@]}"
+    - name: Restore exact Helm download cache
+      id: cache
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      with:
+        path: ~/.cache/helm
+        key: ${{ steps.cache-key.outputs.key }}
+    - name: Report Helm cache source
+      shell: bash
+      run: |
+        if [ "${{ steps.cache.outputs.cache-hit }}" = "true" ]; then
+          echo "Helm cache source: exact key ${{ steps.cache-key.outputs.key }}"
+        else
+          echo "Helm cache source: cold (will save ${{ steps.cache-key.outputs.key }})"
+        fi
+        echo "Vendored chart directories, releases, clusters, and test state are never cached."

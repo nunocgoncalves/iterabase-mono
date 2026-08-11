@@ -1,0 +1,345 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  GO_CACHE_DEPENDENCIES: |
+    control-plane/go.sum
+    inference-gateway/go.sum
+    forge/go.sum
+    forge/test/e2e/go.sum
+
+jobs:
+  changes:
+    name: select
+    runs-on: ubuntu-latest
+    outputs:
+      control_plane: ${{ steps.select.outputs.control_plane }}
+      ui: ${{ steps.select.outputs.ui }}
+      harness: ${{ steps.select.outputs.harness }}
+      tool_runner: ${{ steps.select.outputs.tool_runner }}
+      proto: ${{ steps.select.outputs.proto }}
+      inference_gateway: ${{ steps.select.outputs.inference_gateway }}
+      forge: ${{ steps.select.outputs.forge }}
+      charts: ${{ steps.select.outputs.charts }}
+      images: ${{ steps.select.outputs.images }}
+      image_matrix: ${{ steps.select.outputs.image_matrix }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+      - name: Test path-selection fixture matrix
+        run: python3 .github/scripts/test_select_ci.py
+      - name: Test cache invalidation and exclusions
+        run: python3 .github/scripts/test_cache_contract.py
+      - name: Collect changed paths
+        id: paths
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = workflow_dispatch ]; then
+            echo "all=true" >> "$GITHUB_OUTPUT"
+            : > /tmp/changed-paths
+          elif [[ -z "$BASE_SHA" || "$BASE_SHA" =~ ^0+$ ]]; then
+            git diff-tree --root --no-commit-id --name-only -r "$HEAD_SHA" > /tmp/changed-paths
+          elif [ "$EVENT_NAME" = pull_request ]; then
+            git diff --name-only --diff-filter=ACMRT "$BASE_SHA...$HEAD_SHA" > /tmp/changed-paths
+          else
+            git diff --name-only --diff-filter=ACMRT "$BASE_SHA" "$HEAD_SHA" > /tmp/changed-paths
+          fi
+          echo "Changed paths:"
+          cat /tmp/changed-paths
+      - name: Select CI owners
+        id: select
+        run: |
+          if [ "${{ steps.paths.outputs.all }}" = true ]; then
+            python3 .github/scripts/select_ci.py --all
+          else
+            python3 .github/scripts/select_ci.py --paths-file /tmp/changed-paths
+          fi
+
+  control-plane:
+    name: control-plane
+    needs: changes
+    if: needs.changes.outputs.control_plane == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: ./.github/actions/setup-go
+        with:
+          go-version: 1.26.5
+          cache-dependency-path: ${{ env.GO_CACHE_DEPENDENCIES }}
+          cache-scope: control-plane
+      - uses: ./.github/actions/setup-node
+        with:
+          node-version: 24.19.0
+          cache-dependency-path: control-plane/ui/package-lock.json
+          cache-scope: control-plane-build
+      - name: Install Dashboard dependencies
+        run: make ui-deps
+        working-directory: control-plane
+      - name: Formatting
+        run: make fmt-check
+        working-directory: control-plane
+      - name: Lint
+        run: make lint
+        working-directory: control-plane
+      - name: Build
+        run: make build
+        working-directory: control-plane
+      - name: Unit, integration, and envtest
+        run: make test
+        working-directory: control-plane
+
+  ui:
+    name: dashboard
+    needs: changes
+    if: needs.changes.outputs.ui == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: ./.github/actions/setup-node
+        with:
+          node-version: 24.19.0
+          cache-dependency-path: control-plane/ui/package-lock.json
+          cache-scope: dashboard
+      - name: Install dependencies
+        run: make ui-deps
+        working-directory: control-plane
+      - name: Typecheck
+        run: make ui-lint
+        working-directory: control-plane
+      - name: Component, interaction, accessibility, and localization tests
+        run: make ui-test
+        working-directory: control-plane
+      - name: Production build
+        run: make ui-build
+        working-directory: control-plane
+
+  harness:
+    name: harness
+    needs: changes
+    if: needs.changes.outputs.harness == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: ./.github/actions/setup-go
+        with:
+          go-version: 1.26.5
+          cache-dependency-path: ${{ env.GO_CACHE_DEPENDENCIES }}
+          cache-scope: harness
+      - uses: ./.github/actions/setup-node
+        with:
+          node-version: 22.23.2
+          cache-dependency-path: control-plane/harness/package-lock.json
+          cache-scope: harness
+      - name: Install dependencies
+        run: make harness-deps
+        working-directory: control-plane
+      - name: Typecheck
+        run: make harness-lint
+        working-directory: control-plane
+      - name: Unit and native transport integration tests
+        run: make harness-test
+        working-directory: control-plane
+
+  tool-runner:
+    name: tool-runner
+    needs: changes
+    if: needs.changes.outputs.tool_runner == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: ./.github/actions/setup-node
+        with:
+          node-version: 24.19.0
+          cache-dependency-path: control-plane/tool-runner/package-lock.json
+          cache-scope: tool-runner
+      - name: Install dependencies
+        run: make tool-runner-deps
+        working-directory: control-plane
+      - name: Typecheck
+        run: make tool-runner-lint
+        working-directory: control-plane
+      - name: Test
+        run: make tool-runner-test
+        working-directory: control-plane
+      - name: Build
+        run: make tool-runner-build
+        working-directory: control-plane
+
+  proto:
+    name: protobuf
+    needs: changes
+    if: needs.changes.outputs.proto == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: ./.github/actions/setup-go
+        with:
+          go-version: 1.26.5
+          cache-dependency-path: ${{ env.GO_CACHE_DEPENDENCIES }}
+          cache-scope: protobuf
+      - uses: ./.github/actions/setup-node
+        with:
+          node-version: 22.23.2
+          cache-dependency-path: control-plane/harness/package-lock.json
+          cache-scope: protobuf-tools
+      - name: Lint, regenerate, and verify committed stubs
+        run: make proto-check
+        working-directory: control-plane
+
+  inference-gateway:
+    name: inference-gateway
+    needs: changes
+    if: needs.changes.outputs.inference_gateway == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: ./.github/actions/setup-go
+        with:
+          go-version: 1.25.12
+          cache-dependency-path: ${{ env.GO_CACHE_DEPENDENCIES }}
+          cache-scope: inference-gateway
+      - name: Install pinned goimports
+        run: go install golang.org/x/tools/cmd/goimports@v0.48.0
+      - name: Formatting and imports
+        run: make fmt-check
+        working-directory: inference-gateway
+      - name: Vet
+        run: go vet ./...
+        working-directory: inference-gateway
+      - name: Install pinned golangci-lint
+        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
+      - name: Lint
+        run: make lint
+        working-directory: inference-gateway
+      - name: Build
+        run: make build
+        working-directory: inference-gateway
+      - name: Unit and testcontainers integration tests
+        run: make test
+        working-directory: inference-gateway
+
+  forge:
+    name: forge
+    needs: changes
+    if: needs.changes.outputs.forge == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: ./.github/actions/setup-go
+        with:
+          go-version: 1.26.5
+          cache-dependency-path: ${{ env.GO_CACHE_DEPENDENCIES }}
+          cache-scope: forge
+      - name: Formatting
+        run: make fmt-check
+        working-directory: forge
+      - name: Install pinned golangci-lint
+        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
+      - name: Lint
+        run: make lint
+        working-directory: forge
+      - name: GoReleaser configuration
+        uses: goreleaser/goreleaser-action@ec59f474b9834571250b370d4735c50f8e2d1e29 # v7.0.0
+        with:
+          version: v2.12.7
+          args: check
+          workdir: forge
+      - name: Build
+        run: make build
+        working-directory: forge
+      - name: Unit and fake-SSH integration tests
+        run: make test
+        working-directory: forge
+
+  charts:
+    name: charts-static
+    needs: changes
+    if: needs.changes.outputs.charts == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: ./.github/actions/setup-kubernetes-tools
+      - uses: ./.github/actions/cache-helm
+        with:
+          cache-scope: charts-static
+      - name: Add external chart repositories
+        run: .github/scripts/add_helm_repositories.sh
+      - name: Lint, template, kubeconform, and chart contracts
+        run: make check
+        working-directory: charts
+      - name: Internal TLS static contracts
+        run: make check-tls
+        working-directory: charts
+
+  images:
+    name: image-${{ matrix.name }}
+    needs: changes
+    if: needs.changes.outputs.images == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.changes.outputs.image_matrix) }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - name: Report BuildKit cache source and invalidation boundary
+        run: |
+          echo "BuildKit cache source: GHA scope ci-${{ matrix.name }}"
+          echo "BuildKit content digests include context ${{ matrix.context }} and Dockerfile ${{ matrix.dockerfile }}."
+      - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+      - name: Build ${{ matrix.name }}
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          push: false
+          tags: ${{ matrix.name }}:ci
+          cache-from: type=gha,scope=ci-${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=ci-${{ matrix.name }}
+
+  required:
+    name: required
+    if: always()
+    needs:
+      - changes
+      - control-plane
+      - ui
+      - harness
+      - tool-runner
+      - proto
+      - inference-gateway
+      - forge
+      - charts
+      - images
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every selected owner
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json, os, sys
+          needs = json.loads(os.environ["NEEDS"])
+          failed = {name: job["result"] for name, job in needs.items() if job["result"] not in {"success", "skipped"}}
+          print("selected CI results:", json.dumps({name: job["result"] for name, job in needs.items()}, sort_keys=True))
+          if failed:
+              print("required CI owners failed:", json.dumps(failed, sort_keys=True), file=sys.stderr)
+              raise SystemExit(1)
+          PY
