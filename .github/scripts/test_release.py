@@ -111,6 +111,52 @@ class ReleaseContractTests(unittest.TestCase):
         workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
         self.assertNotIn(r'[\"', workflow)
 
+    def test_release_workflow_uses_validated_image_metadata_listing(self) -> None:
+        workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+        self.assertNotIn("for metadata in release-evidence/evidence-assets/images/candidate-*.json", workflow)
+        self.assertEqual(workflow.count("release.py candidate-image-metadata"), 4)
+
+    def test_candidate_image_evidence_excludes_spdx_and_matches_plan(self) -> None:
+        plan = release.make_plan(
+            self.manifest,
+            self.targets,
+            {"control-plane": "0.0.25"},
+            self.sha,
+            "42",
+            True,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            assets = Path(directory)
+            images = assets / "images"
+            images.mkdir()
+            for planned in plan["image_matrix"]:
+                metadata = {
+                    "name": planned["name"],
+                    "target": planned["target"],
+                    "repository": planned["repository"],
+                    "version": planned["version"],
+                    "candidate_tag": planned["candidate_tag"],
+                    "digest": "sha256:" + "1" * 64,
+                }
+                (images / f"candidate-{planned['name']}.json").write_text(
+                    release.compact(metadata), encoding="utf-8"
+                )
+                (images / f"candidate-{planned['name']}.spdx.json").write_text(
+                    '{"name":"sbom","target":null}', encoding="utf-8"
+                )
+
+            discovered = release.candidate_image_metadata(images)
+            self.assertEqual(
+                sorted(metadata["name"] for _, metadata in discovered),
+                sorted(item["name"] for item in plan["image_matrix"]),
+            )
+            evidence = release.assemble_evidence(plan, assets)
+            self.assertEqual(evidence["validation"]["status"], "passed")
+
+            (images / "candidate-control-plane.json").unlink()
+            with self.assertRaisesRegex(release.ReleaseError, "candidate image evidence mismatch"):
+                release.assemble_evidence(plan, assets)
+
     def test_fixture_drift_is_rejected(self) -> None:
         manifest = copy.deepcopy(self.manifest)
         manifest["fixtures"]["platform_chart"] = "9.9.9"

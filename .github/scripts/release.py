@@ -362,6 +362,54 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def candidate_image_metadata(directory: Path) -> list[tuple[Path, dict[str, Any]]]:
+    """Return validated candidate identities, excluding adjacent SPDX documents."""
+    if not directory.exists():
+        return []
+    result = []
+    required = ("name", "target", "repository", "version", "candidate_tag", "digest")
+    for path in sorted(directory.glob("candidate-*.json")):
+        if path.name.endswith(".spdx.json"):
+            continue
+        metadata = load_json(path)
+        missing = [
+            field
+            for field in required
+            if not isinstance(metadata.get(field), str) or not metadata[field]
+        ]
+        if missing:
+            raise ReleaseError(f"{path} is missing candidate image fields: {', '.join(missing)}")
+        require_semver(metadata["version"], f"{path}.version")
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", metadata["digest"]):
+            raise ReleaseError(f"{path}.digest must be an immutable sha256 digest")
+        result.append((path, metadata))
+    return result
+
+
+def validate_candidate_image_evidence(plan: dict[str, Any], assets: Path) -> None:
+    """Require exactly one valid metadata identity for every selected candidate image."""
+    expected = {item["name"]: item for item in plan["image_matrix"]}
+    actual: dict[str, dict[str, Any]] = {}
+    for path, metadata in candidate_image_metadata(assets / "images"):
+        name = metadata["name"]
+        if name in actual:
+            raise ReleaseError(f"duplicate candidate image metadata for {name}: {path}")
+        actual[name] = metadata
+    if actual.keys() != expected.keys():
+        missing = sorted(expected.keys() - actual.keys())
+        unexpected = sorted(actual.keys() - expected.keys())
+        raise ReleaseError(
+            f"candidate image evidence mismatch; missing={missing}, unexpected={unexpected}"
+        )
+    for name, planned in expected.items():
+        metadata = actual[name]
+        for field in ("target", "repository", "version", "candidate_tag"):
+            if metadata[field] != planned[field]:
+                raise ReleaseError(
+                    f"candidate image evidence {name}.{field} does not match the release plan"
+                )
+
+
 def new_promotion_ledger(plan: dict[str, Any]) -> dict[str, Any]:
     """Create the durable per-target ledger for non-transactional promotion."""
     targets = {}
@@ -417,6 +465,7 @@ def record_promotion(
 
 
 def assemble_evidence(plan: dict[str, Any], assets: Path) -> dict[str, Any]:
+    validate_candidate_image_evidence(plan, assets)
     files = []
     for path in sorted(item for item in assets.rglob("*") if item.is_file()):
         files.append(
@@ -477,6 +526,9 @@ def parser() -> argparse.ArgumentParser:
     evidence.add_argument("--assets", type=Path, required=True)
     evidence.add_argument("--output", type=Path, required=True)
 
+    image_metadata = sub.add_parser("candidate-image-metadata")
+    image_metadata.add_argument("--directory", type=Path, required=True)
+
     promotion_init = sub.add_parser("promotion-init")
     promotion_init.add_argument("--plan", type=Path, required=True)
     promotion_init.add_argument("--output", type=Path, required=True)
@@ -522,6 +574,9 @@ def main() -> int:
                 json.dumps(evidence, indent=2, sort_keys=True) + "\n", encoding="utf-8"
             )
             print(json.dumps(evidence, indent=2, sort_keys=True))
+        elif args.command == "candidate-image-metadata":
+            for path, _ in candidate_image_metadata(args.directory):
+                print(path)
         elif args.command == "promotion-init":
             ledger = new_promotion_ledger(load_json(args.plan))
             args.output.write_text(
