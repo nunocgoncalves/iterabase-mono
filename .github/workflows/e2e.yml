@@ -198,18 +198,6 @@ jobs:
           ITERABASE_LOCAL_CHART: ${{ format('{0}/charts/charts/iterabase-platform', github.workspace) }}
           ITERABASE_PLATFORM_LOCAL_CHART: ${{ format('{0}/charts/charts/iterabase-platform', github.workspace) }}
           CONTROL_PLANE_LOCAL_CHART: ${{ format('{0}/charts/charts/control-plane', github.workspace) }}
-      - name: Export Kind diagnostics
-        if: failure()
-        run: kind export logs "$RUNNER_TEMP/kind-${{ matrix.name }}" || true
-      - name: Upload Kind diagnostics
-        if: failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: kind-${{ matrix.name }}-${{ github.run_id }}
-          path: ${{ runner.temp }}/kind-${{ matrix.name }}
-          if-no-files-found: ignore
-          retention-days: 7
-
   published-compatibility:
     name: published-latest-${{ matrix.name }}
     needs: [changes, harness]
@@ -252,18 +240,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           FORGE_E2E_USE_LATEST_RELEASE: "true"
-      - name: Export Kind diagnostics
-        if: failure()
-        run: kind export logs "$RUNNER_TEMP/published-${{ matrix.name }}" || true
-      - name: Upload Kind diagnostics
-        if: failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: published-${{ matrix.name }}-${{ github.run_id }}
-          path: ${{ runner.temp }}/published-${{ matrix.name }}
-          if-no-files-found: ignore
-          retention-days: 7
-
   charts-runtime:
     name: charts-runtime
     needs: changes

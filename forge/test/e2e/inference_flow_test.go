@@ -78,11 +78,13 @@ func runInferenceFlowContract(t *testing.T) {
 
 	// 2. helm install the umbrella. Disable ingress-nginx + minio (not needed on
 	//    kind; the test port-forwards the api + gateway directly). redis stays
-	//    enabled (the gateway uses it for rate-limit counters).
+	//    enabled (the gateway uses it for rate-limit counters). Dispatch is
+	//    outside this scenario and requires an overlay-owned default model.
 	values := map[string]string{
 		"ingress-nginx.enabled":            "false",
 		"minio.enabled":                    "false",
 		"control-plane.artifact.enabled":   "false",
+		"control-plane.dispatch.enabled":   "false",
 		"control-plane.toolRunner.enabled": "false",
 	}
 	c.HelmInstall(t, release, chartRef, chartVersion, namespace, localChart, values)

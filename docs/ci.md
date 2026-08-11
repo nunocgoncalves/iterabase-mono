@@ -84,8 +84,8 @@ and cache restore.
 
 Kind clusters, databases, mutable fixtures, vendored/generated outputs, test
 results, credentials, customer data, and release evidence are never cached.
-Failure logs remain in job output; Forge scenario Kind jobs additionally upload
-seven-day cluster diagnostics on failure.
+Failure logs remain in job output. Cluster state and credentials are not retained
+as cache or artifact data.
 
 ## Branch-protection dry run
 
