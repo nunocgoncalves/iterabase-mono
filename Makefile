@@ -73,7 +73,7 @@ docker-build:
 	$(CONTAINER_TOOL) build -t control-plane-tool-runner:latest -f control-plane/tool-runner/Dockerfile control-plane/tool-runner
 	$(CONTAINER_TOOL) build -t inference-gateway:latest inference-gateway
 
-check: workspace-check fmt-check vet build test lint codegen-check charts-check
+check: workspace-check fmt-check vet build test lint codegen-check charts-check docker-build
 
 install-hooks:
 	git config core.hooksPath .githooks

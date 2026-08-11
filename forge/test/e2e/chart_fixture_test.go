@@ -8,9 +8,10 @@ import (
 )
 
 const (
-	// PR-gating tests use explicit released baselines when no coordinated ticket
-	// branches are available. Upgrades are intentional changes to this file, not
-	// an unrelated release silently changing another PR's test matrix.
+	// PR-gating tests use a supplied monorepo-local chart when available and
+	// otherwise fall back to pinned released baselines. Explicit version overrides
+	// select a published chart. Baseline upgrades are intentional changes to this
+	// file, not an unrelated release silently changing another PR's test matrix.
 	pinnedPlatformChartVersion     = "0.3.1"
 	pinnedControlPlaneChartVersion = "0.4.1"
 

@@ -16,7 +16,7 @@ endif
 CONTAINER_TOOL ?= docker
 
 # Version metadata injected into binaries via linker flags.
-VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+VERSION := $(shell version="$$(git describe --tags --match 'control-plane-v*' --always --dirty 2>/dev/null)" && printf '%s\n' "$$version" | sed 's/^control-plane-//' || echo dev)
 COMMIT  := $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
 DATE    := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS := -X github.com/nunocgoncalves/iterabase-mono/control-plane/internal/version.version=$(VERSION) \
