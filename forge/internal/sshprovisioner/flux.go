@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/nunocgoncalves/forge/internal/fluxer"
+	"github.com/nunocgoncalves/iterabase-mono/forge/internal/fluxer"
 )
 
 // Compile-time assertion: SSHProvisioner implements fluxer.Fluxer.

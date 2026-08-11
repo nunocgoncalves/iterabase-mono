@@ -11,8 +11,8 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
-	"github.com/nunocgoncalves/control-plane/internal/identity"
-	workstore "github.com/nunocgoncalves/control-plane/internal/work"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/identity"
+	workstore "github.com/nunocgoncalves/iterabase-mono/control-plane/internal/work"
 )
 
 // maxWorkStartBodyBytes bounds the full work-item start request body before any

@@ -9,7 +9,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/nunocgoncalves/inference-gateway/internal/snapshot"
+	"github.com/nunocgoncalves/iterabase-mono/inference-gateway/internal/snapshot"
 )
 
 // identityIDKey is the context key for the authenticated identity id.

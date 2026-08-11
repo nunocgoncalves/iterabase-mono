@@ -11,3 +11,41 @@ Public monorepo for Iterabase product source.
 
 Deployment overlays and the marketing site remain separate repositories and are not
 part of this monorepo.
+
+## Go workspace
+
+The committed [`go.work`](go.work) supports atomic changes while preserving four
+independently buildable modules:
+
+| Module directory | Module path |
+| --- | --- |
+| `control-plane/` | `github.com/nunocgoncalves/iterabase-mono/control-plane` |
+| `inference-gateway/` | `github.com/nunocgoncalves/iterabase-mono/inference-gateway` |
+| `forge/` | `github.com/nunocgoncalves/iterabase-mono/forge` |
+| `forge/test/e2e/` | `github.com/nunocgoncalves/iterabase-mono/forge/test/e2e` |
+
+Run the atomic local matrix from the repository root:
+
+```bash
+make workspace-check  # go work sync freshness + go list for every module
+make build            # production binaries
+make test             # module tests; Docker required for integration tests
+make lint
+make codegen-check    # protobuf lint/regeneration freshness
+make charts-check     # Helm and rendered-resource checks
+```
+
+Use `make -C <component> <target>` for a narrower component command. See the
+root [`AGENTS.md`](AGENTS.md) ownership map before exploring code and the scoped
+`AGENTS.md` in the owning component for prerequisites and architecture rules.
+
+Docker builds retain their runtime identities and use component-scoped contexts:
+
+```bash
+make docker-build  # control-plane, harness, isolation, tool-runner, and inference-gateway
+```
+
+Forge's source-composed E2E inputs are the local `control-plane/` and `charts/`
+directories. Cross-repository matching-branch checkouts are no longer part of
+local monorepo development. Published artifact names, binaries, charts, images,
+configuration, and runtime behavior remain unchanged.

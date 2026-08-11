@@ -12,8 +12,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/santhosh-tekuri/jsonschema/v5"
 
-	runtimestore "github.com/nunocgoncalves/control-plane/internal/runtime"
-	"github.com/nunocgoncalves/control-plane/internal/workflow"
+	runtimestore "github.com/nunocgoncalves/iterabase-mono/control-plane/internal/runtime"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/workflow"
 )
 
 // IsGraphAttempt reports whether runID is a HOR-254 work attempt.

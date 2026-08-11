@@ -28,10 +28,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/config"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 
-	"github.com/nunocgoncalves/control-plane/api/v1alpha1"
-	"github.com/nunocgoncalves/control-plane/internal/gateway"
-	"github.com/nunocgoncalves/control-plane/internal/logging"
-	"github.com/nunocgoncalves/control-plane/internal/testutil"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/api/v1alpha1"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/gateway"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/logging"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/testutil"
 )
 
 // newAgentPoolTestEnv stands up envtest (real API server, RBAC enforced) with

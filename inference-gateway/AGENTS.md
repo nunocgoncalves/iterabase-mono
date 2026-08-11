@@ -1,6 +1,8 @@
-# AGENTS.md — Inference Gateway
+# Inference-gateway instructions
 
-This file provides guidance for AI coding agents operating in this repository.
+Read the root [`AGENTS.md`](../AGENTS.md) first. Its context, Git, ticket, validation, and architecture-approval rules apply here.
+
+Stay inside `inference-gateway/` for OpenAI-compatible inference routing, snapshot consumption, API-key/workload authentication, Redis rate limiting, and backend proxy behavior. Inspect `control-plane/` only for an explicitly named shared database or workload contract; deployment packaging remains owned by `charts/`.
 
 ## Project Overview
 
@@ -82,12 +84,12 @@ internal/
 Three groups separated by blank lines, in this order:
 1. Standard library (`fmt`, `net/http`, `log/slog`, etc.)
 2. Third-party (`github.com/go-chi/chi/v5`, `github.com/redis/go-redis/v9`, etc.)
-3. Internal (`github.com/nunocgoncalves/inference-gateway/internal/...`)
+3. Internal (`github.com/nunocgoncalves/iterabase-mono/inference-gateway/internal/...`)
 
 When aliasing imports, use short descriptive names:
 ```go
 chimiddleware "github.com/go-chi/chi/v5/middleware"
-gatewaymw     "github.com/nunocgoncalves/inference-gateway/internal/middleware"
+gatewaymw     "github.com/nunocgoncalves/iterabase-mono/inference-gateway/internal/middleware"
 ```
 
 ### Types and Naming
@@ -163,17 +165,3 @@ Constructor-based DI. The `server.Deps` struct aggregates all dependencies.
 - Use `json.NewEncoder(w).Encode(...)` for responses.
 - Propagate `X-Request-ID` header across proxy requests.
 - Rate limit headers: `X-RateLimit-Limit-RPM`, `X-RateLimit-Remaining-RPM`, etc.
-
-## Git and ticket workflow
-
-- Direct pushes to `master` are prohibited.
-- Each Linear ticket must be scoped to its own branch.
-- Branch names, commit messages, and pull request titles must include the Linear ticket identifier, for example `HOR-123-short-description`, `HOR-123 describe change`, and `HOR-123 — Describe change`.
-- Commit to the ticket branch as work progresses and as commits make sense.
-- When work is ready for review, open a pull request; do not merge it yourself.
-- Pull request descriptions must be valid Markdown with real line breaks, not escaped `\n` text; when using `gh`, write the body to a file and use `--body-file` for both create/edit operations.
-- Pull request descriptions should use this structure: `## Summary`, `## Validation`, `## Production impact`, and `## Ticket state`; include concise bullets under each heading and mark non-applicable sections as `None` or `N/A`.
-- Only the user may approve and merge pull requests to `master`.
-- A ticket is not complete until its branch has been merged to `master` and any required external checks have passed.
-- The repository is the source of truth for non-secret infrastructure intent and architecture.
-- Linear is the source of truth for ticket state, ownership, sequencing, and completion status.

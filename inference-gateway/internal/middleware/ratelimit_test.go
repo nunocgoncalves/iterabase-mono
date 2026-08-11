@@ -5,7 +5,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/nunocgoncalves/inference-gateway/internal/snapshot"
+	"github.com/nunocgoncalves/iterabase-mono/inference-gateway/internal/snapshot"
 	"github.com/stretchr/testify/assert"
 )
 

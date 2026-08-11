@@ -23,9 +23,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 
-	"github.com/nunocgoncalves/control-plane/api/v1alpha1"
-	"github.com/nunocgoncalves/control-plane/internal/catalog"
-	"github.com/nunocgoncalves/control-plane/internal/testutil"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/api/v1alpha1"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/catalog"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/testutil"
 )
 
 // newCatalogStore returns a Store backed by a fresh migrated Postgres.

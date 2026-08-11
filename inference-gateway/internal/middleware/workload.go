@@ -8,8 +8,8 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/nunocgoncalves/inference-gateway/internal/spiffe"
-	"github.com/nunocgoncalves/inference-gateway/internal/workload"
+	"github.com/nunocgoncalves/iterabase-mono/inference-gateway/internal/spiffe"
+	"github.com/nunocgoncalves/iterabase-mono/inference-gateway/internal/workload"
 )
 
 // Turn-context headers supplied by the supervisor. These are VALIDATED against

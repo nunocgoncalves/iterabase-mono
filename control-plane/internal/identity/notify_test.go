@@ -9,7 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/nunocgoncalves/control-plane/internal/testutil"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/testutil"
 )
 
 // TestAPIKeysChangedNotify asserts the api_keys_changed trigger (HOR-327) fires

@@ -22,12 +22,12 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	artifactstore "github.com/nunocgoncalves/control-plane/internal/artifact"
-	"github.com/nunocgoncalves/control-plane/internal/identity"
-	"github.com/nunocgoncalves/control-plane/internal/permissions"
-	"github.com/nunocgoncalves/control-plane/internal/server"
-	"github.com/nunocgoncalves/control-plane/internal/testutil"
-	workstore "github.com/nunocgoncalves/control-plane/internal/work"
+	artifactstore "github.com/nunocgoncalves/iterabase-mono/control-plane/internal/artifact"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/identity"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/permissions"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/server"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/testutil"
+	workstore "github.com/nunocgoncalves/iterabase-mono/control-plane/internal/work"
 )
 
 func TestDashboardStatic(t *testing.T) {

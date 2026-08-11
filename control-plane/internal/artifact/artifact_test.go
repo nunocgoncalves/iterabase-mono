@@ -12,8 +12,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	artifactstore "github.com/nunocgoncalves/control-plane/internal/artifact"
-	"github.com/nunocgoncalves/control-plane/internal/testutil"
+	artifactstore "github.com/nunocgoncalves/iterabase-mono/control-plane/internal/artifact"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/testutil"
 )
 
 func TestArtifactMinIORoundTripImmutabilityAndDeletion(t *testing.T) {

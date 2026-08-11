@@ -11,10 +11,10 @@ import (
 	"time"
 
 	connect "connectrpc.com/connect"
-	v1 "github.com/nunocgoncalves/control-plane/internal/harnessrpc/iterabase/harness/v1"
-	"github.com/nunocgoncalves/control-plane/internal/runtime"
-	"github.com/nunocgoncalves/control-plane/internal/spiffe"
-	workstore "github.com/nunocgoncalves/control-plane/internal/work"
+	v1 "github.com/nunocgoncalves/iterabase-mono/control-plane/internal/harnessrpc/iterabase/harness/v1"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/runtime"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/spiffe"
+	workstore "github.com/nunocgoncalves/iterabase-mono/control-plane/internal/work"
 )
 
 // errConnClosed is returned by workerConn.send after the conn has been marked

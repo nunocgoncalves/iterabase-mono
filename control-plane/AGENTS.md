@@ -1,22 +1,37 @@
-# Project operating instructions
+# Control-plane instructions
 
-## Git and ticket workflow
+Read the root [`AGENTS.md`](../AGENTS.md) first. Its context, Git, ticket, validation, and architecture-approval rules apply here.
 
-- Direct pushes to `master` are prohibited.
-- Each Linear ticket must be scoped to its own branch.
-- Branch names, commit messages, and pull request titles must include the Linear ticket identifier, for example `HOR-123-short-description`, `HOR-123 describe change`, and `HOR-123 — Describe change`.
-- Commit to the ticket branch as work progresses and as commits make sense.
-- When work is ready for review, open a pull request; do not merge it yourself.
-- Pull request descriptions must be valid Markdown with real line breaks, not escaped `\n` text; when using `gh`, write the body to a file and use `--body-file` for both create/edit operations.
-- Pull request descriptions should use this structure: `## Summary`, `## Validation`, `## Production impact`, and `## Ticket state`; include concise bullets under each heading and mark non-applicable sections as `None` or `N/A`.
-- Only the user may approve and merge pull requests to `master`.
-- A ticket is not complete until its branch has been merged to `master` and any required external checks have passed.
-- A pull request is not considered addressable-complete (review addressed, ready to merge) until CI is green on the PR's branch. After pushing changes that should resolve review findings or CI failures, re-check that CI passes before declaring the work done or asking the user to merge; if CI is red, fix it before finishing. Never mark a review round or a ticket complete while CI is failing.
-- The repository is the source of truth for non-secret infrastructure intent and architecture.
-- Linear is the source of truth for ticket state, ownership, sequencing, and completion status.
+## Scope
 
-## Architecture decisions
+Stay inside `control-plane/` for product API, operator/CRDs, dashboard, durable work/runtime, harness, tool gateway, and tool-runner changes. Inspect `charts/` only when a ticket explicitly changes the deployment contract; inspect `inference-gateway/` or `forge/` only for a named cross-component contract.
 
-- Architectural decisions always require explicit user approval **before** implementation — regardless of whether they were covered in the agreed plan or appear to match existing guidelines/docs.
-- If a decision is ambiguous or seems to call for a deviation (even a seemingly beneficial one), surface it and get approval first; do not make architectural choices unilaterally.
-- "Architectural" includes, non-exhaustively: choosing or changing a datastore, cache, or transport mechanism; cross-service contracts; failure/isolation models; and anything that sets a pattern other tickets will follow. When unsure whether a change is architectural, treat it as architectural and ask.
+The module is `github.com/nunocgoncalves/iterabase-mono/control-plane`. Production chart behavior is owned by `charts/`; `config/` is kubebuilder Kustomize for development/envtest.
+
+## Commands
+
+```bash
+make build              # Dashboard + manager/api/gateway/dispatch binaries
+make test-unit          # short Go tests with race detector
+make test               # envtest + integration tests; requires Docker
+make lint
+make fmt-check
+make proto-check        # lint/regenerate protobufs and verify freshness
+make ui-test
+make harness-test
+make tool-runner-test
+make docker-build       # control-plane image
+```
+
+Run `make proto` after changing `proto/`, and commit all generated Go and TypeScript stubs. Run `make manifests generate` after changing kubebuilder API types and commit generated CRDs/deep-copy code.
+
+## Component boundaries
+
+- `cmd/manager` wires Kubernetes reconcilers; API handlers must not take over operator ownership.
+- Postgres is the durable system of record. Keep schema ownership and migrations under `internal/database`.
+- `internal/gateway` is the authorized external-effect boundary. Never expose customer credentials to the sandbox or persist raw credential values.
+- `internal/dispatch` owns durable worker fencing and assignment semantics; do not add automatic turn execution replay.
+- The harness supervisor holds workload credentials and isolation responsibilities; disposable per-turn children must remain outside that trust boundary.
+- Artifact bytes remain behind the artifact service and immutable metadata contract.
+
+See [`README.md`](README.md) for the full architecture and directory map. Any change to these boundaries is architectural and requires explicit user approval before implementation.

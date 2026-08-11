@@ -9,8 +9,8 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/nunocgoncalves/forge/internal/deployer"
-	"github.com/nunocgoncalves/forge/internal/overlayer"
+	"github.com/nunocgoncalves/iterabase-mono/forge/internal/deployer"
+	"github.com/nunocgoncalves/iterabase-mono/forge/internal/overlayer"
 )
 
 // SecretSync declares a Kubernetes Secret forge materializes from an

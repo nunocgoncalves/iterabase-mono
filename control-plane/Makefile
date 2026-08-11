@@ -19,9 +19,9 @@ CONTAINER_TOOL ?= docker
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT  := $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
 DATE    := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
-LDFLAGS := -X github.com/nunocgoncalves/control-plane/internal/version.version=$(VERSION) \
-           -X github.com/nunocgoncalves/control-plane/internal/version.commit=$(COMMIT) \
-           -X github.com/nunocgoncalves/control-plane/internal/version.date=$(DATE)
+LDFLAGS := -X github.com/nunocgoncalves/iterabase-mono/control-plane/internal/version.version=$(VERSION) \
+           -X github.com/nunocgoncalves/iterabase-mono/control-plane/internal/version.commit=$(COMMIT) \
+           -X github.com/nunocgoncalves/iterabase-mono/control-plane/internal/version.date=$(DATE)
 
 .PHONY: all
 all: build
@@ -186,8 +186,8 @@ proto-check: proto ## CI guard: proto lints clean and generated code is fresh (r
 		echo "generated code is stale; run 'make proto' and commit"; exit 1; }
 
 .PHONY: harness-deps
-harness-deps: ## Install harness Node deps (npm install).
-	cd harness && npm install
+harness-deps: ## Install locked harness Node dependencies.
+	cd harness && npm ci
 
 .PHONY: harness-build
 harness-build: ## Build the harness (tsc -> dist).
@@ -221,8 +221,8 @@ harness-isolation-test: ## Run the Linux sandbox isolation tests (setpriv launch
 ##@ Tool runner (Node 24 trusted gateway runner — HOR-397)
 
 .PHONY: tool-runner-deps
-tool-runner-deps: ## Install tool-runner dependencies.
-	cd tool-runner && npm install
+tool-runner-deps: ## Install locked tool-runner dependencies.
+	cd tool-runner && npm ci
 
 .PHONY: tool-runner-build
 tool-runner-build: ## Build the tool runner + Flux materializer.

@@ -22,8 +22,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	yaml "sigs.k8s.io/yaml"
 
-	"github.com/nunocgoncalves/control-plane/api/v1alpha1"
-	"github.com/nunocgoncalves/control-plane/internal/gateway"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/api/v1alpha1"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/gateway"
 )
 
 const (

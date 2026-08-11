@@ -3,7 +3,7 @@ package proxy
 import (
 	"encoding/json"
 
-	"github.com/nunocgoncalves/inference-gateway/internal/snapshot"
+	"github.com/nunocgoncalves/iterabase-mono/inference-gateway/internal/snapshot"
 )
 
 // ApplyRequestTransforms applies the alias's per-alias config to the request

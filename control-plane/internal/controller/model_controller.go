@@ -15,8 +15,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	"github.com/nunocgoncalves/control-plane/api/v1alpha1"
-	"github.com/nunocgoncalves/control-plane/internal/catalog"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/api/v1alpha1"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/catalog"
 )
 
 const (

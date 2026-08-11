@@ -23,7 +23,7 @@ import (
 	"time"
 
 	"github.com/digitalocean/godo"
-	"github.com/nunocgoncalves/forge/test/e2e/internal/runner"
+	"github.com/nunocgoncalves/iterabase-mono/forge/test/e2e/internal/runner"
 	"golang.org/x/crypto/ssh"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"

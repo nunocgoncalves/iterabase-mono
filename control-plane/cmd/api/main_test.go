@@ -21,9 +21,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/nunocgoncalves/control-plane/internal/config"
-	"github.com/nunocgoncalves/control-plane/internal/logging"
-	"github.com/nunocgoncalves/control-plane/internal/testutil"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/config"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/logging"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/testutil"
 )
 
 // TestServe_PlainHTTP confirms the api serves plain HTTP (backward-compat)

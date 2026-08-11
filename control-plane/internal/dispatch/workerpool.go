@@ -5,7 +5,7 @@ import (
 	"time"
 
 	connect "connectrpc.com/connect"
-	v1 "github.com/nunocgoncalves/control-plane/internal/harnessrpc/iterabase/harness/v1"
+	v1 "github.com/nunocgoncalves/iterabase-mono/control-plane/internal/harnessrpc/iterabase/harness/v1"
 )
 
 // workerConn is one live warm-worker Work bidi stream. The worker is the mTLS

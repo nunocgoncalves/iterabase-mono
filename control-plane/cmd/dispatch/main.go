@@ -25,14 +25,14 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/nunocgoncalves/control-plane/internal/config"
-	"github.com/nunocgoncalves/control-plane/internal/database"
-	"github.com/nunocgoncalves/control-plane/internal/dispatch"
-	v1 "github.com/nunocgoncalves/control-plane/internal/harnessrpc/iterabase/harness/v1"
-	"github.com/nunocgoncalves/control-plane/internal/harnessrpc/iterabase/harness/v1/harnessv1connect"
-	"github.com/nunocgoncalves/control-plane/internal/logging"
-	"github.com/nunocgoncalves/control-plane/internal/runtime"
-	"github.com/nunocgoncalves/control-plane/internal/version"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/config"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/database"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/dispatch"
+	v1 "github.com/nunocgoncalves/iterabase-mono/control-plane/internal/harnessrpc/iterabase/harness/v1"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/harnessrpc/iterabase/harness/v1/harnessv1connect"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/logging"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/runtime"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/version"
 )
 
 func main() {

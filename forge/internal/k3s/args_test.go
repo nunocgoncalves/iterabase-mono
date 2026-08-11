@@ -6,7 +6,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/nunocgoncalves/forge/internal/config"
+	"github.com/nunocgoncalves/iterabase-mono/forge/internal/config"
 )
 
 func cfg() *config.Cluster {

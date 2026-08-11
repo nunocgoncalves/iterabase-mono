@@ -15,7 +15,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/nunocgoncalves/control-plane/internal/workflow"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/workflow"
 )
 
 // Store owns durable customer work and graph execution state.

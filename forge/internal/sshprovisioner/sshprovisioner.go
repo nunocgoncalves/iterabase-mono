@@ -20,10 +20,10 @@ import (
 	"golang.org/x/crypto/ssh/agent"
 	"gopkg.in/yaml.v3"
 
-	"github.com/nunocgoncalves/forge/internal/config"
-	"github.com/nunocgoncalves/forge/internal/deployer"
-	"github.com/nunocgoncalves/forge/internal/k3s"
-	"github.com/nunocgoncalves/forge/internal/provisioner"
+	"github.com/nunocgoncalves/iterabase-mono/forge/internal/config"
+	"github.com/nunocgoncalves/iterabase-mono/forge/internal/deployer"
+	"github.com/nunocgoncalves/iterabase-mono/forge/internal/k3s"
+	"github.com/nunocgoncalves/iterabase-mono/forge/internal/provisioner"
 )
 
 const sshPort = "22"

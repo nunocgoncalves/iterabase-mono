@@ -9,7 +9,7 @@ import (
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 
-	"github.com/nunocgoncalves/forge/internal/config"
+	"github.com/nunocgoncalves/iterabase-mono/forge/internal/config"
 )
 
 func newInitCmd() *cobra.Command {

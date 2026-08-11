@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/nunocgoncalves/forge/test/e2e/internal/kindtest"
+	"github.com/nunocgoncalves/iterabase-mono/forge/test/e2e/internal/kindtest"
 )
 
 // installPlatformCertificateSubstrate mirrors Forge's 0.3+ release boundary for

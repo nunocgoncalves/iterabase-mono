@@ -24,9 +24,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	yaml "sigs.k8s.io/yaml"
 
-	"github.com/nunocgoncalves/control-plane/api/v1alpha1"
-	"github.com/nunocgoncalves/control-plane/internal/identity"
-	"github.com/nunocgoncalves/control-plane/internal/testutil"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/api/v1alpha1"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/identity"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/testutil"
 )
 
 // newPostgresStore returns a Store backed by a fresh migrated Postgres.

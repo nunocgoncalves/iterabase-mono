@@ -10,8 +10,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
-	runtimestore "github.com/nunocgoncalves/control-plane/internal/runtime"
-	"github.com/nunocgoncalves/control-plane/internal/workflow"
+	runtimestore "github.com/nunocgoncalves/iterabase-mono/control-plane/internal/runtime"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/workflow"
 )
 
 // RespondBlocker validates and persists one customer action. Human-gate

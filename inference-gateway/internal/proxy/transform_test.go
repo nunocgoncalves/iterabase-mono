@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/nunocgoncalves/inference-gateway/internal/snapshot"
+	"github.com/nunocgoncalves/iterabase-mono/inference-gateway/internal/snapshot"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

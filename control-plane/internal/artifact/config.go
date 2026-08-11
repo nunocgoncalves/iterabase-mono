@@ -4,7 +4,7 @@ import (
 	"log/slog"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/nunocgoncalves/control-plane/internal/config"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/config"
 )
 
 // NewConfiguredService builds the shared artifact domain from process config.

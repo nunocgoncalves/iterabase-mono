@@ -15,11 +15,11 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	artifactstore "github.com/nunocgoncalves/control-plane/internal/artifact"
-	"github.com/nunocgoncalves/control-plane/internal/identity"
-	"github.com/nunocgoncalves/control-plane/internal/permissions"
-	workstore "github.com/nunocgoncalves/control-plane/internal/work"
-	dashboardui "github.com/nunocgoncalves/control-plane/ui"
+	artifactstore "github.com/nunocgoncalves/iterabase-mono/control-plane/internal/artifact"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/identity"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/permissions"
+	workstore "github.com/nunocgoncalves/iterabase-mono/control-plane/internal/work"
+	dashboardui "github.com/nunocgoncalves/iterabase-mono/control-plane/ui"
 )
 
 // Services are the dependencies injected into the HTTP API.

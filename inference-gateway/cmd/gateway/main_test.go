@@ -17,7 +17,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/nunocgoncalves/inference-gateway/internal/config"
+	"github.com/nunocgoncalves/iterabase-mono/inference-gateway/internal/config"
 )
 
 // TestRedisOptions_Plaintext: a redis:// URL with no CA file leaves TLSConfig

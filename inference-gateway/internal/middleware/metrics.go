@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/nunocgoncalves/inference-gateway/internal/metrics"
+	"github.com/nunocgoncalves/iterabase-mono/inference-gateway/internal/metrics"
 )
 
 // metricsContextKey is used to store request metadata for metrics.

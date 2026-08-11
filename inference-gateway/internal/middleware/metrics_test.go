@@ -10,7 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/nunocgoncalves/inference-gateway/internal/metrics"
+	"github.com/nunocgoncalves/iterabase-mono/inference-gateway/internal/metrics"
 )
 
 func TestMetrics_RecordsRequestsTotal(t *testing.T) {

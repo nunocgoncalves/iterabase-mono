@@ -3,7 +3,7 @@ package e2e
 import (
 	"testing"
 
-	"github.com/nunocgoncalves/forge/test/e2e/internal/runner"
+	"github.com/nunocgoncalves/iterabase-mono/forge/test/e2e/internal/runner"
 )
 
 // TestE2E is the suite's single entrypoint. Scenarios remain independently

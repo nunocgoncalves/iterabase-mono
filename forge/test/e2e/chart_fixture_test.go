@@ -4,7 +4,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/nunocgoncalves/forge/test/e2e/internal/kindtest"
+	"github.com/nunocgoncalves/iterabase-mono/forge/test/e2e/internal/kindtest"
 )
 
 const (

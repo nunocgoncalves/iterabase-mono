@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nunocgoncalves/inference-gateway/internal/middleware"
-	"github.com/nunocgoncalves/inference-gateway/internal/snapshot"
+	"github.com/nunocgoncalves/iterabase-mono/inference-gateway/internal/middleware"
+	"github.com/nunocgoncalves/iterabase-mono/inference-gateway/internal/snapshot"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

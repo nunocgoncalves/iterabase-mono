@@ -5,7 +5,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/nunocgoncalves/forge/internal/version"
+	"github.com/nunocgoncalves/iterabase-mono/forge/internal/version"
 )
 
 func newVersionCmd() *cobra.Command {

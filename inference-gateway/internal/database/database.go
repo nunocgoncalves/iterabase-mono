@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/nunocgoncalves/inference-gateway/internal/config"
+	"github.com/nunocgoncalves/iterabase-mono/inference-gateway/internal/config"
 )
 
 // Connect establishes a connection pool to PostgreSQL and verifies

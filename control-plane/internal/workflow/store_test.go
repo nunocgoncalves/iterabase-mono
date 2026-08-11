@@ -10,8 +10,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/nunocgoncalves/control-plane/internal/testutil"
-	"github.com/nunocgoncalves/control-plane/internal/workflow"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/testutil"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/workflow"
 )
 
 func newTestStore(t *testing.T) (*workflow.Store, *pgxpool.Pool) {

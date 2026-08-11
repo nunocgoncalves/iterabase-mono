@@ -7,8 +7,8 @@ import (
 	"time"
 
 	connect "connectrpc.com/connect"
-	v1 "github.com/nunocgoncalves/control-plane/internal/gatewayrpc/iterabase/gateway/v1"
-	"github.com/nunocgoncalves/control-plane/internal/spiffe"
+	v1 "github.com/nunocgoncalves/iterabase-mono/control-plane/internal/gatewayrpc/iterabase/gateway/v1"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/spiffe"
 )
 
 // dispatchResult is the outcome of dispatching one Invoke over a runner stream.

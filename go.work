@@ -1,0 +1,8 @@
+go 1.26.0
+
+use (
+	./control-plane
+	./forge
+	./forge/test/e2e
+	./inference-gateway
+)

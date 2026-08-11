@@ -23,15 +23,15 @@ import (
 	"syscall"
 	"time"
 
-	artifactstore "github.com/nunocgoncalves/control-plane/internal/artifact"
-	"github.com/nunocgoncalves/control-plane/internal/config"
-	"github.com/nunocgoncalves/control-plane/internal/database"
-	"github.com/nunocgoncalves/control-plane/internal/identity"
-	"github.com/nunocgoncalves/control-plane/internal/logging"
-	"github.com/nunocgoncalves/control-plane/internal/permissions"
-	"github.com/nunocgoncalves/control-plane/internal/server"
-	"github.com/nunocgoncalves/control-plane/internal/version"
-	workstore "github.com/nunocgoncalves/control-plane/internal/work"
+	artifactstore "github.com/nunocgoncalves/iterabase-mono/control-plane/internal/artifact"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/config"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/database"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/identity"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/logging"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/permissions"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/server"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/version"
+	workstore "github.com/nunocgoncalves/iterabase-mono/control-plane/internal/work"
 )
 
 func main() {
