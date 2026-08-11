@@ -124,6 +124,7 @@ func runInternalTLS(t *testing.T) {
 	//    so https://localhost:<port> verifies cleanly.
 	c.Kubectl(t, "rollout", "status", "-n", namespace,
 		"deployment/"+release+"-control-plane-api", "--timeout=300s")
+	assertCandidateImageDigests(t, c, namespace, controlPlaneDigestEnv, inferenceGatewayDigestEnv)
 	caB64 := c.Kubectl(t, "get", "secret", release+"-internal-ca-root", "-n", namespace,
 		"-o", "jsonpath={.data.ca\\.crt}")
 	caPEM, err := base64.StdEncoding.DecodeString(strings.TrimSpace(caB64))

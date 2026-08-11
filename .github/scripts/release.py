@@ -334,6 +334,60 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def new_promotion_ledger(plan: dict[str, Any]) -> dict[str, Any]:
+    """Create the durable per-target ledger for non-transactional promotion."""
+    targets = {}
+    for selected in plan["selected"]:
+        targets[selected["target"]] = {
+            "release_tag": selected["release_tag"],
+            "version": selected["version"],
+            "status": "pending",
+            "events": [],
+        }
+    return {
+        "schema_version": 1,
+        "source": {
+            "repository": os.environ.get("GITHUB_REPOSITORY", "nunocgoncalves/iterabase-mono"),
+            "master_sha": plan["master_sha"],
+            "workflow_run_id": plan["run_id"],
+            "workflow_run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT", "1"),
+        },
+        "mode": "dry-run" if plan["dry_run"] else "release",
+        "targets": targets,
+    }
+
+
+def record_promotion(
+    ledger: dict[str, Any],
+    target: str,
+    phase: str,
+    status: str,
+    identity: dict[str, Any] | None = None,
+    message: str = "",
+) -> None:
+    """Append one immutable-identity outcome and advance the target state."""
+    targets = ledger.get("targets")
+    if not isinstance(targets, dict) or target not in targets:
+        raise ReleaseError(f"promotion ledger has no selected target {target!r}")
+    if status not in {"completed", "failed"}:
+        raise ReleaseError(f"promotion status must be completed or failed: {status!r}")
+    if not phase:
+        raise ReleaseError("promotion phase is required")
+    event: dict[str, Any] = {"phase": phase, "status": status}
+    if identity is not None:
+        event["identity"] = identity
+    if message:
+        event["message"] = message
+    entry = targets[target]
+    entry["events"].append(event)
+    if status == "failed":
+        entry["status"] = "failed"
+    elif phase == "github-release":
+        entry["status"] = "completed"
+    elif entry["status"] == "pending":
+        entry["status"] = "promoting"
+
+
 def assemble_evidence(plan: dict[str, Any], assets: Path) -> dict[str, Any]:
     files = []
     for path in sorted(item for item in assets.rglob("*") if item.is_file()):
@@ -389,6 +443,18 @@ def parser() -> argparse.ArgumentParser:
     evidence.add_argument("--plan", type=Path, required=True)
     evidence.add_argument("--assets", type=Path, required=True)
     evidence.add_argument("--output", type=Path, required=True)
+
+    promotion_init = sub.add_parser("promotion-init")
+    promotion_init.add_argument("--plan", type=Path, required=True)
+    promotion_init.add_argument("--output", type=Path, required=True)
+
+    promotion_record = sub.add_parser("promotion-record")
+    promotion_record.add_argument("--ledger", type=Path, required=True)
+    promotion_record.add_argument("--target", required=True)
+    promotion_record.add_argument("--phase", required=True)
+    promotion_record.add_argument("--status", choices=("completed", "failed"), required=True)
+    promotion_record.add_argument("--identity-json", default="")
+    promotion_record.add_argument("--message", default="")
     return result
 
 
@@ -420,6 +486,31 @@ def main() -> int:
                 json.dumps(evidence, indent=2, sort_keys=True) + "\n", encoding="utf-8"
             )
             print(json.dumps(evidence, indent=2, sort_keys=True))
+        elif args.command == "promotion-init":
+            ledger = new_promotion_ledger(load_json(args.plan))
+            args.output.write_text(
+                json.dumps(ledger, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+            )
+            print(json.dumps(ledger, indent=2, sort_keys=True))
+        elif args.command == "promotion-record":
+            ledger = load_json(args.ledger)
+            identity = None
+            if args.identity_json:
+                try:
+                    identity = json.loads(args.identity_json)
+                except json.JSONDecodeError as exc:
+                    raise ReleaseError(f"invalid promotion identity JSON: {exc}") from exc
+                if not isinstance(identity, dict):
+                    raise ReleaseError("promotion identity must be a JSON object")
+            record_promotion(
+                ledger, args.target, args.phase, args.status, identity, args.message
+            )
+            temporary = args.ledger.with_suffix(args.ledger.suffix + ".tmp")
+            temporary.write_text(
+                json.dumps(ledger, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+            )
+            temporary.replace(args.ledger)
+            print(json.dumps(ledger, indent=2, sort_keys=True))
     except ReleaseError as exc:
         print(f"release contract error: {exc}", file=sys.stderr)
         return 2

@@ -93,6 +93,7 @@ func runControlPlaneIdentity(t *testing.T) {
 		"bootstrap.serviceAccounts[0]": "agent-fleet",
 	}
 	c.HelmInstall(t, release, chartRef, chartVersion, namespace, localChart, values)
+	assertCandidateImageDigests(t, c, namespace, controlPlaneDigestEnv)
 
 	// 3. capture bootstrap keys from the api pod's bootstrap init container.
 	//    helm --wait guarantees init containers completed before Ready.

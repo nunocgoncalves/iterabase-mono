@@ -397,13 +397,17 @@ func joinArgs(args []string) string {
 }
 
 const (
-	helmInstallScript = "https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-4"
-	k3sKubeconfigPath = "/etc/rancher/k3s/k3s.yaml"
+	helmInstallScript      = "https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-4"
+	k3sKubeconfigPath      = "/etc/rancher/k3s/k3s.yaml"
+	helmRegistryConfigPath = "/etc/forge/helm-registry.json"
 )
 
-// helmCmd builds a sudo helm command targeting the k3s kubeconfig on the host.
+// helmCmd builds a sudo helm command targeting the k3s kubeconfig and Forge's
+// root-owned registry config on the host. Public pulls work without the file;
+// private candidate validation creates it temporarily at this same path.
 func helmCmd(args ...string) string {
-	return joinArgs(append([]string{"sudo", "helm", "--kubeconfig", k3sKubeconfigPath}, args...))
+	base := []string{"sudo", "helm", "--kubeconfig", k3sKubeconfigPath, "--registry-config", helmRegistryConfigPath}
+	return joinArgs(append(base, args...))
 }
 
 // ensureHelm installs helm on the host if it is not already present.

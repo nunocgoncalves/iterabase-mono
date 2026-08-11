@@ -159,6 +159,7 @@ spec:
 		source, _ := kubectlOutput(cluster, "get", "pod,service,endpoints", "-n", "flux-system", "-l", "app.kubernetes.io/component=source-controller", "-o", "wide", "--show-labels")
 		t.Fatalf("tool runner did not become ready: %v\n%s\n--- pods ---\n%s\n--- describe ---\n%s\n--- logs ---\n%s\n--- namespace ---\n%s\n--- Flux policies ---\n%s\n--- source endpoint ---\n%s", err, out, pods, describe, logs, network, fluxNetwork, source)
 	}
+	assertCandidateImageDigests(t, cluster, namespace, controlPlaneDigestEnv, toolRunnerDigestEnv)
 
 	postgresPod := cluster.FirstPodName(t, namespace, "app.kubernetes.io/name=postgresql")
 	password := decodeSecret(t, cluster.Kubectl(t, "get", "secret", "tool-postgresql", "-n", namespace, "-o", "jsonpath={.data.password}"))

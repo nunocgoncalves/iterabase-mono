@@ -89,6 +89,7 @@ func runInferenceFlowContract(t *testing.T) {
 	}
 	applyCandidateImageOverrides(values)
 	c.HelmInstall(t, release, chartRef, chartVersion, namespace, localChart, values)
+	assertCandidateImageDigests(t, c, namespace, controlPlaneDigestEnv, inferenceGatewayDigestEnv)
 
 	// 3. capture the control-plane admin key from the api pod's bootstrap init
 	//    container (same pattern as TestControlPlaneIdentity).

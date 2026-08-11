@@ -53,13 +53,18 @@ python3 .github/scripts/release.py validate
    versions. Existing state is accepted only for an idempotent retry of the same
    source and exact digest/checksum.
 3. Images are built and pushed once under
-   `candidate-<sha-prefix>-<run-id>`. Charts are packaged once and staged under
-   the isolated run-addressed `iterabase-release-candidates` OCI namespace.
-   Forge archives are built once and retained as Actions artifacts.
+   `candidate-<sha-prefix>-<run-id>`. Validation references them as
+   `<candidate-tag>@sha256:<digest>` and verifies the resulting pod image IDs;
+   mutable tags alone are never the validation identity. Charts are packaged
+   once and staged under the isolated run-addressed
+   `iterabase-release-candidates` OCI namespace. Forge archives are built once
+   and retained as Actions artifacts.
 4. The target-driven union of owner, chart runtime, candidate-backed Kind, and
-   mandatory CPU/GPU suites runs. Unselected dependencies use explicit versions
-   from the compatibility manifest. Missing mandatory capacity is incomplete,
-   never a release pass.
+   mandatory CPU/GPU suites runs. Selected image and chart candidates replace
+   their manifest entries across the coordinated union, including the
+   real-machine chart values; unselected dependencies use explicit versions
+   from the compatibility manifest. Missing mandatory capacity or credentials
+   are incomplete, never a release pass.
 5. The workflow records image digests, archive checksums, SPDX SBOMs, BuildKit
    provenance, GitHub keyless attestations, compatibility data, and validation
    results.
@@ -68,6 +73,12 @@ python3 .github/scripts/release.py validate
 7. Approval adds semantic image tags to the tested digests, pushes the unchanged
    chart archives, creates protected namespaced Git tags at the requested SHA,
    and creates GitHub Releases with the exact evidence. Nothing is rebuilt.
+   Existing Release assets are reused only when byte-identical; missing assets
+   may be completed, but mismatches are never overwritten.
+8. Every promotion phase appends its target identity and outcome to a durable
+   promotion ledger. An immutable ledger snapshot is retained as an Actions
+   artifact even on failure and attached to every GitHub Release already created
+   by a partially completed coordinated request.
 
 A rejected environment deployment creates no semantic tag, production chart,
 production image alias, or GitHub Release. Run-addressed candidates are
@@ -78,9 +89,11 @@ non-production and may be garbage-collected.
 Publication across Git, GHCR, and GitHub Releases is not transactional. The
 workflow preflights and validates the whole selected set, then promotes targets
 idempotently. If a later target fails, already-published immutable targets remain
-valid and are never deleted or retagged automatically. Evidence records partial
-completion; unreleased targets are retried after the fault is fixed. A retry may
-reuse existing state only when source SHA and artifact identity match exactly.
+valid and are never deleted or retagged automatically. The promotion ledger
+records every completed identity, the failed phase, and targets not yet attempted;
+unreleased targets are retried after the fault is fixed. A retry may reuse
+existing registry state or Release assets only when source SHA and artifact
+digest/checksum/content match the prior evidence exactly.
 
 ## Dry-run / release rehearsal
 

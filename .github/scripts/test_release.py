@@ -98,6 +98,34 @@ class ReleaseContractTests(unittest.TestCase):
         with self.assertRaisesRegex(release.ReleaseError, "pinnedPlatformChartVersion"):
             release.validate_contract(manifest, self.targets, ROOT)
 
+    def test_promotion_ledger_records_partial_completion(self) -> None:
+        plan = release.make_plan(
+            self.manifest,
+            self.targets,
+            {"control-plane": "0.0.25", "inference-gateway": "0.2.5"},
+            self.sha,
+            "4",
+            False,
+        )
+        ledger = release.new_promotion_ledger(plan)
+        release.record_promotion(
+            ledger,
+            "control-plane",
+            "image:control-plane",
+            "completed",
+            {"digest": "sha256:" + "1" * 64},
+        )
+        release.record_promotion(ledger, "control-plane", "github-release", "completed")
+        release.record_promotion(
+            ledger, "inference-gateway", "image:inference-gateway", "failed", message="conflict"
+        )
+        self.assertEqual(ledger["targets"]["control-plane"]["status"], "completed")
+        self.assertEqual(ledger["targets"]["inference-gateway"]["status"], "failed")
+        self.assertEqual(
+            ledger["targets"]["control-plane"]["events"][0]["identity"]["digest"],
+            "sha256:" + "1" * 64,
+        )
+
     def test_evidence_hashes_exact_assets(self) -> None:
         plan = release.make_plan(
             self.manifest,
