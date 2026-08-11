@@ -25,24 +25,12 @@ func runOverlayStage(t *testing.T, state *digitalOceanCPUState) {
 		t.Fatal("FORGE_OVERLAY_TOKEN must be unset for this test (public repo, tokenless)")
 	}
 	loginCandidateRegistry(t, state.ip, state.privKeyPath)
-	var fluxOut string
-	if candidateOverlayValues(t) != "" {
-		fluxConfig := writeCurrentOverlayForgeConfig(
-			t, state.runID, state.ip, state.privKeyPath, state.chartVersion,
-			candidateOverlayRepository, candidateOverlayRef, true,
-		)
-		fluxOut = applyWithRetryArgs(t, state.forgeBin, state.forgeHome, fluxConfig, "--skip-chart")
-	}
-	overlayRepository, overlayRef := prepareCandidateOverlay(
-		t, state.runID, state.ip, state.privKeyPath,
-	)
-	flux := overlayRepository == candidateOverlayRepository
+	plan := prepareCandidateOverlay(t, state.runID, state.ip, state.privKeyPath)
 	candidateConfig := writeCurrentOverlayForgeConfig(
-		t, state.runID, state.ip, state.privKeyPath, state.chartVersion,
-		overlayRepository, overlayRef, flux,
+		t, state.runID, state.ip, state.privKeyPath, state.chartVersion, plan,
 	)
 	out := applyWithRetry(t, state.forgeBin, state.forgeHome, candidateConfig)
-	assertApplyMarkers(t, fluxOut+"\n"+out, "action:     skip", "node ready: true", "certificate substrate applied: true",
+	assertApplyMarkers(t, out, "action:     skip", "node ready: true", "certificate substrate applied: true",
 		"chart applied: true", "overlay applied: true", "overlay commit:", "flux installed: true", "gitrepository: ready=True")
 	t.Logf("apply output:\n%s", out)
 	candidateCluster := kindtest.UseCluster(t, state.runID, filepath.Join(state.forgeHome, state.runID, "kubeconfig.yaml"))
@@ -61,17 +49,17 @@ func runOverlayStage(t *testing.T, state *digitalOceanCPUState) {
 	}
 }
 
-// writeCurrentOverlayForgeConfig uses the public exact-Flux fixture or the
-// ephemeral host-local derivative that injects selected release candidates.
+// writeCurrentOverlayForgeConfig uses the public exact-Flux fixture. Candidate
+// image values affect only Forge's checkout and never change this source identity.
 func writeCurrentOverlayForgeConfig(
-	t *testing.T, name, ip, keyPath, chartVersion, overlayRepository, overlayRef string, flux bool,
+	t *testing.T, name, ip, keyPath, chartVersion string, plan candidateOverlayPlan,
 ) string {
 	return writeForgeConfigSpec(t, forgeConfigSpec{
 		Name: name, Address: ip, SSHKeyPath: keyPath, RunLabel: true, DualStack: true,
 		ChartVersion:    chartVersion,
 		ChartRepository: os.Getenv("FORGE_E2E_CHART_REPOSITORY"),
-		OverlayRepo:     overlayRepository,
-		OverlayRef:      overlayRef,
-		Flux:            flux,
+		OverlayRepo:     plan.repository,
+		OverlayRef:      plan.ref,
+		Flux:            plan.flux,
 	})
 }

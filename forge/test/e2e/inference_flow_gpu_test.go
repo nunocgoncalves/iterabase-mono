@@ -35,28 +35,14 @@ import (
 // this stage proves real serving.
 func applyInferencePlatformStage(t *testing.T, state *digitalOceanGPUState) {
 	loginCandidateRegistry(t, state.vm.IP, state.privKeyPath)
-	var fluxOut string
-	if candidateOverlayValues(t) != "" {
-		fluxConfig := writeForgeConfigInferenceGPU(
-			t, state.runID, state.vm.IP, state.privKeyPath, state.chartVersion,
-			candidateOverlayRepository, candidateOverlayRef, true,
-		)
-		fluxOut = applyWithRetryArgs(
-			t, state.forgeBin, state.forgeHome, fluxConfig, "--skip-gpu", "--skip-chart",
-		)
-	}
-	overlayRepository, overlayRef := prepareCandidateOverlay(
-		t, state.runID, state.vm.IP, state.privKeyPath,
-	)
-	flux := overlayRepository == candidateOverlayRepository
+	plan := prepareCandidateOverlay(t, state.runID, state.vm.IP, state.privKeyPath)
 	// GPU readiness was already proven on this host. Reconcile the same config
 	// with the platform chart while skipping a redundant GPU-operator upgrade.
 	candidateConfig := writeForgeConfigInferenceGPU(
-		t, state.runID, state.vm.IP, state.privKeyPath, state.chartVersion,
-		overlayRepository, overlayRef, flux,
+		t, state.runID, state.vm.IP, state.privKeyPath, state.chartVersion, plan,
 	)
 	out := applyWithRetryArgs(t, state.forgeBin, state.forgeHome, candidateConfig, "--skip-gpu")
-	assertApplyMarkers(t, fluxOut+"\n"+out, "action:     skip", "node ready: true", "certificate substrate applied: true",
+	assertApplyMarkers(t, out, "action:     skip", "node ready: true", "certificate substrate applied: true",
 		"chart applied: true", "overlay applied: true", "flux installed: true", "gitrepository: ready=True")
 	t.Logf("apply output:\n%s", out)
 	candidateCluster := kindtest.UseCluster(t, state.runID, filepath.Join(state.forgeHome, state.runID, "kubeconfig.yaml"))
@@ -201,14 +187,14 @@ spec:
 // writeForgeConfigInferenceGPU writes the current production-ordered GPU
 // fixture: exact public Flux source, certificate substrate, then platform.
 func writeForgeConfigInferenceGPU(
-	t *testing.T, name, ip, keyPath, chartVersion, overlayRepository, overlayRef string, flux bool,
+	t *testing.T, name, ip, keyPath, chartVersion string, plan candidateOverlayPlan,
 ) string {
 	return writeForgeConfigSpec(t, forgeConfigSpec{
 		Name: name, Address: ip, SSHKeyPath: keyPath, GPU: true,
 		ChartVersion: chartVersion, ChartRepository: os.Getenv("FORGE_E2E_CHART_REPOSITORY"),
 		ChartRelease: "itb", ChartNamespace: "iterabase-system",
-		OverlayRepo: overlayRepository, OverlayRef: overlayRef,
-		Flux: flux,
+		OverlayRepo: plan.repository, OverlayRef: plan.ref,
+		Flux: plan.flux,
 	})
 }
 
