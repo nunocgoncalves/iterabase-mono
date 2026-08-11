@@ -136,9 +136,17 @@ func candidateOverlayValues(t *testing.T) string {
 		"INFERENCE_GATEWAY_IMAGE_REPO", "INFERENCE_GATEWAY_IMAGE_TAG", inferenceGatewayDigestEnv, "    ",
 	)
 
+	// These real-machine scenarios prove Forge/bootstrap and exact candidate
+	// installation. Portable dispatch behavior belongs to control-plane E2E and
+	// requires a customer-specific default model, so keep it out of this fixture.
+	releaseCandidate := os.Getenv("FORGE_E2E_RELEASE_CANDIDATE") == "true"
+
 	var values strings.Builder
-	if controlPlane != "" || toolRunner != "" {
+	if releaseCandidate || controlPlane != "" || toolRunner != "" {
 		values.WriteString("\n# Exact run-addressed release candidates.\ncontrol-plane:\n")
+		if releaseCandidate {
+			values.WriteString("  dispatch:\n    enabled: false\n")
+		}
 		if controlPlane != "" {
 			values.WriteString("  image:\n")
 			values.WriteString(controlPlane)
@@ -157,6 +165,8 @@ func candidateOverlayValues(t *testing.T) string {
 
 func TestCandidateOverlayValues(t *testing.T) {
 	digest := "sha256:" + strings.Repeat("a", 64)
+	t.Setenv("FORGE_E2E_RELEASE_CANDIDATE", "true")
+	t.Setenv("FORGE_E2E_CHART_REPOSITORY", "oci://ghcr.io/example/candidates/platform")
 	t.Setenv("CONTROL_PLANE_IMAGE_REPO", "ghcr.io/example/control-plane")
 	t.Setenv("CONTROL_PLANE_IMAGE_TAG", "candidate-run@"+digest)
 	t.Setenv(controlPlaneDigestEnv, digest)
@@ -173,12 +183,27 @@ func TestCandidateOverlayValues(t *testing.T) {
 	}
 	for expected := range map[string]struct{}{
 		"control-plane:": {},
+		"dispatch:":      {},
+		"enabled: false": {},
 		"repository: \"ghcr.io/example/control-plane\"": {},
 		"tag: \"candidate-run@" + digest + "\"":         {},
 	} {
 		if !strings.Contains(plan.values, expected) {
 			t.Fatalf("candidate values missing %q:\n%s", expected, plan.values)
 		}
+	}
+}
+
+func TestCandidateOverlayValuesForChartOnly(t *testing.T) {
+	t.Setenv("FORGE_E2E_RELEASE_CANDIDATE", "true")
+	t.Setenv("FORGE_E2E_CHART_REPOSITORY", "oci://ghcr.io/example/candidates/platform")
+	t.Setenv(controlPlaneDigestEnv, "")
+	t.Setenv(toolRunnerDigestEnv, "")
+	t.Setenv(inferenceGatewayDigestEnv, "")
+
+	values := candidateOverlayValues(t)
+	if !strings.Contains(values, "control-plane:\n  dispatch:\n    enabled: false") {
+		t.Fatalf("candidate chart fixture must disable customer-specific dispatch:\n%s", values)
 	}
 }
 

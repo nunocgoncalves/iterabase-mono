@@ -29,7 +29,7 @@ func runOverlayStage(t *testing.T, state *digitalOceanCPUState) {
 	candidateConfig := writeCurrentOverlayForgeConfig(
 		t, state.runID, state.ip, state.privKeyPath, state.chartVersion, plan,
 	)
-	out := applyWithRetry(t, state.forgeBin, state.forgeHome, candidateConfig)
+	out := applyOnce(t, state.forgeBin, state.forgeHome, candidateConfig)
 	assertApplyMarkers(t, out, "action:     skip", "node ready: true", "certificate substrate applied: true",
 		"chart applied: true", "overlay applied: true", "overlay commit:", "flux installed: true", "gitrepository: ready=True")
 	t.Logf("apply output:\n%s", out)

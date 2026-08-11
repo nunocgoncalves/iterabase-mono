@@ -44,7 +44,7 @@ func runSecretsStage(t *testing.T, state *digitalOceanCPUState) {
 	sc.Close()
 
 	cfgPath := writeSecretsForgeConfig(t, state.runID, state.ip, state.privKeyPath, overlayDir)
-	out := applyWithRetry(t, state.forgeBin, state.forgeHome, cfgPath)
+	out := applyOnce(t, state.forgeBin, state.forgeHome, cfgPath)
 	assertApplyMarkers(t, out, "action:     skip", "node ready: true", "secrets applied: true")
 	t.Logf("apply output:\n%s", out)
 

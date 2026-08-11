@@ -41,7 +41,7 @@ func applyInferencePlatformStage(t *testing.T, state *digitalOceanGPUState) {
 	candidateConfig := writeForgeConfigInferenceGPU(
 		t, state.runID, state.vm.IP, state.privKeyPath, state.chartVersion, plan,
 	)
-	out := applyWithRetryArgs(t, state.forgeBin, state.forgeHome, candidateConfig, "--skip-gpu")
+	out := applyOnceArgs(t, state.forgeBin, state.forgeHome, candidateConfig, "--skip-gpu")
 	assertApplyMarkers(t, out, "action:     skip", "node ready: true", "certificate substrate applied: true",
 		"chart applied: true", "overlay applied: true", "flux installed: true", "gitrepository: ready=True")
 	t.Logf("apply output:\n%s", out)

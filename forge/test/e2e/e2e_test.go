@@ -130,7 +130,7 @@ func rejectGPUOnCPUStage(t *testing.T, state *digitalOceanCPUState) {
 func applyBaselineStage(t *testing.T, state *digitalOceanCPUState) {
 	t.Helper()
 	writeEdgeOverlayOnHost(t, state.ip, state.privKeyPath)
-	out := applyWithRetry(t, state.forgeBin, state.forgeHome,
+	out := applyOnce(t, state.forgeBin, state.forgeHome,
 		writeForgeConfig(t, state.runID, state.ip, state.privKeyPath, certificateMigrationSourceVersion))
 	assertApplyMarkers(t, out, "node ready: true", "chart applied: true", "overlay applied: true")
 	t.Logf("apply output:\n%s", out)
@@ -177,7 +177,7 @@ func reapplyCurrentPlatformStage(t *testing.T, state *digitalOceanCPUState) {
 	cfgPath := writeCurrentOverlayForgeConfig(
 		t, state.runID, state.ip, state.privKeyPath, state.chartVersion, plan,
 	)
-	out := applyWithRetry(t, state.forgeBin, state.forgeHome, cfgPath)
+	out := applyOnce(t, state.forgeBin, state.forgeHome, cfgPath)
 	markers := []string{"action:     skip", "node ready: true", "certificate substrate applied: true",
 		"chart applied: true", "overlay applied: true"}
 	if plan.flux {
@@ -431,61 +431,21 @@ func runForgeE(bin, forgeHome string, args ...string) (string, error) {
 	return string(out), err
 }
 
-// applyWithRetryArgs is applyWithRetry with extra forge apply args appended
-// (e.g. --skip-chart to isolate a phase that doesn't depend on the platform
-// chart). Bounded retries on non-zero exit.
-func applyWithRetryArgs(t *testing.T, bin, forgeHome, cfgPath string, extraArgs ...string) string {
+// applyOnceArgs runs one required Forge apply. Required E2E gates fail on the
+// first non-zero result; a later success must not mask a deterministic defect.
+func applyOnceArgs(t *testing.T, bin, forgeHome, cfgPath string, extraArgs ...string) string {
 	t.Helper()
-	const maxAttempts = 3
-	var out string
-	var lastErr error
 	args := append([]string{"apply", "--config", cfgPath}, extraArgs...)
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		var err error
-		out, err = runForgeE(bin, forgeHome, args...)
-		if err == nil {
-			if attempt > 1 {
-				t.Logf("apply succeeded on attempt %d/%d", attempt, maxAttempts)
-			}
-			return out
-		}
-		lastErr = err
-		t.Logf("apply attempt %d/%d failed: %v\n%s", attempt, maxAttempts, err, out)
-		if attempt < maxAttempts {
-			time.Sleep(10 * time.Second)
-		}
+	out, err := runForgeE(bin, forgeHome, args...)
+	if err != nil {
+		t.Fatalf("forge apply failed: %v\n%s", err, out)
 	}
-	t.Fatalf("forge apply failed after %d attempts: %v\n%s", maxAttempts, lastErr, out)
 	return out
 }
 
-// k3s install script's binary download from GitHub releases is prone to
-// transient DO egress failures; `apply` is idempotent (re-reads live state and
-// reconciles), so re-running after a partial/failed install is safe. A 0-exit
-// whose output lacks the expected markers is not retried — that's a real
-// regression, not transient infra.
-func applyWithRetry(t *testing.T, bin, forgeHome, cfgPath string) string {
+func applyOnce(t *testing.T, bin, forgeHome, cfgPath string) string {
 	t.Helper()
-	const maxAttempts = 3
-	var out string
-	var lastErr error
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		var err error
-		out, err = runForgeE(bin, forgeHome, "apply", "--config", cfgPath)
-		if err == nil {
-			if attempt > 1 {
-				t.Logf("apply succeeded on attempt %d/%d", attempt, maxAttempts)
-			}
-			return out
-		}
-		lastErr = err
-		t.Logf("apply attempt %d/%d failed: %v\n%s", attempt, maxAttempts, err, out)
-		if attempt < maxAttempts {
-			time.Sleep(10 * time.Second)
-		}
-	}
-	t.Fatalf("forge apply failed after %d attempts: %v\n%s", maxAttempts, lastErr, out)
-	return out
+	return applyOnceArgs(t, bin, forgeHome, cfgPath)
 }
 
 func checkNodeViaKubeconfig(t *testing.T, kcPath, wantLabelValue string) {
