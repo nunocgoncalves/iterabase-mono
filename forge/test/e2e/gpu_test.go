@@ -146,6 +146,9 @@ type digitalOceanGPUState struct {
 func runDigitalOceanGPU(t *testing.T) {
 	token := os.Getenv("DIGITALOCEAN_TOKEN")
 	if token == "" {
+		if os.Getenv("FORGE_E2E_REQUIRE_CAPACITY") == "true" {
+			t.Fatal("mandatory GPU release validation incomplete — DIGITALOCEAN_TOKEN not set")
+		}
 		t.Skip("DIGITALOCEAN_TOKEN not set; skipping DigitalOcean GPU scenario")
 	}
 

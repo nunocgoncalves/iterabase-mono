@@ -147,15 +147,21 @@ jobs:
               [ "$existing" = "$REQUESTED_SHA" ]
             }
             while IFS=$'\t' read -r target ref; do
-              if docker manifest inspect "$ref" >/dev/null 2>&1 && ! idempotent_target "$target"; then
-                echo "semantic package tag already exists before this request: $ref" >&2
-                exit 1
+              if docker manifest inspect "$ref" >/dev/null 2>&1; then
+                if idempotent_target "$target"; then
+                  echo "idempotent retry: $ref already exists for the requested source"
+                else
+                  echo "partial promotion candidate: $ref exists without its release tag; exact digest verification is deferred to promotion"
+                fi
               fi
             done < <(jq -r '.image_matrix[] | [.target, (.repository + ":" + .version)] | @tsv' release-plan.json)
             while IFS=$'\t' read -r target ref; do
-              if docker manifest inspect "$ref" >/dev/null 2>&1 && ! idempotent_target "$target"; then
-                echo "semantic chart version already exists before this request: $ref" >&2
-                exit 1
+              if docker manifest inspect "$ref" >/dev/null 2>&1; then
+                if idempotent_target "$target"; then
+                  echo "idempotent retry: $ref already exists for the requested source"
+                else
+                  echo "partial promotion candidate: $ref exists without its release tag; exact archive verification is deferred to promotion"
+                fi
               fi
             done < <(jq -r '.chart_matrix[] as $entry | ([$entry.chart] + $entry.companions)[] as $chart | [$entry.target, ("ghcr.io/nunocgoncalves/iterabase-charts/" + $chart + ":" + $entry.version)] | @tsv' release-plan.json)
           fi
@@ -577,17 +583,22 @@ jobs:
             [ -f "$metadata" ] || continue
             name="$(jq -r '.name // empty' "$metadata")"
             repository="$(jq -r '.repository // empty' "$metadata")"
-            tag="$(jq -r '.candidate_tag // empty' "$metadata")"
+            candidate_tag="$(jq -r '.candidate_tag // empty' "$metadata")"
+            digest="$(jq -r '.digest // empty' "$metadata")"
+            immutable_tag="$candidate_tag@$digest"
             case "$name" in
               control-plane)
                 set_env "CONTROL_PLANE_IMAGE_REPO=$repository"
-                set_env "CONTROL_PLANE_IMAGE_TAG=$tag" ;;
+                set_env "CONTROL_PLANE_IMAGE_TAG=$immutable_tag"
+                set_env "CONTROL_PLANE_IMAGE_DIGEST=$digest" ;;
               inference-gateway)
                 set_env "INFERENCE_GATEWAY_IMAGE_REPO=$repository"
-                set_env "INFERENCE_GATEWAY_IMAGE_TAG=$tag" ;;
+                set_env "INFERENCE_GATEWAY_IMAGE_TAG=$immutable_tag"
+                set_env "INFERENCE_GATEWAY_IMAGE_DIGEST=$digest" ;;
               control-plane-tool-runner)
                 set_env "TOOL_RUNNER_IMAGE_REPO=$repository"
-                set_env "TOOL_RUNNER_IMAGE_TAG=$tag" ;;
+                set_env "TOOL_RUNNER_IMAGE_TAG=$immutable_tag"
+                set_env "TOOL_RUNNER_IMAGE_DIGEST=$digest" ;;
             esac
           done
 
@@ -598,6 +609,45 @@ jobs:
             substrate="$(find candidates -name 'cert-manager-substrate-*.tgz' -print -quit)"
             test -n "$substrate"
             tar -xzf "$substrate" -C candidate-local
+          fi
+
+          # An independently selected inference-gateway chart must replace the
+          # manifest-pinned dependency archive in the platform fixture. Pull the
+          # reviewed platform baseline when it was not selected, then inject the
+          # unchanged candidate .tgz into its dependency directory.
+          inference="$(find candidates -name 'inference-gateway-*.tgz' -print -quit)"
+          if [ -n "$inference" ]; then
+            if [ ! -d candidate-local/iterabase-platform ]; then
+              platform_version="$(manifest_value '.compatibility.charts["iterabase-platform"].version')"
+              helm pull oci://ghcr.io/nunocgoncalves/iterabase-charts/iterabase-platform \
+                --version "$platform_version" --untar --untardir candidate-local
+              helm pull oci://ghcr.io/nunocgoncalves/iterabase-charts/cert-manager-substrate \
+                --version "$platform_version" --untar --untardir candidate-local
+            fi
+            inference_version="$(basename "$inference" | sed -E 's/^inference-gateway-//;s/\.tgz$//')"
+            rm -f candidate-local/iterabase-platform/charts/inference-gateway-*.tgz
+            cp "$inference" candidate-local/iterabase-platform/charts/
+            python3 - candidate-local/iterabase-platform/Chart.yaml "$inference_version" <<'PY'
+          import pathlib, sys
+          path, version = pathlib.Path(sys.argv[1]), sys.argv[2]
+          lines = path.read_text(encoding="utf-8").splitlines()
+          selected = False
+          for index, line in enumerate(lines):
+              if line.strip() == "- name: inference-gateway":
+                  selected = True
+                  continue
+              if selected and line.strip().startswith("version:"):
+                  indent = line[: len(line) - len(line.lstrip())]
+                  lines[index] = f"{indent}version: {version}"
+                  break
+          else:
+              raise SystemExit("platform chart has no inference-gateway dependency")
+          path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+          PY
+            cmp "$inference" "candidate-local/iterabase-platform/charts/$(basename "$inference")"
+          fi
+
+          if [ -d candidate-local/iterabase-platform ]; then
             set_env "ITERABASE_LOCAL_CHART=$GITHUB_WORKSPACE/candidate-local/iterabase-platform"
             set_env "ITERABASE_PLATFORM_LOCAL_CHART=$GITHUB_WORKSPACE/candidate-local/iterabase-platform"
             set_env "ITERABASE_CHART_VERSION="
@@ -616,12 +666,13 @@ jobs:
 
   real-machine-candidates:
     name: Exact candidate real machine — ${{ matrix.name }}
-    needs: [preflight, forge-candidate, chart-candidates]
+    needs: [preflight, forge-candidate, chart-candidates, image-candidates]
     if: >-
       always() && needs.preflight.result == 'success' &&
       needs.preflight.outputs.run_real_machine == 'true' &&
       (needs.forge-candidate.result == 'success' || needs.forge-candidate.result == 'skipped') &&
-      (needs.chart-candidates.result == 'success' || needs.chart-candidates.result == 'skipped')
+      (needs.chart-candidates.result == 'success' || needs.chart-candidates.result == 'skipped') &&
+      (needs.image-candidates.result == 'success' || needs.image-candidates.result == 'skipped')
     runs-on: ubuntu-latest
     timeout-minutes: 70
     permissions:
@@ -650,6 +701,12 @@ jobs:
           pattern: chart-iterabase-platform
           path: candidates/charts
           merge-multiple: true
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        if: needs.preflight.outputs.has_images == 'true'
+        with:
+          pattern: image-*
+          path: candidates/images
+          merge-multiple: true
       - uses: ./.github/actions/setup-go
         with:
           go-version: 1.26.5
@@ -676,6 +733,32 @@ jobs:
             set_env "FORGE_E2E_CHART_REPOSITORY=oci://ghcr.io/${{ github.repository_owner }}/$namespace/iterabase-platform"
             set_env "FORGE_E2E_REGISTRY_USERNAME=${{ github.actor }}"
           fi
+          for image in candidates/images/candidate-*.json; do
+            [ -f "$image" ] || continue
+            name="$(jq -r '.name // empty' "$image")"
+            repository="$(jq -r '.repository // empty' "$image")"
+            candidate_tag="$(jq -r '.candidate_tag // empty' "$image")"
+            digest="$(jq -r '.digest // empty' "$image")"
+            immutable_tag="$candidate_tag@$digest"
+            case "$name" in
+              control-plane)
+                set_env "CONTROL_PLANE_IMAGE_REPO=$repository"
+                set_env "CONTROL_PLANE_IMAGE_TAG=$immutable_tag"
+                set_env "CONTROL_PLANE_IMAGE_DIGEST=$digest" ;;
+              inference-gateway)
+                set_env "INFERENCE_GATEWAY_IMAGE_REPO=$repository"
+                set_env "INFERENCE_GATEWAY_IMAGE_TAG=$immutable_tag"
+                set_env "INFERENCE_GATEWAY_IMAGE_DIGEST=$digest" ;;
+              control-plane-tool-runner)
+                set_env "TOOL_RUNNER_IMAGE_REPO=$repository"
+                set_env "TOOL_RUNNER_IMAGE_TAG=$immutable_tag"
+                set_env "TOOL_RUNNER_IMAGE_DIGEST=$digest" ;;
+            esac
+          done
+      - name: Require mandatory real-machine credentials
+        env:
+          DIGITALOCEAN_TOKEN: ${{ secrets.DIGITALOCEAN_TOKEN }}
+        run: test -n "$DIGITALOCEAN_TOKEN"
       - name: Run mandatory exact-candidate real-machine suite
         working-directory: forge
         env:
@@ -764,9 +847,67 @@ jobs:
             evidence-assets/
           retention-days: 90
 
+  retry-identity:
+    name: Verify existing retry identities before approval
+    needs: [preflight, evidence]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ inputs.master_sha }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-evidence
+          path: release-evidence
+      - uses: ./.github/actions/setup-kubernetes-tools
+      - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+      - name: Log in to GHCR for existing-identity verification
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Require existing semantic artifacts to match this candidate set
+        env:
+          DRY_RUN: ${{ needs.preflight.outputs.dry_run }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          for metadata in release-evidence/evidence-assets/images/candidate-*.json; do
+            [ -f "$metadata" ] || continue
+            repository="$(jq -r '.repository' "$metadata")"
+            version="$(jq -r '.version' "$metadata")"
+            digest="$(jq -r '.digest' "$metadata")"
+            destination="$repository:$version"
+            if [ "$DRY_RUN" = true ]; then destination="$repository:dry-run-$version-$RUN_ID"; fi
+            existing="$(docker buildx imagetools inspect "$destination" --format '{{json .Manifest.Digest}}' 2>/dev/null | tr -d '"' || true)"
+            if [ -n "$existing" ] && [ "$existing" != "$digest" ]; then
+              echo "$destination already has conflicting digest $existing" >&2
+              exit 1
+            fi
+          done
+
+          echo '${{ secrets.GITHUB_TOKEN }}' | helm registry login ghcr.io -u '${{ github.actor }}' --password-stdin
+          namespace=iterabase-charts
+          if [ "$DRY_RUN" = true ]; then namespace="iterabase-release-dry-run/$RUN_ID"; fi
+          while IFS= read -r -d '' package; do
+            chart="$(basename "$package" | sed -E 's/-[0-9]+\.[0-9]+\.[0-9]+\.tgz$//')"
+            version="$(basename "$package" | sed -E "s/^${chart}-//;s/\.tgz$//")"
+            repository="oci://ghcr.io/${{ github.repository_owner }}/$namespace/$chart"
+            pulled="$(mktemp -d)"
+            if helm pull "$repository" --version "$version" --destination "$pulled" >/dev/null 2>&1; then
+              cmp "$package" "$pulled/$(basename "$package")" || {
+                echo "$repository:$version already has conflicting content" >&2
+                exit 1
+              }
+            fi
+          done < <(find release-evidence/evidence-assets/charts -type f -name '*.tgz' -print0)
+
   promote:
     name: Founder-approved exact promotion
-    needs: [preflight, evidence]
+    needs: [preflight, evidence, retry-identity]
     runs-on: ubuntu-latest
     environment: release
     permissions:
@@ -781,6 +922,11 @@ jobs:
         with:
           name: release-evidence
           path: release-evidence
+      - name: Initialize durable promotion ledger
+        run: |
+          python3 .github/scripts/release.py promotion-init \
+            --plan release-evidence/release-plan.json \
+            --output promotion-ledger.json
       - uses: ./.github/actions/setup-kubernetes-tools
       - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
       - name: Log in to GHCR
@@ -808,8 +954,24 @@ jobs:
           DRY_RUN: ${{ needs.preflight.outputs.dry_run }}
           RUN_ID: ${{ github.run_id }}
         run: |
+          current_target=''
+          current_phase=''
+          record_failure() {
+            status=$?
+            trap - ERR
+            if [ -n "$current_target" ]; then
+              python3 .github/scripts/release.py promotion-record --ledger promotion-ledger.json \
+                --target "$current_target" --phase "$current_phase" --status failed \
+                --message "image promotion command failed"
+            fi
+            exit "$status"
+          }
+          trap record_failure ERR
           for metadata in release-evidence/evidence-assets/images/candidate-*.json; do
             [ -f "$metadata" ] || continue
+            name="$(jq -r '.name' "$metadata")"
+            current_target="$(jq -r '.target' "$metadata")"
+            current_phase="image:$name"
             repository="$(jq -r '.repository' "$metadata")"
             version="$(jq -r '.version' "$metadata")"
             digest="$(jq -r '.digest' "$metadata")"
@@ -826,18 +988,44 @@ jobs:
             fi
             promoted="$(docker buildx imagetools inspect "$destination" --format '{{json .Manifest.Digest}}' | tr -d '"')"
             test "$promoted" = "$digest"
+            identity="$(jq -nc --arg repository "$repository" --arg destination "$destination" --arg digest "$digest" \
+              '{repository:$repository,destination:$destination,digest:$digest}')"
+            python3 .github/scripts/release.py promotion-record --ledger promotion-ledger.json \
+              --target "$current_target" --phase "$current_phase" --status completed --identity-json "$identity"
+            current_target=''
+            current_phase=''
           done
+          trap - ERR
       - name: Promote unchanged chart archives
         env:
           DRY_RUN: ${{ needs.preflight.outputs.dry_run }}
           RUN_ID: ${{ github.run_id }}
         run: |
+          current_target=''
+          current_phase=''
+          record_failure() {
+            status=$?
+            trap - ERR
+            if [ -n "$current_target" ]; then
+              python3 .github/scripts/release.py promotion-record --ledger promotion-ledger.json \
+                --target "$current_target" --phase "$current_phase" --status failed \
+                --message "chart promotion command failed"
+            fi
+            exit "$status"
+          }
+          trap record_failure ERR
           echo '${{ secrets.GITHUB_TOKEN }}' | helm registry login ghcr.io -u '${{ github.actor }}' --password-stdin
           namespace=iterabase-charts
           if [ "$DRY_RUN" = true ]; then namespace="iterabase-release-dry-run/$RUN_ID"; fi
           while IFS= read -r -d '' package; do
             chart="$(basename "$package" | sed -E 's/-[0-9]+\.[0-9]+\.[0-9]+\.tgz$//')"
             version="$(basename "$package" | sed -E "s/^${chart}-//;s/\.tgz$//")"
+            metadata="release-evidence/evidence-assets/charts/candidate-chart-$chart.json"
+            if [ "$chart" = cert-manager-substrate ]; then
+              metadata="release-evidence/evidence-assets/charts/candidate-chart-iterabase-platform.json"
+            fi
+            current_target="$(jq -r '.target' "$metadata")"
+            current_phase="chart:$chart"
             repository="oci://ghcr.io/${{ github.repository_owner }}/$namespace/$chart"
             pulled="$(mktemp -d)"
             if helm pull "$repository" --version "$version" --destination "$pulled" >/dev/null 2>&1; then
@@ -845,44 +1033,119 @@ jobs:
                 echo "$repository:$version already has conflicting content" >&2
                 exit 1
               }
-              continue
+            else
+              helm push "$package" "oci://ghcr.io/${{ github.repository_owner }}/$namespace"
             fi
-            helm push "$package" "oci://ghcr.io/${{ github.repository_owner }}/$namespace"
+            checksum="$(sha256sum "$package" | awk '{print $1}')"
+            identity="$(jq -nc --arg repository "$repository" --arg version "$version" --arg sha256 "$checksum" \
+              '{repository:$repository,version:$version,sha256:$sha256}')"
+            python3 .github/scripts/release.py promotion-record --ledger promotion-ledger.json \
+              --target "$current_target" --phase "$current_phase" --status completed --identity-json "$identity"
+            current_target=''
+            current_phase=''
           done < <(find release-evidence/evidence-assets/charts -type f -name '*.tgz' -print0)
+          trap - ERR
       - name: Create protected tags at the exact source
         env:
           PLAN: ${{ needs.preflight.outputs.plan }}
         run: |
-          while IFS= read -r tag; do
+          current_target=''
+          current_phase=git-tag
+          record_failure() {
+            status=$?
+            trap - ERR
+            if [ -n "$current_target" ]; then
+              python3 .github/scripts/release.py promotion-record --ledger promotion-ledger.json \
+                --target "$current_target" --phase "$current_phase" --status failed \
+                --message "protected tag promotion command failed"
+            fi
+            exit "$status"
+          }
+          trap record_failure ERR
+          while IFS= read -r selected; do
+            current_target="$(jq -r '.target' <<<"$selected")"
+            tag="$(jq -r '.release_tag' <<<"$selected")"
             direct="$(git ls-remote --tags origin "refs/tags/$tag" | awk '{print $1}')"
             peeled="$(git ls-remote --tags origin "refs/tags/$tag^{}" | awk '{print $1}')"
             existing="${peeled:-$direct}"
             if [ -n "$existing" ]; then
               test "$existing" = '${{ inputs.master_sha }}'
-              continue
+            else
+              git -c tag.gpgSign=false tag -a "$tag" '${{ inputs.master_sha }}' -m "Protected release $tag from ${{ inputs.master_sha }}"
+              git push origin "refs/tags/$tag"
             fi
-            git -c tag.gpgSign=false tag -a "$tag" '${{ inputs.master_sha }}' -m "Protected release $tag from ${{ inputs.master_sha }}"
-            git push origin "refs/tags/$tag"
-          done < <(jq -r '.selected[].release_tag' <<<"$PLAN")
+            identity="$(jq -nc --arg tag "$tag" --arg source_sha '${{ inputs.master_sha }}' \
+              '{tag:$tag,source_sha:$source_sha}')"
+            python3 .github/scripts/release.py promotion-record --ledger promotion-ledger.json \
+              --target "$current_target" --phase "$current_phase" --status completed --identity-json "$identity"
+            current_target=''
+          done < <(jq -c '.selected[]' <<<"$PLAN")
+          trap - ERR
       - name: Create or complete GitHub Releases with exact evidence
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PLAN: ${{ needs.preflight.outputs.plan }}
           DRY_RUN: ${{ needs.preflight.outputs.dry_run }}
         run: |
+          current_target=''
+          current_phase=github-release
+          record_failure() {
+            status=$?
+            trap - ERR
+            if [ -n "$current_target" ]; then
+              python3 .github/scripts/release.py promotion-record --ledger promotion-ledger.json \
+                --target "$current_target" --phase "$current_phase" --status failed \
+                --message "GitHub Release publication command failed"
+            fi
+            exit "$status"
+          }
+          trap record_failure ERR
+
+          verify_or_upload_assets() {
+            local tag="$1"
+            shift
+            local existing_dir name asset
+            existing_dir="$(mktemp -d)"
+            # Existing Releases are retries only when their prior validation
+            # evidence and every same-named asset are byte-identical. Missing
+            # assets may be completed; mismatches are never overwritten.
+            if ! gh release view "$tag" --json assets --jq '.assets[].name' | grep -Fxq release-evidence.json; then
+              echo "existing release $tag has no prior release-evidence.json" >&2
+              return 1
+            fi
+            gh release download "$tag" --pattern release-evidence.json --dir "$existing_dir"
+            cmp release-evidence/release-evidence.json "$existing_dir/release-evidence.json" || {
+              echo "existing release $tag has conflicting validation evidence" >&2
+              return 1
+            }
+            for asset in "$@"; do
+              name="$(basename "$asset")"
+              if gh release view "$tag" --json assets --jq '.assets[].name' | grep -Fxq "$name"; then
+                rm -f "$existing_dir/$name"
+                gh release download "$tag" --pattern "$name" --dir "$existing_dir"
+                cmp "$asset" "$existing_dir/$name" || {
+                  echo "existing release $tag asset $name has conflicting content" >&2
+                  return 1
+                }
+              else
+                gh release upload "$tag" "$asset"
+              fi
+            done
+          }
+
           # shellcheck disable=SC2035 # release assets are generated controlled filenames
           while IFS= read -r selected; do
-            target="$(jq -r '.target' <<<"$selected")"
+            current_target="$(jq -r '.target' <<<"$selected")"
             tag="$(jq -r '.release_tag' <<<"$selected")"
             version="$(jq -r '.version' <<<"$selected")"
             notes="$(mktemp)"
             cat > "$notes" <<EOF
-          Protected release of **$target $version** from \`${{ inputs.master_sha }}\`.
+          Protected release of **$current_target $version** from \`${{ inputs.master_sha }}\`.
 
           Exact candidate validation and compatibility evidence are attached. This release was promoted without rebuilding.
           EOF
             assets=(release-evidence/release-evidence.json release-evidence/release-plan.json)
-            case "$target" in
+            case "$current_target" in
               control-plane)
                 while IFS= read -r file; do assets+=("$file"); done < <(find release-evidence/evidence-assets/images -type f -name 'candidate-control-plane*' | sort) ;;
               inference-gateway)
@@ -897,10 +1160,50 @@ jobs:
                 fi ;;
             esac
             if gh release view "$tag" >/dev/null 2>&1; then
-              gh release upload "$tag" "${assets[@]}" --clobber
+              verify_or_upload_assets "$tag" "${assets[@]}"
             else
               prerelease=()
               if [ "$DRY_RUN" = true ]; then prerelease+=(--prerelease); fi
               gh release create "$tag" "${assets[@]}" --verify-tag --title "$tag" --notes-file "$notes" "${prerelease[@]}"
             fi
+            identity="$(jq -nc --arg tag "$tag" --arg source_sha '${{ inputs.master_sha }}' \
+              '{tag:$tag,source_sha:$source_sha,evidence_asset:"release-evidence.json"}')"
+            python3 .github/scripts/release.py promotion-record --ledger promotion-ledger.json \
+              --target "$current_target" --phase "$current_phase" --status completed --identity-json "$identity"
+            current_target=''
           done < <(jq -c '.selected[]' <<<"$PLAN")
+          trap - ERR
+      - name: Retain and attach immutable promotion ledger
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ ! -f promotion-ledger.json ]; then
+            python3 .github/scripts/release.py promotion-init \
+              --plan release-evidence/release-plan.json \
+              --output promotion-ledger.json
+          fi
+          checksum="$(sha256sum promotion-ledger.json | awk '{print $1}')"
+          snapshot="promotion-ledger-${{ github.run_id }}-${checksum}.json"
+          cp promotion-ledger.json "$snapshot"
+          while IFS= read -r tag; do
+            if ! gh release view "$tag" >/dev/null 2>&1; then
+              continue
+            fi
+            if gh release view "$tag" --json assets --jq '.assets[].name' | grep -Fxq "$snapshot"; then
+              existing="$(mktemp -d)"
+              gh release download "$tag" --pattern "$snapshot" --dir "$existing"
+              cmp "$snapshot" "$existing/$snapshot"
+            else
+              gh release upload "$tag" "$snapshot"
+            fi
+          done < <(jq -r '.selected[].release_tag' release-evidence/release-plan.json)
+      - name: Upload durable promotion ledger
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: promotion-ledger-${{ github.run_attempt }}
+          path: |
+            promotion-ledger.json
+            promotion-ledger-${{ github.run_id }}-*.json
+          retention-days: 90

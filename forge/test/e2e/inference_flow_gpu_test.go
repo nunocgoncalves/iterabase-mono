@@ -42,6 +42,11 @@ func applyInferencePlatformStage(t *testing.T, state *digitalOceanGPUState) {
 	assertApplyMarkers(t, out, "action:     skip", "node ready: true", "certificate substrate applied: true",
 		"chart applied: true", "overlay applied: true", "flux installed: true", "gitrepository: ready=True")
 	t.Logf("apply output:\n%s", out)
+	applyCandidateImagesOnHost(t, state.vm.IP, state.privKeyPath, "itb", "iterabase-system",
+		os.Getenv("FORGE_E2E_CHART_REPOSITORY"), state.chartVersion)
+	candidateCluster := kindtest.UseCluster(t, state.runID, filepath.Join(state.forgeHome, state.runID, "kubeconfig.yaml"))
+	assertCandidateImageDigests(t, candidateCluster, "iterabase-system",
+		controlPlaneDigestEnv, inferenceGatewayDigestEnv, toolRunnerDigestEnv)
 }
 
 func runInferenceGPUStage(t *testing.T, state *digitalOceanGPUState) {

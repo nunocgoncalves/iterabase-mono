@@ -26,6 +26,13 @@ import (
 // handler returns canned stdout + exit code for a given remote command.
 type handler func(cmd string) (string, int)
 
+func TestHelmCmdUsesRootOwnedRegistryConfig(t *testing.T) {
+	command := helmCmd("show", "chart", "oci://ghcr.io/example/private/chart", "--version", "1.2.3")
+	assert.Contains(t, command, "'sudo' 'helm'")
+	assert.Contains(t, command, "'--registry-config' '/etc/forge/helm-registry.json'")
+	assert.Contains(t, command, "'--kubeconfig' '/etc/rancher/k3s/k3s.yaml'")
+}
+
 // startFakeSSH starts an in-process SSH server accepting a single test key.
 // It returns the server address, a client config usable to connect, and a
 // cleanup func. The handler is invoked for each "exec" request.

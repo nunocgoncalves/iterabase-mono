@@ -2,7 +2,10 @@ package e2e
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
+
+	"github.com/nunocgoncalves/iterabase-mono/forge/test/e2e/internal/kindtest"
 )
 
 // runOverlayStage upgrades the composed CPU fixture from the migration source
@@ -28,6 +31,11 @@ func runOverlayStage(t *testing.T, state *digitalOceanCPUState) {
 	assertApplyMarkers(t, out, "action:     skip", "node ready: true", "certificate substrate applied: true",
 		"chart applied: true", "overlay applied: true", "overlay commit:", "flux installed: true", "gitrepository: ready=True")
 	t.Logf("apply output:\n%s", out)
+	applyCandidateImagesOnHost(t, state.ip, state.privKeyPath, state.runID, "iterabase-system",
+		os.Getenv("FORGE_E2E_CHART_REPOSITORY"), state.chartVersion)
+	candidateCluster := kindtest.UseCluster(t, state.runID, filepath.Join(state.forgeHome, state.runID, "kubeconfig.yaml"))
+	assertCandidateImageDigests(t, candidateCluster, "iterabase-system",
+		controlPlaneDigestEnv, inferenceGatewayDigestEnv, toolRunnerDigestEnv)
 
 	// The cloned overlay dir exists on the host (a real clone happened).
 	overlayDir := "/var/lib/forge/overlay/" + state.runID

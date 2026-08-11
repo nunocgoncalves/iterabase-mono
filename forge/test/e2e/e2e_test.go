@@ -55,6 +55,9 @@ type digitalOceanCPUState struct {
 func runDigitalOceanCPU(t *testing.T) {
 	token := os.Getenv("DIGITALOCEAN_TOKEN")
 	if token == "" {
+		if os.Getenv("FORGE_E2E_REQUIRE_CAPACITY") == "true" {
+			t.Fatal("mandatory CPU release validation incomplete — DIGITALOCEAN_TOKEN not set")
+		}
 		t.Skip("DIGITALOCEAN_TOKEN not set; skipping DigitalOcean CPU scenario")
 	}
 
