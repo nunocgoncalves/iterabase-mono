@@ -16,13 +16,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nunocgoncalves/forge/test/e2e/internal/kindtest"
+	"github.com/nunocgoncalves/iterabase-mono/forge/test/e2e/internal/kindtest"
 	"golang.org/x/crypto/ssh"
 )
 
 const fluxInstallManifest = "https://github.com/fluxcd/flux2/releases/download/v2.4.0/install.yaml"
 
-// runToolRunnerContract owns the cross-repository real-cluster contract for
+// runToolRunnerContract owns the cross-component real-cluster contract for
 // HOR-397. Component semantics stay in control-plane unit/integration tests;
 // this fresh Kind scenario proves the released boundaries compose:
 //
@@ -253,9 +253,9 @@ func resolveToolRunnerArtifacts(t *testing.T) toolRunnerArtifacts {
 			certificateChartVersion: platformChartVersion(t, ""),
 		}
 	}
-	for label, path := range map[string]string{"control-plane": controlPlaneRoot, "iterabase-charts": chartsRoot} {
+	for label, path := range map[string]string{"control-plane": controlPlaneRoot, "charts": chartsRoot} {
 		if _, err := os.Stat(path); err != nil {
-			t.Fatalf("%s checkout %q unavailable: %v", label, path, err)
+			t.Fatalf("%s monorepo directory %q unavailable: %v", label, path, err)
 		}
 	}
 	controlChart := filepath.Join(chartsRoot, "charts", "control-plane")

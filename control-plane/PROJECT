@@ -7,5 +7,5 @@ domain: iterabase.com
 layout:
 - go.kubebuilder.io/v4
 projectName: control-plane
-repo: github.com/nunocgoncalves/control-plane
+repo: github.com/nunocgoncalves/iterabase-mono/control-plane
 version: "3"

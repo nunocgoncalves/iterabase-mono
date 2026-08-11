@@ -26,11 +26,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/config"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 
-	"github.com/nunocgoncalves/control-plane/api/v1alpha1"
-	"github.com/nunocgoncalves/control-plane/internal/gateway"
-	"github.com/nunocgoncalves/control-plane/internal/identity"
-	"github.com/nunocgoncalves/control-plane/internal/testutil"
-	"github.com/nunocgoncalves/control-plane/internal/workflow"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/api/v1alpha1"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/gateway"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/identity"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/testutil"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/workflow"
 )
 
 // jsonConfig wraps a raw JSON snippet into an apiextensionsv1.JSON pointer.

@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nunocgoncalves/forge/test/e2e/internal/kindtest"
+	"github.com/nunocgoncalves/iterabase-mono/forge/test/e2e/internal/kindtest"
 )
 
 // runControlPlaneIdentity deploys the control-plane Helm chart to an isolated Kind
@@ -37,7 +37,7 @@ import (
 // available and the reviewed pinned release otherwise; the scheduled
 // compatibility matrix opts into latest stable. The image tag is derived from
 // chart appVersion, so chart and image cannot drift. Override via
-// env for local dev / pinning: CONTROL_PLANE_LOCAL_CHART points at a checkout
+// env for local dev / pinning: CONTROL_PLANE_LOCAL_CHART points at a local chart directory
 // (helm installs the path directly), CONTROL_PLANE_LOCAL_IMAGE loads a
 // locally-built image into the Kind nodes, and CONTROL_PLANE_CHART_VERSION /
 // CONTROL_PLANE_IMAGE_TAG pin a specific release/tag.

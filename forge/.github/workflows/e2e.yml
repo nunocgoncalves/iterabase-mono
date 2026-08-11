@@ -105,49 +105,16 @@ jobs:
       cancel-in-progress: true
     steps:
       - uses: actions/checkout@v7
-      - name: resolve coordinated ticket branches
+      - name: resolve monorepo source paths
         id: coordinated-refs
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          ticket=$(printf '%s' "${GITHUB_HEAD_REF:-}" | grep -oE '^HOR-[0-9]+' || true)
-          resolve_ref() {
-            local repository=$1
-            if [ -n "$ticket" ]; then
-              gh api --paginate "repos/$repository/branches?per_page=100" \
-                --jq ".[] | select(.name | startswith(\"${ticket}-\")) | .name" | head -1
-            fi
-          }
-          control_plane_ref=$(resolve_ref nunocgoncalves/control-plane)
-          charts_ref=$(resolve_ref nunocgoncalves/iterabase-charts)
-          if [ -n "$control_plane_ref" ] && [ -n "$charts_ref" ]; then
-            {
-              echo "mode=source-composed"
-              echo "control_plane_ref=$control_plane_ref"
-              echo "charts_ref=$charts_ref"
-              echo "control_plane_root=$GITHUB_WORKSPACE/dependencies/control-plane"
-              echo "charts_root=$GITHUB_WORKSPACE/dependencies/iterabase-charts"
-              echo "platform_local_chart=$GITHUB_WORKSPACE/dependencies/iterabase-charts/charts/iterabase-platform"
-              echo "control_plane_local_chart=$GITHUB_WORKSPACE/dependencies/iterabase-charts/charts/control-plane"
-            } >> "$GITHUB_OUTPUT"
-          else
-            echo "mode=pinned-release" >> "$GITHUB_OUTPUT"
-            echo "No complete coordinated branch pair for ${ticket:-non-ticket run}; using reviewed pinned releases."
-          fi
-      - name: checkout coordinated control-plane source
-        if: steps.coordinated-refs.outputs.mode == 'source-composed'
-        uses: actions/checkout@v7
-        with:
-          repository: nunocgoncalves/control-plane
-          ref: ${{ steps.coordinated-refs.outputs.control_plane_ref }}
-          path: dependencies/control-plane
-      - name: checkout coordinated chart source
-        if: steps.coordinated-refs.outputs.mode == 'source-composed'
-        uses: actions/checkout@v7
-        with:
-          repository: nunocgoncalves/iterabase-charts
-          ref: ${{ steps.coordinated-refs.outputs.charts_ref }}
-          path: dependencies/iterabase-charts
+          {
+            echo "mode=source-composed"
+            echo "control_plane_root=$GITHUB_WORKSPACE/control-plane"
+            echo "charts_root=$GITHUB_WORKSPACE/charts"
+            echo "platform_local_chart=$GITHUB_WORKSPACE/charts/charts/iterabase-platform"
+            echo "control_plane_local_chart=$GITHUB_WORKSPACE/charts/charts/control-plane"
+          } >> "$GITHUB_OUTPUT"
       - uses: actions/setup-go@v6
         with:
           go-version: "1.26.x"
@@ -162,10 +129,10 @@ jobs:
       - name: build coordinated chart dependencies
         if: steps.coordinated-refs.outputs.mode == 'source-composed' && matrix.name != 'tool-runner-contract'
         run: |
-          helm dependency build dependencies/iterabase-charts/charts/control-plane
+          helm dependency build charts/charts/control-plane
           if [ "${{ matrix.name }}" != "controlplane-identity" ]; then
-            helm dependency build dependencies/iterabase-charts/charts/cert-manager-substrate
-            helm dependency build dependencies/iterabase-charts/charts/iterabase-platform
+            helm dependency build charts/charts/cert-manager-substrate
+            helm dependency build charts/charts/iterabase-platform
           fi
       - name: run ${{ matrix.name }} (${{ steps.coordinated-refs.outputs.mode }})
         run: make ${{ matrix.target }}

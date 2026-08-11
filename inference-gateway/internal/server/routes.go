@@ -10,9 +10,9 @@ import (
 	chimiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
-	"github.com/nunocgoncalves/inference-gateway/internal/metrics"
-	gatewaymw "github.com/nunocgoncalves/inference-gateway/internal/middleware"
-	"github.com/nunocgoncalves/inference-gateway/internal/snapshot"
+	"github.com/nunocgoncalves/iterabase-mono/inference-gateway/internal/metrics"
+	gatewaymw "github.com/nunocgoncalves/iterabase-mono/inference-gateway/internal/middleware"
+	"github.com/nunocgoncalves/iterabase-mono/inference-gateway/internal/snapshot"
 )
 
 func newRouter(logger *slog.Logger, m *metrics.Metrics, deps *Deps) http.Handler {
@@ -20,7 +20,7 @@ func newRouter(logger *slog.Logger, m *metrics.Metrics, deps *Deps) http.Handler
 
 	// Base middleware — order matters.
 	r.Use(chimiddleware.Recoverer)
-	r.Use(chimiddleware.RealIP)
+	r.Use(chimiddleware.RealIP) //nolint:staticcheck // Preserve existing proxy-header behavior during source migration.
 	r.Use(gatewaymw.RequestID)
 	r.Use(gatewaymw.Logging(logger))
 
@@ -84,7 +84,7 @@ func newRouter(logger *slog.Logger, m *metrics.Metrics, deps *Deps) http.Handler
 func newWorkloadRouter(logger *slog.Logger, m *metrics.Metrics, deps *Deps) http.Handler {
 	r := chi.NewRouter()
 	r.Use(chimiddleware.Recoverer)
-	r.Use(chimiddleware.RealIP)
+	r.Use(chimiddleware.RealIP) //nolint:staticcheck // Preserve existing proxy-header behavior during source migration.
 	r.Use(gatewaymw.RequestID)
 	r.Use(gatewaymw.Logging(logger))
 	r.Use(gatewaymw.WorkloadAuth(deps.WorkloadStore, deps.TrustDomain, logger))

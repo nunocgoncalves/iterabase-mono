@@ -11,15 +11,15 @@ import (
 
 	"golang.org/x/mod/semver"
 
-	"github.com/nunocgoncalves/forge/internal/artifacts"
-	"github.com/nunocgoncalves/forge/internal/config"
-	"github.com/nunocgoncalves/forge/internal/deployer"
-	"github.com/nunocgoncalves/forge/internal/fluxer"
-	"github.com/nunocgoncalves/forge/internal/k3s"
-	"github.com/nunocgoncalves/forge/internal/kubeconfig"
-	"github.com/nunocgoncalves/forge/internal/overlayer"
-	"github.com/nunocgoncalves/forge/internal/provisioner"
-	"github.com/nunocgoncalves/forge/internal/version"
+	"github.com/nunocgoncalves/iterabase-mono/forge/internal/artifacts"
+	"github.com/nunocgoncalves/iterabase-mono/forge/internal/config"
+	"github.com/nunocgoncalves/iterabase-mono/forge/internal/deployer"
+	"github.com/nunocgoncalves/iterabase-mono/forge/internal/fluxer"
+	"github.com/nunocgoncalves/iterabase-mono/forge/internal/k3s"
+	"github.com/nunocgoncalves/iterabase-mono/forge/internal/kubeconfig"
+	"github.com/nunocgoncalves/iterabase-mono/forge/internal/overlayer"
+	"github.com/nunocgoncalves/iterabase-mono/forge/internal/provisioner"
+	"github.com/nunocgoncalves/iterabase-mono/forge/internal/version"
 )
 
 // Action is what apply will do for the host.

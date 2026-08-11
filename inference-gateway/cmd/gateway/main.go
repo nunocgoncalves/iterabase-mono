@@ -14,15 +14,15 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/redis/go-redis/v9"
 
-	"github.com/nunocgoncalves/inference-gateway/internal/config"
-	"github.com/nunocgoncalves/inference-gateway/internal/database"
-	"github.com/nunocgoncalves/inference-gateway/internal/metrics"
-	"github.com/nunocgoncalves/inference-gateway/internal/proxy"
-	"github.com/nunocgoncalves/inference-gateway/internal/ratelimit"
-	"github.com/nunocgoncalves/inference-gateway/internal/server"
-	"github.com/nunocgoncalves/inference-gateway/internal/snapshot"
-	"github.com/nunocgoncalves/inference-gateway/internal/spiffe"
-	"github.com/nunocgoncalves/inference-gateway/internal/workload"
+	"github.com/nunocgoncalves/iterabase-mono/inference-gateway/internal/config"
+	"github.com/nunocgoncalves/iterabase-mono/inference-gateway/internal/database"
+	"github.com/nunocgoncalves/iterabase-mono/inference-gateway/internal/metrics"
+	"github.com/nunocgoncalves/iterabase-mono/inference-gateway/internal/proxy"
+	"github.com/nunocgoncalves/iterabase-mono/inference-gateway/internal/ratelimit"
+	"github.com/nunocgoncalves/iterabase-mono/inference-gateway/internal/server"
+	"github.com/nunocgoncalves/iterabase-mono/inference-gateway/internal/snapshot"
+	"github.com/nunocgoncalves/iterabase-mono/inference-gateway/internal/spiffe"
+	"github.com/nunocgoncalves/iterabase-mono/inference-gateway/internal/workload"
 )
 
 func main() {

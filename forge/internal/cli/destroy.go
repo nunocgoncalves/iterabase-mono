@@ -9,9 +9,9 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/nunocgoncalves/forge/internal/artifacts"
-	"github.com/nunocgoncalves/forge/internal/lifecycle"
-	"github.com/nunocgoncalves/forge/internal/sshprovisioner"
+	"github.com/nunocgoncalves/iterabase-mono/forge/internal/artifacts"
+	"github.com/nunocgoncalves/iterabase-mono/forge/internal/lifecycle"
+	"github.com/nunocgoncalves/iterabase-mono/forge/internal/sshprovisioner"
 )
 
 func newDestroyCmd() *cobra.Command {

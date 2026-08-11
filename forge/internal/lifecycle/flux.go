@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/nunocgoncalves/forge/internal/config"
-	"github.com/nunocgoncalves/forge/internal/deployer"
-	"github.com/nunocgoncalves/forge/internal/fluxer"
+	"github.com/nunocgoncalves/iterabase-mono/forge/internal/config"
+	"github.com/nunocgoncalves/iterabase-mono/forge/internal/deployer"
+	"github.com/nunocgoncalves/iterabase-mono/forge/internal/fluxer"
 )
 
 // Flux sync resource names + constants. v1 single-node => one install per

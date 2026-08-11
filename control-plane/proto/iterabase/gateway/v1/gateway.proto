@@ -40,7 +40,7 @@ package iterabase.gateway.v1;
 // Ref: Tool Gateway and Lightweight Sandbox — Architecture Direction (Obsidian);
 // Linear HOR-392.
 
-option go_package = "github.com/nunocgoncalves/control-plane/internal/gatewayrpc/iterabase/gateway/v1;gatewayv1";
+option go_package = "github.com/nunocgoncalves/iterabase-mono/control-plane/internal/gatewayrpc/iterabase/gateway/v1;gatewayv1";
 
 import "google/protobuf/duration.proto";
 

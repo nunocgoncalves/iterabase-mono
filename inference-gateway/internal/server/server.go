@@ -10,12 +10,12 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/nunocgoncalves/inference-gateway/internal/config"
-	"github.com/nunocgoncalves/inference-gateway/internal/metrics"
-	"github.com/nunocgoncalves/inference-gateway/internal/proxy"
-	"github.com/nunocgoncalves/inference-gateway/internal/ratelimit"
-	"github.com/nunocgoncalves/inference-gateway/internal/snapshot"
-	"github.com/nunocgoncalves/inference-gateway/internal/workload"
+	"github.com/nunocgoncalves/iterabase-mono/inference-gateway/internal/config"
+	"github.com/nunocgoncalves/iterabase-mono/inference-gateway/internal/metrics"
+	"github.com/nunocgoncalves/iterabase-mono/inference-gateway/internal/proxy"
+	"github.com/nunocgoncalves/iterabase-mono/inference-gateway/internal/ratelimit"
+	"github.com/nunocgoncalves/iterabase-mono/inference-gateway/internal/snapshot"
+	"github.com/nunocgoncalves/iterabase-mono/inference-gateway/internal/workload"
 )
 
 // Deps holds all dependencies needed by the server to wire routing.

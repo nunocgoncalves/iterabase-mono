@@ -20,7 +20,7 @@ package iterabase.harness.v1;
 //
 // Ref: Platform Direction doc §4/§7/§9 (refined 2026-07-27); Linear HOR-381.
 
-option go_package = "github.com/nunocgoncalves/control-plane/internal/harnessrpc/iterabase/harness/v1;harnessv1";
+option go_package = "github.com/nunocgoncalves/iterabase-mono/control-plane/internal/harnessrpc/iterabase/harness/v1;harnessv1";
 
 service Harness {
   // Work is the one long-lived bidi stream per worker. Worker->CP: Hello,

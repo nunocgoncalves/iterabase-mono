@@ -12,10 +12,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/nunocgoncalves/forge/internal/config"
-	"github.com/nunocgoncalves/forge/internal/deployer"
-	"github.com/nunocgoncalves/forge/internal/fluxer"
-	"github.com/nunocgoncalves/forge/internal/provisioner"
+	"github.com/nunocgoncalves/iterabase-mono/forge/internal/config"
+	"github.com/nunocgoncalves/iterabase-mono/forge/internal/deployer"
+	"github.com/nunocgoncalves/iterabase-mono/forge/internal/fluxer"
+	"github.com/nunocgoncalves/iterabase-mono/forge/internal/provisioner"
 )
 
 const (

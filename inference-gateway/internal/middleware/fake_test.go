@@ -4,8 +4,8 @@ import (
 	"context"
 	"time"
 
-	"github.com/nunocgoncalves/inference-gateway/internal/ratelimit"
-	"github.com/nunocgoncalves/inference-gateway/internal/snapshot"
+	"github.com/nunocgoncalves/iterabase-mono/inference-gateway/internal/ratelimit"
+	"github.com/nunocgoncalves/iterabase-mono/inference-gateway/internal/snapshot"
 )
 
 // fakeReader is a snapshot.Reader fake for middleware unit tests.

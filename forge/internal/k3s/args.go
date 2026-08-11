@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/nunocgoncalves/forge/internal/config"
+	"github.com/nunocgoncalves/iterabase-mono/forge/internal/config"
 )
 
 // InstallScriptURL is the official k3s install script.

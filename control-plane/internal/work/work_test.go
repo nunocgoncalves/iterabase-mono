@@ -10,9 +10,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/nunocgoncalves/control-plane/internal/testutil"
-	workstore "github.com/nunocgoncalves/control-plane/internal/work"
-	"github.com/nunocgoncalves/control-plane/internal/workflow"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/testutil"
+	workstore "github.com/nunocgoncalves/iterabase-mono/control-plane/internal/work"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/workflow"
 )
 
 func terminalResult(outcome, en, pt string) *workflow.CanonicalResultPresentation {

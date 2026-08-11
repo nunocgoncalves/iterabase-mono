@@ -26,17 +26,17 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
-	"github.com/nunocgoncalves/control-plane/api/v1alpha1"
-	"github.com/nunocgoncalves/control-plane/internal/catalog"
-	"github.com/nunocgoncalves/control-plane/internal/config"
-	"github.com/nunocgoncalves/control-plane/internal/controller"
-	"github.com/nunocgoncalves/control-plane/internal/database"
-	"github.com/nunocgoncalves/control-plane/internal/gateway"
-	"github.com/nunocgoncalves/control-plane/internal/identity"
-	"github.com/nunocgoncalves/control-plane/internal/logging"
-	"github.com/nunocgoncalves/control-plane/internal/permissions"
-	"github.com/nunocgoncalves/control-plane/internal/version"
-	"github.com/nunocgoncalves/control-plane/internal/workflow"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/api/v1alpha1"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/catalog"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/config"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/controller"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/database"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/gateway"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/identity"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/logging"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/permissions"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/version"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/workflow"
 	// +kubebuilder:scaffold:imports
 )
 

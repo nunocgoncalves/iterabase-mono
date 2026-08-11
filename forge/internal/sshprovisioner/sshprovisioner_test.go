@@ -18,9 +18,9 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/ssh"
 
-	"github.com/nunocgoncalves/forge/internal/config"
-	"github.com/nunocgoncalves/forge/internal/deployer"
-	"github.com/nunocgoncalves/forge/internal/k3s"
+	"github.com/nunocgoncalves/iterabase-mono/forge/internal/config"
+	"github.com/nunocgoncalves/iterabase-mono/forge/internal/deployer"
+	"github.com/nunocgoncalves/iterabase-mono/forge/internal/k3s"
 )
 
 // handler returns canned stdout + exit code for a given remote command.

@@ -24,14 +24,14 @@ import (
 	tcredis "github.com/testcontainers/testcontainers-go/modules/redis"
 	"github.com/testcontainers/testcontainers-go/wait"
 
-	"github.com/nunocgoncalves/inference-gateway/internal/metrics"
-	"github.com/nunocgoncalves/inference-gateway/internal/middleware"
-	"github.com/nunocgoncalves/inference-gateway/internal/proxy"
-	"github.com/nunocgoncalves/inference-gateway/internal/ratelimit"
-	"github.com/nunocgoncalves/inference-gateway/internal/snapshot"
-	"github.com/nunocgoncalves/inference-gateway/internal/spiffe"
-	"github.com/nunocgoncalves/inference-gateway/internal/spiffe/testca"
-	"github.com/nunocgoncalves/inference-gateway/internal/workload"
+	"github.com/nunocgoncalves/iterabase-mono/inference-gateway/internal/metrics"
+	"github.com/nunocgoncalves/iterabase-mono/inference-gateway/internal/middleware"
+	"github.com/nunocgoncalves/iterabase-mono/inference-gateway/internal/proxy"
+	"github.com/nunocgoncalves/iterabase-mono/inference-gateway/internal/ratelimit"
+	"github.com/nunocgoncalves/iterabase-mono/inference-gateway/internal/snapshot"
+	"github.com/nunocgoncalves/iterabase-mono/inference-gateway/internal/spiffe"
+	"github.com/nunocgoncalves/iterabase-mono/inference-gateway/internal/spiffe/testca"
+	"github.com/nunocgoncalves/iterabase-mono/inference-gateway/internal/workload"
 )
 
 // workloadFixture applies both the snapshot (catalog/identity/permissions) and

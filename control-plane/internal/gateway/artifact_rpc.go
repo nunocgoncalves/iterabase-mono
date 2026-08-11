@@ -8,9 +8,9 @@ import (
 	"io"
 
 	connect "connectrpc.com/connect"
-	artifactstore "github.com/nunocgoncalves/control-plane/internal/artifact"
-	v1 "github.com/nunocgoncalves/control-plane/internal/gatewayrpc/iterabase/gateway/v1"
-	"github.com/nunocgoncalves/control-plane/internal/spiffe"
+	artifactstore "github.com/nunocgoncalves/iterabase-mono/control-plane/internal/artifact"
+	v1 "github.com/nunocgoncalves/iterabase-mono/control-plane/internal/gatewayrpc/iterabase/gateway/v1"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/spiffe"
 )
 
 // PutArtifact streams one immutable object. The first message must be init;

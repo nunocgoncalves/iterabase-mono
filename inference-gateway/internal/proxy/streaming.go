@@ -11,9 +11,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/nunocgoncalves/inference-gateway/internal/middleware"
-	"github.com/nunocgoncalves/inference-gateway/internal/ratelimit"
-	"github.com/nunocgoncalves/inference-gateway/internal/snapshot"
+	"github.com/nunocgoncalves/iterabase-mono/inference-gateway/internal/middleware"
+	"github.com/nunocgoncalves/iterabase-mono/inference-gateway/internal/ratelimit"
+	"github.com/nunocgoncalves/iterabase-mono/inference-gateway/internal/snapshot"
 )
 
 const tpmBatchInterval = 500 * time.Millisecond

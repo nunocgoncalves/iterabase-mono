@@ -4,7 +4,7 @@ package main
 import (
 	"os"
 
-	"github.com/nunocgoncalves/forge/internal/cli"
+	"github.com/nunocgoncalves/iterabase-mono/forge/internal/cli"
 )
 
 func main() {

@@ -12,9 +12,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/nunocgoncalves/inference-gateway/internal/spiffe"
-	"github.com/nunocgoncalves/inference-gateway/internal/spiffe/testca"
-	"github.com/nunocgoncalves/inference-gateway/internal/workload"
+	"github.com/nunocgoncalves/iterabase-mono/inference-gateway/internal/spiffe"
+	"github.com/nunocgoncalves/iterabase-mono/inference-gateway/internal/spiffe/testca"
+	"github.com/nunocgoncalves/iterabase-mono/inference-gateway/internal/workload"
 )
 
 // fakeStore is an in-memory workload.Store for middleware tests.

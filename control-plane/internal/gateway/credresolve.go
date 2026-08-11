@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	v1 "github.com/nunocgoncalves/control-plane/internal/gatewayrpc/iterabase/gateway/v1"
+	v1 "github.com/nunocgoncalves/iterabase-mono/control-plane/internal/gatewayrpc/iterabase/gateway/v1"
 )
 
 // SecretResolver resolves a K8s SecretRef to its value. The production

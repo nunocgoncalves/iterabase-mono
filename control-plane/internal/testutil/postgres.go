@@ -13,7 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 
-	"github.com/nunocgoncalves/control-plane/internal/database"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/database"
 )
 
 // NewPostgres starts a fresh pgvector Postgres container, applies all

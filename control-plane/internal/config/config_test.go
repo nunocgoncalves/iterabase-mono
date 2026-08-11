@@ -8,7 +8,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/nunocgoncalves/control-plane/internal/config"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/config"
 )
 
 func TestLoad_EnvOnly(t *testing.T) {

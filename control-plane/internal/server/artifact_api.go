@@ -9,8 +9,8 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
-	artifactstore "github.com/nunocgoncalves/control-plane/internal/artifact"
-	"github.com/nunocgoncalves/control-plane/internal/identity"
+	artifactstore "github.com/nunocgoncalves/iterabase-mono/control-plane/internal/artifact"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/identity"
 )
 
 func (h *Handler) artifactActor(r *http.Request) (identity.Identity, bool) {

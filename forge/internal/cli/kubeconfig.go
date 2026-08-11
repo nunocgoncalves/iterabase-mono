@@ -7,9 +7,9 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/nunocgoncalves/forge/internal/artifacts"
-	"github.com/nunocgoncalves/forge/internal/kubeconfig"
-	"github.com/nunocgoncalves/forge/internal/sshprovisioner"
+	"github.com/nunocgoncalves/iterabase-mono/forge/internal/artifacts"
+	"github.com/nunocgoncalves/iterabase-mono/forge/internal/kubeconfig"
+	"github.com/nunocgoncalves/iterabase-mono/forge/internal/sshprovisioner"
 )
 
 func newKubeconfigCmd() *cobra.Command {

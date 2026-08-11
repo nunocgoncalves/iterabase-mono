@@ -21,7 +21,7 @@ COPY --from=ui-builder /ui/dist ./ui/dist
 ARG VERSION=dev
 ARG COMMIT=none
 ARG DATE=unknown
-ENV LDFLAGS="-X github.com/nunocgoncalves/control-plane/internal/version.version=${VERSION} -X github.com/nunocgoncalves/control-plane/internal/version.commit=${COMMIT} -X github.com/nunocgoncalves/control-plane/internal/version.date=${DATE}"
+ENV LDFLAGS="-X github.com/nunocgoncalves/iterabase-mono/control-plane/internal/version.version=${VERSION} -X github.com/nunocgoncalves/iterabase-mono/control-plane/internal/version.commit=${COMMIT} -X github.com/nunocgoncalves/iterabase-mono/control-plane/internal/version.date=${DATE}"
 
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags "$LDFLAGS" -o /out/manager ./cmd/manager && \
     CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags "$LDFLAGS" -o /out/api ./cmd/api && \

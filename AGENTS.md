@@ -1,0 +1,52 @@
+# Iterabase monorepo operating instructions
+
+## Bound context before exploring
+
+- Start with this file, identify the owning directory below, then read that directory's `AGENTS.md` before inspecting implementation files.
+- Do not search or read the whole repository by default. Keep exploration inside the owning directory unless the ticket names a cross-component contract or evidence proves another owner must change.
+- For a cross-component change, inspect only the named contract surfaces and record why each additional directory is in scope.
+- Deployment overlays and the marketing site are separate repositories. Do not look for or add customer-specific overlay behavior here.
+
+## Ownership map
+
+| Directory | Owns | Scoped instructions |
+| --- | --- | --- |
+| `control-plane/` | Product API, operator/CRDs, dashboard, durable work runtime, harness, and tool runner | [`control-plane/AGENTS.md`](control-plane/AGENTS.md) |
+| `inference-gateway/` | OpenAI-compatible inference routing, snapshot consumption, auth enforcement, and rate limiting | [`inference-gateway/AGENTS.md`](inference-gateway/AGENTS.md) |
+| `forge/` | Host/k3s bootstrap, substrate reconciliation, and Forge-owned E2E | [`forge/AGENTS.md`](forge/AGENTS.md) |
+| `charts/` | Helm packaging and declarative install/upgrade/rollback behavior | [`charts/AGENTS.md`](charts/AGENTS.md) |
+| `docs/` | Monorepo-wide durable repository documentation | This file |
+
+The Go modules remain independently buildable. The root `go.work` is for atomic local development; do not merge component modules or introduce cross-module imports without an approved architectural decision.
+
+## Shared ticket and Git workflow
+
+- Direct pushes to `master` are prohibited. Work on one `<TICKET>-<short-description>` branch.
+- Branch names, commit messages, and pull request titles must include the Linear identifier, for example `HOR-123-short-description`, `HOR-123: describe change`, and `HOR-123 — Describe change`.
+- Keep commits coherent and limited to the ticket. Do not mix unrelated component cleanup into an atomic change.
+- Open a pull request when validation is complete; only the user may approve and merge it.
+- Pull request bodies use `## Summary`, `## Validation`, `## Production impact`, and `## Ticket state`, with real Markdown line breaks and `None`/`N/A` where appropriate.
+- After pushing, watch required CI to completion. A review is not addressable-complete and a ticket is not complete while required CI is failing.
+- The repository is the source of truth for non-secret infrastructure intent and architecture. Linear is the source of truth for ticket state, ownership, sequencing, and completion.
+
+## Architecture decisions
+
+Architectural decisions require explicit user approval before implementation, even when they seem consistent with existing guidance. This includes cross-service contracts, datastore/cache/transport choices, failure or isolation models, and patterns future tickets would inherit. Surface ambiguity instead of choosing unilaterally.
+
+## Root validation and builds
+
+Use root targets for atomic checks and component targets while working inside one owner:
+
+```bash
+make workspace-check  # go work sync freshness + every module's go list
+make build            # production Go binaries, preserving component outputs
+make test             # component Go tests + Forge nested E2E harness tests
+make lint             # all Go modules, including Forge E2E
+make codegen-check    # protobuf freshness
+make charts-check     # Helm/static chart validation
+make docker-build     # control-plane and inference-gateway images
+make check            # complete local matrix above
+make install-hooks    # shared monorepo pre-commit hook
+```
+
+Component-specific prerequisites and narrower commands live in each component's `AGENTS.md` and `README.md`.

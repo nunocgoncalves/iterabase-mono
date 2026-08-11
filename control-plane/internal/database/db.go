@@ -8,7 +8,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/nunocgoncalves/control-plane/internal/config"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/config"
 )
 
 // Connect establishes a connection pool to PostgreSQL and verifies

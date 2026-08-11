@@ -48,7 +48,7 @@ The inference path depends on GPU readiness, so a second VM/operator installatio
 - `kind-inference-contract`: umbrella cross-service catalog/auth contract.
 - `kind-cert-issuers`: minimal cert-manager/self-signed issuer values contract.
 - `kind-internal-tls`: two-phase Helm transition and live internal transport contract.
-- `kind-tool-runner-contract`: exact Flux artifact materialization through the chart-managed Node runner, mTLS gateway registration, and pinned generation drain using coordinated local control-plane/charts builds.
+- `kind-tool-runner-contract`: exact Flux artifact materialization through the chart-managed Node runner, mTLS gateway registration, and pinned generation drain using the monorepo-local control-plane/charts builds.
 
 These remain isolated because clean chart installation, cluster-scoped CRDs/issuers, hooks, and value combinations are part of what they test. Sharing a cluster could mask missing resources or leak state between releases.
 
@@ -67,7 +67,7 @@ These remain isolated because clean chart installation, cluster-scoped CRDs/issu
 | `TestInferenceFlowContract` | `kind-inference-contract` | unchanged plus restored PermissionPolicy materialization |
 | `TestCertIssuers` | `kind-cert-issuers` | unchanged, fresh Kind cluster |
 | `TestInternalTLS` | `kind-internal-tls` | unchanged, fresh Kind cluster |
-| HOR-397 cross-repository acceptance | `kind-tool-runner-contract` | Flux artifact → materializer → runner → mTLS registration → pinned drain |
+| HOR-397 cross-component acceptance | `kind-tool-runner-contract` | Flux artifact → materializer → runner → mTLS registration → pinned drain |
 
 ## CI
 
@@ -79,7 +79,7 @@ One `e2e.yml` workflow owns:
 - a fail-fast-disabled Kind PR matrix with one fresh runner/cluster per contract;
 - a nightly, non-PR-gating Kind compatibility matrix against latest stable published artifacts.
 
-For a ticket PR, the Kind matrix composes matching `HOR-*` control-plane and chart branches when both exist. If either counterpart is absent, it falls back as one unit to explicit reviewed release pins. Standard Kind scenarios install coordinated chart source; the tool-runner contract additionally builds the coordinated control-plane and runner images. Cloud jobs intentionally use distributable releases because their boundary is Forge's real remote OCI installation path, not local source mounting.
+For a monorepo ticket PR, the Kind matrix composes the control-plane and chart source from the same checkout. Standard Kind scenarios install the local chart source; the tool-runner contract additionally builds the local control-plane and runner images. Scheduled compatibility runs use explicit published releases. Cloud jobs intentionally use distributable releases because their boundary is Forge's real remote OCI installation path, not local source mounting.
 
 The nightly compatibility matrix is the only floating-latest consumer. It detects release drift without making an unrelated release silently change another PR's required checks. All E2E invocations are verbose so capacity skips and stage results are visible. Cloud jobs never cancel in progress, allowing test cleanup to destroy VMs; the tagged reaper remains the crash safety net.
 
@@ -87,7 +87,7 @@ The nightly compatibility matrix is the only floating-latest consumer. It detect
 
 - **Merged mega-suite/shared Kind cluster:** weaker artifact-boundary signal and cluster-scoped state leakage.
 - **Fresh VM for every forge phase:** repeated provisioning and k3s/GPU installation without an independent requirement.
-- **Cross-repository harness library:** outside HOR-406's forge-only scope and premature before another repository demonstrates the same fixture contract.
+- **Shared harness extraction:** outside HOR-406's Forge-only scope and deferred to the approved monorepo E2E testkit work.
 
 ## Production impact
 
