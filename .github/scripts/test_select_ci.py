@@ -2,8 +2,11 @@
 
 import json
 from pathlib import Path
+import subprocess
+import tempfile
 import unittest
 
+from collect_changed_paths import collect_changed_paths
 from select_ci import OUTPUTS, selection
 
 
@@ -29,6 +32,83 @@ class PathSelectionFixtures(unittest.TestCase):
         result = selection([], select_all=True)
         self.assertTrue(all(result[name] for name in OUTPUTS))
         self.assertEqual(5, len(result["image_matrix"]))
+
+
+class ChangedPathCollectionFixtures(unittest.TestCase):
+    def git(self, repo: Path, *args: str) -> str:
+        completed = subprocess.run(
+            ["git", "-C", str(repo), *args],
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        return completed.stdout.strip()
+
+    def create_repo(self, directory: str) -> tuple[Path, str]:
+        repo = Path(directory)
+        self.git(repo, "init", "--quiet")
+        self.git(repo, "config", "user.email", "ci@example.com")
+        self.git(repo, "config", "user.name", "CI Fixture")
+        source = repo / "control-plane/internal/api/moved.go"
+        source.parent.mkdir(parents=True)
+        source.write_text("package api\n")
+        self.git(repo, "add", "-A")
+        self.git(repo, "commit", "--quiet", "-m", "base")
+        return repo, self.git(repo, "rev-parse", "HEAD")
+
+    def test_deletion_only_change_retains_source_owner(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repo, base_sha = self.create_repo(directory)
+            (repo / "control-plane/internal/api/moved.go").unlink()
+            self.git(repo, "add", "-A")
+            self.git(repo, "commit", "--quiet", "-m", "delete source")
+            head_sha = self.git(repo, "rev-parse", "HEAD")
+
+            select_all, paths = collect_changed_paths(
+                repo, "push", base_sha, head_sha
+            )
+
+            self.assertFalse(select_all)
+            self.assertEqual(["control-plane/internal/api/moved.go"], paths)
+            self.assertTrue(selection(paths)["control_plane"])
+
+    def test_cross_owner_move_reports_source_and_destination(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repo, base_sha = self.create_repo(directory)
+            (repo / "docs").mkdir()
+            self.git(
+                repo,
+                "mv",
+                "control-plane/internal/api/moved.go",
+                "docs/moved.md",
+            )
+            self.git(repo, "commit", "--quiet", "-m", "move source to docs")
+            head_sha = self.git(repo, "rev-parse", "HEAD")
+
+            select_all, paths = collect_changed_paths(
+                repo, "pull_request", base_sha, head_sha
+            )
+
+            self.assertFalse(select_all)
+            self.assertEqual(
+                {"control-plane/internal/api/moved.go", "docs/moved.md"},
+                set(paths),
+            )
+            self.assertTrue(selection(paths)["control_plane"])
+
+    def test_workflows_share_collector_and_publish_exact_required_names(self) -> None:
+        workflows = {
+            "CI": (ROOT / ".github/workflows/ci.yml").read_text(),
+            "E2E": (ROOT / ".github/workflows/e2e.yml").read_text(),
+        }
+        for workflow_name, workflow in workflows.items():
+            with self.subTest(workflow=workflow_name):
+                self.assertIn(
+                    "python3 .github/scripts/collect_changed_paths.py", workflow
+                )
+                self.assertNotIn("git diff --name-only", workflow)
+                self.assertIn(f"name: {workflow_name} / required", workflow)
 
 
 if __name__ == "__main__":
