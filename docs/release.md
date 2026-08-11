@@ -55,7 +55,9 @@ python3 .github/scripts/release.py validate
 3. Images are built and pushed once under
    `candidate-<sha-prefix>-<run-id>`. Validation references them as
    `<candidate-tag>@sha256:<digest>` and verifies the resulting pod image IDs;
-   mutable tags alone are never the validation identity. Charts are packaged
+   the production control-plane harness candidate is additionally started by
+   exact digest and must serve its health probe. Mutable tags alone are never
+   the validation identity. Charts are packaged
    once and staged under the isolated run-addressed
    `iterabase-release-candidates` OCI namespace. Forge archives are built once
    and retained as Actions artifacts.

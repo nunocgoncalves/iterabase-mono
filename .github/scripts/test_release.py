@@ -33,7 +33,10 @@ class ReleaseContractTests(unittest.TestCase):
             False,
         )
         self.assertEqual([item["target"] for item in plan["selected"]], ["control-plane"])
-        self.assertEqual(len(plan["image_matrix"]), 3)
+        self.assertEqual(
+            [item["name"] for item in plan["image_matrix"]],
+            ["control-plane", "control-plane-harness", "control-plane-tool-runner"],
+        )
         self.assertEqual(
             [item["name"] for item in plan["kind_matrix"]],
             ["controlplane-identity", "inference-contract", "internal-tls", "tool-runner-contract"],
