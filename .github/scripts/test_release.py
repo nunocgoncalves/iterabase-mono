@@ -186,6 +186,18 @@ class ReleaseContractTests(unittest.TestCase):
             release.validate_candidate_assets(plan, Path(directory))
             self.assertFalse(any(path.name == "forge" for path in assets.rglob("*")))
 
+    def test_chart_candidate_assets_use_the_flat_promotion_contract(self) -> None:
+        plan = self.plan("iterabase-platform-chart")
+        with tempfile.TemporaryDirectory() as directory:
+            assets = Path(directory) / "charts"
+            assets.mkdir(parents=True)
+            (assets / "iterabase-platform-0.3.9.tgz").write_bytes(b"platform")
+            (assets / "cert-manager-substrate-0.3.9.tgz").write_bytes(b"substrate")
+            (assets / "checksums-iterabase-platform.txt").write_text(
+                "fixture\n", encoding="utf-8"
+            )
+            release.validate_candidate_assets(plan, Path(directory))
+
     def test_workflows_are_split_and_promotion_keeps_environment_gate(self) -> None:
         candidate = (ROOT / ".github" / "workflows" / "release-candidate.yml").read_text(
             encoding="utf-8"
@@ -203,6 +215,20 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertNotIn("Reuse an existing immutable full-SHA candidate", candidate)
         self.assertIn("Reject an existing unverified full-SHA alias", candidate)
         self.assertIn("candidate_artifact:", candidate)
+        self.assertIn("path: candidate-charts/", candidate)
+        self.assertIn(
+            "> 'candidate-charts/candidate-chart-${{ matrix.chart }}.json'", candidate
+        )
+        self.assertIn(
+            "output-file: candidate-charts/candidate-chart-${{ matrix.chart }}.spdx.json",
+            candidate,
+        )
+        self.assertIn("--release-notes /dev/null", candidate)
+        self.assertIn(
+            "cp -R charts/charts/cert-manager-substrate candidate-local/cert-manager-substrate",
+            candidate,
+        )
+        self.assertIn('tar -xzf "$companion_archive" -C candidate-local', candidate)
 
     def test_platform_chart_keeps_mandatory_real_machine_validation(self) -> None:
         plan = self.plan("iterabase-platform-chart")

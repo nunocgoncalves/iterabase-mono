@@ -37,6 +37,13 @@ class CacheContractTests(unittest.TestCase):
             with self.subTest(action=action):
                 self.assertNotIn("restore-keys:", action.read_text())
 
+    def test_node_cache_accepts_multiple_lockfiles(self) -> None:
+        action = (ROOT / ".github/actions/setup-node/action.yml").read_text()
+        self.assertIn("DEPENDENCY_PATHS:", action)
+        self.assertIn('while IFS= read -r path', action)
+        self.assertIn('files+=("$path")', action)
+        self.assertIn('"${files[@]}"', action)
+
     def test_all_workspace_sums_define_go_cache(self) -> None:
         workflow = (ROOT / ".github/workflows/ci.yml").read_text()
         for go_sum in (
