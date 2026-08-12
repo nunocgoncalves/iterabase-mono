@@ -1,0 +1,99 @@
+name: Release system rehearsal
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: release-system-rehearsal
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  rehearse:
+    name: Founder-approved disposable release rehearsal
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - name: Require rehearsal workflow from master
+        run: test '${{ github.ref }}' = refs/heads/master
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: master
+          fetch-depth: 0
+      - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Configure protected-tag credential
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG_SSH_KEY: ${{ secrets.RELEASE_TAG_SSH_KEY }}
+        run: |
+          test -n "$RELEASE_TAG_SSH_KEY"
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$RELEASE_TAG_SSH_KEY" > ~/.ssh/release-tag
+          chmod 600 ~/.ssh/release-tag
+          gh api meta --jq '.ssh_keys[] | "github.com " + .' > ~/.ssh/known_hosts
+          git remote set-url origin 'git@github.com:${{ github.repository }}.git'
+          git config core.sshCommand 'ssh -i ~/.ssh/release-tag -o IdentitiesOnly=yes'
+          git config user.name iterabase-release
+          git config user.email release@iterabase.com
+      - name: Exercise package, protected tag, and prerelease APIs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REHEARSAL_TAG: dry-run/rehearsal-${{ github.run_id }}
+          IMAGE_TAG: rehearsal-${{ github.run_id }}
+        run: |
+          cleanup() {
+            status=$?
+            set +e
+            gh release delete "$REHEARSAL_TAG" --yes
+            git push origin ":refs/tags/$REHEARSAL_TAG"
+            version_id="$(gh api --paginate /user/packages/container/control-plane/versions \
+              --jq '.[] | select(.metadata.container.tags[]? == env.IMAGE_TAG) | .id' | head -1)"
+            if [ -n "$version_id" ]; then
+              gh api --method DELETE "/user/packages/container/control-plane/versions/$version_id"
+            fi
+            exit "$status"
+          }
+          trap cleanup EXIT
+
+          context="$(mktemp -d)"
+          printf 'release rehearsal %s\n' '${{ github.run_id }}' > "$context/probe"
+          cat > "$context/Dockerfile" <<'EOF'
+          FROM scratch
+          COPY probe /probe
+          EOF
+          docker buildx build --push \
+            --tag "ghcr.io/${{ github.repository_owner }}/control-plane:$IMAGE_TAG" \
+            "$context"
+          docker buildx imagetools inspect "ghcr.io/${{ github.repository_owner }}/control-plane:$IMAGE_TAG"
+
+          git -c tag.gpgSign=false tag -a "$REHEARSAL_TAG" '${{ github.sha }}' -m "Disposable release rehearsal"
+          git push origin "refs/tags/$REHEARSAL_TAG"
+          printf 'release rehearsal %s\n' '${{ github.run_id }}' > rehearsal.txt
+          gh release create "$REHEARSAL_TAG" rehearsal.txt --verify-tag --prerelease \
+            --title "$REHEARSAL_TAG" --notes 'Disposable protected release-system rehearsal.'
+          gh release download "$REHEARSAL_TAG" --pattern rehearsal.txt --dir verified
+          cmp rehearsal.txt verified/rehearsal.txt
+      - name: Verify rehearsal cleanup
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REHEARSAL_TAG: dry-run/rehearsal-${{ github.run_id }}
+          IMAGE_TAG: rehearsal-${{ github.run_id }}
+        run: |
+          test -z "$(git ls-remote --tags origin "refs/tags/$REHEARSAL_TAG")"
+          if gh release view "$REHEARSAL_TAG"; then
+            echo "rehearsal release still exists" >&2
+            exit 1
+          fi
+          test -z "$(gh api --paginate /user/packages/container/control-plane/versions \
+            --jq '.[] | select(.metadata.container.tags[]? == env.IMAGE_TAG) | .id')"

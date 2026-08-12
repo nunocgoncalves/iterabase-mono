@@ -1,18 +1,17 @@
 {
-  "schema_version": 1,
-  "temporary_until": "HOR-476",
+  "schema_version": 2,
+  "suite_mapping_until": "HOR-476",
   "targets": {
     "control-plane": {
-      "manifest_section": "components",
-      "manifest_name": "control-plane",
+      "version_file": "control-plane/VERSION",
       "tag_prefix": "control-plane-v",
+      "source_suites": ["control-plane"],
       "kind_scenarios": [
         "controlplane-identity",
         "inference-contract",
         "internal-tls",
         "tool-runner-contract"
       ],
-      "source_suites": ["control-plane"],
       "real_machine": false,
       "images": [
         {
@@ -36,11 +35,10 @@
       ]
     },
     "inference-gateway": {
-      "manifest_section": "components",
-      "manifest_name": "inference-gateway",
+      "version_file": "inference-gateway/VERSION",
       "tag_prefix": "inference-gateway-v",
-      "kind_scenarios": ["inference-contract", "internal-tls"],
       "source_suites": ["inference-gateway"],
+      "kind_scenarios": ["inference-contract", "internal-tls"],
       "real_machine": false,
       "images": [
         {
@@ -52,36 +50,36 @@
       ]
     },
     "forge": {
-      "manifest_section": "components",
-      "manifest_name": "forge",
+      "version_file": "forge/VERSION",
       "tag_prefix": "forge-v",
-      "kind_scenarios": [],
       "source_suites": ["forge"],
+      "kind_scenarios": [],
       "real_machine": true,
       "images": []
     },
     "control-plane-chart": {
-      "manifest_section": "charts",
-      "manifest_name": "control-plane",
+      "chart": "control-plane",
       "tag_prefix": "control-plane-",
-      "kind_scenarios": ["controlplane-identity", "tool-runner-contract"],
       "source_suites": ["charts"],
+      "chart_runtime": true,
+      "kind_scenarios": ["controlplane-identity", "tool-runner-contract"],
       "real_machine": false,
-      "chart": "control-plane"
+      "images": []
     },
     "inference-gateway-chart": {
-      "manifest_section": "charts",
-      "manifest_name": "inference-gateway",
+      "chart": "inference-gateway",
       "tag_prefix": "inference-gateway-",
-      "kind_scenarios": ["inference-contract", "internal-tls"],
       "source_suites": ["charts"],
+      "chart_runtime": true,
+      "kind_scenarios": ["inference-contract", "internal-tls"],
       "real_machine": false,
-      "chart": "inference-gateway"
+      "images": []
     },
     "iterabase-platform-chart": {
-      "manifest_section": "charts",
-      "manifest_name": "iterabase-platform",
+      "chart": "iterabase-platform",
       "tag_prefix": "iterabase-platform-",
+      "source_suites": ["charts"],
+      "chart_runtime": true,
       "kind_scenarios": [
         "controlplane-identity",
         "inference-contract",
@@ -89,9 +87,8 @@
         "internal-tls",
         "tool-runner-contract"
       ],
-      "source_suites": ["charts"],
-      "real_machine": true,
-      "chart": "iterabase-platform",
+      "real_machine": false,
+      "images": [],
       "companions": ["cert-manager-substrate"]
     }
   }

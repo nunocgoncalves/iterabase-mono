@@ -1,0 +1,207 @@
+name: Promote release
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_run_id:
+        description: Successful Release candidate workflow run ID
+        required: true
+        type: string
+
+concurrency:
+  group: release-promotion
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  verify-candidate:
+    name: Verify candidate run and exact artifacts
+    runs-on: ubuntu-latest
+    outputs:
+      source_sha: ${{ steps.candidate.outputs.source_sha }}
+      target: ${{ steps.candidate.outputs.target }}
+      version: ${{ steps.candidate.outputs.version }}
+      production_tag: ${{ steps.candidate.outputs.production_tag }}
+      has_images: ${{ steps.candidate.outputs.has_images }}
+      has_chart: ${{ steps.candidate.outputs.has_chart }}
+      has_forge: ${{ steps.candidate.outputs.has_forge }}
+    steps:
+      - name: Require promotion workflow from master
+        run: test '${{ github.ref }}' = refs/heads/master
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: master
+          fetch-depth: 0
+      - name: Verify trusted successful candidate workflow
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_ID: ${{ inputs.candidate_run_id }}
+        run: |
+          [[ "$RUN_ID" =~ ^[0-9]+$ ]]
+          run="$(gh api "repos/${{ github.repository }}/actions/runs/$RUN_ID")"
+          test "$(jq -r '.name' <<<"$run")" = 'Release candidate'
+          test "$(jq -r '.path' <<<"$run")" = '.github/workflows/release-candidate.yml'
+          test "$(jq -r '.event' <<<"$run")" = workflow_dispatch
+          test "$(jq -r '.head_branch' <<<"$run")" = master
+          test "$(jq -r '.conclusion' <<<"$run")" = success
+          mkdir candidate
+          gh run download "$RUN_ID" --name release-candidate --dir candidate
+      - name: Verify candidate checksums, source, and target
+        id: candidate
+        env:
+          RUN_ID: ${{ inputs.candidate_run_id }}
+        run: |
+          python3 .github/scripts/release.py verify-candidate --directory candidate > verified-plan.json
+          test "$(jq -r '.run_id' verified-plan.json)" = "$RUN_ID"
+          source_sha="$(jq -r '.source_sha' verified-plan.json)"
+          git fetch --no-tags origin master
+          git merge-base --is-ancestor "$source_sha" origin/master
+          {
+            printf 'source_sha=%s\n' "$source_sha"
+            printf 'target=%s\n' "$(jq -r '.target' verified-plan.json)"
+            printf 'version=%s\n' "$(jq -r '.version' verified-plan.json)"
+            printf 'production_tag=%s\n' "$(jq -r '.production_tag' verified-plan.json)"
+            printf 'has_images=%s\n' "$(jq -r '(.image_matrix | length) > 0' verified-plan.json)"
+            printf 'has_chart=%s\n' "$(jq -r '(.chart_matrix | length) > 0' verified-plan.json)"
+            printf 'has_forge=%s\n' "$(jq -r '.forge' verified-plan.json)"
+          } >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: verified-release-candidate
+          path: candidate/
+          retention-days: 7
+
+  promote:
+    name: Founder-approved exact promotion
+    needs: verify-candidate
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        # Promotion logic always executes from the protected default branch;
+        # the verified candidate source SHA is used only as the tag target.
+        with:
+          ref: master
+          fetch-depth: 0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: verified-release-candidate
+          path: candidate
+      - name: Re-verify candidate after approval
+        run: python3 .github/scripts/release.py verify-candidate --directory candidate
+      - uses: ./.github/actions/setup-kubernetes-tools
+        if: needs.verify-candidate.outputs.has_chart == 'true'
+      - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+        if: needs.verify-candidate.outputs.has_images == 'true'
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.4.0
+        if: needs.verify-candidate.outputs.has_images == 'true'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Configure environment-scoped protected-tag credential
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG_SSH_KEY: ${{ secrets.RELEASE_TAG_SSH_KEY }}
+        run: |
+          test -n "$RELEASE_TAG_SSH_KEY"
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$RELEASE_TAG_SSH_KEY" > ~/.ssh/release-tag
+          chmod 600 ~/.ssh/release-tag
+          gh api meta --jq '.ssh_keys[] | "github.com " + .' > ~/.ssh/known_hosts
+          git remote set-url origin 'git@github.com:${{ github.repository }}.git'
+          git config core.sshCommand 'ssh -i ~/.ssh/release-tag -o IdentitiesOnly=yes'
+          git config user.name iterabase-release
+          git config user.email release@iterabase.com
+      - name: Promote tested image digests by adding semantic aliases
+        if: needs.verify-candidate.outputs.has_images == 'true'
+        run: |
+          for metadata in candidate/assets/images/candidate-*.json; do
+            [ "$(jq -r '.artifact_type' "$metadata")" = image ] || continue
+            repository="$(jq -r '.repository' "$metadata")"
+            version="$(jq -r '.version' "$metadata")"
+            digest="$(jq -r '.digest' "$metadata")"
+            source_sha="$(jq -r '.source_sha' "$metadata")"
+            test "$(docker buildx imagetools inspect "$repository:$source_sha" --format '{{json .Manifest.Digest}}' | tr -d '"')" = "$digest"
+            existing="$(docker buildx imagetools inspect "$repository:$version" --format '{{json .Manifest.Digest}}' 2>/dev/null | tr -d '"' || true)"
+            if [ -n "$existing" ]; then
+              test "$existing" = "$digest"
+            else
+              docker buildx imagetools create --tag "$repository:$version" "$repository@$digest"
+            fi
+            test "$(docker buildx imagetools inspect "$repository:$version" --format '{{json .Manifest.Digest}}' | tr -d '"')" = "$digest"
+          done
+      - name: Publish unchanged chart archives
+        if: needs.verify-candidate.outputs.has_chart == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "$GH_TOKEN" | helm registry login ghcr.io -u '${{ github.actor }}' --password-stdin
+          for package in candidate/assets/charts/*.tgz; do
+            chart="$(basename "$package" | sed -E 's/-[0-9]+\.[0-9]+\.[0-9]+\.tgz$//')"
+            version="$(basename "$package" | sed -E "s/^${chart}-//;s/\.tgz$//")"
+            repository="oci://ghcr.io/${{ github.repository_owner }}/iterabase-charts/$chart"
+            existing="$(mktemp -d)"
+            if helm pull "$repository" --version "$version" --destination "$existing" >/dev/null 2>&1; then
+              cmp "$package" "$existing/$(basename "$package")"
+            else
+              helm push "$package" 'oci://ghcr.io/${{ github.repository_owner }}/iterabase-charts'
+            fi
+          done
+      - name: Create or verify protected namespaced tag
+        env:
+          TAG: ${{ needs.verify-candidate.outputs.production_tag }}
+          SOURCE_SHA: ${{ needs.verify-candidate.outputs.source_sha }}
+        run: |
+          direct="$(git ls-remote --tags origin "refs/tags/$TAG" | awk '{print $1}')"
+          peeled="$(git ls-remote --tags origin "refs/tags/$TAG^{}" | awk '{print $1}')"
+          existing="${peeled:-$direct}"
+          if [ -n "$existing" ]; then
+            test "$existing" = "$SOURCE_SHA"
+          else
+            git -c tag.gpgSign=false tag -a "$TAG" "$SOURCE_SHA" -m "Release $TAG from $SOURCE_SHA"
+            git push origin "refs/tags/$TAG"
+          fi
+      - name: Create or complete GitHub Release with exact candidate files
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.verify-candidate.outputs.production_tag }}
+          TARGET: ${{ needs.verify-candidate.outputs.target }}
+          VERSION: ${{ needs.verify-candidate.outputs.version }}
+          SOURCE_SHA: ${{ needs.verify-candidate.outputs.source_sha }}
+        run: |
+          mapfile -t assets < <(find candidate/assets -type f | sort)
+          assets+=(candidate/candidate-plan.json candidate/candidate-evidence.json)
+          notes="$(mktemp)"
+          cat > "$notes" <<EOF
+          Release of **$TARGET $VERSION** from \`$SOURCE_SHA\`.
+
+          Built and validated once by candidate run ${{ inputs.candidate_run_id }}; promoted without rebuilding. Exact candidate evidence is attached.
+          EOF
+
+          verify_or_upload() {
+            local existing_dir name asset
+            existing_dir="$(mktemp -d)"
+            for asset in "${assets[@]}"; do
+              name="$(basename "$asset")"
+              if gh release view "$TAG" --json assets --jq '.assets[].name' | grep -Fxq "$name"; then
+                gh release download "$TAG" --pattern "$name" --dir "$existing_dir"
+                cmp "$asset" "$existing_dir/$name"
+                rm -f "$existing_dir/$name"
+              else
+                gh release upload "$TAG" "$asset"
+              fi
+            done
+          }
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            verify_or_upload
+          else
+            gh release create "$TAG" "${assets[@]}" --verify-tag --title "$TAG" --notes-file "$notes"
+          fi

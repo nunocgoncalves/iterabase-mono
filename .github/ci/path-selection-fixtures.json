@@ -60,8 +60,20 @@
     "images": ["control-plane", "control-plane-harness", "control-plane-harness-isolation", "control-plane-tool-runner", "inference-gateway"]
   },
   {
-    "name": "release compatibility contract fans out to every owner",
-    "paths": ["release/compatibility.json"],
+    "name": "release implementation runs focused contract checks only",
+    "paths": [
+      ".github/workflows/release-candidate.yml",
+      ".github/workflows/release-promote.yml",
+      ".github/scripts/release.py",
+      "release/targets.json",
+      "forge/VERSION"
+    ],
+    "true": [],
+    "images": []
+  },
+  {
+    "name": "affected-target selector changes fan out to every owner",
+    "paths": [".github/scripts/select_ci.py"],
     "true": ["control_plane", "ui", "harness", "tool_runner", "proto", "inference_gateway", "forge", "forge_e2e", "forge_real_e2e", "charts", "images"],
     "images": ["control-plane", "control-plane-harness", "control-plane-harness-isolation", "control-plane-tool-runner", "inference-gateway"]
   },

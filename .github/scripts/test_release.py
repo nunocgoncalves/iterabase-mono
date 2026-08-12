@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-import copy
 import importlib.util
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -16,237 +16,142 @@ SPEC.loader.exec_module(release)
 
 class ReleaseContractTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.manifest = release.load_json(ROOT / "release" / "compatibility.json")
         self.targets = release.load_json(ROOT / "release" / "targets.json")
         self.sha = "a" * 40
 
-    def test_repository_contract_is_valid(self) -> None:
-        release.validate_contract(self.manifest, self.targets, ROOT)
+    def plan(self, target: str) -> dict:
+        return release.make_plan(self.targets, target, self.sha, "123", ROOT)
 
-    def test_single_component_selects_conservative_suite(self) -> None:
-        plan = release.make_plan(
-            self.manifest,
-            self.targets,
-            {"control-plane": "0.0.25"},
-            self.sha,
-            "123",
-            False,
-        )
-        self.assertEqual([item["target"] for item in plan["selected"]], ["control-plane"])
+    def test_repository_contract_is_valid(self) -> None:
+        release.validate_contract(self.targets, ROOT)
+
+    def test_component_versions_are_local_authorities(self) -> None:
+        self.assertEqual(release.read_version(ROOT / "control-plane" / "VERSION"), "0.0.25")
+        self.assertEqual(release.read_version(ROOT / "inference-gateway" / "VERSION"), "0.2.5")
+        self.assertEqual(release.read_version(ROOT / "forge" / "VERSION"), "0.8.1")
+        self.assertFalse((ROOT / "release" / "compatibility.json").exists())
+
+    def test_candidate_selects_exactly_one_target(self) -> None:
+        plan = self.plan("control-plane")
+        self.assertEqual(plan["target"], "control-plane")
+        self.assertEqual(plan["version"], "0.0.25")
+        self.assertEqual(plan["production_tag"], "control-plane-v0.0.25")
         self.assertEqual(
             [item["name"] for item in plan["image_matrix"]],
             ["control-plane", "control-plane-harness", "control-plane-tool-runner"],
         )
-        self.assertEqual(
-            [item["name"] for item in plan["kind_matrix"]],
-            ["controlplane-identity", "inference-contract", "internal-tls", "tool-runner-contract"],
-        )
+        self.assertTrue(all(item["candidate_tag"] == self.sha for item in plan["image_matrix"]))
+        self.assertEqual(plan["chart_matrix"], [])
         self.assertFalse(plan["real_machine"])
 
-    def test_coordinated_request_takes_union_without_duplicates(self) -> None:
-        plan = release.make_plan(
-            self.manifest,
-            self.targets,
-            {
-                "control-plane": "0.0.25",
-                "inference-gateway": "0.2.5",
-                "iterabase-platform-chart": "0.3.9",
-            },
-            self.sha,
-            "456",
-            False,
-        )
-        self.assertEqual(len(plan["kind_matrix"]), 5)
-        self.assertEqual(plan["source_suites"], ["charts", "control-plane", "inference-gateway"])
+    def test_forge_is_one_target_with_real_machine_validation(self) -> None:
+        plan = self.plan("forge")
+        self.assertTrue(plan["forge"])
         self.assertTrue(plan["real_machine"])
-        self.assertEqual(len(plan["chart_matrix"]), 1)
+        self.assertEqual(plan["production_tag"], "forge-v0.8.1")
+        self.assertEqual(plan["image_matrix"], [])
+        self.assertEqual(plan["chart_matrix"], [])
 
-    def test_dry_run_never_uses_production_release_tag(self) -> None:
-        plan = release.make_plan(
-            self.manifest,
-            self.targets,
-            {"forge": "0.8.1"},
-            self.sha,
-            "789",
-            True,
+    def test_chart_version_and_dependencies_come_from_chart_source(self) -> None:
+        plan = self.plan("iterabase-platform-chart")
+        self.assertEqual(plan["version"], "0.3.9")
+        self.assertEqual(plan["chart_matrix"][0]["companions"], ["cert-manager-substrate"])
+        dependencies = {
+            item["name"]: item["version"]
+            for item in plan["tested_with"]["selected_chart_dependencies"]
+        }
+        self.assertEqual(dependencies["control-plane"], "0.4.7")
+        self.assertEqual(dependencies["inference-gateway"], "0.2.9")
+        self.assertEqual(
+            plan["tested_with"]["chart_metadata"]["control-plane"]["appVersion"],
+            "0.0.25",
         )
-        selected = plan["selected"][0]
-        self.assertEqual(selected["production_tag"], "forge-v0.8.1")
-        self.assertEqual(selected["release_tag"], "dry-run/forge-v0.8.1-789")
 
-    def test_manifest_mismatch_is_rejected(self) -> None:
-        with self.assertRaisesRegex(release.ReleaseError, "does not match manifest"):
-            release.make_plan(
-                self.manifest,
-                self.targets,
-                {"forge": "0.8.2"},
-                self.sha,
-                "1",
-                False,
-            )
+    def test_invalid_source_and_target_are_rejected(self) -> None:
+        with self.assertRaises(release.ReleaseError):
+            release.make_plan(self.targets, "everything", self.sha, "1", ROOT)
+        with self.assertRaises(release.ReleaseError):
+            release.make_plan(self.targets, "forge", "short", "1", ROOT)
+        with self.assertRaises(release.ReleaseError):
+            release.make_plan(self.targets, "forge", self.sha, "run", ROOT)
 
     def test_prerelease_and_v_prefix_are_rejected(self) -> None:
         for value in ("v1.2.3", "1.2.3-rc.1", "01.2.3", "latest"):
             with self.subTest(value=value), self.assertRaises(release.ReleaseError):
                 release.require_semver(value, "version")
 
-    def test_component_can_release_independently_of_chart_default(self) -> None:
-        manifest = copy.deepcopy(self.manifest)
-        manifest["components"]["control-plane"]["version"] = "0.0.26"
-        release.validate_contract(manifest, self.targets)
-
-    def test_dependency_injection_accepts_source_and_helm_key_order(self) -> None:
-        fixtures = (
-            """dependencies:\n  - name: inference-gateway\n    version: 0.2.8\n    repository: file://../inference-gateway\n""",
-            """dependencies:\n- condition: inference-gateway.enabled\n  name: inference-gateway\n  repository: file://../inference-gateway\n  version: 0.2.8\n""",
-        )
-        for source in fixtures:
-            with self.subTest(source=source), tempfile.TemporaryDirectory() as directory:
-                chart = Path(directory) / "Chart.yaml"
-                chart.write_text(source, encoding="utf-8")
-                release.replace_chart_dependency_version(chart, "inference-gateway", "0.2.9")
-                self.assertIn("version: 0.2.9", chart.read_text(encoding="utf-8"))
-
-    def test_release_workflow_has_no_shell_escaped_jq_keys(self) -> None:
-        workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
-        self.assertNotIn(r'[\"', workflow)
-
-    def test_release_workflow_uses_validated_image_metadata_listing(self) -> None:
-        workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
-        self.assertNotIn("for metadata in release-evidence/evidence-assets/images/candidate-*.json", workflow)
-        self.assertEqual(workflow.count("release.py candidate-image-metadata"), 4)
-        self.assertEqual(workflow.count('artifact_type:"image"'), 1)
-        self.assertEqual(workflow.count('artifact_type:"chart"'), 1)
-        self.assertEqual(workflow.count('artifact_type:"forge"'), 1)
-
-    def test_candidate_image_evidence_excludes_spdx_and_matches_plan(self) -> None:
-        plan = release.make_plan(
-            self.manifest,
-            self.targets,
-            {"control-plane": "0.0.25"},
-            self.sha,
-            "42",
-            True,
-        )
+    def test_generated_evidence_binds_plan_and_exact_image_assets(self) -> None:
+        plan = self.plan("inference-gateway")
         with tempfile.TemporaryDirectory() as directory:
-            assets = Path(directory)
+            root = Path(directory)
+            assets = root / "assets"
             images = assets / "images"
-            images.mkdir()
-            for planned in plan["image_matrix"]:
-                metadata = {
-                    "schema_version": 1,
-                    "artifact_type": "image",
-                    "name": planned["name"],
-                    "target": planned["target"],
-                    "repository": planned["repository"],
-                    "version": planned["version"],
-                    "candidate_tag": planned["candidate_tag"],
-                    "digest": "sha256:" + "1" * 64,
-                    "source_sha": self.sha,
-                }
-                (images / f"candidate-{planned['name']}.json").write_text(
-                    release.compact(metadata), encoding="utf-8"
-                )
-                (images / f"candidate-{planned['name']}.spdx.json").write_text(
-                    '{"name":"sbom","target":null}', encoding="utf-8"
-                )
-            (images / "candidate-chart-control-plane.json").write_text(
-                '{"schema_version":1,"artifact_type":"chart"}', encoding="utf-8"
+            images.mkdir(parents=True)
+            metadata = {
+                "schema_version": 2,
+                "artifact_type": "image",
+                "name": "inference-gateway",
+                "target": "inference-gateway",
+                "repository": "ghcr.io/nunocgoncalves/inference-gateway",
+                "candidate_tag": self.sha,
+                "version": "0.2.5",
+                "digest": "sha256:" + "1" * 64,
+                "source_sha": self.sha,
+            }
+            (images / "candidate-inference-gateway.json").write_text(
+                release.compact(metadata) + "\n", encoding="utf-8"
             )
-            (images / "candidate-forge.json").write_text(
-                '{"schema_version":1,"artifact_type":"forge"}', encoding="utf-8"
+            (images / "candidate-inference-gateway.spdx.json").write_text(
+                '{"spdxVersion":"SPDX-2.3"}\n', encoding="utf-8"
             )
-
-            discovered = release.candidate_image_metadata(images)
-            self.assertEqual(
-                sorted(metadata["name"] for _, metadata in discovered),
-                sorted(item["name"] for item in plan["image_matrix"]),
+            (root / "candidate-plan.json").write_text(
+                release.compact(plan) + "\n", encoding="utf-8"
             )
             evidence = release.assemble_evidence(plan, assets)
-            self.assertEqual(evidence["validation"]["status"], "passed")
+            (root / "candidate-evidence.json").write_text(
+                release.compact(evidence) + "\n", encoding="utf-8"
+            )
+            verified = release.verify_candidate(root)
+            self.assertEqual(verified["source_sha"], self.sha)
 
-            control_metadata = images / "candidate-control-plane.json"
-            original = release.load_json(control_metadata)
-            mismatched = {**original, "source_sha": "b" * 40}
-            control_metadata.write_text(release.compact(mismatched), encoding="utf-8")
-            with self.assertRaisesRegex(release.ReleaseError, "source_sha does not match"):
-                release.assemble_evidence(plan, assets)
+            metadata["source_sha"] = "b" * 40
+            (images / "candidate-inference-gateway.json").write_text(
+                release.compact(metadata) + "\n", encoding="utf-8"
+            )
+            with self.assertRaisesRegex(release.ReleaseError, "checksums"):
+                release.verify_candidate(root)
 
-            missing_source = original.copy()
-            missing_source.pop("source_sha")
-            control_metadata.write_text(release.compact(missing_source), encoding="utf-8")
-            with self.assertRaisesRegex(release.ReleaseError, "missing.*source_sha"):
-                release.assemble_evidence(plan, assets)
-
-            missing_type = original.copy()
-            missing_type.pop("artifact_type")
-            control_metadata.write_text(release.compact(missing_type), encoding="utf-8")
-            with self.assertRaisesRegex(release.ReleaseError, "artifact_type must identify"):
-                release.assemble_evidence(plan, assets)
-
-            missing_schema = original.copy()
-            missing_schema.pop("schema_version")
-            control_metadata.write_text(release.compact(missing_schema), encoding="utf-8")
-            with self.assertRaisesRegex(release.ReleaseError, "schema_version must be 1"):
-                release.assemble_evidence(plan, assets)
-
-            control_metadata.unlink()
-            with self.assertRaisesRegex(release.ReleaseError, "candidate image evidence mismatch"):
-                release.assemble_evidence(plan, assets)
-
-    def test_fixture_drift_is_rejected(self) -> None:
-        manifest = copy.deepcopy(self.manifest)
-        manifest["fixtures"]["platform_chart"] = "9.9.9"
-        with self.assertRaisesRegex(release.ReleaseError, "pinnedPlatformChartVersion"):
-            release.validate_contract(manifest, self.targets, ROOT)
-
-    def test_promotion_ledger_records_partial_completion(self) -> None:
-        plan = release.make_plan(
-            self.manifest,
-            self.targets,
-            {"control-plane": "0.0.25", "inference-gateway": "0.2.5"},
-            self.sha,
-            "4",
-            False,
-        )
-        ledger = release.new_promotion_ledger(plan)
-        release.record_promotion(
-            ledger,
-            "control-plane",
-            "image:control-plane",
-            "completed",
-            {"digest": "sha256:" + "1" * 64},
-        )
-        release.record_promotion(ledger, "control-plane", "github-release", "completed")
-        release.record_promotion(
-            ledger, "inference-gateway", "image:inference-gateway", "failed", message="conflict"
-        )
-        self.assertEqual(ledger["targets"]["control-plane"]["status"], "completed")
-        self.assertEqual(ledger["targets"]["inference-gateway"]["status"], "failed")
-        self.assertEqual(
-            ledger["targets"]["control-plane"]["events"][0]["identity"]["digest"],
-            "sha256:" + "1" * 64,
-        )
-
-    def test_evidence_hashes_exact_assets(self) -> None:
-        plan = release.make_plan(
-            self.manifest,
-            self.targets,
-            {"forge": "0.8.1"},
-            self.sha,
-            "3",
-            False,
-        )
+    def test_forge_candidate_requires_four_archives_and_no_unpacked_binaries(self) -> None:
+        plan = self.plan("forge")
         with tempfile.TemporaryDirectory() as directory:
-            assets = Path(directory)
-            (assets / "forge.tar.gz").write_bytes(b"candidate")
-            evidence = release.assemble_evidence(plan, assets)
-        self.assertEqual(evidence["validation"]["status"], "passed")
-        self.assertEqual(evidence["assets"][0]["path"], "forge.tar.gz")
-        self.assertEqual(
-            evidence["assets"][0]["sha256"],
-            "dda18a0e21ae47c53b4309434cbc02ae8bf764fa83a6defbb719431242722aa7",
+            assets = Path(directory) / "forge"
+            assets.mkdir(parents=True)
+            for platform in ("linux_amd64", "linux_arm64", "darwin_amd64", "darwin_arm64"):
+                (assets / f"forge_0.8.1_{platform}.tar.gz").write_bytes(platform.encode())
+            (assets / "checksums.txt").write_text("fixture\n", encoding="utf-8")
+            release.validate_candidate_assets(plan, Path(directory))
+            self.assertFalse(any(path.name == "forge" for path in assets.rglob("*")))
+
+    def test_workflows_are_split_and_promotion_keeps_environment_gate(self) -> None:
+        candidate = (ROOT / ".github" / "workflows" / "release-candidate.yml").read_text(
+            encoding="utf-8"
         )
+        promotion = (ROOT / ".github" / "workflows" / "release-promote.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("target:", candidate)
+        self.assertNotIn("environment: release", candidate)
+        self.assertIn("candidate_run_id:", promotion)
+        self.assertIn("environment: release", promotion)
+        self.assertNotIn("candidate_namespace", candidate)
+        self.assertNotIn("iterabase-release-candidates", candidate)
+        self.assertNotIn("compatibility.json", candidate + promotion)
+
+    def test_release_workflows_never_publish_from_push_or_tag_events(self) -> None:
+        for name in ("release-candidate.yml", "release-promote.yml", "release-rehearsal.yml"):
+            workflow = (ROOT / ".github" / "workflows" / name).read_text(encoding="utf-8")
+            self.assertIn("workflow_dispatch:", workflow)
+            self.assertNotIn("push:", workflow)
 
 
 if __name__ == "__main__":

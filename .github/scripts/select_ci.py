@@ -68,9 +68,40 @@ def selection(paths: list[str], select_all: bool = False) -> dict[str, object]:
             if not path or is_documentation(path):
                 continue
 
-            # Root build/workspace contracts and CI implementation fan out to
-            # every owner. Component-local Makefiles remain component-scoped.
-            if path.startswith((".github/", "release/")) or path in {
+            # Release implementation and component version metadata are
+            # validated by the lightweight release-contract tests in the
+            # selector job. They do not change product binaries or scenarios.
+            if path in {
+                "control-plane/VERSION",
+                "inference-gateway/VERSION",
+                "forge/VERSION",
+                "release/targets.json",
+                ".github/scripts/release.py",
+                ".github/scripts/test_release.py",
+                ".github/scripts/audit_release_security.sh",
+                ".github/workflows/release.yml",
+                ".github/workflows/release-candidate.yml",
+                ".github/workflows/release-promote.yml",
+                ".github/workflows/release-rehearsal.yml",
+            }:
+                continue
+
+            # Selection logic, shared setup/actions, and the PR/E2E workflow
+            # implementation can invalidate every affected-target decision, so
+            # changes to those contracts deliberately fan out to every owner.
+            shared_ci = path.startswith(".github/actions/") or path in {
+                ".github/ci/path-selection-fixtures.json",
+                ".github/scripts/collect_changed_paths.py",
+                ".github/scripts/select_ci.py",
+                ".github/scripts/test_select_ci.py",
+                ".github/scripts/test_cache_contract.py",
+                ".github/workflows/ci.yml",
+                ".github/workflows/e2e.yml",
+                ".github/workflows/charts-runtime.yml",
+            }
+            # Unknown GitHub automation remains conservative, but release-only
+            # files above no longer force unrelated images, Kind, CPU, or GPU.
+            if shared_ci or path.startswith(".github/") or path in {
                 "Makefile",
                 "go.work",
                 "go.work.sum",
@@ -86,6 +117,10 @@ def selection(paths: list[str], select_all: bool = False) -> dict[str, object]:
                         "inference-gateway",
                     }
                 )
+                continue
+
+            # Generated release records are evidence, not product inputs.
+            if path.startswith("release/"):
                 continue
 
             if path.startswith("control-plane/"):
