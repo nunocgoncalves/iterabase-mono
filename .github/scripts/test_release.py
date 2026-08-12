@@ -230,10 +230,39 @@ class ReleaseContractTests(unittest.TestCase):
         )
         self.assertIn('tar -xzf "$companion_archive" -C candidate-local', candidate)
 
+    def test_candidate_validation_allows_unselected_jobs_to_skip(self) -> None:
+        for target in release.TARGET_NAMES:
+            with self.subTest(target=target):
+                plan = self.plan(target)
+                selected = release.candidate_job_selection(plan)
+                needs = {
+                    name: {"result": "success" if required else "skipped"}
+                    for name, required in selected.items()
+                }
+                self.assertIn(False, selected.values())
+                release.validate_candidate_job_results(plan, needs)
+
+    def test_candidate_validation_rejects_selected_job_skips(self) -> None:
+        plan = self.plan("control-plane")
+        selected = release.candidate_job_selection(plan)
+        valid_needs = {
+            name: {"result": "success" if required else "skipped"}
+            for name, required in selected.items()
+        }
+        for name, required in selected.items():
+            if not required:
+                continue
+            with self.subTest(job=name):
+                needs = {job: dict(value) for job, value in valid_needs.items()}
+                needs[name]["result"] = "skipped"
+                with self.assertRaisesRegex(release.ReleaseError, name):
+                    release.validate_candidate_job_results(plan, needs)
+
     def test_candidate_evidence_runs_after_expected_target_skips(self) -> None:
         candidate = (ROOT / ".github" / "workflows" / "release-candidate.yml").read_text(
             encoding="utf-8"
         )
+        self.assertIn("python3 .github/scripts/release.py validate-jobs", candidate)
         self.assertIn(
             """  evidence:
     name: Assemble immutable candidate record
