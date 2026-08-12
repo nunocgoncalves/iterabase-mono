@@ -164,6 +164,7 @@ func assertCurrentPlatformStage(t *testing.T, state *digitalOceanCPUState) {
 
 func reapplyCurrentPlatformStage(t *testing.T, state *digitalOceanCPUState) {
 	t.Helper()
+	prepareCandidateChart(t, state.ip, state.privKeyPath)
 	plan := prepareCandidateOverlay(t, state.runID, state.ip, state.privKeyPath)
 	cfgPath := writeCurrentOverlayForgeConfig(
 		t, state.runID, state.ip, state.privKeyPath, state.chartVersion, plan,

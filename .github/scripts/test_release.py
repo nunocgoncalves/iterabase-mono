@@ -121,6 +121,60 @@ class ReleaseContractTests(unittest.TestCase):
             with self.assertRaisesRegex(release.ReleaseError, "checksums"):
                 release.verify_candidate(root)
 
+    def test_image_metadata_must_match_every_planned_identity_field(self) -> None:
+        plan = self.plan("inference-gateway")
+        valid = {
+            "schema_version": 2,
+            "artifact_type": "image",
+            "name": "inference-gateway",
+            "target": "inference-gateway",
+            "repository": "ghcr.io/nunocgoncalves/inference-gateway",
+            "candidate_tag": self.sha,
+            "version": "0.2.5",
+            "digest": "sha256:" + "1" * 64,
+            "source_sha": self.sha,
+        }
+        changes = {
+            "schema_version": 1,
+            "repository": "ghcr.io/example/wrong",
+            "candidate_tag": "b" * 40,
+            "version": "9.9.9",
+        }
+        for field, value in changes.items():
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as directory:
+                images = Path(directory) / "images"
+                images.mkdir()
+                metadata = {**valid, field: value}
+                (images / "candidate-inference-gateway.json").write_text(
+                    release.compact(metadata) + "\n", encoding="utf-8"
+                )
+                with self.assertRaisesRegex(release.ReleaseError, field):
+                    release.validate_candidate_assets(plan, Path(directory))
+
+    def test_duplicate_and_unexpected_image_metadata_are_rejected(self) -> None:
+        plan = self.plan("inference-gateway")
+        metadata = {
+            **plan["image_matrix"][0],
+            "schema_version": 2,
+            "artifact_type": "image",
+            "digest": "sha256:" + "1" * 64,
+            "source_sha": self.sha,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            images = Path(directory) / "images"
+            images.mkdir()
+            for name in ("candidate-inference-gateway.json", "candidate-copy.json"):
+                (images / name).write_text(release.compact(metadata) + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(release.ReleaseError, "duplicated"):
+                release.validate_candidate_assets(plan, Path(directory))
+
+            (images / "candidate-copy.json").write_text(
+                release.compact({**metadata, "name": "unexpected"}) + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(release.ReleaseError, "unexpected"):
+                release.validate_candidate_assets(plan, Path(directory))
+
     def test_forge_candidate_requires_four_archives_and_no_unpacked_binaries(self) -> None:
         plan = self.plan("forge")
         with tempfile.TemporaryDirectory() as directory:
@@ -146,6 +200,13 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertNotIn("candidate_namespace", candidate)
         self.assertNotIn("iterabase-release-candidates", candidate)
         self.assertNotIn("compatibility.json", candidate + promotion)
+        self.assertNotIn("Reuse an existing immutable full-SHA candidate", candidate)
+        self.assertIn("Reject an existing unverified full-SHA alias", candidate)
+        self.assertIn("candidate_artifact:", candidate)
+
+    def test_platform_chart_keeps_mandatory_real_machine_validation(self) -> None:
+        plan = self.plan("iterabase-platform-chart")
+        self.assertTrue(plan["real_machine"])
 
     def test_release_workflows_never_publish_from_push_or_tag_events(self) -> None:
         for name in ("release-candidate.yml", "release-promote.yml", "release-rehearsal.yml"):

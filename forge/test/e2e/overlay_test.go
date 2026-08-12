@@ -24,6 +24,7 @@ func runOverlayStage(t *testing.T, state *digitalOceanCPUState) {
 	if _, ok := os.LookupEnv("FORGE_OVERLAY_TOKEN"); ok {
 		t.Fatal("FORGE_OVERLAY_TOKEN must be unset for this test (public repo, tokenless)")
 	}
+	prepareCandidateChart(t, state.ip, state.privKeyPath)
 	loginCandidateRegistry(t, state.ip, state.privKeyPath)
 	plan := prepareCandidateOverlay(t, state.runID, state.ip, state.privKeyPath)
 	candidateConfig := writeCurrentOverlayForgeConfig(
