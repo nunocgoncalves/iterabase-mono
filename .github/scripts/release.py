@@ -363,7 +363,7 @@ def sha256(path: Path) -> str:
 
 
 def candidate_image_metadata(directory: Path) -> list[tuple[Path, dict[str, Any]]]:
-    """Return validated candidate identities, excluding adjacent SPDX documents."""
+    """Return validated image identities from a mixed candidate artifact directory."""
     if not directory.exists():
         return []
     result = []
@@ -382,6 +382,11 @@ def candidate_image_metadata(directory: Path) -> list[tuple[Path, dict[str, Any]
         metadata = load_json(path)
         if metadata.get("schema_version") != 1:
             raise ReleaseError(f"{path}.schema_version must be 1")
+        artifact_type = metadata.get("artifact_type")
+        if artifact_type not in {"image", "chart", "forge"}:
+            raise ReleaseError(f"{path}.artifact_type must identify a candidate artifact")
+        if artifact_type != "image":
+            continue
         missing = [
             field
             for field in required

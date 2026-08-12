@@ -427,7 +427,7 @@ jobs:
             --arg version '${{ matrix.version }}' \
             --arg digest "$DIGEST" \
             --arg source_sha '${{ inputs.master_sha }}' \
-            '{schema_version:1,name:$name,target:$target,repository:$repository,candidate_tag:$candidate_tag,version:$version,digest:$digest,source_sha:$source_sha}' \
+            '{schema_version:1,artifact_type:"image",name:$name,target:$target,repository:$repository,candidate_tag:$candidate_tag,version:$version,digest:$digest,source_sha:$source_sha}' \
             > candidate-${{ matrix.name }}.json
           docker buildx imagetools inspect '${{ matrix.repository }}@${{ steps.build.outputs.digest }}'
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -501,7 +501,7 @@ jobs:
             --arg version '${{ matrix.version }}' \
             --arg namespace "$CANDIDATE_NAMESPACE" \
             --arg source_sha '${{ inputs.master_sha }}' \
-            '{schema_version:1,target:$target,chart:$chart,version:$version,candidate_namespace:$namespace,source_sha:$source_sha}' \
+            '{schema_version:1,artifact_type:"chart",target:$target,chart:$chart,version:$version,candidate_namespace:$namespace,source_sha:$source_sha}' \
             > 'candidate-chart-${{ matrix.chart }}.json'
       - name: Generate chart SPDX SBOM
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.20.6
@@ -569,7 +569,7 @@ jobs:
             --arg target forge \
             --arg version '${{ inputs.forge_version }}' \
             --arg source_sha '${{ inputs.master_sha }}' \
-            '{schema_version:1,target:$target,version:$version,source_sha:$source_sha}' \
+            '{schema_version:1,artifact_type:"forge",target:$target,version:$version,source_sha:$source_sha}' \
             > forge/dist/candidate-forge.json
       - name: Generate Forge SPDX SBOM
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.20.6
