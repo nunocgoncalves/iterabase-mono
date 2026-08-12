@@ -262,7 +262,10 @@ class ReleaseContractTests(unittest.TestCase):
         candidate = (ROOT / ".github" / "workflows" / "release-candidate.yml").read_text(
             encoding="utf-8"
         )
-        self.assertIn("python3 .github/scripts/release.py validate-jobs", candidate)
+        self.assertIn(
+            "python3 workflow-validator/.github/scripts/release.py validate-jobs",
+            candidate,
+        )
         self.assertIn(
             """  evidence:
     name: Assemble immutable candidate record
@@ -273,6 +276,20 @@ class ReleaseContractTests(unittest.TestCase):
     needs: [preflight, validation]
 """,
             candidate,
+        )
+
+    def test_candidate_validation_supports_an_older_master_source(self) -> None:
+        candidate = (ROOT / ".github" / "workflows" / "release-candidate.yml").read_text(
+            encoding="utf-8"
+        )
+        validation = candidate.split("  validation:\n", 1)[1].split("\n  evidence:\n", 1)[0]
+        self.assertIn("PLAN: ${{ needs.preflight.outputs.plan }}", validation)
+        self.assertIn("ref: ${{ github.workflow_sha }}", validation)
+        self.assertIn("path: workflow-validator", validation)
+        self.assertNotIn("ref: ${{ inputs.master_sha }}", validation)
+        self.assertIn(
+            "python3 workflow-validator/.github/scripts/release.py validate-jobs",
+            validation,
         )
 
     def test_platform_chart_keeps_mandatory_real_machine_validation(self) -> None:
