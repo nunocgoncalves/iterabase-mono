@@ -236,6 +236,9 @@ jobs:
     if: >-
       needs.changes.outputs.charts == 'true' &&
       github.event_name != 'schedule'
+    permissions:
+      contents: read
+      actions: read
     uses: ./.github/workflows/charts-runtime.yml
 
   required:
