@@ -1,11 +1,11 @@
 name: Set up pinned Node with immutable npm cache
-description: Install an exact Node version and cache npm downloads by the selected lockfile.
+description: Install an exact Node version and cache npm downloads by the selected lockfiles.
 inputs:
   node-version:
     description: Exact Node patch version.
     required: true
   cache-dependency-path:
-    description: package-lock.json that defines the npm download cache.
+    description: Newline-separated package-lock.json paths that define the npm download cache.
     required: true
   cache-scope:
     description: Job-owner scope that prevents concurrent partial cache saves.
@@ -21,16 +21,24 @@ runs:
     - name: Compute content-addressed npm cache key
       id: cache-key
       shell: bash
+      env:
+        DEPENDENCY_PATHS: ${{ inputs.cache-dependency-path }}
       run: |
         set -euo pipefail
         cd "$GITHUB_WORKSPACE"
-        lock='${{ inputs.cache-dependency-path }}'
-        [ -f "$lock" ] || { echo "missing npm cache dependency: $lock" >&2; exit 1; }
-        digest=$(python3 "$GITHUB_WORKSPACE/.github/scripts/content_digest.py" "$lock")
+        files=()
+        while IFS= read -r path; do
+          [ -z "$path" ] && continue
+          [ -f "$path" ] || { echo "missing npm cache dependency: $path" >&2; exit 1; }
+          files+=("$path")
+        done <<< "$DEPENDENCY_PATHS"
+        [ "${#files[@]}" -gt 0 ] || { echo "no npm cache dependencies supplied" >&2; exit 1; }
+        digest=$(python3 "$GITHUB_WORKSPACE/.github/scripts/content_digest.py" "${files[@]}")
         key="${{ runner.os }}-${{ runner.arch }}-npm-node-$(node --version)-${{ inputs.cache-scope }}-${digest}"
         echo "key=$key" >> "$GITHUB_OUTPUT"
         echo "path=$(npm config get cache)" >> "$GITHUB_OUTPUT"
-        echo "npm cache key: $key (lockfile: $lock)"
+        echo "npm cache key: $key"
+        printf 'npm cache inputs:\n%s\n' "$DEPENDENCY_PATHS"
     - name: Restore exact npm download cache
       id: cache
       uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
