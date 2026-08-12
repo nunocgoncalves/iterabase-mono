@@ -115,6 +115,9 @@ class ReleaseContractTests(unittest.TestCase):
         workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
         self.assertNotIn("for metadata in release-evidence/evidence-assets/images/candidate-*.json", workflow)
         self.assertEqual(workflow.count("release.py candidate-image-metadata"), 4)
+        self.assertEqual(workflow.count('artifact_type:"image"'), 1)
+        self.assertEqual(workflow.count('artifact_type:"chart"'), 1)
+        self.assertEqual(workflow.count('artifact_type:"forge"'), 1)
 
     def test_candidate_image_evidence_excludes_spdx_and_matches_plan(self) -> None:
         plan = release.make_plan(
@@ -132,6 +135,7 @@ class ReleaseContractTests(unittest.TestCase):
             for planned in plan["image_matrix"]:
                 metadata = {
                     "schema_version": 1,
+                    "artifact_type": "image",
                     "name": planned["name"],
                     "target": planned["target"],
                     "repository": planned["repository"],
@@ -146,6 +150,12 @@ class ReleaseContractTests(unittest.TestCase):
                 (images / f"candidate-{planned['name']}.spdx.json").write_text(
                     '{"name":"sbom","target":null}', encoding="utf-8"
                 )
+            (images / "candidate-chart-control-plane.json").write_text(
+                '{"schema_version":1,"artifact_type":"chart"}', encoding="utf-8"
+            )
+            (images / "candidate-forge.json").write_text(
+                '{"schema_version":1,"artifact_type":"forge"}', encoding="utf-8"
+            )
 
             discovered = release.candidate_image_metadata(images)
             self.assertEqual(
@@ -166,6 +176,12 @@ class ReleaseContractTests(unittest.TestCase):
             missing_source.pop("source_sha")
             control_metadata.write_text(release.compact(missing_source), encoding="utf-8")
             with self.assertRaisesRegex(release.ReleaseError, "missing.*source_sha"):
+                release.assemble_evidence(plan, assets)
+
+            missing_type = original.copy()
+            missing_type.pop("artifact_type")
+            control_metadata.write_text(release.compact(missing_type), encoding="utf-8")
+            with self.assertRaisesRegex(release.ReleaseError, "artifact_type must identify"):
                 release.assemble_evidence(plan, assets)
 
             missing_schema = original.copy()
