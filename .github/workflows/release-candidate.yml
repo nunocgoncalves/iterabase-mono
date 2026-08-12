@@ -671,18 +671,14 @@ jobs:
       - real-machine-candidates
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ inputs.master_sha }}
       - name: Require every selected candidate job
         env:
+          PLAN: ${{ needs.preflight.outputs.plan }}
           NEEDS: ${{ toJSON(needs) }}
-        run: |
-          python3 - <<'PY'
-          import json, os
-          needs = json.loads(os.environ["NEEDS"])
-          failed = {name: job["result"] for name, job in needs.items() if job["result"] not in {"success", "skipped"}}
-          print(json.dumps({name: job["result"] for name, job in needs.items()}, sort_keys=True))
-          if failed:
-              raise SystemExit("candidate validation incomplete: " + json.dumps(failed, sort_keys=True))
-          PY
+        run: python3 .github/scripts/release.py validate-jobs
 
   evidence:
     name: Assemble immutable candidate record

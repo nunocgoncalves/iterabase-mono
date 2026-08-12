@@ -49,6 +49,16 @@ def load_json(path: Path) -> dict[str, Any]:
     return value
 
 
+def parse_json_object(value: str | None, label: str) -> dict[str, Any]:
+    try:
+        parsed = json.loads(value or "")
+    except json.JSONDecodeError as exc:
+        raise ReleaseError(f"{label} must contain a JSON object: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise ReleaseError(f"{label} must contain a JSON object")
+    return parsed
+
+
 def require_semver(value: Any, label: str) -> str:
     if not isinstance(value, str) or not SEMVER.fullmatch(value):
         raise ReleaseError(f"{label} must be stable SemVer without a v prefix: {value!r}")
@@ -257,6 +267,63 @@ def make_plan(
     return plan
 
 
+def candidate_job_selection(plan: dict[str, Any]) -> dict[str, bool]:
+    source_suites = plan.get("source_suites")
+    if not isinstance(source_suites, list) or any(
+        not isinstance(suite, str) for suite in source_suites
+    ):
+        raise ReleaseError("candidate plan source_suites must be a list of names")
+    for field in ("image_matrix", "chart_matrix", "kind_matrix"):
+        if not isinstance(plan.get(field), list):
+            raise ReleaseError(f"candidate plan {field} must be a list")
+    for field in ("forge", "chart_runtime", "real_machine"):
+        if not isinstance(plan.get(field), bool):
+            raise ReleaseError(f"candidate plan {field} must be a boolean")
+
+    return {
+        "preflight": True,
+        "control-plane-source": "control-plane" in source_suites,
+        "inference-gateway-source": "inference-gateway" in source_suites,
+        "forge-source": "forge" in source_suites,
+        "charts-source": "charts" in source_suites,
+        "charts-runtime": plan["chart_runtime"],
+        "image-candidates": bool(plan["image_matrix"]),
+        "chart-candidate": bool(plan["chart_matrix"]),
+        "forge-candidate": plan["forge"],
+        "kind-candidates": bool(plan["kind_matrix"]),
+        "real-machine-candidates": plan["real_machine"],
+    }
+
+
+def validate_candidate_job_results(
+    plan: dict[str, Any], needs: dict[str, Any]
+) -> dict[str, str]:
+    selected = candidate_job_selection(plan)
+    missing = sorted(set(selected) - set(needs))
+    unexpected = sorted(set(needs) - set(selected))
+    if missing or unexpected:
+        raise ReleaseError(
+            "candidate validation job set mismatch: "
+            + compact({"missing": missing, "unexpected": unexpected})
+        )
+
+    results: dict[str, str] = {}
+    incomplete: dict[str, dict[str, Any]] = {}
+    for name, is_selected in selected.items():
+        job = needs[name]
+        result = job.get("result") if isinstance(job, dict) else None
+        if not isinstance(result, str):
+            raise ReleaseError(f"candidate validation job {name} has no result")
+        results[name] = result
+        if result == "success" or (result == "skipped" and not is_selected):
+            continue
+        incomplete[name] = {"result": result, "selected": is_selected}
+
+    if incomplete:
+        raise ReleaseError("candidate validation incomplete: " + compact(incomplete))
+    return results
+
+
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as source:
@@ -411,6 +478,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("validate")
+    sub.add_parser("validate-jobs")
     plan = sub.add_parser("plan")
     plan.add_argument("--target", required=True, choices=TARGET_NAMES)
     plan.add_argument("--master-sha", required=True)
@@ -434,6 +502,11 @@ def main() -> int:
         validate_contract(targets, root)
         if args.command == "validate":
             print("release contract valid")
+        elif args.command == "validate-jobs":
+            plan = parse_json_object(os.environ.get("PLAN"), "PLAN")
+            needs = parse_json_object(os.environ.get("NEEDS"), "NEEDS")
+            results = validate_candidate_job_results(plan, needs)
+            print("candidate validation results:", compact(results))
         elif args.command == "plan":
             plan = make_plan(targets, args.target, args.master_sha, args.run_id, root)
             args.output.write_text(compact(plan) + "\n", encoding="utf-8")
