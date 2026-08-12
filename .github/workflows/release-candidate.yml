@@ -686,6 +686,10 @@ jobs:
 
   evidence:
     name: Assemble immutable candidate record
+    if: >-
+      always() &&
+      needs.preflight.result == 'success' &&
+      needs.validation.result == 'success'
     needs: [preflight, validation]
     runs-on: ubuntu-latest
     permissions:
