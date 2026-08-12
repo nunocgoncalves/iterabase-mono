@@ -25,6 +25,7 @@ concurrency:
 
 permissions:
   contents: read
+  actions: read
 
 env:
   GO_CACHE_DEPENDENCIES: |
@@ -107,9 +108,20 @@ jobs:
       - uses: ./.github/actions/setup-node
         with:
           node-version: 24.19.0
-          cache-dependency-path: control-plane/ui/package-lock.json
+          cache-dependency-path: |
+            control-plane/ui/package-lock.json
+            control-plane/harness/package-lock.json
+            control-plane/tool-runner/package-lock.json
           cache-scope: candidate-control-plane
-      - run: make ui-deps fmt-check lint build test
+      - name: Install locked Node dependencies
+        run: make ui-deps harness-deps tool-runner-deps
+        working-directory: control-plane
+      - name: Run complete control-plane owner validation
+        run: >-
+          make fmt-check lint build test proto-check
+          ui-lint ui-test
+          harness-lint harness-test
+          tool-runner-lint tool-runner-test tool-runner-build
         working-directory: control-plane
 
   inference-gateway-source:
@@ -171,11 +183,16 @@ jobs:
         working-directory: charts
 
   charts-runtime:
-    needs: preflight
-    if: needs.preflight.outputs.run_chart_runtime == 'true'
+    needs: [preflight, chart-candidate]
+    if: >-
+      always() && needs.preflight.result == 'success' &&
+      needs.preflight.outputs.run_chart_runtime == 'true' &&
+      needs.chart-candidate.result == 'success'
     uses: ./.github/workflows/charts-runtime.yml
     with:
       source_ref: ${{ inputs.master_sha }}
+      candidate_artifact: candidate-chart-${{ fromJSON(needs.preflight.outputs.chart_matrix)[0].chart }}
+      candidate_chart: ${{ fromJSON(needs.preflight.outputs.chart_matrix)[0].chart }}
 
   image-candidates:
     name: Build image — ${{ matrix.name }}
@@ -199,17 +216,17 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Reuse an existing immutable full-SHA candidate
-        id: existing
+      - name: Reject an existing unverified full-SHA alias
         env:
           REPOSITORY: ${{ matrix.repository }}
           SOURCE_SHA: ${{ inputs.master_sha }}
         run: |
-          digest="$(docker buildx imagetools inspect "$REPOSITORY:$SOURCE_SHA" --format '{{json .Manifest.Digest}}' 2>/dev/null | tr -d '"' || true)"
-          printf 'digest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
-          if [ -n "$digest" ]; then printf 'exists=true\n' >> "$GITHUB_OUTPUT"; else printf 'exists=false\n' >> "$GITHUB_OUTPUT"; fi
+          existing="$(docker buildx imagetools inspect "$REPOSITORY:$SOURCE_SHA" --format '{{json .Manifest.Digest}}' 2>/dev/null | tr -d '"' || true)"
+          test -z "$existing" || {
+            echo "$REPOSITORY:$SOURCE_SHA already exists at $existing; refusing unverified candidate reuse" >&2
+            exit 1
+          }
       - name: Build and push one canonical untagged digest
-        if: steps.existing.outputs.exists != 'true'
         id: build
         uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
         with:
@@ -232,7 +249,7 @@ jobs:
         env:
           REPOSITORY: ${{ matrix.repository }}
           SOURCE_SHA: ${{ inputs.master_sha }}
-          DIGEST: ${{ steps.existing.outputs.digest || steps.build.outputs.digest }}
+          DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           test -n "$DIGEST"
           existing="$(docker buildx imagetools inspect "$REPOSITORY:$SOURCE_SHA" --format '{{json .Manifest.Digest}}' 2>/dev/null | tr -d '"' || true)"
@@ -245,7 +262,7 @@ jobs:
       - name: Generate portable SPDX SBOM
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.20.6
         with:
-          image: ${{ matrix.repository }}@${{ steps.existing.outputs.digest || steps.build.outputs.digest }}
+          image: ${{ matrix.repository }}@${{ steps.build.outputs.digest }}
           syft-version: v1.51.0
           format: spdx-json
           output-file: candidate-${{ matrix.name }}.spdx.json
@@ -254,7 +271,7 @@ jobs:
       - name: Smoke-test exact production harness digest
         if: matrix.name == 'control-plane-harness'
         env:
-          IMAGE: ${{ matrix.repository }}@${{ steps.existing.outputs.digest || steps.build.outputs.digest }}
+          IMAGE: ${{ matrix.repository }}@${{ steps.build.outputs.digest }}
         run: |
           smoke_dir="$RUNNER_TEMP/harness-candidate-smoke"
           mkdir -p "$smoke_dir"
@@ -316,7 +333,7 @@ jobs:
           exit 1
       - name: Record immutable image identity
         env:
-          DIGEST: ${{ steps.existing.outputs.digest || steps.build.outputs.digest }}
+          DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           jq -n \
             --arg name '${{ matrix.name }}' \
@@ -552,13 +569,19 @@ jobs:
 
   real-machine-candidates:
     name: Exact candidate real machine — ${{ matrix.name }}
-    needs: [preflight, forge-candidate]
+    needs: [preflight, forge-candidate, chart-candidate]
     if: >-
       always() && needs.preflight.result == 'success' &&
       needs.preflight.outputs.run_real_machine == 'true' &&
-      needs.forge-candidate.result == 'success'
+      (needs.forge-candidate.result == 'success' || needs.forge-candidate.result == 'skipped') &&
+      (needs.chart-candidate.result == 'success' || needs.chart-candidate.result == 'skipped')
     runs-on: ubuntu-latest
     timeout-minutes: 70
+    permissions:
+      contents: read
+      packages: read
+    env:
+      FORGE_E2E_RELEASE_CANDIDATE: "true"
     strategy:
       fail-fast: false
       matrix:
@@ -572,21 +595,44 @@ jobs:
         with:
           ref: ${{ inputs.master_sha }}
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        if: needs.preflight.outputs.has_forge == 'true'
         with:
           name: candidate-forge
           path: candidates/forge
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        if: needs.preflight.outputs.has_chart == 'true'
+        with:
+          name: candidate-chart-${{ fromJSON(needs.preflight.outputs.chart_matrix)[0].chart }}
+          path: candidates/charts
       - uses: ./.github/actions/setup-go
         with:
           go-version: 1.26.5
           cache-dependency-path: forge/test/e2e/go.sum
           cache-scope: candidate-real-${{ matrix.name }}
-      - name: Resolve exact Linux amd64 Forge candidate
+      - name: Resolve exact Forge or platform-chart candidate
+        env:
+          PLAN: ${{ needs.preflight.outputs.plan }}
         run: |
-          archive="$(find candidates/forge -name 'forge_*_linux_amd64.tar.gz' -print -quit)"
-          mkdir candidate-bin
-          tar -xzf "$archive" -C candidate-bin
-          chmod +x candidate-bin/forge
-          printf 'FORGE_E2E_BINARY=%s\n' "$GITHUB_WORKSPACE/candidate-bin/forge" >> "$GITHUB_ENV"
+          set_env() { printf '%s\n' "$1" >> "$GITHUB_ENV"; }
+          forge_archive="$(find candidates/forge -name 'forge_*_linux_amd64.tar.gz' -print -quit 2>/dev/null || true)"
+          if [ -n "$forge_archive" ]; then
+            mkdir candidate-bin
+            tar -xzf "$forge_archive" -C candidate-bin
+            chmod +x candidate-bin/forge
+            set_env "FORGE_E2E_BINARY=$GITHUB_WORKSPACE/candidate-bin/forge"
+          fi
+
+          platform_archive="$(find candidates/charts -name 'iterabase-platform-*.tgz' -print -quit 2>/dev/null || true)"
+          if [ -n "$platform_archive" ]; then
+            companion_archive="$(find candidates/charts -name 'cert-manager-substrate-*.tgz' -print -quit)"
+            test -n "$companion_archive"
+            (cd candidates/charts && sha256sum --check checksums-iterabase-platform.txt)
+            test "$(jq -r '.schema_version' candidates/charts/candidate-chart-iterabase-platform.json)" = 2
+            test "$(jq -r '.source_sha' candidates/charts/candidate-chart-iterabase-platform.json)" = '${{ inputs.master_sha }}'
+            set_env "ITERABASE_CHART_VERSION=$(jq -r '.version' <<<"$PLAN")"
+            set_env "FORGE_E2E_PLATFORM_CHART_ARCHIVE=$GITHUB_WORKSPACE/$platform_archive"
+            set_env "FORGE_E2E_SUBSTRATE_CHART_ARCHIVE=$GITHUB_WORKSPACE/$companion_archive"
+          fi
       - name: Require mandatory capacity credentials
         env:
           DIGITALOCEAN_TOKEN: ${{ secrets.DIGITALOCEAN_TOKEN }}

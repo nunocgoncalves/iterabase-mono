@@ -282,22 +282,41 @@ def asset_records(directory: Path) -> list[dict[str, Any]]:
 def validate_candidate_assets(plan: dict[str, Any], assets: Path) -> None:
     target = plan["target"]
     if plan["image_matrix"]:
-        expected = {item["name"] for item in plan["image_matrix"]}
+        expected = {item["name"]: item for item in plan["image_matrix"]}
         discovered: set[str] = set()
         for metadata_path in sorted((assets / "images").glob("candidate-*.json")):
-            metadata = load_json(metadata_path)
-            if metadata.get("artifact_type") != "image":
+            if metadata_path.name.endswith(".spdx.json"):
                 continue
-            if metadata.get("source_sha") != plan["source_sha"]:
-                raise ReleaseError(f"{metadata_path} source_sha does not match candidate")
-            if metadata.get("target") != target:
-                raise ReleaseError(f"{metadata_path} target does not match candidate")
+            metadata = load_json(metadata_path)
+            name = metadata.get("name")
+            if not isinstance(name, str) or name not in expected:
+                raise ReleaseError(f"{metadata_path} is unexpected candidate image metadata")
+            if name in discovered:
+                raise ReleaseError(f"candidate image metadata for {name} is duplicated")
+            planned = expected[name]
+            required_identity = {
+                "schema_version": 2,
+                "artifact_type": "image",
+                "name": planned["name"],
+                "target": planned["target"],
+                "repository": planned["repository"],
+                "candidate_tag": planned["candidate_tag"],
+                "version": planned["version"],
+                "source_sha": plan["source_sha"],
+            }
+            for field, value in required_identity.items():
+                if metadata.get(field) != value:
+                    raise ReleaseError(
+                        f"{metadata_path} {field} does not match the planned candidate identity"
+                    )
             digest = metadata.get("digest")
             if not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
                 raise ReleaseError(f"{metadata_path} has no canonical digest")
-            discovered.add(str(metadata.get("name")))
-        if discovered != expected:
-            raise ReleaseError(f"candidate image evidence mismatch: {discovered} != {expected}")
+            discovered.add(name)
+        if discovered != set(expected):
+            raise ReleaseError(
+                f"candidate image evidence mismatch: {discovered} != {set(expected)}"
+            )
 
     if plan["chart_matrix"]:
         chart = plan["chart_matrix"][0]["chart"]

@@ -87,7 +87,7 @@
         "internal-tls",
         "tool-runner-contract"
       ],
-      "real_machine": false,
+      "real_machine": true,
       "images": [],
       "companions": ["cert-manager-substrate"]
     }

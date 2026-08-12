@@ -34,6 +34,7 @@ import (
 // PRs. The contract-propagation layer is covered by the isolated Kind scenario;
 // this stage proves real serving.
 func applyInferencePlatformStage(t *testing.T, state *digitalOceanGPUState) {
+	prepareCandidateChart(t, state.vm.IP, state.privKeyPath)
 	loginCandidateRegistry(t, state.vm.IP, state.privKeyPath)
 	plan := prepareCandidateOverlay(t, state.runID, state.vm.IP, state.privKeyPath)
 	// GPU readiness was already proven on this host. Reconcile the same config

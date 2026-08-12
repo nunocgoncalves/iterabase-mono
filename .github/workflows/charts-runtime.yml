@@ -7,9 +7,18 @@ on:
         description: Exact source commit to validate (defaults to the caller commit)
         required: false
         type: string
+      candidate_artifact:
+        description: Optional chart-candidate artifact produced earlier in this workflow run
+        required: false
+        type: string
+      candidate_chart:
+        description: Chart name contained in candidate_artifact
+        required: false
+        type: string
 
 permissions:
   contents: read
+  actions: read
 
 defaults:
   run:
@@ -29,6 +38,11 @@ jobs:
       - uses: ./.github/actions/cache-helm
         with:
           cache-scope: certificate-ownership-migration
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        if: inputs.candidate_artifact != ''
+        with:
+          name: ${{ inputs.candidate_artifact }}
+          path: ${{ runner.temp }}/chart-candidate
       - name: create isolated Kind cluster
         run: kind create cluster --name kind --wait 120s
       - name: helm repo add external chart repositories
@@ -42,6 +56,9 @@ jobs:
           helm repo add grafana https://grafana.github.io/helm-charts
       - name: build local 0.3.0 chart dependencies
         run: make build-deps
+      - name: Replace source fixture with exact candidate archive
+        if: inputs.candidate_artifact != ''
+        run: scripts/prepare-runtime-candidate.sh '${{ runner.temp }}/chart-candidate' '${{ inputs.candidate_chart }}'
       - name: validate 0.2.2 ownership hand-off and rollback
         run: ./scripts/check-certificate-migration.sh
 
@@ -55,6 +72,11 @@ jobs:
       - uses: ./.github/actions/cache-helm
         with:
           cache-scope: install
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        if: inputs.candidate_artifact != ''
+        with:
+          name: ${{ inputs.candidate_artifact }}
+          path: ${{ runner.temp }}/chart-candidate
       - name: create isolated Kind cluster
         run: kind create cluster --name kind --wait 120s
       - name: helm repo add external chart repositories
@@ -71,6 +93,9 @@ jobs:
           helm dependency build charts/control-plane
           helm dependency build charts/cert-manager-substrate
           helm dependency build charts/iterabase-platform
+      - name: Replace source fixture with exact candidate archive
+        if: inputs.candidate_artifact != ''
+        run: scripts/prepare-runtime-candidate.sh '${{ runner.temp }}/chart-candidate' '${{ inputs.candidate_chart }}'
       - name: compute MetalLB pool from the kind docker-bridge subnet
         run: |
           # The edge is a LoadBalancer Service; on kind, MetalLB L2 allocates the
@@ -284,6 +309,11 @@ jobs:
       - uses: ./.github/actions/cache-helm
         with:
           cache-scope: install-observability
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        if: inputs.candidate_artifact != ''
+        with:
+          name: ${{ inputs.candidate_artifact }}
+          path: ${{ runner.temp }}/chart-candidate
       - name: create isolated Kind cluster
         run: kind create cluster --name kind --wait 120s
       - name: helm repo add external chart repositories
@@ -301,6 +331,9 @@ jobs:
           helm dependency build charts/observability
           helm dependency build charts/cert-manager-substrate
           helm dependency build charts/iterabase-platform
+      - name: Replace source fixture with exact candidate archive
+        if: inputs.candidate_artifact != ''
+        run: scripts/prepare-runtime-candidate.sh '${{ runner.temp }}/chart-candidate' '${{ inputs.candidate_chart }}'
       - name: compute MetalLB pool from the kind docker-bridge subnet
         run: |
           subnets=$(docker network inspect kind -f '{{range .IPAM.Config}}{{.Subnet}}{{"\n"}}{{end}}')
@@ -498,6 +531,11 @@ jobs:
       - uses: ./.github/actions/cache-helm
         with:
           cache-scope: install-observability-tls
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        if: inputs.candidate_artifact != ''
+        with:
+          name: ${{ inputs.candidate_artifact }}
+          path: ${{ runner.temp }}/chart-candidate
       - name: create isolated Kind cluster
         run: kind create cluster --name kind --wait 120s
       - name: helm repo add external chart repositories
@@ -515,6 +553,9 @@ jobs:
           helm dependency build charts/observability
           helm dependency build charts/cert-manager-substrate
           helm dependency build charts/iterabase-platform
+      - name: Replace source fixture with exact candidate archive
+        if: inputs.candidate_artifact != ''
+        run: scripts/prepare-runtime-candidate.sh '${{ runner.temp }}/chart-candidate' '${{ inputs.candidate_chart }}'
       - name: compute MetalLB pool from the kind docker-bridge subnet
         run: |
           subnets=$(docker network inspect kind -f '{{range .IPAM.Config}}{{.Subnet}}{{"\n"}}{{end}}')

@@ -15,7 +15,8 @@ const candidateRegistryConfigPath = "/etc/forge/helm-registry.json"
 // removed before the ephemeral host is destroyed.
 func loginCandidateRegistry(t *testing.T, ip, keyPath string) {
 	t.Helper()
-	if os.Getenv("FORGE_E2E_CHART_REPOSITORY") == "" {
+	repository := os.Getenv("FORGE_E2E_CHART_REPOSITORY")
+	if repository == "" || !strings.HasPrefix(repository, "oci://") {
 		return
 	}
 	username := os.Getenv("FORGE_E2E_REGISTRY_USERNAME")
