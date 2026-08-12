@@ -230,6 +230,22 @@ class ReleaseContractTests(unittest.TestCase):
         )
         self.assertIn('tar -xzf "$companion_archive" -C candidate-local', candidate)
 
+    def test_candidate_evidence_runs_after_expected_target_skips(self) -> None:
+        candidate = (ROOT / ".github" / "workflows" / "release-candidate.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            """  evidence:
+    name: Assemble immutable candidate record
+    if: >-
+      always() &&
+      needs.preflight.result == 'success' &&
+      needs.validation.result == 'success'
+    needs: [preflight, validation]
+""",
+            candidate,
+        )
+
     def test_platform_chart_keeps_mandatory_real_machine_validation(self) -> None:
         plan = self.plan("iterabase-platform-chart")
         self.assertTrue(plan["real_machine"])
