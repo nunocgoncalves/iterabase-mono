@@ -230,8 +230,9 @@ template; match them in the overlay or via a service-repo ticket.
 
 ## Release
 
-Raw tags do not publish. Chart candidates are packaged once, validated through
-the protected exact-candidate suite, and promoted unchanged only after founder
-approval. Update `release/compatibility.json` in a reviewed monorepo PR, then use
-the root **Protected release** workflow with the exact master SHA and selected
-chart version. See [`../docs/release.md`](../docs/release.md).
+Raw tags do not publish. `Chart.yaml` is the chart version authority. Dispatch
+the root **Release candidate** workflow for one chart target and an exact master
+SHA; it packages and validates the final archive once and retains it as an
+Actions artifact. Then dispatch **Promote release** with that successful run ID.
+After founder approval in the protected `release` environment, the unchanged
+archive is published. See [`../docs/release.md`](../docs/release.md).

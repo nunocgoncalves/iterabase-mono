@@ -33,10 +33,10 @@ Branch protection therefore does not depend on a changing matrix job name.
 | charts `ci / install-observability-tls` | `E2E / charts-runtime / install-observability-tls` | Ported |
 | component Docker build smoke | `CI / image-*` | Explicit per-image BuildKit jobs |
 
-The former nested component release workflows have been removed. The root
-`Protected release` workflow is the sole publication path: manual exact-master
-request, compatibility-manifest validation, build-once candidates, complete
-relevant suites, founder approval, and promotion without rebuild. See
+The former nested component release workflows have been removed. Root-owned
+manual candidate, protected promotion, and disposable rehearsal workflows are
+the sole publication path: one target and exact master SHA, build once, focused
+exact-candidate validation, founder approval, and promotion without rebuild. See
 [`release.md`](release.md). Forge's scheduled droplet reaper remains active in
 the legacy Forge repository until source-authority cutover in HOR-474; it is
 operational cleanup rather than a source quality gate.
@@ -49,7 +49,8 @@ a move retain their owners. `.github/scripts/select_ci.py` is the owner-mapping
 source of truth, and its tests prove deletion-only, cross-owner move, docs-only,
 single-component, shared-contract, and cross-component changes.
 
-- Root workflow, release contract, root Makefile, and Go workspace metadata fan out to every owner.
+- Root Makefile, Go workspace metadata, affected-target selector code, shared setup actions, and PR/E2E workflow contracts fan out to every owner.
+- Release candidate/promotion/rehearsal implementation, target metadata, and component `VERSION` files run focused release contract checks and do not select unrelated product images, Kind scenarios, or CPU/GPU suites.
 - Control-plane UI, harness, tool-runner, and protobuf contracts select their
   focused checks. Protobuf changes fan out to both generated Node consumers.
 - Forge source/E2E changes retain the existing Forge unit, real-machine, and
@@ -58,6 +59,7 @@ single-component, shared-contract, and cross-component changes.
   scenarios. This is source composition from one checkout; no matching-branch
   lookup or cross-repository checkout exists.
 - Markdown and repository documentation alone select no expensive owner job.
+- `.github/scripts/select_ci.py` remains the PR affected-target authority. `release/targets.json` temporarily maps one requested release target to its required candidate suites until HOR-476 replaces scenario lists with compiled metadata; it is not a second PR path selector.
 
 Run the fixture matrix locally with:
 

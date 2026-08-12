@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""Validate and plan protected monorepo releases.
-
-The workflow remains intentionally thin: this module owns request parsing,
-manifest consistency, deterministic temporary suite selection, and evidence
-assembly so those security-sensitive decisions are fixture-tested.
-"""
+"""Plan, record, and verify single-target build-once releases."""
 
 from __future__ import annotations
 
@@ -19,14 +14,14 @@ from typing import Any
 
 SEMVER = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 SHA = re.compile(r"^[0-9a-f]{40}$")
-INPUT_TARGETS = {
-    "control_plane_version": "control-plane",
-    "inference_gateway_version": "inference-gateway",
-    "forge_version": "forge",
-    "control_plane_chart_version": "control-plane-chart",
-    "inference_gateway_chart_version": "inference-gateway-chart",
-    "platform_chart_version": "iterabase-platform-chart",
-}
+TARGET_NAMES = (
+    "control-plane",
+    "inference-gateway",
+    "forge",
+    "control-plane-chart",
+    "inference-gateway-chart",
+    "iterabase-platform-chart",
+)
 KIND_TARGETS = {
     "controlplane-identity": ("test-e2e-controlplane", 20),
     "inference-contract": ("test-e2e-inference", 20),
@@ -37,7 +32,11 @@ KIND_TARGETS = {
 
 
 class ReleaseError(ValueError):
-    """A release contract or request is invalid."""
+    """The repository release contract or candidate is invalid."""
+
+
+def compact(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -56,6 +55,14 @@ def require_semver(value: Any, label: str) -> str:
     return value
 
 
+def read_version(path: Path) -> str:
+    try:
+        value = path.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        raise ReleaseError(f"cannot read version authority {path}: {exc}") from exc
+    return require_semver(value, str(path))
+
+
 def chart_metadata(path: Path) -> dict[str, str]:
     result: dict[str, str] = {}
     try:
@@ -69,563 +76,363 @@ def chart_metadata(path: Path) -> dict[str, str]:
     missing = {"name", "version", "appVersion"} - result.keys()
     if missing:
         raise ReleaseError(f"{path} is missing {', '.join(sorted(missing))}")
+    require_semver(result["version"], f"{path} version")
+    # Helm appVersion is an opaque application identity and may legitimately
+    # include a v prefix (for example cert-manager v1.21.0).
     return result
 
 
-def validate_contract(
-    manifest: dict[str, Any], targets: dict[str, Any], root: Path | None = None
-) -> None:
-    if manifest.get("schema_version") != 1:
-        raise ReleaseError("compatibility manifest schema_version must be 1")
-    if targets.get("schema_version") != 1:
-        raise ReleaseError("release targets schema_version must be 1")
-    if targets.get("temporary_until") != "HOR-476":
-        raise ReleaseError("temporary suite mapping must name HOR-476 as its replacement owner")
+def chart_dependencies(path: Path) -> list[dict[str, str]]:
+    dependencies: list[dict[str, str]] = []
+    current: dict[str, str] = {}
+    in_dependencies = False
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        if raw == "dependencies:":
+            in_dependencies = True
+            continue
+        if not in_dependencies:
+            continue
+        name = re.match(r"^\s*-\s+name:\s*([^\s#]+)", raw)
+        if name:
+            if current.get("name") and current.get("version"):
+                dependencies.append(current)
+            current = {"name": name.group(1)}
+            continue
+        version = re.match(r"^\s+version:\s*[\"']?([^\"'#\s]+)", raw)
+        if version and current:
+            current["version"] = version.group(1)
+    if current.get("name") and current.get("version"):
+        dependencies.append(current)
+    return dependencies
 
-    components = manifest.get("components")
-    charts = manifest.get("charts")
-    fixtures = manifest.get("fixtures")
-    if not all(isinstance(value, dict) for value in (components, charts, fixtures)):
-        raise ReleaseError("manifest components, charts, and fixtures must be objects")
 
-    for name in ("control-plane", "inference-gateway", "forge"):
-        if name not in components or not isinstance(components[name], dict):
-            raise ReleaseError(f"manifest is missing component {name}")
-        require_semver(components[name].get("version"), f"components.{name}.version")
-
-    for name in ("control-plane", "inference-gateway", "iterabase-platform"):
-        entry = charts.get(name)
-        if not isinstance(entry, dict):
-            raise ReleaseError(f"manifest is missing chart {name}")
-        require_semver(entry.get("version"), f"charts.{name}.version")
-        require_semver(entry.get("app_version"), f"charts.{name}.app_version")
-
-    # A chart appVersion records that chart archive's default component image.
-    # It deliberately need not equal the latest compatible component version:
-    # components and charts release independently, and candidate E2E overrides
-    # only the selected component while retaining manifest-pinned dependencies.
-    companions = charts["iterabase-platform"].get("companions")
-    if not isinstance(companions, dict):
-        raise ReleaseError("platform chart companions must be an object")
-    substrate = require_semver(
-        companions.get("cert-manager-substrate"),
-        "charts.iterabase-platform.companions.cert-manager-substrate",
+def fixture_versions(root: Path) -> dict[str, str]:
+    source = (root / "forge" / "test" / "e2e" / "chart_fixture_test.go").read_text(
+        encoding="utf-8"
     )
-    if substrate != charts["iterabase-platform"]["version"]:
-        raise ReleaseError("cert-manager-substrate must match the platform chart version")
+    constants = {
+        "platform_chart": "pinnedPlatformChartVersion",
+        "control_plane_chart": "pinnedControlPlaneChartVersion",
+        "certificate_migration_source": "certificateMigrationSourceVersion",
+    }
+    result: dict[str, str] = {}
+    for name, constant in constants.items():
+        match = re.search(rf'{constant}\s*=\s*"([^"]+)"', source)
+        if match is None:
+            raise ReleaseError(f"cannot resolve test fixture {constant}")
+        result[name] = require_semver(match.group(1), constant)
+    return result
 
-    for name in (
-        "platform_chart",
-        "control_plane_chart",
-        "certificate_migration_source",
-    ):
-        require_semver(fixtures.get(name), f"fixtures.{name}")
 
+def validate_contract(targets: dict[str, Any], root: Path) -> None:
+    if targets.get("schema_version") != 2:
+        raise ReleaseError("release targets schema_version must be 2")
+    if targets.get("suite_mapping_until") != "HOR-476":
+        raise ReleaseError("temporary suite mapping must name HOR-476")
     definitions = targets.get("targets")
-    if not isinstance(definitions, dict) or set(definitions) != set(INPUT_TARGETS.values()):
-        raise ReleaseError("release target names do not match the workflow input contract")
-    for name, definition in definitions.items():
+    if not isinstance(definitions, dict) or tuple(definitions) != TARGET_NAMES:
+        raise ReleaseError("release target names or order do not match the workflow contract")
+
+    for target, definition in definitions.items():
         if not isinstance(definition, dict):
-            raise ReleaseError(f"target {name} must be an object")
-        section = definition.get("manifest_section")
-        manifest_name = definition.get("manifest_name")
-        if section not in {"components", "charts"} or manifest_name not in manifest[section]:
-            raise ReleaseError(f"target {name} points at an unknown manifest entry")
+            raise ReleaseError(f"target {target} must be an object")
         if not isinstance(definition.get("tag_prefix"), str):
-            raise ReleaseError(f"target {name} has no tag prefix")
-        scenarios = definition.get("kind_scenarios")
-        if not isinstance(scenarios, list) or any(item not in KIND_TARGETS for item in scenarios):
-            raise ReleaseError(f"target {name} has an unknown Kind scenario")
+            raise ReleaseError(f"target {target} is missing tag_prefix")
         suites = definition.get("source_suites")
         if not isinstance(suites, list) or any(
             item not in {"control-plane", "inference-gateway", "forge", "charts"}
             for item in suites
         ):
-            raise ReleaseError(f"target {name} has an unknown source suite")
+            raise ReleaseError(f"target {target} has an unknown source suite")
+        scenarios = definition.get("kind_scenarios")
+        if not isinstance(scenarios, list) or any(item not in KIND_TARGETS for item in scenarios):
+            raise ReleaseError(f"target {target} has an unknown Kind scenario")
+        if not isinstance(definition.get("real_machine"), bool):
+            raise ReleaseError(f"target {target} must declare real_machine")
+        images = definition.get("images")
+        if not isinstance(images, list):
+            raise ReleaseError(f"target {target} must declare images")
 
-    if root is not None:
-        for name, entry in charts.items():
-            metadata = chart_metadata(root / "charts" / "charts" / name / "Chart.yaml")
-            if metadata["name"] != name:
-                raise ReleaseError(f"chart directory {name} declares name {metadata['name']}")
-            if metadata["version"] != entry["version"]:
-                raise ReleaseError(
-                    f"chart {name} version {metadata['version']} does not match manifest {entry['version']}"
+        if "version_file" in definition:
+            read_version(root / definition["version_file"])
+        elif "chart" in definition:
+            chart = definition["chart"]
+            metadata = chart_metadata(root / "charts" / "charts" / chart / "Chart.yaml")
+            if metadata["name"] != chart:
+                raise ReleaseError(f"chart target {target} points at {metadata['name']}")
+            for companion in definition.get("companions", []):
+                companion_metadata = chart_metadata(
+                    root / "charts" / "charts" / companion / "Chart.yaml"
                 )
-            if metadata["appVersion"] != entry["app_version"]:
-                raise ReleaseError(
-                    f"chart {name} appVersion {metadata['appVersion']} does not match manifest {entry['app_version']}"
-                )
-        companion_metadata = chart_metadata(
-            root / "charts" / "charts" / "cert-manager-substrate" / "Chart.yaml"
-        )
-        if companion_metadata["version"] != substrate:
-            raise ReleaseError("cert-manager-substrate Chart.yaml does not match the manifest")
+                if companion_metadata["version"] != metadata["version"]:
+                    raise ReleaseError(f"companion {companion} must match {chart} version")
+        else:
+            raise ReleaseError(f"target {target} has no version authority")
 
-        fixture_file = root / "forge" / "test" / "e2e" / "chart_fixture_test.go"
-        fixture_source = fixture_file.read_text(encoding="utf-8")
-        expected_literals = {
-            "pinnedPlatformChartVersion": fixtures["platform_chart"],
-            "pinnedControlPlaneChartVersion": fixtures["control_plane_chart"],
-            "certificateMigrationSourceVersion": fixtures["certificate_migration_source"],
-        }
-        for constant, version in expected_literals.items():
-            pattern = rf'{constant}\s*=\s*"{re.escape(version)}"'
-            if re.search(pattern, fixture_source) is None:
-                raise ReleaseError(
-                    f"fixture {constant} does not match manifest version {version}"
-                )
+    fixture_versions(root)
 
 
-def compact(value: Any) -> str:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"))
-
-
-def replace_chart_dependency_version(chart: Path, dependency: str, version: str) -> None:
-    """Replace one dependency version in source or Helm-normalized Chart.yaml."""
-    require_semver(version, f"chart dependency {dependency} version")
-    try:
-        lines = chart.read_text(encoding="utf-8").splitlines()
-    except OSError as exc:
-        raise ReleaseError(f"cannot read {chart}: {exc}") from exc
-
-    selected = False
-    for index, line in enumerate(lines):
-        if re.match(rf"^\s*(?:-\s+)?name:\s*{re.escape(dependency)}\s*$", line):
-            selected = True
-            continue
-        if selected:
-            match = re.match(r"^(\s*)(-\s+)?version:\s*\S+\s*$", line)
-            if match:
-                marker = match.group(2) or ""
-                lines[index] = f"{match.group(1)}{marker}version: {version}"
-                try:
-                    chart.write_text("\n".join(lines) + "\n", encoding="utf-8")
-                except OSError as exc:
-                    raise ReleaseError(f"cannot write {chart}: {exc}") from exc
-                return
-            if re.match(r"^\s*-\s+", line):
-                break
-    raise ReleaseError(f"chart {chart} has no {dependency} dependency version")
-
-
-def selected_request(args: argparse.Namespace) -> dict[str, str]:
-    selected: dict[str, str] = {}
-    for input_name, target in INPUT_TARGETS.items():
-        value = getattr(args, input_name, "").strip()
-        if value:
-            selected[target] = require_semver(value, input_name)
-    if not selected:
-        raise ReleaseError("at least one component or chart version must be requested")
-    return selected
+def repository_versions(root: Path, targets: dict[str, Any]) -> dict[str, str]:
+    versions: dict[str, str] = {}
+    for target, definition in targets["targets"].items():
+        if "version_file" in definition:
+            versions[target] = read_version(root / definition["version_file"])
+        else:
+            versions[target] = chart_metadata(
+                root / "charts" / "charts" / definition["chart"] / "Chart.yaml"
+            )["version"]
+    return versions
 
 
 def make_plan(
-    manifest: dict[str, Any],
-    targets: dict[str, Any],
-    selected: dict[str, str],
-    master_sha: str,
-    run_id: str,
-    dry_run: bool,
+    targets: dict[str, Any], target: str, master_sha: str, run_id: str, root: Path
 ) -> dict[str, Any]:
+    if target not in targets.get("targets", {}):
+        raise ReleaseError(f"unknown release target {target!r}")
     if not SHA.fullmatch(master_sha):
-        raise ReleaseError("master_sha must be a full lowercase 40-character commit SHA")
-    if not run_id or not re.fullmatch(r"[0-9]+", run_id):
+        raise ReleaseError("master_sha must be a full lowercase commit SHA")
+    if not run_id.isdigit():
         raise ReleaseError("run_id must be numeric")
-    validate_contract(manifest, targets)
 
-    definitions = targets["targets"]
-    release_targets: list[dict[str, Any]] = []
-    images: list[dict[str, Any]] = []
-    charts: list[dict[str, Any]] = []
-    source_suites: set[str] = set()
-    scenarios: set[str] = set()
-    real_machine = False
-    candidate_suffix = f"{master_sha[:12]}-{run_id}"
-
-    for target in sorted(selected):
-        definition = definitions[target]
-        entry = manifest[definition["manifest_section"]][definition["manifest_name"]]
-        expected = entry["version"]
-        requested = selected[target]
-        if requested != expected:
-            raise ReleaseError(
-                f"requested {target} version {requested} does not match manifest {expected}"
-            )
-        production_tag = definition["tag_prefix"] + requested
-        release_tag = (
-            f"dry-run/{production_tag}-{run_id}" if dry_run else production_tag
-        )
-        release_targets.append(
+    definition = targets["targets"][target]
+    versions = repository_versions(root, targets)
+    version = versions[target]
+    images = [
+        {
+            **image,
+            "target": target,
+            "version": version,
+            "candidate_tag": master_sha,
+        }
+        for image in definition["images"]
+    ]
+    chart = definition.get("chart")
+    chart_matrix: list[dict[str, Any]] = []
+    selected_dependencies: list[dict[str, str]] = []
+    if chart:
+        chart_path = root / "charts" / "charts" / chart / "Chart.yaml"
+        selected_dependencies = chart_dependencies(chart_path)
+        chart_matrix.append(
             {
                 "target": target,
-                "version": requested,
-                "production_tag": production_tag,
-                "release_tag": release_tag,
-                "manifest_section": definition["manifest_section"],
-                "manifest_name": definition["manifest_name"],
-                "artifact_type": (
-                    "forge"
-                    if target == "forge"
-                    else "chart"
-                    if "chart" in definition
-                    else "image"
-                ),
+                "chart": chart,
+                "version": version,
+                "companions": definition.get("companions", []),
             }
         )
-        for image in definition.get("images", []):
-            images.append(
-                {
-                    **image,
-                    "target": target,
-                    "version": requested,
-                    "candidate_tag": f"candidate-{candidate_suffix}",
-                    "dry_run_tag": f"dry-run-{requested}-{run_id}",
-                }
-            )
-        if "chart" in definition:
-            charts.append(
-                {
-                    "target": target,
-                    "chart": definition["chart"],
-                    "version": requested,
-                    "companions": definition.get("companions", []),
-                    "candidate_namespace": f"iterabase-release-candidates/{candidate_suffix}",
-                    "dry_run_namespace": f"iterabase-release-dry-run/{run_id}",
-                }
-            )
-        source_suites.update(definition["source_suites"])
-        scenarios.update(definition["kind_scenarios"])
-        real_machine |= bool(definition["real_machine"])
 
-    kind_matrix = [
-        {"name": name, "target": KIND_TARGETS[name][0], "timeout": KIND_TARGETS[name][1]}
-        for name in KIND_TARGETS
-        if name in scenarios
-    ]
-    return {
-        "schema_version": 1,
-        "master_sha": master_sha,
+    plan = {
+        "schema_version": 2,
+        "candidate_workflow": "release-candidate.yml",
         "run_id": run_id,
-        "dry_run": dry_run,
-        "candidate_suffix": candidate_suffix,
-        "selected": release_targets,
+        "source_sha": master_sha,
+        "target": target,
+        "version": version,
+        "production_tag": f"{definition['tag_prefix']}{version}",
+        "source_suites": definition["source_suites"],
+        "kind_matrix": [
+            {"name": name, "target": KIND_TARGETS[name][0], "timeout": KIND_TARGETS[name][1]}
+            for name in definition["kind_scenarios"]
+        ],
+        "real_machine": definition["real_machine"],
+        "chart_runtime": bool(definition.get("chart_runtime")),
         "image_matrix": images,
-        "chart_matrix": charts,
-        "kind_matrix": kind_matrix,
-        "source_suites": sorted(source_suites),
-        "real_machine": real_machine,
-        "compatibility": manifest,
-        "temporary_suite_mapping_owner": targets["temporary_until"],
+        "chart_matrix": chart_matrix,
+        "forge": target == "forge",
+        "tested_with": {
+            "repository_versions": versions,
+            "chart_metadata": {
+                name: chart_metadata(root / "charts" / "charts" / name / "Chart.yaml")
+                for name in (
+                    "control-plane",
+                    "inference-gateway",
+                    "iterabase-platform",
+                    "cert-manager-substrate",
+                )
+            },
+            "selected_chart_dependencies": selected_dependencies,
+            "fixture_versions": fixture_versions(root),
+        },
     }
+    return plan
 
 
-def write_outputs(plan: dict[str, Any], path: Path) -> None:
-    suites = set(plan["source_suites"])
-    outputs: dict[str, Any] = {
-        "plan": plan,
-        "selected_matrix": plan["selected"],
-        "image_matrix": plan["image_matrix"],
-        "chart_matrix": plan["chart_matrix"],
-        "kind_matrix": plan["kind_matrix"],
-        "has_images": bool(plan["image_matrix"]),
-        "has_charts": bool(plan["chart_matrix"]),
-        "has_forge": any(item["target"] == "forge" for item in plan["selected"]),
-        "has_platform_chart": any(
-            item["target"] == "iterabase-platform-chart" for item in plan["selected"]
-        ),
-        "run_control_plane": "control-plane" in suites,
-        "run_inference_gateway": "inference-gateway" in suites,
-        "run_forge": "forge" in suites,
-        "run_charts": "charts" in suites,
-        "run_kind": bool(plan["kind_matrix"]),
-        "run_real_machine": plan["real_machine"],
-        "candidate_suffix": plan["candidate_suffix"],
-        "dry_run": plan["dry_run"],
-    }
-    with path.open("a", encoding="utf-8") as output:
-        for name, value in outputs.items():
-            if isinstance(value, bool):
-                rendered = str(value).lower()
-            elif isinstance(value, str):
-                rendered = value
-            else:
-                rendered = compact(value)
-            output.write(f"{name}={rendered}\n")
-
-
-def sha256(path: Path) -> str:
+def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as source:
-        for block in iter(lambda: source.read(1024 * 1024), b""):
-            digest.update(block)
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
     return digest.hexdigest()
 
 
-def candidate_image_metadata(directory: Path) -> list[tuple[Path, dict[str, Any]]]:
-    """Return validated image identities from a mixed candidate artifact directory."""
+def asset_records(directory: Path) -> list[dict[str, Any]]:
     if not directory.exists():
         return []
-    result = []
-    required = (
-        "name",
-        "target",
-        "repository",
-        "version",
-        "candidate_tag",
-        "digest",
-        "source_sha",
-    )
-    for path in sorted(directory.glob("candidate-*.json")):
-        if path.name.endswith(".spdx.json"):
-            continue
-        metadata = load_json(path)
-        if metadata.get("schema_version") != 1:
-            raise ReleaseError(f"{path}.schema_version must be 1")
-        artifact_type = metadata.get("artifact_type")
-        if artifact_type not in {"image", "chart", "forge"}:
-            raise ReleaseError(f"{path}.artifact_type must identify a candidate artifact")
-        if artifact_type != "image":
-            continue
-        missing = [
-            field
-            for field in required
-            if not isinstance(metadata.get(field), str) or not metadata[field]
-        ]
-        if missing:
-            raise ReleaseError(f"{path} is missing candidate image fields: {', '.join(missing)}")
-        require_semver(metadata["version"], f"{path}.version")
-        if not SHA.fullmatch(metadata["source_sha"]):
-            raise ReleaseError(f"{path}.source_sha must be a full lowercase commit SHA")
-        if not re.fullmatch(r"sha256:[0-9a-f]{64}", metadata["digest"]):
-            raise ReleaseError(f"{path}.digest must be an immutable sha256 digest")
-        result.append((path, metadata))
-    return result
-
-
-def validate_candidate_image_evidence(plan: dict[str, Any], assets: Path) -> None:
-    """Require exactly one valid metadata identity for every selected candidate image."""
-    expected = {item["name"]: item for item in plan["image_matrix"]}
-    actual: dict[str, dict[str, Any]] = {}
-    for path, metadata in candidate_image_metadata(assets / "images"):
-        name = metadata["name"]
-        if name in actual:
-            raise ReleaseError(f"duplicate candidate image metadata for {name}: {path}")
-        actual[name] = metadata
-    if actual.keys() != expected.keys():
-        missing = sorted(expected.keys() - actual.keys())
-        unexpected = sorted(actual.keys() - expected.keys())
-        raise ReleaseError(
-            f"candidate image evidence mismatch; missing={missing}, unexpected={unexpected}"
-        )
-    for name, planned in expected.items():
-        metadata = actual[name]
-        for field in ("target", "repository", "version", "candidate_tag"):
-            if metadata[field] != planned[field]:
-                raise ReleaseError(
-                    f"candidate image evidence {name}.{field} does not match the release plan"
-                )
-        if metadata["source_sha"] != plan["master_sha"]:
-            raise ReleaseError(
-                f"candidate image evidence {name}.source_sha does not match the release plan"
-            )
-
-
-def new_promotion_ledger(plan: dict[str, Any]) -> dict[str, Any]:
-    """Create the durable per-target ledger for non-transactional promotion."""
-    targets = {}
-    for selected in plan["selected"]:
-        targets[selected["target"]] = {
-            "release_tag": selected["release_tag"],
-            "version": selected["version"],
-            "status": "pending",
-            "events": [],
+    return [
+        {
+            "path": str(path.relative_to(directory)),
+            "sha256": sha256_file(path),
+            "size": path.stat().st_size,
         }
-    return {
-        "schema_version": 1,
-        "source": {
-            "repository": os.environ.get("GITHUB_REPOSITORY", "nunocgoncalves/iterabase-mono"),
-            "master_sha": plan["master_sha"],
-            "workflow_run_id": plan["run_id"],
-            "workflow_run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT", "1"),
-        },
-        "mode": "dry-run" if plan["dry_run"] else "release",
-        "targets": targets,
-    }
+        for path in sorted(directory.rglob("*"))
+        if path.is_file()
+    ]
 
 
-def record_promotion(
-    ledger: dict[str, Any],
-    target: str,
-    phase: str,
-    status: str,
-    identity: dict[str, Any] | None = None,
-    message: str = "",
-) -> None:
-    """Append one immutable-identity outcome and advance the target state."""
-    targets = ledger.get("targets")
-    if not isinstance(targets, dict) or target not in targets:
-        raise ReleaseError(f"promotion ledger has no selected target {target!r}")
-    if status not in {"completed", "failed"}:
-        raise ReleaseError(f"promotion status must be completed or failed: {status!r}")
-    if not phase:
-        raise ReleaseError("promotion phase is required")
-    event: dict[str, Any] = {"phase": phase, "status": status}
-    if identity is not None:
-        event["identity"] = identity
-    if message:
-        event["message"] = message
-    entry = targets[target]
-    entry["events"].append(event)
-    if status == "failed":
-        entry["status"] = "failed"
-    elif phase == "github-release":
-        entry["status"] = "completed"
-    elif entry["status"] == "pending":
-        entry["status"] = "promoting"
+def validate_candidate_assets(plan: dict[str, Any], assets: Path) -> None:
+    target = plan["target"]
+    if plan["image_matrix"]:
+        expected = {item["name"] for item in plan["image_matrix"]}
+        discovered: set[str] = set()
+        for metadata_path in sorted((assets / "images").glob("candidate-*.json")):
+            metadata = load_json(metadata_path)
+            if metadata.get("artifact_type") != "image":
+                continue
+            if metadata.get("source_sha") != plan["source_sha"]:
+                raise ReleaseError(f"{metadata_path} source_sha does not match candidate")
+            if metadata.get("target") != target:
+                raise ReleaseError(f"{metadata_path} target does not match candidate")
+            digest = metadata.get("digest")
+            if not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+                raise ReleaseError(f"{metadata_path} has no canonical digest")
+            discovered.add(str(metadata.get("name")))
+        if discovered != expected:
+            raise ReleaseError(f"candidate image evidence mismatch: {discovered} != {expected}")
+
+    if plan["chart_matrix"]:
+        chart = plan["chart_matrix"][0]["chart"]
+        if not list((assets / "charts").glob(f"{chart}-*.tgz")):
+            raise ReleaseError(f"candidate chart archive for {chart} is missing")
+        if not (assets / "charts" / f"checksums-{chart}.txt").is_file():
+            raise ReleaseError(f"candidate chart checksums for {chart} are missing")
+
+    if plan["forge"]:
+        archives = sorted((assets / "forge").glob("forge_*_*.tar.gz"))
+        expected_platforms = {"linux_amd64", "linux_arm64", "darwin_amd64", "darwin_arm64"}
+        found = {
+            next((platform for platform in expected_platforms if platform in archive.name), "")
+            for archive in archives
+        }
+        if found != expected_platforms:
+            raise ReleaseError(f"Forge candidate platform matrix is incomplete: {found}")
+        if not (assets / "forge" / "checksums.txt").is_file():
+            raise ReleaseError("Forge candidate checksums are missing")
 
 
 def assemble_evidence(plan: dict[str, Any], assets: Path) -> dict[str, Any]:
-    validate_candidate_image_evidence(plan, assets)
-    files = []
-    for path in sorted(item for item in assets.rglob("*") if item.is_file()):
-        files.append(
-            {
-                "path": str(path.relative_to(assets)),
-                "sha256": sha256(path),
-                "size": path.stat().st_size,
-            }
-        )
+    validate_candidate_assets(plan, assets)
+    records = asset_records(assets)
+    if not records:
+        raise ReleaseError("candidate has no recorded assets")
     return {
-        "schema_version": 1,
-        "source": {
-            "repository": os.environ.get("GITHUB_REPOSITORY", "nunocgoncalves/iterabase-mono"),
-            "master_sha": plan["master_sha"],
-            "workflow_run_id": plan["run_id"],
+        "schema_version": 2,
+        "candidate": {
+            "workflow": plan["candidate_workflow"],
+            "run_id": plan["run_id"],
+            "source_sha": plan["source_sha"],
+            "target": plan["target"],
+            "version": plan["version"],
+            "production_tag": plan["production_tag"],
         },
-        "mode": "dry-run" if plan["dry_run"] else "release",
-        "selected": plan["selected"],
-        "compatibility": plan["compatibility"],
-        "validation": {
-            "source_suites": plan["source_suites"],
-            "kind_scenarios": [item["name"] for item in plan["kind_matrix"]],
-            "real_machine": plan["real_machine"],
-            "status": "passed",
-            "temporary_mapping_replacement": plan["temporary_suite_mapping_owner"],
-        },
-        "assets": files,
+        "tested_with": plan["tested_with"],
+        "validation": {"status": "passed"},
+        "plan_sha256": hashlib.sha256((compact(plan) + "\n").encode()).hexdigest(),
+        "assets": records,
     }
 
 
-def parser() -> argparse.ArgumentParser:
-    result = argparse.ArgumentParser()
-    sub = result.add_subparsers(dest="command", required=True)
+def verify_candidate(directory: Path) -> dict[str, Any]:
+    plan_path = directory / "candidate-plan.json"
+    evidence_path = directory / "candidate-evidence.json"
+    assets = directory / "assets"
+    plan = load_json(plan_path)
+    evidence = load_json(evidence_path)
+    if evidence.get("schema_version") != 2 or evidence.get("validation", {}).get("status") != "passed":
+        raise ReleaseError("candidate evidence is not a passed schema-v2 record")
+    expected_plan_hash = hashlib.sha256((compact(plan) + "\n").encode()).hexdigest()
+    if evidence.get("plan_sha256") != expected_plan_hash:
+        raise ReleaseError("candidate plan does not match evidence")
+    actual = asset_records(assets)
+    if evidence.get("assets") != actual:
+        raise ReleaseError("candidate assets do not match recorded checksums")
+    candidate = evidence.get("candidate", {})
+    for field in ("run_id", "source_sha", "target", "version", "production_tag"):
+        if str(candidate.get(field)) != str(plan.get(field)):
+            raise ReleaseError(f"candidate evidence {field} does not match plan")
+    validate_candidate_assets(plan, assets)
+    return plan
 
-    validate = sub.add_parser("validate")
-    validate.add_argument("--manifest", type=Path, default=Path("release/compatibility.json"))
-    validate.add_argument("--targets", type=Path, default=Path("release/targets.json"))
-    validate.add_argument("--root", type=Path, default=Path("."))
 
+def write_github_outputs(path: Path, plan: dict[str, Any]) -> None:
+    outputs = {
+        "plan": compact(plan),
+        "target": plan["target"],
+        "version": plan["version"],
+        "production_tag": plan["production_tag"],
+        "image_matrix": compact(plan["image_matrix"]),
+        "chart_matrix": compact(plan["chart_matrix"]),
+        "kind_matrix": compact(plan["kind_matrix"]),
+        "has_images": str(bool(plan["image_matrix"])).lower(),
+        "has_chart": str(bool(plan["chart_matrix"])).lower(),
+        "has_forge": str(bool(plan["forge"])).lower(),
+        "run_control_plane": str("control-plane" in plan["source_suites"]).lower(),
+        "run_inference_gateway": str("inference-gateway" in plan["source_suites"]).lower(),
+        "run_forge": str("forge" in plan["source_suites"]).lower(),
+        "run_charts": str("charts" in plan["source_suites"]).lower(),
+        "run_chart_runtime": str(plan["chart_runtime"]).lower(),
+        "run_kind": str(bool(plan["kind_matrix"])).lower(),
+        "run_real_machine": str(bool(plan["real_machine"])).lower(),
+    }
+    with path.open("a", encoding="utf-8") as output:
+        for name, value in outputs.items():
+            output.write(f"{name}={value}\n")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser()
+    sub = parser.add_subparsers(dest="command", required=True)
+    sub.add_parser("validate")
     plan = sub.add_parser("plan")
-    plan.add_argument("--manifest", type=Path, default=Path("release/compatibility.json"))
-    plan.add_argument("--targets", type=Path, default=Path("release/targets.json"))
+    plan.add_argument("--target", required=True, choices=TARGET_NAMES)
     plan.add_argument("--master-sha", required=True)
     plan.add_argument("--run-id", required=True)
-    plan.add_argument("--dry-run", action="store_true")
     plan.add_argument("--output", type=Path, required=True)
     plan.add_argument("--github-output", type=Path)
-    for input_name in INPUT_TARGETS:
-        plan.add_argument("--" + input_name.replace("_", "-"), default="")
-
-    dependency = sub.add_parser("replace-chart-dependency")
-    dependency.add_argument("--chart", type=Path, required=True)
-    dependency.add_argument("--dependency", required=True)
-    dependency.add_argument("--version", required=True)
-
     evidence = sub.add_parser("evidence")
     evidence.add_argument("--plan", type=Path, required=True)
     evidence.add_argument("--assets", type=Path, required=True)
     evidence.add_argument("--output", type=Path, required=True)
-
-    image_metadata = sub.add_parser("candidate-image-metadata")
-    image_metadata.add_argument("--directory", type=Path, required=True)
-
-    promotion_init = sub.add_parser("promotion-init")
-    promotion_init.add_argument("--plan", type=Path, required=True)
-    promotion_init.add_argument("--output", type=Path, required=True)
-
-    promotion_record = sub.add_parser("promotion-record")
-    promotion_record.add_argument("--ledger", type=Path, required=True)
-    promotion_record.add_argument("--target", required=True)
-    promotion_record.add_argument("--phase", required=True)
-    promotion_record.add_argument("--status", choices=("completed", "failed"), required=True)
-    promotion_record.add_argument("--identity-json", default="")
-    promotion_record.add_argument("--message", default="")
-    return result
+    verify = sub.add_parser("verify-candidate")
+    verify.add_argument("--directory", type=Path, required=True)
+    return parser
 
 
 def main() -> int:
-    args = parser().parse_args()
+    args = build_parser().parse_args()
+    root = Path(__file__).resolve().parents[2]
+    targets = load_json(root / "release" / "targets.json")
     try:
+        validate_contract(targets, root)
         if args.command == "validate":
-            validate_contract(load_json(args.manifest), load_json(args.targets), args.root)
-            print("release compatibility and target contracts are valid")
+            print("release contract valid")
         elif args.command == "plan":
-            manifest = load_json(args.manifest)
-            targets = load_json(args.targets)
-            plan = make_plan(
-                manifest,
-                targets,
-                selected_request(args),
-                args.master_sha,
-                args.run_id,
-                args.dry_run,
-            )
-            args.output.write_text(json.dumps(plan, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-            if args.github_output:
-                write_outputs(plan, args.github_output)
-            print(json.dumps(plan, indent=2, sort_keys=True))
-        elif args.command == "replace-chart-dependency":
-            replace_chart_dependency_version(args.chart, args.dependency, args.version)
-            print(f"updated {args.dependency} dependency to {args.version} in {args.chart}")
+            plan = make_plan(targets, args.target, args.master_sha, args.run_id, root)
+            args.output.write_text(compact(plan) + "\n", encoding="utf-8")
+            print(compact(plan))
+            output = args.github_output
+            if output is None and os.environ.get("GITHUB_OUTPUT"):
+                output = Path(os.environ["GITHUB_OUTPUT"])
+            if output:
+                write_github_outputs(output, plan)
         elif args.command == "evidence":
-            plan = load_json(args.plan)
-            evidence = assemble_evidence(plan, args.assets)
-            args.output.write_text(
-                json.dumps(evidence, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-            )
-            print(json.dumps(evidence, indent=2, sort_keys=True))
-        elif args.command == "candidate-image-metadata":
-            for path, _ in candidate_image_metadata(args.directory):
-                print(path)
-        elif args.command == "promotion-init":
-            ledger = new_promotion_ledger(load_json(args.plan))
-            args.output.write_text(
-                json.dumps(ledger, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-            )
-            print(json.dumps(ledger, indent=2, sort_keys=True))
-        elif args.command == "promotion-record":
-            ledger = load_json(args.ledger)
-            identity = None
-            if args.identity_json:
-                try:
-                    identity = json.loads(args.identity_json)
-                except json.JSONDecodeError as exc:
-                    raise ReleaseError(f"invalid promotion identity JSON: {exc}") from exc
-                if not isinstance(identity, dict):
-                    raise ReleaseError("promotion identity must be a JSON object")
-            record_promotion(
-                ledger, args.target, args.phase, args.status, identity, args.message
-            )
-            temporary = args.ledger.with_suffix(args.ledger.suffix + ".tmp")
-            temporary.write_text(
-                json.dumps(ledger, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-            )
-            temporary.replace(args.ledger)
-            print(json.dumps(ledger, indent=2, sort_keys=True))
+            evidence = assemble_evidence(load_json(args.plan), args.assets)
+            args.output.write_text(compact(evidence) + "\n", encoding="utf-8")
+            print(compact(evidence))
+        elif args.command == "verify-candidate":
+            print(compact(verify_candidate(args.directory)))
     except ReleaseError as exc:
         print(f"release contract error: {exc}", file=sys.stderr)
-        return 2
+        return 1
     return 0
 
 
