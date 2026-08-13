@@ -49,7 +49,11 @@ func runToolRunnerContract(t *testing.T) {
 	buildToolGitImage(t, gitImage)
 	if artifacts.sourceComposed {
 		buildToolRunnerImages(t, artifacts.controlPlaneRoot, controlImage, runnerImage)
+	}
+	if artifacts.controlChartLocal != "" {
 		command(t, "helm", "dependency", "build", artifacts.controlChartLocal)
+	}
+	if artifacts.certificateChartLocal != "" {
 		command(t, "helm", "dependency", "build", artifacts.certificateChartLocal)
 	}
 
@@ -260,11 +264,18 @@ func resolveToolRunnerArtifacts(t *testing.T) toolRunnerArtifacts {
 		t.Fatal("source composition requires both ITERABASE_CONTROL_PLANE_ROOT and ITERABASE_CHARTS_ROOT")
 	}
 	if controlPlaneRoot == "" {
+		controlLocal := os.Getenv("CONTROL_PLANE_LOCAL_CHART")
+		certificateLocal := ""
+		if platformLocal := os.Getenv("ITERABASE_PLATFORM_LOCAL_CHART"); platformLocal != "" {
+			certificateLocal = filepath.Join(filepath.Dir(platformLocal), "cert-manager-substrate")
+		}
 		return toolRunnerArtifacts{
 			controlChartRef:         "oci://ghcr.io/nunocgoncalves/iterabase-charts/control-plane",
-			controlChartVersion:     controlPlaneChartVersion(t, ""),
+			controlChartVersion:     controlPlaneChartVersion(t, controlLocal),
+			controlChartLocal:       controlLocal,
 			certificateChartRef:     "oci://ghcr.io/nunocgoncalves/iterabase-charts/cert-manager-substrate",
-			certificateChartVersion: platformChartVersion(t, ""),
+			certificateChartVersion: platformChartVersion(t, certificateLocal),
+			certificateChartLocal:   certificateLocal,
 		}
 	}
 	for label, path := range map[string]string{"control-plane": controlPlaneRoot, "charts": chartsRoot} {

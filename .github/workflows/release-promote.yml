@@ -22,9 +22,8 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       source_sha: ${{ steps.candidate.outputs.source_sha }}
-      target: ${{ steps.candidate.outputs.target }}
-      version: ${{ steps.candidate.outputs.version }}
-      production_tag: ${{ steps.candidate.outputs.production_tag }}
+      targets: ${{ steps.candidate.outputs.targets }}
+      releases: ${{ steps.candidate.outputs.releases }}
       has_images: ${{ steps.candidate.outputs.has_images }}
       has_chart: ${{ steps.candidate.outputs.has_chart }}
       has_forge: ${{ steps.candidate.outputs.has_forge }}
@@ -49,7 +48,7 @@ jobs:
           test "$(jq -r '.conclusion' <<<"$run")" = success
           mkdir candidate
           gh run download "$RUN_ID" --name release-candidate --dir candidate
-      - name: Verify candidate checksums, source, and target
+      - name: Verify candidate checksums, source, and target bundle
         id: candidate
         env:
           RUN_ID: ${{ inputs.candidate_run_id }}
@@ -61,9 +60,8 @@ jobs:
           git merge-base --is-ancestor "$source_sha" origin/master
           {
             printf 'source_sha=%s\n' "$source_sha"
-            printf 'target=%s\n' "$(jq -r '.target' verified-plan.json)"
-            printf 'version=%s\n' "$(jq -r '.version' verified-plan.json)"
-            printf 'production_tag=%s\n' "$(jq -r '.production_tag' verified-plan.json)"
+            printf 'targets=%s\n' "$(jq -c '.targets' verified-plan.json)"
+            printf 'releases=%s\n' "$(jq -c '.releases' verified-plan.json)"
             printf 'has_images=%s\n' "$(jq -r '(.image_matrix | length) > 0' verified-plan.json)"
             printf 'has_chart=%s\n' "$(jq -r '(.chart_matrix | length) > 0' verified-plan.json)"
             printf 'has_forge=%s\n' "$(jq -r '.forge' verified-plan.json)"
@@ -119,6 +117,21 @@ jobs:
           git config core.sshCommand 'ssh -i ~/.ssh/release-tag -o IdentitiesOnly=yes'
           git config user.name iterabase-release
           git config user.email release@iterabase.com
+      - name: Preflight every semantic destination before publication
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASES: ${{ needs.verify-candidate.outputs.releases }}
+        run: |
+          .github/scripts/check_promotion_destinations.sh candidate '${{ github.repository_owner }}'
+          while IFS=$'\t' read -r tag _target; do
+            direct="$(git ls-remote --tags origin "refs/tags/$tag" | awk '{print $1}')"
+            peeled="$(git ls-remote --tags origin "refs/tags/$tag^{}" | awk '{print $1}')"
+            existing="${peeled:-$direct}"
+            if [ -n "$existing" ]; then test "$existing" = '${{ needs.verify-candidate.outputs.source_sha }}'; fi
+            if gh release view "$tag" >/dev/null 2>&1; then
+              test "$(gh release view "$tag" --json tagName --jq .tagName)" = "$tag"
+            fi
+          done < <(jq -r '.[] | [.production_tag,.target] | @tsv' <<<"$RELEASES")
       - name: Promote tested image digests by adding semantic aliases
         if: needs.verify-candidate.outputs.has_images == 'true'
         run: |
@@ -154,54 +167,69 @@ jobs:
               helm push "$package" 'oci://ghcr.io/${{ github.repository_owner }}/iterabase-charts'
             fi
           done
-      - name: Create or verify protected namespaced tag
+      - name: Create or verify protected namespaced tags
         env:
-          TAG: ${{ needs.verify-candidate.outputs.production_tag }}
+          RELEASES: ${{ needs.verify-candidate.outputs.releases }}
           SOURCE_SHA: ${{ needs.verify-candidate.outputs.source_sha }}
         run: |
-          direct="$(git ls-remote --tags origin "refs/tags/$TAG" | awk '{print $1}')"
-          peeled="$(git ls-remote --tags origin "refs/tags/$TAG^{}" | awk '{print $1}')"
-          existing="${peeled:-$direct}"
-          if [ -n "$existing" ]; then
-            test "$existing" = "$SOURCE_SHA"
-          else
-            git -c tag.gpgSign=false tag -a "$TAG" "$SOURCE_SHA" -m "Release $TAG from $SOURCE_SHA"
-            git push origin "refs/tags/$TAG"
-          fi
-      - name: Create or complete GitHub Release with exact candidate files
+          while IFS= read -r tag; do
+            direct="$(git ls-remote --tags origin "refs/tags/$tag" | awk '{print $1}')"
+            peeled="$(git ls-remote --tags origin "refs/tags/$tag^{}" | awk '{print $1}')"
+            existing="${peeled:-$direct}"
+            if [ -n "$existing" ]; then
+              test "$existing" = "$SOURCE_SHA"
+            else
+              git -c tag.gpgSign=false tag -a "$tag" "$SOURCE_SHA" -m "Release $tag from $SOURCE_SHA"
+              git push origin "refs/tags/$tag"
+            fi
+          done < <(jq -r '.[].production_tag' <<<"$RELEASES")
+      - name: Create or complete target GitHub Releases with exact candidate files
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ needs.verify-candidate.outputs.production_tag }}
-          TARGET: ${{ needs.verify-candidate.outputs.target }}
-          VERSION: ${{ needs.verify-candidate.outputs.version }}
+          RELEASES: ${{ needs.verify-candidate.outputs.releases }}
           SOURCE_SHA: ${{ needs.verify-candidate.outputs.source_sha }}
         run: |
-          mapfile -t assets < <(find candidate/assets -type f | sort)
-          assets+=(candidate/candidate-plan.json candidate/candidate-evidence.json)
-          notes="$(mktemp)"
-          cat > "$notes" <<EOF
-          Release of **$TARGET $VERSION** from \`$SOURCE_SHA\`.
+          while IFS=$'\t' read -r target version tag artifact_types; do
+            assets=(candidate/candidate-plan.json candidate/candidate-evidence.json)
+            if jq -e 'index("image")' <<<"$artifact_types" >/dev/null; then
+              while IFS= read -r asset; do assets+=("$asset"); done \
+                < <(find candidate/assets/images -type f -name 'candidate-*' | sort)
+            fi
+            if jq -e 'index("chart")' <<<"$artifact_types" >/dev/null; then
+              chart="$(jq -r --arg target "$target" '.chart_matrix[] | select(.target == $target) | .chart' candidate/candidate-plan.json)"
+              assets+=(
+                "candidate/assets/charts/candidate-chart-$chart.json"
+                "candidate/assets/charts/candidate-chart-$chart.spdx.json"
+                "candidate/assets/charts/checksums-$chart.txt"
+              )
+              while IFS= read -r name; do
+                assets+=("candidate/assets/charts/$name-$version.tgz")
+              done < <(jq -r --arg target "$target" '.chart_matrix[] | select(.target == $target) | [.chart] + .companions | .[]' candidate/candidate-plan.json)
+            fi
+            if jq -e 'index("forge")' <<<"$artifact_types" >/dev/null; then
+              while IFS= read -r asset; do assets+=("$asset"); done \
+                < <(find candidate/assets/forge -type f | sort)
+            fi
+            notes="$(mktemp)"
+            cat > "$notes" <<EOF
+          Release of **$target $version** from \`$SOURCE_SHA\` as part of affected-target bundle ${{ inputs.candidate_run_id }}.
 
-          Built and validated once by candidate run ${{ inputs.candidate_run_id }}; promoted without rebuilding. Exact candidate evidence is attached.
+          Built and validated once with the other selected targets; promoted without rebuilding. Exact bundle evidence is attached.
           EOF
 
-          verify_or_upload() {
-            local existing_dir name asset
             existing_dir="$(mktemp -d)"
-            for asset in "${assets[@]}"; do
-              name="$(basename "$asset")"
-              if gh release view "$TAG" --json assets --jq '.assets[].name' | grep -Fxq "$name"; then
-                gh release download "$TAG" --pattern "$name" --dir "$existing_dir"
-                cmp "$asset" "$existing_dir/$name"
-                rm -f "$existing_dir/$name"
-              else
-                gh release upload "$TAG" "$asset"
-              fi
-            done
-          }
-
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            verify_or_upload
-          else
-            gh release create "$TAG" "${assets[@]}" --verify-tag --title "$TAG" --notes-file "$notes"
-          fi
+            if gh release view "$tag" >/dev/null 2>&1; then
+              for asset in "${assets[@]}"; do
+                name="$(basename "$asset")"
+                if gh release view "$tag" --json assets --jq '.assets[].name' | grep -Fxq "$name"; then
+                  gh release download "$tag" --pattern "$name" --dir "$existing_dir"
+                  cmp "$asset" "$existing_dir/$name"
+                  rm -f "$existing_dir/$name"
+                else
+                  gh release upload "$tag" "$asset"
+                fi
+              done
+            else
+              gh release create "$tag" "${assets[@]}" --verify-tag --title "$tag" --notes-file "$notes"
+            fi
+          done < <(jq -r '.[] | [.target,.version,.production_tag,(.artifact_types | tojson)] | @tsv' <<<"$RELEASES")

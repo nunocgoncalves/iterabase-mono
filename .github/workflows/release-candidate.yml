@@ -3,24 +3,17 @@ name: Release candidate
 on:
   workflow_dispatch:
     inputs:
-      target:
-        description: One independently versioned release target
+      targets:
+        description: Comma-separated affected release targets
         required: true
-        type: choice
-        options:
-          - control-plane
-          - inference-gateway
-          - forge
-          - control-plane-chart
-          - inference-gateway-chart
-          - iterabase-platform-chart
+        type: string
       master_sha:
         description: Full commit SHA contained in master
         required: true
         type: string
 
 concurrency:
-  group: release-candidate-${{ inputs.target }}-${{ inputs.master_sha }}
+  group: release-candidate-${{ inputs.master_sha }}-${{ inputs.targets }}
   cancel-in-progress: false
 
 permissions:
@@ -40,23 +33,23 @@ jobs:
     name: Candidate preflight
     runs-on: ubuntu-latest
     outputs:
-      plan: ${{ steps.plan.outputs.plan }}
-      target: ${{ steps.plan.outputs.target }}
-      version: ${{ steps.plan.outputs.version }}
-      production_tag: ${{ steps.plan.outputs.production_tag }}
-      image_matrix: ${{ steps.plan.outputs.image_matrix }}
-      chart_matrix: ${{ steps.plan.outputs.chart_matrix }}
-      kind_matrix: ${{ steps.plan.outputs.kind_matrix }}
-      has_images: ${{ steps.plan.outputs.has_images }}
-      has_chart: ${{ steps.plan.outputs.has_chart }}
-      has_forge: ${{ steps.plan.outputs.has_forge }}
-      run_control_plane: ${{ steps.plan.outputs.run_control_plane }}
-      run_inference_gateway: ${{ steps.plan.outputs.run_inference_gateway }}
-      run_forge: ${{ steps.plan.outputs.run_forge }}
-      run_charts: ${{ steps.plan.outputs.run_charts }}
-      run_chart_runtime: ${{ steps.plan.outputs.run_chart_runtime }}
-      run_kind: ${{ steps.plan.outputs.run_kind }}
-      run_real_machine: ${{ steps.plan.outputs.run_real_machine }}
+      plan: ${{ steps.resolved.outputs.plan }}
+      targets: ${{ steps.resolved.outputs.targets }}
+      releases: ${{ steps.resolved.outputs.releases }}
+      forge_version: ${{ steps.resolved.outputs.forge_version }}
+      image_matrix: ${{ steps.resolved.outputs.image_matrix }}
+      chart_matrix: ${{ steps.resolved.outputs.chart_matrix }}
+      kind_matrix: ${{ steps.resolved.outputs.kind_matrix }}
+      has_images: ${{ steps.resolved.outputs.has_images }}
+      has_chart: ${{ steps.resolved.outputs.has_chart }}
+      has_forge: ${{ steps.resolved.outputs.has_forge }}
+      run_control_plane: ${{ steps.resolved.outputs.run_control_plane }}
+      run_inference_gateway: ${{ steps.resolved.outputs.run_inference_gateway }}
+      run_forge: ${{ steps.resolved.outputs.run_forge }}
+      run_charts: ${{ steps.resolved.outputs.run_charts }}
+      run_chart_runtime: ${{ steps.resolved.outputs.run_chart_runtime }}
+      run_kind: ${{ steps.resolved.outputs.run_kind }}
+      run_real_machine: ${{ steps.resolved.outputs.run_real_machine }}
     steps:
       - name: Require workflow dispatch from master
         run: test '${{ github.ref }}' = refs/heads/master
@@ -71,21 +64,24 @@ jobs:
           test "$(git rev-parse HEAD)" = "$REQUESTED_SHA"
           git fetch --no-tags origin master
           git merge-base --is-ancestor "$REQUESTED_SHA" origin/master
-      - name: Validate and resolve the single target from source authority
+      - name: Validate and resolve the affected target bundle from source authority
         id: plan
         run: |
           python3 .github/scripts/test_release.py
           python3 .github/scripts/release.py validate
           python3 .github/scripts/release.py plan \
-            --target '${{ inputs.target }}' \
+            --targets '${{ inputs.targets }}' \
             --master-sha '${{ inputs.master_sha }}' \
             --run-id '${{ github.run_id }}' \
             --output candidate-plan.json \
             --github-output "$GITHUB_OUTPUT"
-      - name: Reject an existing protected production tag
+      - name: Reject existing protected production tags
         env:
-          TAG: ${{ steps.plan.outputs.production_tag }}
-        run: test -z "$(git ls-remote --tags origin "refs/tags/$TAG" "refs/tags/$TAG^{}")"
+          RELEASES: ${{ steps.plan.outputs.releases }}
+        run: |
+          while IFS= read -r tag; do
+            test -z "$(git ls-remote --tags origin "refs/tags/$tag" "refs/tags/$tag^{}")"
+          done < <(jq -r '.[].production_tag' <<<"$RELEASES")
       - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
         if: steps.plan.outputs.has_images == 'true'
       - uses: ./.github/actions/setup-kubernetes-tools
@@ -103,6 +99,13 @@ jobs:
         run: echo "$GH_TOKEN" | helm registry login ghcr.io -u '${{ github.actor }}' --password-stdin
       - name: Reject existing semantic artifacts before candidate validation
         run: .github/scripts/check_release_availability.sh candidate-plan.json '${{ github.repository_owner }}'
+      - name: Resolve immutable published baseline identities
+        run: .github/scripts/resolve_release_baselines.sh candidate-plan.json
+      - name: Refresh plan outputs with resolved baselines
+        id: resolved
+        run: >-
+          python3 .github/scripts/release.py outputs
+          --plan candidate-plan.json --github-output "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: candidate-plan
@@ -209,8 +212,7 @@ jobs:
     uses: ./.github/workflows/charts-runtime.yml
     with:
       source_ref: ${{ inputs.master_sha }}
-      candidate_artifact: candidate-chart-${{ fromJSON(needs.preflight.outputs.chart_matrix)[0].chart }}
-      candidate_chart: ${{ fromJSON(needs.preflight.outputs.chart_matrix)[0].chart }}
+      candidate_bundle: true
 
   image-candidates:
     name: Build image — ${{ matrix.name }}
@@ -449,7 +451,7 @@ jobs:
       - uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0.20.6
         with:
           syft-version: v1.51.0
-      - run: git -c tag.gpgSign=false tag 'v${{ needs.preflight.outputs.version }}' '${{ inputs.master_sha }}'
+      - run: git -c tag.gpgSign=false tag 'v${{ needs.preflight.outputs.forge_version }}' '${{ inputs.master_sha }}'
       - uses: goreleaser/goreleaser-action@ec59f474b9834571250b370d4735c50f8e2d1e29 # v7.0.0
         with:
           version: v2.12.7
@@ -460,14 +462,14 @@ jobs:
           workdir: forge
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GORELEASER_CURRENT_TAG: v${{ needs.preflight.outputs.version }}
+          GORELEASER_CURRENT_TAG: v${{ needs.preflight.outputs.forge_version }}
       - name: Select publishable Forge files only
         run: |
           mkdir forge-candidate
           cp forge/dist/forge_*.tar.gz forge/dist/forge_*.tar.gz.sbom.json forge/dist/checksums.txt forge-candidate/
           jq -n \
             --arg target forge \
-            --arg version '${{ needs.preflight.outputs.version }}' \
+            --arg version '${{ needs.preflight.outputs.forge_version }}' \
             --arg source_sha '${{ inputs.master_sha }}' \
             '{schema_version:2,artifact_type:"forge",target:$target,version:$version,source_sha:$source_sha}' \
             > forge-candidate/candidate-forge.json
@@ -524,70 +526,10 @@ jobs:
           cache-scope: candidate-kind-${{ matrix.name }}
       - uses: ./.github/actions/setup-kubernetes-tools
       - run: .github/scripts/add_helm_repositories.sh
-      - name: Resolve exact candidates and generated repository baselines
-        env:
-          PLAN: ${{ needs.preflight.outputs.plan }}
-        run: |
-          set_env() { printf '%s\n' "$1" >> "$GITHUB_ENV"; }
-          version() { jq -r ".tested_with.repository_versions[\"$1\"]" <<<"$PLAN"; }
-          set_env "ITERABASE_CHART_VERSION=$(version iterabase-platform-chart)"
-          set_env "CONTROL_PLANE_CHART_VERSION=$(version control-plane-chart)"
-          set_env "CONTROL_PLANE_IMAGE_REPO=ghcr.io/nunocgoncalves/control-plane"
-          set_env "CONTROL_PLANE_IMAGE_TAG=$(version control-plane)"
-          set_env "INFERENCE_GATEWAY_IMAGE_REPO=ghcr.io/nunocgoncalves/inference-gateway"
-          set_env "INFERENCE_GATEWAY_IMAGE_TAG=$(version inference-gateway)"
-          set_env "TOOL_RUNNER_IMAGE_REPO=ghcr.io/nunocgoncalves/control-plane-tool-runner"
-          set_env "TOOL_RUNNER_IMAGE_TAG=$(version control-plane)"
-
-          for metadata in candidates/images/candidate-*.json; do
-            [ -e "$metadata" ] || continue
-            [ "$(jq -r '.artifact_type' "$metadata")" = image ] || continue
-            name="$(jq -r '.name' "$metadata")"
-            repository="$(jq -r '.repository' "$metadata")"
-            digest="$(jq -r '.digest' "$metadata")"
-            immutable='${{ inputs.master_sha }}'"@$digest"
-            case "$name" in
-              control-plane) set_env "CONTROL_PLANE_IMAGE_REPO=$repository"; set_env "CONTROL_PLANE_IMAGE_TAG=$immutable"; set_env "CONTROL_PLANE_IMAGE_DIGEST=$digest" ;;
-              inference-gateway) set_env "INFERENCE_GATEWAY_IMAGE_REPO=$repository"; set_env "INFERENCE_GATEWAY_IMAGE_TAG=$immutable"; set_env "INFERENCE_GATEWAY_IMAGE_DIGEST=$digest" ;;
-              control-plane-tool-runner) set_env "TOOL_RUNNER_IMAGE_REPO=$repository"; set_env "TOOL_RUNNER_IMAGE_TAG=$immutable"; set_env "TOOL_RUNNER_IMAGE_DIGEST=$digest" ;;
-            esac
-          done
-
-          mkdir -p candidate-local
-          chart="$(jq -r '.chart_matrix[0].chart // empty' <<<"$PLAN")"
-          archive="$(find candidates/charts -name "$chart-*.tgz" -print -quit 2>/dev/null || true)"
-          if [ -n "$archive" ]; then
-            metadata="candidates/charts/candidate-chart-$chart.json"
-            checksums="candidates/charts/checksums-$chart.txt"
-            test "$(jq -r '.schema_version' "$metadata")" = 2
-            test "$(jq -r '.source_sha' "$metadata")" = '${{ inputs.master_sha }}'
-            (cd candidates/charts && sha256sum --check "$(basename "$checksums")")
-            tar -xzf "$archive" -C candidate-local
-            case "$chart" in
-              control-plane)
-                set_env "CONTROL_PLANE_LOCAL_CHART=$GITHUB_WORKSPACE/candidate-local/control-plane"
-                set_env "CONTROL_PLANE_CHART_VERSION=" ;;
-              iterabase-platform)
-                companion_archive="$(find candidates/charts -name 'cert-manager-substrate-*.tgz' -print -quit)"
-                test -n "$companion_archive"
-                tar -xzf "$companion_archive" -C candidate-local
-                set_env "ITERABASE_LOCAL_CHART=$GITHUB_WORKSPACE/candidate-local/iterabase-platform"
-                set_env "ITERABASE_PLATFORM_LOCAL_CHART=$GITHUB_WORKSPACE/candidate-local/iterabase-platform"
-                set_env "ITERABASE_CHART_VERSION=" ;;
-              inference-gateway)
-                helm dependency build charts/charts/control-plane
-                helm dependency build charts/charts/cert-manager-substrate
-                helm dependency build charts/charts/iterabase-platform
-                cp -R charts/charts/iterabase-platform candidate-local/iterabase-platform
-                cp -R charts/charts/cert-manager-substrate candidate-local/cert-manager-substrate
-                mkdir -p candidate-local/iterabase-platform/charts
-                rm -f candidate-local/iterabase-platform/charts/inference-gateway-*.tgz
-                cp "$archive" candidate-local/iterabase-platform/charts/
-                set_env "ITERABASE_LOCAL_CHART=$GITHUB_WORKSPACE/candidate-local/iterabase-platform"
-                set_env "ITERABASE_PLATFORM_LOCAL_CHART=$GITHUB_WORKSPACE/candidate-local/iterabase-platform"
-                set_env "ITERABASE_CHART_VERSION=" ;;
-            esac
-          fi
+      - name: Resolve exact selected candidates and published baselines
+        run: >-
+          .github/scripts/prepare_candidate_runtime.sh
+          candidate-plan.json candidates "$GITHUB_ENV"
       - name: Run candidate-backed scenario
         working-directory: forge
         env:
@@ -629,8 +571,9 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         if: needs.preflight.outputs.has_chart == 'true'
         with:
-          name: candidate-chart-${{ fromJSON(needs.preflight.outputs.chart_matrix)[0].chart }}
+          pattern: candidate-chart-*
           path: candidates/charts
+          merge-multiple: true
       - uses: ./.github/actions/setup-go
         with:
           go-version: 1.26.5
@@ -656,7 +599,7 @@ jobs:
             (cd candidates/charts && sha256sum --check checksums-iterabase-platform.txt)
             test "$(jq -r '.schema_version' candidates/charts/candidate-chart-iterabase-platform.json)" = 2
             test "$(jq -r '.source_sha' candidates/charts/candidate-chart-iterabase-platform.json)" = '${{ inputs.master_sha }}'
-            set_env "ITERABASE_CHART_VERSION=$(jq -r '.version' <<<"$PLAN")"
+            set_env "ITERABASE_CHART_VERSION=$(jq -r '.chart_matrix[] | select(.chart == "iterabase-platform") | .version' <<<"$PLAN")"
             set_env "FORGE_E2E_PLATFORM_CHART_ARCHIVE=$GITHUB_WORKSPACE/$platform_archive"
             set_env "FORGE_E2E_SUBSTRATE_CHART_ARCHIVE=$GITHUB_WORKSPACE/$companion_archive"
           fi

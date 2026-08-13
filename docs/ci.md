@@ -35,8 +35,9 @@ Branch protection therefore does not depend on a changing matrix job name.
 
 The former nested component release workflows have been removed. Root-owned
 manual candidate, protected promotion, and disposable rehearsal workflows are
-the sole publication path: one target and exact master SHA, build once, focused
-exact-candidate validation, founder approval, and promotion without rebuild. See
+the sole publication path: one explicit affected-target bundle and exact master
+SHA, build each selected target once, validate the coherent bundle, obtain one
+founder approval, and promote without rebuild. See
 [`release.md`](release.md). Forge's scheduled droplet reaper remains active in
 the legacy Forge repository until source-authority cutover in HOR-474; it is
 operational cleanup rather than a source quality gate.
@@ -59,7 +60,7 @@ single-component, shared-contract, and cross-component changes.
   scenarios. This is source composition from one checkout; no matching-branch
   lookup or cross-repository checkout exists.
 - Markdown and repository documentation alone select no expensive owner job.
-- `.github/scripts/select_ci.py` remains the PR affected-target authority. `release/targets.json` temporarily maps one requested release target to its required candidate suites until HOR-476 replaces scenario lists with compiled metadata; it is not a second PR path selector.
+- `.github/scripts/select_ci.py` remains the PR affected-target authority. `release/targets.json` temporarily maps each explicitly requested release target to its required candidate suites; the candidate workflow deduplicates their union until HOR-476 replaces scenario lists with compiled metadata. It is not a second PR path selector and does not choose release intent.
 
 Run the fixture matrix locally with:
 

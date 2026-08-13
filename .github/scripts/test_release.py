@@ -21,8 +21,8 @@ class ReleaseContractTests(unittest.TestCase):
         self.targets = release.load_json(ROOT / "release" / "targets.json")
         self.sha = "a" * 40
 
-    def plan(self, target: str) -> dict:
-        return release.make_plan(self.targets, target, self.sha, "123", ROOT)
+    def plan(self, targets: str) -> dict:
+        return release.make_plan(self.targets, targets, self.sha, "123", ROOT)
 
     def check_availability(
         self,
@@ -83,34 +83,44 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertEqual(release.read_version(ROOT / "forge" / "VERSION"), "0.8.2")
         self.assertFalse((ROOT / "release" / "compatibility.json").exists())
 
-    def test_candidate_selects_exactly_one_target(self) -> None:
-        plan = self.plan("control-plane")
-        self.assertEqual(plan["target"], "control-plane")
-        self.assertEqual(plan["version"], "0.0.26")
-        self.assertEqual(plan["production_tag"], "control-plane-v0.0.26")
+    def test_candidate_accepts_and_canonicalizes_an_explicit_target_set(self) -> None:
+        plan = self.plan("forge, control-plane-chart,control-plane")
+        self.assertEqual(
+            plan["targets"], ["control-plane", "forge", "control-plane-chart"]
+        )
+        self.assertEqual(
+            [(item["target"], item["version"], item["production_tag"]) for item in plan["releases"]],
+            [
+                ("control-plane", "0.0.26", "control-plane-v0.0.26"),
+                ("forge", "0.8.2", "forge-v0.8.2"),
+                ("control-plane-chart", "0.4.8", "control-plane-0.4.8"),
+            ],
+        )
         self.assertEqual(
             [item["name"] for item in plan["image_matrix"]],
             ["control-plane", "control-plane-harness", "control-plane-tool-runner"],
         )
-        self.assertTrue(all(item["candidate_tag"] == self.sha for item in plan["image_matrix"]))
-        self.assertEqual(plan["chart_matrix"], [])
-        self.assertFalse(plan["real_machine"])
-
-    def test_forge_is_one_target_with_real_machine_validation(self) -> None:
-        plan = self.plan("forge")
+        self.assertEqual([item["chart"] for item in plan["chart_matrix"]], ["control-plane"])
         self.assertTrue(plan["forge"])
         self.assertTrue(plan["real_machine"])
-        self.assertEqual(plan["production_tag"], "forge-v0.8.2")
+        self.assertEqual(len(plan["kind_matrix"]), 4)
+
+    def test_single_forge_target_remains_supported(self) -> None:
+        plan = self.plan("forge")
+        self.assertEqual(plan["targets"], ["forge"])
+        self.assertTrue(plan["forge"])
+        self.assertTrue(plan["real_machine"])
+        self.assertEqual(plan["releases"][0]["production_tag"], "forge-v0.8.2")
         self.assertEqual(plan["image_matrix"], [])
         self.assertEqual(plan["chart_matrix"], [])
 
     def test_chart_version_and_dependencies_come_from_chart_source(self) -> None:
         plan = self.plan("iterabase-platform-chart")
-        self.assertEqual(plan["version"], "0.3.10")
+        self.assertEqual(plan["releases"][0]["version"], "0.3.10")
         self.assertEqual(plan["chart_matrix"][0]["companions"], ["cert-manager-substrate"])
         dependencies = {
             item["name"]: item["version"]
-            for item in plan["tested_with"]["selected_chart_dependencies"]
+            for item in plan["tested_with"]["selected_chart_dependencies"][0]["dependencies"]
         }
         self.assertEqual(dependencies["control-plane"], "0.4.8")
         self.assertEqual(dependencies["inference-gateway"], "0.2.10")
@@ -127,13 +137,34 @@ class ReleaseContractTests(unittest.TestCase):
             plan["tested_with"]["repository_versions"]["inference-gateway"], "0.2.6"
         )
 
-    def test_invalid_source_and_target_are_rejected(self) -> None:
-        with self.assertRaises(release.ReleaseError):
-            release.make_plan(self.targets, "everything", self.sha, "1", ROOT)
+    def test_invalid_source_and_target_sets_are_rejected(self) -> None:
+        for targets in ("", "everything", "forge,forge", "forge,", ",forge"):
+            with self.subTest(targets=targets), self.assertRaises(release.ReleaseError):
+                release.make_plan(self.targets, targets, self.sha, "1", ROOT)
         with self.assertRaises(release.ReleaseError):
             release.make_plan(self.targets, "forge", "short", "1", ROOT)
         with self.assertRaises(release.ReleaseError):
             release.make_plan(self.targets, "forge", self.sha, "run", ROOT)
+
+    def test_bundle_uses_candidates_for_selected_members_and_published_baselines_otherwise(self) -> None:
+        plan = self.plan("control-plane,control-plane-chart,forge")
+        self.assertEqual(
+            {item["target"] for item in plan["image_matrix"]}, {"control-plane"}
+        )
+        self.assertEqual(
+            {item["target"] for item in plan["chart_matrix"]}, {"control-plane-chart"}
+        )
+        baseline_charts = {
+            (item["chart"], item["version"])
+            for item in plan["baseline_dependencies"]["charts"]
+        }
+        self.assertIn(("iterabase-platform", "0.3.1"), baseline_charts)
+        baseline_images = {
+            (item["target"], item["version"])
+            for item in plan["baseline_dependencies"]["images"]
+        }
+        self.assertNotIn(("inference-gateway", "0.2.6"), baseline_images)
+        self.assertNotIn(("control-plane", "0.0.25"), baseline_images)
 
     def test_prerelease_and_v_prefix_are_rejected(self) -> None:
         for value in ("v1.2.3", "1.2.3-rc.1", "01.2.3", "latest"):
@@ -173,6 +204,7 @@ class ReleaseContractTests(unittest.TestCase):
             )
             verified = release.verify_candidate(root)
             self.assertEqual(verified["source_sha"], self.sha)
+            self.assertEqual(verified["targets"], ["inference-gateway"])
 
             metadata["source_sha"] = "b" * 40
             (images / "candidate-inference-gateway.json").write_text(
@@ -258,6 +290,69 @@ class ReleaseContractTests(unittest.TestCase):
             )
             release.validate_candidate_assets(plan, Path(directory))
 
+    def test_candidate_bundle_evidence_binds_every_selected_release(self) -> None:
+        plan = self.plan("control-plane-chart,iterabase-platform-chart")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            assets = root / "assets" / "charts"
+            assets.mkdir(parents=True)
+            for chart, version in (
+                ("control-plane", "0.4.8"),
+                ("iterabase-platform", "0.3.10"),
+                ("cert-manager-substrate", "0.3.10"),
+            ):
+                (assets / f"{chart}-{version}.tgz").write_bytes(chart.encode())
+            for chart in ("control-plane", "iterabase-platform"):
+                (assets / f"checksums-{chart}.txt").write_text("fixture\n", encoding="utf-8")
+            (root / "candidate-plan.json").write_text(release.compact(plan) + "\n", encoding="utf-8")
+            evidence = release.assemble_evidence(plan, root / "assets")
+            (root / "candidate-evidence.json").write_text(
+                release.compact(evidence) + "\n", encoding="utf-8"
+            )
+            verified = release.verify_candidate(root)
+            self.assertEqual(
+                verified["targets"], ["control-plane-chart", "iterabase-platform-chart"]
+            )
+            self.assertEqual(len(verified["releases"]), 2)
+
+    def test_baseline_resolver_records_immutable_image_and_chart_identities(self) -> None:
+        plan = self.plan("control-plane")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            plan_path = root / "plan.json"
+            plan_path.write_text(release.compact(plan) + "\n", encoding="utf-8")
+            log_path = root / "commands.log"
+            digest = "sha256:" + "a" * 64
+            docker = root / "docker"
+            docker.write_text(
+                "#!/usr/bin/env bash\nprintf '\"%s\"\\n' \"$BASELINE_DIGEST\"\n",
+                encoding="utf-8",
+            )
+            docker.chmod(0o755)
+            helm = root / "helm"
+            helm.write_text(
+                "#!/usr/bin/env bash\nset -eu\nrepository=$2\ndestination=''\nversion=''\nwhile [ $# -gt 0 ]; do case \"$1\" in --destination) destination=$2; shift 2;; --version) version=$2; shift 2;; *) shift;; esac; done\nchart=${repository##*/}\nmkdir -p \"$destination\"\nprintf baseline > \"$destination/$chart-$version.tgz\"\n",
+                encoding="utf-8",
+            )
+            helm.chmod(0o755)
+            result = subprocess.run(
+                ["bash", str(ROOT / ".github/scripts/resolve_release_baselines.sh"), str(plan_path)],
+                check=False,
+                capture_output=True,
+                text=True,
+                env={
+                    **os.environ,
+                    "DOCKER_BIN": str(docker),
+                    "HELM_BIN": str(helm),
+                    "BASELINE_DIGEST": digest,
+                    "COMMAND_LOG": str(log_path),
+                },
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            resolved = release.load_json(plan_path)
+            self.assertTrue(all(item["digest"] == digest for item in resolved["baseline_dependencies"]["images"]))
+            self.assertRegex(resolved["baseline_dependencies"]["charts"][0]["sha256"], r"^[0-9a-f]{64}$")
+
     def test_candidate_preflight_rejects_existing_semantic_image_versions(self) -> None:
         result, _ = self.check_availability(
             self.plan("inference-gateway"), docker_status=0, docker_output="manifest"
@@ -300,7 +395,7 @@ class ReleaseContractTests(unittest.TestCase):
         promotion = (ROOT / ".github" / "workflows" / "release-promote.yml").read_text(
             encoding="utf-8"
         )
-        self.assertIn("target:", candidate)
+        self.assertIn("targets:", candidate)
         self.assertNotIn("environment: release", candidate)
         self.assertIn("candidate_run_id:", promotion)
         self.assertIn("environment: release", promotion)
@@ -311,7 +406,11 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertIn("Reject an existing unverified full-SHA alias", candidate)
         self.assertIn("Reject existing semantic artifacts before candidate validation", candidate)
         self.assertIn("check_release_availability.sh candidate-plan.json", candidate)
-        self.assertIn("candidate_artifact:", candidate)
+        self.assertIn("resolve_release_baselines.sh candidate-plan.json", candidate)
+        self.assertIn("check_promotion_destinations.sh candidate", promotion)
+        self.assertIn("Preflight every semantic destination before publication", promotion)
+        self.assertIn("Create or verify protected namespaced tags", promotion)
+        self.assertIn("candidate_bundle: true", candidate)
         self.assertIn("path: candidate-charts/", candidate)
         self.assertIn(
             "> 'candidate-charts/candidate-chart-${{ matrix.chart }}.json'", candidate
@@ -321,16 +420,14 @@ class ReleaseContractTests(unittest.TestCase):
             candidate,
         )
         self.assertIn("--release-notes /dev/null", candidate)
-        self.assertIn(
-            "cp -R charts/charts/cert-manager-substrate candidate-local/cert-manager-substrate",
-            candidate,
-        )
-        self.assertIn('tar -xzf "$companion_archive" -C candidate-local', candidate)
+        self.assertIn("prepare_candidate_runtime.sh", candidate)
+        runtime_helper = (ROOT / ".github" / "scripts" / "prepare_candidate_runtime.sh").read_text(encoding="utf-8")
+        self.assertIn('tar -xzf "$companion_archive" -C candidate-local', runtime_helper)
 
     def test_candidate_validation_allows_unselected_jobs_to_skip(self) -> None:
-        for target in release.TARGET_NAMES:
-            with self.subTest(target=target):
-                plan = self.plan(target)
+        for target_set in (*release.TARGET_NAMES, "control-plane,control-plane-chart,forge"):
+            with self.subTest(targets=target_set):
+                plan = self.plan(target_set)
                 selected = release.candidate_job_selection(plan)
                 needs = {
                     name: {"result": "success" if required else "skipped"}
@@ -374,6 +471,24 @@ class ReleaseContractTests(unittest.TestCase):
 """,
             candidate,
         )
+
+    def test_bundle_chart_assets_require_every_selected_archive(self) -> None:
+        plan = self.plan("control-plane-chart,iterabase-platform-chart")
+        with tempfile.TemporaryDirectory() as directory:
+            assets = Path(directory) / "charts"
+            assets.mkdir(parents=True)
+            for chart, version in (
+                ("control-plane", "0.4.8"),
+                ("iterabase-platform", "0.3.10"),
+                ("cert-manager-substrate", "0.3.10"),
+            ):
+                (assets / f"{chart}-{version}.tgz").write_bytes(chart.encode())
+            for chart in ("control-plane", "iterabase-platform"):
+                (assets / f"checksums-{chart}.txt").write_text("fixture\n", encoding="utf-8")
+            release.validate_candidate_assets(plan, Path(directory))
+            (assets / "control-plane-0.4.8.tgz").unlink()
+            with self.assertRaisesRegex(release.ReleaseError, "control-plane"):
+                release.validate_candidate_assets(plan, Path(directory))
 
     def test_candidate_validation_supports_an_older_master_source(self) -> None:
         candidate = (ROOT / ".github" / "workflows" / "release-candidate.yml").read_text(
