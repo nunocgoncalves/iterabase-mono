@@ -26,7 +26,7 @@ class ReleaseContractTests(unittest.TestCase):
 
     def check_availability(
         self,
-        plan: dict,
+        plan: dict | str,
         *,
         docker_status: int = 1,
         docker_output: str = "not found",
@@ -36,7 +36,8 @@ class ReleaseContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             plan_path = root / "candidate-plan.json"
-            plan_path.write_text(release.compact(plan) + "\n", encoding="utf-8")
+            plan_text = plan if isinstance(plan, str) else release.compact(plan) + "\n"
+            plan_path.write_text(plan_text, encoding="utf-8")
             log_path = root / "commands.log"
             binaries: dict[str, str] = {}
             for name, status, output in (
@@ -285,6 +286,12 @@ class ReleaseContractTests(unittest.TestCase):
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("could not verify", result.stderr)
+
+    def test_candidate_preflight_rejects_malformed_plan_before_registry_checks(self) -> None:
+        result, commands = self.check_availability('{"image_matrix": [')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("parse error", result.stderr)
+        self.assertEqual(commands, "")
 
     def test_workflows_are_split_and_promotion_keeps_environment_gate(self) -> None:
         candidate = (ROOT / ".github" / "workflows" / "release-candidate.yml").read_text(
