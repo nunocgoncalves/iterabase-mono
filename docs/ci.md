@@ -41,9 +41,12 @@ founder approval, and promote without rebuild. See
 [`release.md`](release.md). Forge's scheduled droplet reaper is now root-owned
 by `.github/workflows/reaper.yml`; it uses the monorepo E2E source and secret and
 is operational cleanup rather than a source quality gate. At archival, every
-repository-authored legacy workflow is disabled and repository Actions are
-disabled entirely. GitHub-managed `dynamic/*` entries may remain visible in the
-workflow-list API, but cannot execute with repository Actions disabled.
+repository-authored legacy workflow and Dependabot security update is disabled,
+Dependabot version updates must remain unconfigured, and repository Actions are
+disabled. GitHub-managed `dynamic/*` entries may remain visible in
+the workflow-list API; read-only dependency-graph entries can remain, while the
+Dependabot writer is disabled explicitly because its jobs bypass repository
+Actions disablement.
 
 ## Path ownership
 

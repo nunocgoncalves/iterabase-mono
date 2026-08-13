@@ -119,6 +119,14 @@ for index in "${!legacy_repositories[@]}"; do
       (.description | contains($pointer)) and .homepage == $pointer
     ' <<<"$repository_json" >/dev/null || fail "$full_name has no canonical monorepo pointer"
 
+    dependabot_version_updates=$(dependabot_version_updates_configured "$full_name")
+    [[ "$dependabot_version_updates" == false ]] \
+      || fail "$full_name still has Dependabot version updates configured"
+
+    dependabot_updates_enabled=$(dependabot_security_updates_enabled "$full_name")
+    [[ "$dependabot_updates_enabled" == false ]] \
+      || fail "$full_name still has Dependabot security updates enabled"
+
     actions_enabled=$(repository_actions_enabled "$full_name")
     [[ "$actions_enabled" == false ]] || fail "$full_name still has repository Actions enabled"
 
@@ -152,7 +160,7 @@ printf 'source authority audit passed for %s (%s)\n' "$monorepo" "$state"
 printf 'required checks: CI / required, E2E / required\n'
 printf 'legacy heads, ancestry, PRs, tags, and releases remain accessible\n'
 if [[ "$state" == archived ]]; then
-  printf 'legacy repository Actions and authored workflows are disabled; Actions secrets are absent\n'
+  printf 'legacy Dependabot updates, repository Actions, and authored workflows are disabled; Actions secrets are absent\n'
 fi
 if [[ ${CHECK_ARTIFACTS:-false} == true ]]; then
   printf 'historical GHCR images and chart artifact remain accessible\n'

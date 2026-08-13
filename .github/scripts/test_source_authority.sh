@@ -10,14 +10,21 @@ trap 'rm -rf "$temporary_directory"' EXIT
 call_log="$temporary_directory/calls"
 authored_workflow_state="$temporary_directory/authored-state"
 actions_enabled_state="$temporary_directory/actions-enabled"
+dependabot_updates_state="$temporary_directory/dependabot-updates-enabled"
+workflow_list_succeeds=true
 printf 'active\n' >"$authored_workflow_state"
 printf 'true\n' >"$actions_enabled_state"
+printf 'true\n' >"$dependabot_updates_state"
 
 gh() {
   printf '%q ' "$@" >>"$call_log"
   printf '\n' >>"$call_log"
 
   if [[ $1 == api && $2 == --paginate ]]; then
+    if [[ $workflow_list_succeeds != true ]]; then
+      printf 'mock workflow-list failure\n' >&2
+      return 1
+    fi
     printf '101\t.github/workflows/ci.yml\t%s\n' "$(<"$authored_workflow_state")"
     printf '102\tdynamic/dependabot/dependabot-updates\tactive\n'
     printf '103\tdynamic/dependabot/update-graph\tactive\n'
@@ -31,12 +38,24 @@ gh() {
     printf 'unexpected attempt to disable GitHub-managed workflow %s\n' "$3" >&2
     return 1
   fi
+  if [[ $1 == api && $2 == 'repos/example/legacy/contents/.github?ref=master' ]]; then
+    printf '[{"type":"dir","name":"workflows"}]\n' | jq -r "$4"
+    return
+  fi
+  if [[ $1 == api && $2 == --method && $3 == DELETE && $4 == repos/example/legacy/automated-security-fixes ]]; then
+    printf 'false\n' >"$dependabot_updates_state"
+    return
+  fi
+  if [[ $1 == api && $2 == repos/example/legacy/automated-security-fixes ]]; then
+    printf '{"enabled":%s,"paused":false}\n' "$(<"$dependabot_updates_state")" | jq -r "$4"
+    return
+  fi
   if [[ $1 == api && $2 == --method && $3 == PUT && $4 == repos/example/legacy/actions/permissions ]]; then
     printf 'false\n' >"$actions_enabled_state"
     return
   fi
   if [[ $1 == api && $2 == repos/example/legacy/actions/permissions ]]; then
-    cat "$actions_enabled_state"
+    printf '{"enabled":%s}\n' "$(<"$actions_enabled_state")" | jq -r "$4"
     return
   fi
 
@@ -45,8 +64,11 @@ gh() {
 }
 
 disable_repository_workflows example/legacy
+disable_dependabot_security_updates example/legacy
 disable_repository_actions example/legacy
 
+[[ $(dependabot_version_updates_configured example/legacy) == false ]]
+[[ $(dependabot_security_updates_enabled example/legacy) == false ]]
 [[ $(repository_actions_enabled example/legacy) == false ]]
 [[ $(active_repository_workflow_count example/legacy) == 0 ]]
 grep -q '^workflow disable 101 --repo example/legacy ' "$call_log"
@@ -54,6 +76,17 @@ if grep -Eq '^workflow disable (102|103) ' "$call_log"; then
   echo 'GitHub-managed workflow was passed to gh workflow disable' >&2
   exit 1
 fi
+grep -q '^api --method DELETE repos/example/legacy/automated-security-fixes ' "$call_log"
 grep -q '^api --method PUT repos/example/legacy/actions/permissions -F enabled=false ' "$call_log"
+
+workflow_list_succeeds=false
+if disable_repository_workflows example/legacy; then
+  echo 'workflow disabling succeeded after the workflow-list API failed' >&2
+  exit 1
+fi
+if active_repository_workflow_count example/legacy >/dev/null; then
+  echo 'workflow counting succeeded after the workflow-list API failed' >&2
+  exit 1
+fi
 
 echo 'source-authority workflow boundary tests passed'
