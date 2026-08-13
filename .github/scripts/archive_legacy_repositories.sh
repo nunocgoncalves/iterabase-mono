@@ -99,6 +99,15 @@ for repository in "${legacy_repositories[@]}"; do
 
   disable_repository_workflows "$full_name"
 
+  dependabot_version_updates=$(dependabot_version_updates_configured "$full_name")
+  [[ "$dependabot_version_updates" == false ]] \
+    || fail "$full_name still has Dependabot version updates configured"
+
+  disable_dependabot_security_updates "$full_name"
+  dependabot_updates_enabled=$(dependabot_security_updates_enabled "$full_name")
+  [[ "$dependabot_updates_enabled" == false ]] \
+    || fail "$full_name still has Dependabot security updates enabled"
+
   while IFS= read -r secret_name; do
     [[ -n "$secret_name" ]] || continue
     gh api --method DELETE "repos/$full_name/actions/secrets/$secret_name"

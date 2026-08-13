@@ -84,12 +84,13 @@ required checks pass.
 
    The script rechecks both required contexts on current `master`, the exact
    successful root-reaper run, imported heads and ancestry, and historical
-   evidence. It then disables every repository-authored legacy workflow,
-   removes custom repository Actions secrets, disables repository Actions,
-   adds canonical metadata pointers, and archives the repositories. GitHub may
-   continue listing non-disableable `dynamic/*` system workflows such as
-   Dependabot, but repository-level Actions disablement prevents them from
-   executing.
+   evidence. It then requires Dependabot version updates to be unconfigured,
+   disables repository-authored legacy workflows and Dependabot security
+   updates, removes custom repository Actions secrets,
+   disables repository Actions, adds canonical metadata pointers, and archives
+   the repositories. GitHub may continue listing non-disableable `dynamic/*`
+   system workflows such as the dependency graph, but no GitHub-managed writer
+   remains enabled; Dependabot jobs bypass repository-level Actions disablement.
 5. Verify the final state and sample the preserved artifacts again:
 
    ```bash
@@ -98,9 +99,12 @@ required checks pass.
    ```
 
 The root scheduled reaper is the only post-cutover cleanup authority. The final
-audit verifies that Actions are disabled and custom repository Actions secrets
-are absent from every legacy archive, so CI and release credentials stay only
-in the monorepo.
+audit verifies that Dependabot version updates remain unconfigured, Dependabot
+security updates and repository Actions are disabled, and custom repository
+Actions secrets are absent from every legacy archive, so product-writing
+automation and CI/release credentials stay only in
+the monorepo. Dependency alerts and the read-only dependency graph may remain
+available as historical security evidence.
 Existing GHCR image and chart names remain unchanged, so overlays continue
 consuming the same immutable artifact identities.
 
