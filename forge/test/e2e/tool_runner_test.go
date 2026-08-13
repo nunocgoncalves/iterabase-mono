@@ -50,12 +50,7 @@ func runToolRunnerContract(t *testing.T) {
 	if artifacts.sourceComposed {
 		buildToolRunnerImages(t, artifacts.controlPlaneRoot, controlImage, runnerImage)
 	}
-	if artifacts.controlChartLocal != "" {
-		command(t, "helm", "dependency", "build", artifacts.controlChartLocal)
-	}
-	if artifacts.certificateChartLocal != "" {
-		command(t, "helm", "dependency", "build", artifacts.certificateChartLocal)
-	}
+	prepareToolRunnerChartDependencies(t, artifacts)
 
 	cluster := kindtest.CreateCluster(t, "forge-tool-runner-contract")
 	if artifacts.sourceComposed {
@@ -299,6 +294,30 @@ func buildToolRunnerImages(t *testing.T, controlPlaneRoot, controlImage, runnerI
 	t.Helper()
 	command(t, "docker", "build", "-t", controlImage, controlPlaneRoot)
 	command(t, "docker", "build", "-t", runnerImage, "-f", filepath.Join(controlPlaneRoot, "tool-runner", "Dockerfile"), filepath.Join(controlPlaneRoot, "tool-runner"))
+}
+
+func prepareToolRunnerChartDependencies(t *testing.T, artifacts toolRunnerArtifacts) {
+	t.Helper()
+	if !artifacts.sourceComposed {
+		// Candidate and published chart packages already contain the exact
+		// dependencies they were built and checksummed with. Rebuilding an
+		// extracted package would re-resolve those dependencies and breaks local
+		// file references whose source siblings are intentionally absent.
+		return
+	}
+	for _, chart := range []string{artifacts.controlChartLocal, artifacts.certificateChartLocal} {
+		if chart != "" {
+			command(t, "helm", "dependency", "build", chart)
+		}
+	}
+}
+
+func TestPrepareToolRunnerChartDependenciesSkipsPackagedCandidates(t *testing.T) {
+	missingRoot := t.TempDir()
+	prepareToolRunnerChartDependencies(t, toolRunnerArtifacts{
+		controlChartLocal:     filepath.Join(missingRoot, "control-plane-0.4.8.tgz"),
+		certificateChartLocal: filepath.Join(missingRoot, "cert-manager-substrate-0.3.10.tgz"),
+	})
 }
 
 func buildToolGitImage(t *testing.T, gitImage string) {
