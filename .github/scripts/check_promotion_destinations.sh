@@ -3,7 +3,7 @@ set -euo pipefail
 
 candidate=${1:?usage: check_promotion_destinations.sh CANDIDATE REPOSITORY_OWNER REPOSITORY}
 repository_owner=${2:?usage: check_promotion_destinations.sh CANDIDATE REPOSITORY_OWNER REPOSITORY}
-repository=${3:-${GITHUB_REPOSITORY:-}}
+github_repository=${3:-${GITHUB_REPOSITORY:-}}
 docker_bin=${DOCKER_BIN:-docker}
 helm_bin=${HELM_BIN:-helm}
 gh_bin=${GH_BIN:-gh}
@@ -13,23 +13,23 @@ plan="$candidate/candidate-plan.json"
 for metadata in "$candidate"/assets/images/candidate-*.json; do
   [[ -e "$metadata" ]] || continue
   [[ $(jq -r '.artifact_type' "$metadata") == image ]] || continue
-  repository=$(jq -r '.repository' "$metadata")
+  image_repository=$(jq -r '.repository' "$metadata")
   version=$(jq -r '.version' "$metadata")
   expected=$(jq -r '.digest' "$metadata")
   set +e
-  output=$($docker_bin buildx imagetools inspect "$repository:$version" --format '{{json .Manifest.Digest}}' 2>&1)
+  output=$($docker_bin buildx imagetools inspect "$image_repository:$version" --format '{{json .Manifest.Digest}}' 2>&1)
   status=$?
   set -e
   if [[ $status -eq 0 ]]; then
     actual=$(tr -d '"' <<<"$output")
     [[ "$actual" == "$expected" ]] || {
-      echo "$repository:$version conflicts with tested digest $expected ($actual exists)" >&2
+      echo "$image_repository:$version conflicts with tested digest $expected ($actual exists)" >&2
       exit 1
     }
   elif [[ $status -eq 1 ]] && grep -Eqi '(^|: )not found$|manifest unknown|name unknown' <<<"$output"; then
     :
   else
-    echo "could not preflight $repository:$version:" >&2
+    echo "could not preflight $image_repository:$version:" >&2
     printf '%s\n' "$output" >&2
     exit 1
   fi
@@ -38,21 +38,21 @@ done
 while IFS=$'\t' read -r chart version; do
   package="$candidate/assets/charts/$chart-$version.tgz"
   [[ -f "$package" ]] || { echo "missing tested chart package $package" >&2; exit 1; }
-  repository="oci://ghcr.io/$repository_owner/iterabase-charts/$chart"
+  chart_repository="oci://ghcr.io/$repository_owner/iterabase-charts/$chart"
   destination=$(mktemp -d)
   set +e
-  output=$($helm_bin pull "$repository" --version "$version" --destination "$destination" 2>&1)
+  output=$($helm_bin pull "$chart_repository" --version "$version" --destination "$destination" 2>&1)
   status=$?
   set -e
   if [[ $status -eq 0 ]]; then
     cmp "$package" "$destination/$(basename "$package")" || {
-      echo "$repository:$version conflicts with the tested archive" >&2
+      echo "$chart_repository:$version conflicts with the tested archive" >&2
       exit 1
     }
   elif [[ $status -eq 1 ]] && grep -Eqi '(^|: )not found$|manifest unknown|name unknown' <<<"$output"; then
     :
   else
-    echo "could not preflight $repository:$version:" >&2
+    echo "could not preflight $chart_repository:$version:" >&2
     printf '%s\n' "$output" >&2
     exit 1
   fi
@@ -92,7 +92,7 @@ release_assets() {
 # An existing Release is resumable only when every already-present asset is one
 # of this target's candidate files and has identical bytes. Perform all of these
 # reads before the first image/chart/tag/Release mutation.
-[[ -n "$repository" ]] || { echo "GitHub repository is required for Release preflight" >&2; exit 1; }
+[[ -n "$github_repository" ]] || { echo "GitHub repository is required for Release preflight" >&2; exit 1; }
 while IFS=$'\t' read -r target version tag artifact_types; do
   expected_assets=()
   while IFS= read -r asset; do expected_assets+=("$asset"); done \
@@ -102,7 +102,7 @@ while IFS=$'\t' read -r target version tag artifact_types; do
   done
 
   set +e
-  release_json=$($gh_bin release view "$tag" --repo "$repository" --json tagName,assets 2>&1)
+  release_json=$($gh_bin release view "$tag" --repo "$github_repository" --json tagName,assets 2>&1)
   status=$?
   set -e
   if [[ $status -ne 0 ]]; then
@@ -132,7 +132,7 @@ while IFS=$'\t' read -r target version tag artifact_types; do
       exit 1
     }
     destination=$(mktemp -d)
-    $gh_bin release download "$tag" --repo "$repository" \
+    $gh_bin release download "$tag" --repo "$github_repository" \
       --pattern "$existing_name" --dir "$destination"
     cmp "$expected_path" "$destination/$existing_name" || {
       echo "GitHub Release $tag asset $existing_name conflicts with the candidate" >&2
