@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 
@@ -22,20 +24,69 @@ class ReleaseContractTests(unittest.TestCase):
     def plan(self, target: str) -> dict:
         return release.make_plan(self.targets, target, self.sha, "123", ROOT)
 
+    def check_availability(
+        self,
+        plan: dict,
+        *,
+        docker_status: int = 1,
+        docker_output: str = "not found",
+        helm_status: int = 1,
+        helm_output: str = "not found",
+    ) -> tuple[subprocess.CompletedProcess[str], str]:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            plan_path = root / "candidate-plan.json"
+            plan_path.write_text(release.compact(plan) + "\n", encoding="utf-8")
+            log_path = root / "commands.log"
+            binaries: dict[str, str] = {}
+            for name, status, output in (
+                ("docker", docker_status, docker_output),
+                ("helm", helm_status, helm_output),
+            ):
+                binary = root / name
+                binary.write_text(
+                    "#!/usr/bin/env bash\n"
+                    f"printf '{name} %s\\n' \"$*\" >> \"$COMMAND_LOG\"\n"
+                    f"printf '%s\\n' {json.dumps(output)}\n"
+                    f"exit {status}\n",
+                    encoding="utf-8",
+                )
+                binary.chmod(0o755)
+                binaries[name] = str(binary)
+            result = subprocess.run(
+                [
+                    "bash",
+                    str(ROOT / ".github" / "scripts" / "check_release_availability.sh"),
+                    str(plan_path),
+                    "nunocgoncalves",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                env={
+                    **os.environ,
+                    "COMMAND_LOG": str(log_path),
+                    "DOCKER_BIN": binaries["docker"],
+                    "HELM_BIN": binaries["helm"],
+                },
+            )
+            commands = log_path.read_text(encoding="utf-8") if log_path.exists() else ""
+            return result, commands
+
     def test_repository_contract_is_valid(self) -> None:
         release.validate_contract(self.targets, ROOT)
 
     def test_component_versions_are_local_authorities(self) -> None:
-        self.assertEqual(release.read_version(ROOT / "control-plane" / "VERSION"), "0.0.25")
-        self.assertEqual(release.read_version(ROOT / "inference-gateway" / "VERSION"), "0.2.5")
-        self.assertEqual(release.read_version(ROOT / "forge" / "VERSION"), "0.8.1")
+        self.assertEqual(release.read_version(ROOT / "control-plane" / "VERSION"), "0.0.26")
+        self.assertEqual(release.read_version(ROOT / "inference-gateway" / "VERSION"), "0.2.6")
+        self.assertEqual(release.read_version(ROOT / "forge" / "VERSION"), "0.8.2")
         self.assertFalse((ROOT / "release" / "compatibility.json").exists())
 
     def test_candidate_selects_exactly_one_target(self) -> None:
         plan = self.plan("control-plane")
         self.assertEqual(plan["target"], "control-plane")
-        self.assertEqual(plan["version"], "0.0.25")
-        self.assertEqual(plan["production_tag"], "control-plane-v0.0.25")
+        self.assertEqual(plan["version"], "0.0.26")
+        self.assertEqual(plan["production_tag"], "control-plane-v0.0.26")
         self.assertEqual(
             [item["name"] for item in plan["image_matrix"]],
             ["control-plane", "control-plane-harness", "control-plane-tool-runner"],
@@ -48,23 +99,23 @@ class ReleaseContractTests(unittest.TestCase):
         plan = self.plan("forge")
         self.assertTrue(plan["forge"])
         self.assertTrue(plan["real_machine"])
-        self.assertEqual(plan["production_tag"], "forge-v0.8.1")
+        self.assertEqual(plan["production_tag"], "forge-v0.8.2")
         self.assertEqual(plan["image_matrix"], [])
         self.assertEqual(plan["chart_matrix"], [])
 
     def test_chart_version_and_dependencies_come_from_chart_source(self) -> None:
         plan = self.plan("iterabase-platform-chart")
-        self.assertEqual(plan["version"], "0.3.9")
+        self.assertEqual(plan["version"], "0.3.10")
         self.assertEqual(plan["chart_matrix"][0]["companions"], ["cert-manager-substrate"])
         dependencies = {
             item["name"]: item["version"]
             for item in plan["tested_with"]["selected_chart_dependencies"]
         }
-        self.assertEqual(dependencies["control-plane"], "0.4.7")
-        self.assertEqual(dependencies["inference-gateway"], "0.2.9")
+        self.assertEqual(dependencies["control-plane"], "0.4.8")
+        self.assertEqual(dependencies["inference-gateway"], "0.2.10")
         self.assertEqual(
             plan["tested_with"]["chart_metadata"]["control-plane"]["appVersion"],
-            "0.0.25",
+            "0.0.26",
         )
 
     def test_invalid_source_and_target_are_rejected(self) -> None:
@@ -94,7 +145,7 @@ class ReleaseContractTests(unittest.TestCase):
                 "target": "inference-gateway",
                 "repository": "ghcr.io/nunocgoncalves/inference-gateway",
                 "candidate_tag": self.sha,
-                "version": "0.2.5",
+                "version": "0.2.6",
                 "digest": "sha256:" + "1" * 64,
                 "source_sha": self.sha,
             }
@@ -130,7 +181,7 @@ class ReleaseContractTests(unittest.TestCase):
             "target": "inference-gateway",
             "repository": "ghcr.io/nunocgoncalves/inference-gateway",
             "candidate_tag": self.sha,
-            "version": "0.2.5",
+            "version": "0.2.6",
             "digest": "sha256:" + "1" * 64,
             "source_sha": self.sha,
         }
@@ -181,7 +232,7 @@ class ReleaseContractTests(unittest.TestCase):
             assets = Path(directory) / "forge"
             assets.mkdir(parents=True)
             for platform in ("linux_amd64", "linux_arm64", "darwin_amd64", "darwin_arm64"):
-                (assets / f"forge_0.8.1_{platform}.tar.gz").write_bytes(platform.encode())
+                (assets / f"forge_0.8.2_{platform}.tar.gz").write_bytes(platform.encode())
             (assets / "checksums.txt").write_text("fixture\n", encoding="utf-8")
             release.validate_candidate_assets(plan, Path(directory))
             self.assertFalse(any(path.name == "forge" for path in assets.rglob("*")))
@@ -191,12 +242,41 @@ class ReleaseContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             assets = Path(directory) / "charts"
             assets.mkdir(parents=True)
-            (assets / "iterabase-platform-0.3.9.tgz").write_bytes(b"platform")
-            (assets / "cert-manager-substrate-0.3.9.tgz").write_bytes(b"substrate")
+            (assets / "iterabase-platform-0.3.10.tgz").write_bytes(b"platform")
+            (assets / "cert-manager-substrate-0.3.10.tgz").write_bytes(b"substrate")
             (assets / "checksums-iterabase-platform.txt").write_text(
                 "fixture\n", encoding="utf-8"
             )
             release.validate_candidate_assets(plan, Path(directory))
+
+    def test_candidate_preflight_rejects_existing_semantic_image_versions(self) -> None:
+        result, _ = self.check_availability(
+            self.plan("inference-gateway"), docker_status=0, docker_output="manifest"
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "ghcr.io/nunocgoncalves/inference-gateway:0.2.6 already exists",
+            result.stderr,
+        )
+
+    def test_candidate_preflight_allows_missing_semantic_versions(self) -> None:
+        result, commands = self.check_availability(self.plan("iterabase-platform-chart"))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(
+            "helm show chart oci://ghcr.io/nunocgoncalves/iterabase-charts/iterabase-platform --version 0.3.10",
+            commands,
+        )
+        self.assertIn(
+            "helm show chart oci://ghcr.io/nunocgoncalves/iterabase-charts/cert-manager-substrate --version 0.3.10",
+            commands,
+        )
+
+    def test_candidate_preflight_fails_closed_when_registry_is_unavailable(self) -> None:
+        result, _ = self.check_availability(
+            self.plan("control-plane"), docker_output="connection reset by peer"
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("could not verify", result.stderr)
 
     def test_workflows_are_split_and_promotion_keeps_environment_gate(self) -> None:
         candidate = (ROOT / ".github" / "workflows" / "release-candidate.yml").read_text(
@@ -214,6 +294,8 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertNotIn("compatibility.json", candidate + promotion)
         self.assertNotIn("Reuse an existing immutable full-SHA candidate", candidate)
         self.assertIn("Reject an existing unverified full-SHA alias", candidate)
+        self.assertIn("Reject existing semantic artifacts before candidate validation", candidate)
+        self.assertIn("check_release_availability.sh candidate-plan.json", candidate)
         self.assertIn("candidate_artifact:", candidate)
         self.assertIn("path: candidate-charts/", candidate)
         self.assertIn(

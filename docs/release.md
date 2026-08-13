@@ -30,7 +30,7 @@ Dispatch **Release candidate** from `master` with:
 
 The workflow infers the version from source. A caller cannot supply a second, conflicting version.
 
-1. Preflight validates the repository release contract, exact source membership, version authority, and production-tag uniqueness.
+1. Preflight validates the repository release contract, exact source membership, version authority, production-tag uniqueness, and absence of every planned semantic image/chart identity. Existing semantic artifacts or an unavailable registry fail before candidate builds and validation begin.
 2. Image targets fail closed if the full-source-SHA alias already exists without evidence from this run, then build once, push a canonical digest, and create that immutable alias in the existing GHCR package. Tests consume `repository:<full-sha>@sha256:<digest>`.
 3. Chart targets package the final archive once. Forge produces its four final GoReleaser archives once. Archives, checksums, SBOMs, and metadata remain GitHub Actions artifacts; candidate runs do not create persistent run-specific GHCR package repositories.
 4. Only the selected target's complete owner, chart runtime, Kind, and mandatory real-machine suites run. Chart runtime and platform real-machine jobs download and install the exact packaged candidate (and its companion where applicable); missing mandatory capacity is incomplete.
