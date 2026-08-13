@@ -489,6 +489,10 @@ class ReleaseContractTests(unittest.TestCase):
             gh.write_text(
                 "#!/usr/bin/env bash\n"
                 "set -eu\n"
+                "case \" $* \" in\n"
+                "  *\" --repo $EXPECTED_GITHUB_REPOSITORY \"*) ;;\n"
+                "  *) printf 'unexpected --repo argument: %s\\n' \"$*\" >&2; exit 2 ;;\n"
+                "esac\n"
                 "if [ \"$2\" = view ]; then\n"
                 "  printf '%s\\n' '{\"tagName\":\"control-plane-v0.0.26\",\"assets\":[{\"name\":\"candidate-plan.json\"}]}'\n"
                 "elif [ \"$2\" = download ]; then\n"
@@ -511,6 +515,7 @@ class ReleaseContractTests(unittest.TestCase):
                 "DOCKER_BIN": str(docker),
                 "HELM_BIN": str(helm),
                 "GH_BIN": str(gh),
+                "EXPECTED_GITHUB_REPOSITORY": "nunocgoncalves/iterabase-mono",
                 "EXISTING_RELEASE_ASSET": str(existing),
             }
             matching = subprocess.run(
