@@ -1,12 +1,14 @@
 # control-plane
 
+> Canonical source: [`iterabase-mono/control-plane`](https://github.com/nunocgoncalves/iterabase-mono/tree/master/control-plane). The former standalone repository is historical and read-only.
+
 The Horizonshift/Iterabase control plane: a Go Kubernetes operator + HTTP API
 that provides identity, per-caller permissions, sandbox reconciliation,
 a durable turn runtime, and the model catalog the inference-gateway consumes.
 
 Per-customer, fully isolated, self-hosted. See the Platform Direction doc
 (Obsidian: *Horizonshift Platform Direction*) for the full architecture; this
-repo is the source of truth for control-plane infrastructure intent.
+monorepo directory is the source of truth for control-plane infrastructure intent.
 
 ## Status
 

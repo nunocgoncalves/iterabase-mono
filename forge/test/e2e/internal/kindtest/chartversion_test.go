@@ -35,6 +35,18 @@ func TestParseAppVersion(t *testing.T) {
 	}
 }
 
+func TestReleasesGitHubRepo(t *testing.T) {
+	t.Setenv("FORGE_RELEASES_REPO", "")
+	if got := releasesGitHubRepo(); got != "nunocgoncalves/iterabase-mono" {
+		t.Fatalf("releasesGitHubRepo() = %q, want canonical monorepo", got)
+	}
+
+	t.Setenv("FORGE_RELEASES_REPO", "example/fork")
+	if got := releasesGitHubRepo(); got != "example/fork" {
+		t.Fatalf("releasesGitHubRepo() = %q, want fork override", got)
+	}
+}
+
 func TestLooksSemver(t *testing.T) {
 	good := []string{"0.2.1", "v0.2.1", "1.0.0", "10.20.30", "0.2.1-rc.1", "v1.2.3+build", "1.2"}
 	bad := []string{"", "v", "1", "x.y.z", "0.2.x", "control-plane-0.2.1", "latest", "0.2.1.4"}

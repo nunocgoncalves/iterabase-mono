@@ -19,6 +19,15 @@
 
 The Go modules remain independently buildable. The root `go.work` is for atomic local development; do not merge component modules or introduce cross-module imports without an approved architectural decision.
 
+## Source and release authority
+
+- This monorepo is the sole writable public source for the product components above. The former `control-plane`, `inference-gateway`, `forge`, and `iterabase-charts` repositories are historical archives; never target them for changes, pull requests, CI, or releases.
+- Existing GHCR image names and the `ghcr.io/nunocgoncalves/iterabase-charts` OCI namespace are stable artifact identities, not source repository links. Do not rename them during source maintenance.
+- A merge to `master` is integration, not a semantic release. Ticket acceptance must state whether publication is required. When it is, use the manual affected-target candidate and protected promotion flow in [`docs/release.md`](docs/release.md); never publish implicitly from merge or acceptance.
+- Deployment overlays continue to reconcile independently against immutable published artifacts. Do not couple overlay changes to a source ticket unless the ticket explicitly names that external contract.
+
+See [`docs/source-authority.md`](docs/source-authority.md) for the cutover audit and catastrophic-only unarchive boundary.
+
 ## Shared ticket and Git workflow
 
 - Direct pushes to `master` are prohibited. Work on one `<TICKET>-<short-description>` branch.

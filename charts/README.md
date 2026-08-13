@@ -1,6 +1,8 @@
-# iterabase-charts
+# Iterabase charts
 
-Helm charts for the [iterabase](https://iterabase.com) platform. The `cert-manager-substrate` release establishes certificate CRDs, webhook, controller, and CSI driver before the `iterabase-platform` umbrella deploys application workloads. [Forge](https://github.com/nunocgoncalves/forge) enforces this release ordering automatically; direct Helm users install the two same-version artifacts in order.
+> Canonical source: [`iterabase-mono/charts`](https://github.com/nunocgoncalves/iterabase-mono/tree/master/charts). The former standalone source repository is historical and read-only; the existing `ghcr.io/nunocgoncalves/iterabase-charts` package namespace remains the stable artifact identity.
+
+Helm charts for the [iterabase](https://iterabase.com) platform. The `cert-manager-substrate` release establishes certificate CRDs, webhook, controller, and CSI driver before the `iterabase-platform` umbrella deploys application workloads. [Forge](https://github.com/nunocgoncalves/iterabase-mono/tree/master/forge) enforces this release ordering automatically; direct Helm users install the two same-version artifacts in order.
 
 ## Charts
 
@@ -28,7 +30,8 @@ edge is always a **LoadBalancer** Service —
 no hostNetwork. The LB implementation is pluggable:
 
 - **kind/dev** — MetalLB L2 with a pool in the kind docker-bridge subnet. Clone
-  this repo and use the `values-kind.yaml` preset:
+  `iterabase-mono`, change into its `charts/` directory, and use the
+  `values-kind.yaml` preset:
   ```sh
   helm install iterabase-cert-manager charts/cert-manager-substrate \
     -n iterabase-system --create-namespace --wait

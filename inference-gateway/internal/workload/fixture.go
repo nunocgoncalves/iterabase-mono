@@ -3,7 +3,7 @@ package workload
 // FixtureSchema is a test-only mirror of the durable control-plane tables the
 // workload path validates against (pools/turns/runs/assignments), NOT the
 // control-plane's actual migrations — so gateway tests stay decoupled from the
-// control-plane repo (B+C approach, mirroring snapshot.FixtureSchema).
+// control-plane component (B+C approach, mirroring snapshot.FixtureSchema).
 // Exported so the server integration test can reuse it.
 const FixtureSchema = `
 CREATE SCHEMA IF NOT EXISTS toolgateway;

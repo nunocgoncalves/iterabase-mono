@@ -6,7 +6,7 @@ GO_MODULE_FILES := $(foreach module,$(GO_MODULES),$(module)/go.mod $(module)/go.
 WORKSPACE_FILES := go.work go.work.sum $(GO_MODULE_FILES)
 CONTAINER_TOOL ?= docker
 
-.PHONY: workspace-sync workspace-check workspace-list fmt-check vet build test lint codegen-check charts-check release-check release-security-audit docker-build check install-hooks pre-commit clean
+.PHONY: workspace-sync workspace-check workspace-list fmt-check vet build test lint codegen-check charts-check release-check release-security-audit source-authority-audit docker-build check install-hooks pre-commit clean
 
 workspace-sync:
 	go work sync
@@ -70,6 +70,11 @@ release-check:
 
 release-security-audit:
 	.github/scripts/audit_release_security.sh
+
+# Explicit, authenticated operational audit. This is intentionally outside the
+# hermetic `check` matrix because it verifies live GitHub and optional registry state.
+source-authority-audit:
+	.github/scripts/audit_source_authority.sh "$${SOURCE_AUTHORITY_STATE:-pre-archive}"
 
 # Preserve the existing runtime image names while using component-scoped
 # monorepo build contexts.

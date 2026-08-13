@@ -38,9 +38,10 @@ manual candidate, protected promotion, and disposable rehearsal workflows are
 the sole publication path: one explicit affected-target bundle and exact master
 SHA, build each selected target once, validate the coherent bundle, obtain one
 founder approval, and promote without rebuild. See
-[`release.md`](release.md). Forge's scheduled droplet reaper remains active in
-the legacy Forge repository until source-authority cutover in HOR-474; it is
-operational cleanup rather than a source quality gate.
+[`release.md`](release.md). Forge's scheduled droplet reaper is now root-owned
+by `.github/workflows/reaper.yml`; it uses the monorepo E2E source and secret and
+is operational cleanup rather than a source quality gate. All legacy repository
+workflows are disabled at archival.
 
 ## Path ownership
 
@@ -104,5 +105,10 @@ gh api repos/nunocgoncalves/iterabase-mono/commits/HEAD/check-runs \
 gh api repos/nunocgoncalves/iterabase-mono/branches/master/protection/required_status_checks || true
 ```
 
-Only the user should update branch protection. The intended required contexts
-are the two aggregate names at the top of this document.
+The active `master` ruleset requires the two aggregate names at the top of this
+document with strict up-to-date-branch enforcement. Audit that live contract
+without changing it via:
+
+```bash
+make source-authority-audit
+```
