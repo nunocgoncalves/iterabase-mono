@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+script_directory=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=.github/scripts/source_authority_lib.sh
+source "$script_directory/source_authority_lib.sh"
+
 state=${1:-pre-archive}
 case "$state" in
   pre-archive|transition|archived) ;;
@@ -115,9 +119,12 @@ for index in "${!legacy_repositories[@]}"; do
       (.description | contains($pointer)) and .homepage == $pointer
     ' <<<"$repository_json" >/dev/null || fail "$full_name has no canonical monorepo pointer"
 
-    active_workflows=$(gh api "repos/$full_name/actions/workflows?per_page=100" \
-      --jq '[.workflows[] | select(.state == "active")] | length')
-    [[ "$active_workflows" == 0 ]] || fail "$full_name still has active workflows"
+    actions_enabled=$(repository_actions_enabled "$full_name")
+    [[ "$actions_enabled" == false ]] || fail "$full_name still has repository Actions enabled"
+
+    active_workflows=$(active_repository_workflow_count "$full_name")
+    [[ "$active_workflows" == 0 ]] \
+      || fail "$full_name still has $active_workflows active repository-authored workflows"
 
     secret_count=$(gh api "repos/$full_name/actions/secrets?per_page=1" --jq '.total_count')
     [[ "$secret_count" == 0 ]] || fail "$full_name still has $secret_count Actions secrets"
@@ -145,7 +152,7 @@ printf 'source authority audit passed for %s (%s)\n' "$monorepo" "$state"
 printf 'required checks: CI / required, E2E / required\n'
 printf 'legacy heads, ancestry, PRs, tags, and releases remain accessible\n'
 if [[ "$state" == archived ]]; then
-  printf 'legacy workflows are disabled and repository Actions secrets are absent\n'
+  printf 'legacy repository Actions and authored workflows are disabled; Actions secrets are absent\n'
 fi
 if [[ ${CHECK_ARTIFACTS:-false} == true ]]; then
   printf 'historical GHCR images and chart artifact remain accessible\n'
