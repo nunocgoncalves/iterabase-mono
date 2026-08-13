@@ -29,17 +29,50 @@ check_absent() {
   return 1
 }
 
+image_rows=$(
+  jq -r '
+    if (.image_matrix | type) != "array" then
+      error("image_matrix must be an array")
+    else
+      .image_matrix[]
+    end
+    | if ((.repository | type) != "string" or .repository == ""
+        or (.version | type) != "string" or .version == "") then
+        error("image_matrix entries require repository and version")
+      else
+        [.repository, .version] | @tsv
+      end
+  ' "$plan"
+)
+chart_rows=$(
+  jq -r '
+    if (.chart_matrix | type) != "array" then
+      error("chart_matrix must be an array")
+    else
+      .chart_matrix[]
+    end
+    | if ((.chart | type) != "string" or .chart == ""
+        or (.version | type) != "string" or .version == ""
+        or (.companions | type) != "array"
+        or (all(.companions[]; (type == "string" and length > 0)) | not)) then
+        error("chart_matrix entries require chart, version, and companions")
+      else
+        .version as $version
+        | ([.chart] + .companions)[]
+        | [$version, .] | @tsv
+      end
+  ' "$plan"
+)
+
 while IFS=$'\t' read -r repository version; do
   [ -n "$repository" ] || continue
   check_absent "$repository:$version" \
     "$docker_bin" buildx imagetools inspect "$repository:$version"
-done < <(jq -r '.image_matrix[]? | [.repository, .version] | @tsv' "$plan")
+done <<<"$image_rows"
 
 while IFS=$'\t' read -r version chart; do
   [ -n "$chart" ] || continue
   reference="oci://ghcr.io/$repository_owner/iterabase-charts/$chart"
   check_absent "$reference:$version" \
     "$helm_bin" show chart "$reference" --version "$version"
-done < <(
-  jq -r '.chart_matrix[]? | .version as $version | ([.chart] + .companions)[] | [$version, .] | @tsv' "$plan"
-)
+done <<<"$chart_rows"
