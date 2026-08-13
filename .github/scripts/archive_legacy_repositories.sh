@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+script_directory=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=.github/scripts/source_authority_lib.sh
+source "$script_directory/source_authority_lib.sh"
+
 apply=false
 reaper_run_id=
 while (($# > 0)); do
@@ -93,13 +97,7 @@ for repository in "${legacy_repositories[@]}"; do
     -f description="$description" \
     -f homepage="$pointer" >/dev/null
 
-  while IFS=$'\t' read -r workflow_id workflow_state; do
-    [[ -n "$workflow_id" ]] || continue
-    if [[ "$workflow_state" == active ]]; then
-      gh workflow disable "$workflow_id" --repo "$full_name"
-    fi
-  done < <(gh api "repos/$full_name/actions/workflows?per_page=100" \
-    --jq '.workflows[] | [.id,.state] | @tsv')
+  disable_repository_workflows "$full_name"
 
   while IFS= read -r secret_name; do
     [[ -n "$secret_name" ]] || continue
@@ -109,6 +107,13 @@ for repository in "${legacy_repositories[@]}"; do
     --jq '.secrets[].name')
   secret_count=$(gh api "repos/$full_name/actions/secrets?per_page=1" --jq '.total_count')
   [[ "$secret_count" == 0 ]] || fail "$full_name still has $secret_count Actions secrets"
+
+  disable_repository_actions "$full_name"
+  actions_enabled=$(repository_actions_enabled "$full_name")
+  [[ "$actions_enabled" == false ]] || fail "$full_name still has repository Actions enabled"
+  active_workflows=$(active_repository_workflow_count "$full_name")
+  [[ "$active_workflows" == 0 ]] \
+    || fail "$full_name still has $active_workflows active repository-authored workflows"
 
   gh api --method PATCH "repos/$full_name" -F archived=true >/dev/null
   printf 'archived %s\n' "$full_name"

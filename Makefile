@@ -6,7 +6,7 @@ GO_MODULE_FILES := $(foreach module,$(GO_MODULES),$(module)/go.mod $(module)/go.
 WORKSPACE_FILES := go.work go.work.sum $(GO_MODULE_FILES)
 CONTAINER_TOOL ?= docker
 
-.PHONY: workspace-sync workspace-check workspace-list fmt-check vet build test lint codegen-check charts-check release-check release-security-audit source-authority-audit docker-build check install-hooks pre-commit clean
+.PHONY: workspace-sync workspace-check workspace-list fmt-check vet build test lint codegen-check charts-check release-check release-security-audit source-authority-check source-authority-audit docker-build check install-hooks pre-commit clean
 
 workspace-sync:
 	go work sync
@@ -71,6 +71,9 @@ release-check:
 release-security-audit:
 	.github/scripts/audit_release_security.sh
 
+source-authority-check:
+	.github/scripts/test_source_authority.sh
+
 # Explicit, authenticated post-cutover audit. This is intentionally outside the
 # hermetic `check` matrix because it verifies live GitHub and optional registry state.
 # The cutover procedure overrides SOURCE_AUTHORITY_STATE while repositories are live.
@@ -86,12 +89,12 @@ docker-build:
 	$(CONTAINER_TOOL) build -t control-plane-tool-runner:latest -f control-plane/tool-runner/Dockerfile control-plane/tool-runner
 	$(CONTAINER_TOOL) build -t inference-gateway:latest inference-gateway
 
-check: workspace-check fmt-check vet build test lint codegen-check charts-check release-check docker-build
+check: workspace-check fmt-check vet build test lint codegen-check charts-check release-check source-authority-check docker-build
 
 install-hooks:
 	git config core.hooksPath .githooks
 
-pre-commit: workspace-check fmt-check vet build lint release-check
+pre-commit: workspace-check fmt-check vet build lint release-check source-authority-check
 
 clean:
 	$(MAKE) -C control-plane clean
