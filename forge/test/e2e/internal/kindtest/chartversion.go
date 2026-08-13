@@ -64,9 +64,75 @@ func selectLatestChartVersion(releases []githubRelease, chart string) (best, bes
 	return best, bestTag
 }
 
+// nextGitHubPage returns the URL marked rel="next" in GitHub's Link header.
+func nextGitHubPage(linkHeader string) string {
+	for _, link := range strings.Split(linkHeader, ",") {
+		parts := strings.Split(link, ";")
+		if len(parts) < 2 {
+			continue
+		}
+		isNext := false
+		for _, parameter := range parts[1:] {
+			if strings.TrimSpace(parameter) == `rel="next"` {
+				isNext = true
+				break
+			}
+		}
+		target := strings.TrimSpace(parts[0])
+		if isNext && len(target) >= 2 && target[0] == '<' && target[len(target)-1] == '>' {
+			return target[1 : len(target)-1]
+		}
+	}
+	return ""
+}
+
+// listGitHubReleases follows GitHub's release pagination until the feed is
+// exhausted. The shared monorepo feed contains independently versioned targets,
+// so the latest release for one chart may be older than the first page.
+func listGitHubReleases(client *http.Client, firstPageURL, token string) ([]githubRelease, error) {
+	var releases []githubRelease
+	seen := make(map[string]struct{})
+	for pageURL := firstPageURL; pageURL != ""; {
+		if _, ok := seen[pageURL]; ok {
+			return nil, fmt.Errorf("github releases pagination repeated %q", pageURL)
+		}
+		seen[pageURL] = struct{}{}
+
+		req, err := http.NewRequest(http.MethodGet, pageURL, nil)
+		if err != nil {
+			return nil, fmt.Errorf("build request for %q: %w", pageURL, err)
+		}
+		req.Header.Set("Accept", "application/vnd.github+json")
+		req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+
+		resp, err := client.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		var page []githubRelease
+		decodeErr := json.NewDecoder(resp.Body).Decode(&page)
+		closeErr := resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("status %d", resp.StatusCode)
+		}
+		if decodeErr != nil {
+			return nil, fmt.Errorf("decode page %q: %w", pageURL, decodeErr)
+		}
+		if closeErr != nil {
+			return nil, fmt.Errorf("close page %q: %w", pageURL, closeErr)
+		}
+		releases = append(releases, page...)
+		pageURL = nextGitHubPage(resp.Header.Get("Link"))
+	}
+	return releases, nil
+}
+
 // LatestChartVersion resolves the highest stable semver published for the named
-// chart by listing monorepo GitHub releases and filtering tags of the
-// form "<chart>-<semver>". Prereleases and drafts are skipped so PR-time CI
+// chart by listing every page of monorepo GitHub releases and filtering tags of
+// the form "<chart>-<semver>". Prereleases and drafts are skipped so PR-time CI
 // tracks stable service releases (chart-releaser marks a release prerelease when
 // the chart version carries a -prerelease suffix).
 //
@@ -78,31 +144,11 @@ func LatestChartVersion(t *testing.T, chart string) string {
 	t.Helper()
 	repo := releasesGitHubRepo()
 	url := fmt.Sprintf("https://api.github.com/repos/%s/releases?per_page=100", repo)
-	req, err := http.NewRequest(http.MethodGet, url, nil)
-	if err != nil {
-		t.Fatalf("build github releases request for %s: %v\n"+
-			"set CONTROL_PLANE_CHART_VERSION to pin a chart version and skip auto-resolution.", repo, err)
-	}
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	if tok := os.Getenv("GITHUB_TOKEN"); tok != "" {
-		req.Header.Set("Authorization", "Bearer "+tok)
-	}
 	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
+	releases, err := listGitHubReleases(client, url, os.Getenv("GITHUB_TOKEN"))
 	if err != nil {
 		t.Fatalf("github releases request for %s: %v\n"+
 			"set CONTROL_PLANE_CHART_VERSION to pin a chart version and skip auto-resolution.", repo, err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("github releases request for %s: status %d\n"+
-			"set CONTROL_PLANE_CHART_VERSION to pin a chart version and skip auto-resolution.",
-			repo, resp.StatusCode)
-	}
-	var releases []githubRelease
-	if err := json.NewDecoder(resp.Body).Decode(&releases); err != nil {
-		t.Fatalf("decode github releases for %s: %v", repo, err)
 	}
 	best, bestTag := selectLatestChartVersion(releases, chart)
 	if best == "" {

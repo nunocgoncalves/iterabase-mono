@@ -1,6 +1,12 @@
 package kindtest
 
-import "testing"
+import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+)
 
 // Unit tests for the pure helpers behind chart auto-resolution (HOR-321). The
 // network/helm-backed LatestChartVersion and ChartAppVersion are exercised by
@@ -121,5 +127,50 @@ func TestSelectLatestChartVersionUsesExactChartTagNamespace(t *testing.T) {
 	version, tag := selectLatestChartVersion(releases, "control-plane")
 	if version != "0.2.10" || tag != "control-plane-0.2.10" {
 		t.Fatalf("selected version %q from tag %q, want chart version 0.2.10", version, tag)
+	}
+}
+
+func TestListGitHubReleasesFindsChartAfterMoreThan100NewerNonMatchingReleases(t *testing.T) {
+	nonMatching := make([]githubRelease, 199)
+	for i := range nonMatching {
+		nonMatching[i] = githubRelease{TagName: fmt.Sprintf("forge-v0.8.%d", i+3)}
+	}
+
+	requests := 0
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "application/json")
+		var page []githubRelease
+		switch r.URL.Query().Get("page") {
+		case "":
+			page = nonMatching[:100]
+			w.Header().Set("Link", fmt.Sprintf(`<%s/releases?per_page=100&page=2>; rel="next"`, server.URL))
+		case "2":
+			page = append(page, nonMatching[100:]...)
+			page = append(page, githubRelease{TagName: "control-plane-0.4.7"})
+			w.Header().Set("Link", fmt.Sprintf(`<%s/releases?per_page=100&page=3>; rel="next"`, server.URL))
+		case "3":
+			page = []githubRelease{{TagName: "control-plane-0.4.8"}}
+		default:
+			http.Error(w, "unexpected page", http.StatusBadRequest)
+			return
+		}
+		if err := json.NewEncoder(w).Encode(page); err != nil {
+			t.Errorf("encode release page: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	releases, err := listGitHubReleases(server.Client(), server.URL+"/releases?per_page=100", "")
+	if err != nil {
+		t.Fatalf("listGitHubReleases() error = %v", err)
+	}
+	if requests != 3 {
+		t.Fatalf("listGitHubReleases() made %d requests, want 3", requests)
+	}
+	version, tag := selectLatestChartVersion(releases, "control-plane")
+	if version != "0.4.8" || tag != "control-plane-0.4.8" {
+		t.Fatalf("selected version %q from tag %q, want paginated chart version 0.4.8", version, tag)
 	}
 }
