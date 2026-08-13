@@ -40,7 +40,7 @@ template-controlplane: build-deps
 
 kubeconform-controlplane: template-controlplane
 	# The chart renders a CRD (kubebuilder-generated, sourced verbatim from the
-	# control-plane repo); kubeconform's bundled schema set does not resolve the
+	# control-plane component); kubeconform's bundled schema set does not resolve the
 	# apiextensions CRD schema, so ignore missing schemas rather than failing.
 	kubeconform -strict -kubernetes-version 1.31.0 -ignore-missing-schemas $(RENDER_CP)
 

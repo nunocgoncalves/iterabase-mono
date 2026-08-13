@@ -1,5 +1,7 @@
 # Inference Gateway
 
+> Canonical source: [`iterabase-mono/inference-gateway`](https://github.com/nunocgoncalves/iterabase-mono/tree/master/inference-gateway). The former standalone repository is historical and read-only.
+
 The Horizonshift/Iterabase inference gateway: an OpenAI-compatible Go service
 that routes client requests to vLLM/SGLang backends. It consumes the model
 catalog, API keys, capabilities, and rate limits from the **control-plane**
@@ -8,8 +10,8 @@ per-identity rate limits via Redis. Per-customer, self-hosted; pairs with the
 control-plane operator, which owns the catalog/auth/policy CRDs.
 
 See the Platform Direction doc (Obsidian: *Horizonshift Platform Direction*)
-for the full architecture; this repo is the source of truth for gateway
-infrastructure intent.
+for the full architecture; this monorepo directory is the source of truth for
+gateway infrastructure intent.
 
 ## Status
 

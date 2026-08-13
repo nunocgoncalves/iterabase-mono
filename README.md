@@ -12,6 +12,24 @@ Public monorepo for Iterabase product source.
 Deployment overlays and the marketing site remain separate repositories and are not
 part of this monorepo.
 
+## Source authority
+
+This is the sole writable public source for the four product components. Clone
+and branch from this repository for every product change:
+
+```bash
+git clone https://github.com/nunocgoncalves/iterabase-mono.git
+cd iterabase-mono
+git switch -c HOR-123-short-description origin/master
+```
+
+The former standalone component repositories are public read-only archives at
+the exact heads imported into this history. Do not open product pull requests or
+run releases there. Existing image and chart package names remain unchanged so
+overlays continue consuming the same immutable artifact identities. See
+[`docs/source-authority.md`](docs/source-authority.md) for the authority audit,
+historical evidence, and emergency boundary.
+
 ## Go workspace
 
 The committed [`go.work`](go.work) supports atomic changes while preserving four
@@ -46,6 +64,10 @@ make docker-build  # control-plane, harness, isolation, tool-runner, and inferen
 ```
 
 Forge's source-composed E2E inputs are the local `control-plane/` and `charts/`
-directories. Cross-repository matching-branch checkouts are no longer part of
-local monorepo development. Published artifact names, binaries, charts, images,
+directories. Cross-repository matching-branch checkouts are not part of local
+monorepo development. Published artifact names, binaries, charts, images,
 configuration, and runtime behavior remain unchanged.
+
+A merge to `master` does not release. If ticket acceptance requires semantic
+publication, use the explicit affected-target candidate and founder-approved
+promotion flow documented in [`docs/release.md`](docs/release.md).

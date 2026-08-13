@@ -32,7 +32,7 @@ const fluxInstallManifest = "https://github.com/fluxcd/flux2/releases/download/v
 // Forge's DigitalOcean Flux stage separately proves forge installs and gates on
 // the exact source revision/digest. This Kind contract deliberately uses the
 // shared kindtest harness rather than retaining a ticket-specific shell runner
-// in the control-plane repository.
+// in the control-plane component.
 func runToolRunnerContract(t *testing.T) {
 	artifacts := resolveToolRunnerArtifacts(t)
 

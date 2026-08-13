@@ -2,7 +2,7 @@ package snapshot
 
 // FixtureSchema is a test-only mirror of the control-plane contract (the 4 views
 // the gateway reads), NOT the control-plane's actual migrations — so gateway
-// tests stay decoupled from the control-plane repo (B+C approach). Exported so
+// tests stay decoupled from the control-plane component (B+C approach). Exported so
 // the server integration test can reuse it.
 const FixtureSchema = `
 CREATE SCHEMA IF NOT EXISTS identity;

@@ -288,7 +288,7 @@ func createDroplet(ctx context.Context, client *godo.Client, name, pubKeyStr str
 }
 
 // deleteDroplet best-effort deletes a droplet. Failures are swallowed: the
-// reaper workflow (reaper.yml) cleans up any orphaned forge-e2e droplets.
+// root monorepo reaper workflow cleans up any orphaned forge-e2e droplets.
 func deleteDroplet(ctx context.Context, client *godo.Client, id int) {
 	_, _ = client.Droplets.Delete(ctx, id)
 }

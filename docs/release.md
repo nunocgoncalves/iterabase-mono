@@ -8,6 +8,27 @@ HOR-473 makes `master` an integration branch, not a publication trigger. The rep
 
 No push to `master` or tag push publishes an artifact or GitHub Release.
 
+## Ticket acceptance and release intent
+
+Engineering acceptance and semantic publication are separate decisions. Every
+ticket's production-impact evidence must classify publication as one of:
+
+- **Required for ticket acceptance:** the acceptance contract names the affected
+  release targets and requires published artifacts. After merge, run a candidate
+  from the exact current master SHA, promote that successful run through the
+  founder-approved environment, and record the run, release, tag, digest, and
+  checksum evidence before marking the ticket Done.
+- **Deferred to the product release gate:** the merged implementation can be
+  accepted as engineering delivery without publishing it. The containing
+  outcome's `product-release-review` decides when the coherent product release
+  is ready.
+- **None:** documentation, tests, source-control operations, or other work does
+  not alter a semantic artifact.
+
+Acceptance must never dispatch a release merely because a PR merged. When
+publication is required, target selection is explicit founder-reviewed release
+intent; path selection may inform the proposal but cannot choose it.
+
 ## Independently versioned targets
 
 | Target | Version authority | Published outputs |

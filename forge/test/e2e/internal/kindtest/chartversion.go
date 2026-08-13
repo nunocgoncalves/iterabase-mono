@@ -17,7 +17,7 @@ import (
 // that drifted from every control-plane service release, forcing a manual forge
 // bump. Now:
 //
-//   - the chart version is resolved from the charts repo's GitHub releases
+//   - the chart version is resolved from the monorepo's GitHub releases
 //     (highest stable <chart>-<semver> tag), and
 //   - the image tag is derived from the chart's appVersion, so the deployed
 //     image can never drift from the chart (the control-plane chart keeps
@@ -26,19 +26,19 @@ import (
 // CONTROL_PLANE_CHART_VERSION / CONTROL_PLANE_IMAGE_TAG remain as explicit
 // overrides for pinning or local dev.
 
-// chartsGitHubRepo returns the "owner/name" GitHub repo that publishes forge's
-// Helm charts as git tags of the form "<chart>-<semver>" (e.g.
-// "control-plane-0.2.1"), created by chart-releaser. Defaults to the public
-// nunocgoncalves/iterabase-charts repo; override with FORGE_CHARTS_REPO for forks.
-func chartsGitHubRepo() string {
-	if r := os.Getenv("FORGE_CHARTS_REPO"); r != "" {
-		return r
+// releasesGitHubRepo returns the "owner/name" GitHub repository that publishes
+// Forge and chart releases under namespaced tags such as
+// "control-plane-0.2.1". FORGE_RELEASES_REPO supports forks without reviving a
+// dependency on the archived standalone chart source repository.
+func releasesGitHubRepo() string {
+	if repository := os.Getenv("FORGE_RELEASES_REPO"); repository != "" {
+		return repository
 	}
-	return "nunocgoncalves/iterabase-charts"
+	return "nunocgoncalves/iterabase-mono"
 }
 
 // LatestChartVersion resolves the highest stable semver published for the named
-// chart by listing GitHub releases on the charts repo and filtering tags of the
+// chart by listing monorepo GitHub releases and filtering tags of the
 // form "<chart>-<semver>". Prereleases and drafts are skipped so PR-time CI
 // tracks stable service releases (chart-releaser marks a release prerelease when
 // the chart version carries a -prerelease suffix).
@@ -49,7 +49,7 @@ func chartsGitHubRepo() string {
 // CONTROL_PLANE_CHART_VERSION as the manual pin escape hatch.
 func LatestChartVersion(t *testing.T, chart string) string {
 	t.Helper()
-	repo := chartsGitHubRepo()
+	repo := releasesGitHubRepo()
 	url := fmt.Sprintf("https://api.github.com/repos/%s/releases?per_page=100", repo)
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {

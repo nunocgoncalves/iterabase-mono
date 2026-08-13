@@ -164,7 +164,7 @@ spec:
 	t.Logf("issued JWT sub=%s iss=%s aud=%s", claims.Sub, claims.Iss, claims.Aud)
 
 	// 8. admin CRUD smoke (optional): create a local user with the admin key.
-	//    Kept minimal — the control-plane repo's integration tests cover CRUD.
+	//    Kept minimal — the control-plane component's integration tests cover CRUD.
 	createUser(t, client, base+"/v1/users", adminKey, "e2e-bob@local")
 
 	// 9. delete the IdentityMapping -> the identity is soft-deleted; a token for

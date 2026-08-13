@@ -116,7 +116,10 @@ history.
 Deployment overlays and marketing content and history were not imported. The
 source repositories remained writable release authorities at import time; their
 existing tags and releases remain there. No conflicting raw `v*` refs were
-imported.
+imported. HOR-474 subsequently froze and archived those repositories at the
+recorded source heads. They now preserve history only; [`source-authority.md`](source-authority.md)
+defines the sole writable source and verifies that historical links remain
+accessible.
 
 New monorepo releases use `control-plane-v<semver>`,
 `inference-gateway-v<semver>`, and `forge-v<semver>`. Charts retain
