@@ -118,6 +118,9 @@ for index in "${!legacy_repositories[@]}"; do
     active_workflows=$(gh api "repos/$full_name/actions/workflows?per_page=100" \
       --jq '[.workflows[] | select(.state == "active")] | length')
     [[ "$active_workflows" == 0 ]] || fail "$full_name still has active workflows"
+
+    secret_count=$(gh api "repos/$full_name/actions/secrets?per_page=1" --jq '.total_count')
+    [[ "$secret_count" == 0 ]] || fail "$full_name still has $secret_count Actions secrets"
   fi
 
 done
@@ -141,6 +144,9 @@ fi
 printf 'source authority audit passed for %s (%s)\n' "$monorepo" "$state"
 printf 'required checks: CI / required, E2E / required\n'
 printf 'legacy heads, ancestry, PRs, tags, and releases remain accessible\n'
+if [[ "$state" == archived ]]; then
+  printf 'legacy workflows are disabled and repository Actions secrets are absent\n'
+fi
 if [[ ${CHECK_ARTIFACTS:-false} == true ]]; then
   printf 'historical GHCR images and chart artifact remain accessible\n'
 fi

@@ -71,10 +71,11 @@ release-check:
 release-security-audit:
 	.github/scripts/audit_release_security.sh
 
-# Explicit, authenticated operational audit. This is intentionally outside the
+# Explicit, authenticated post-cutover audit. This is intentionally outside the
 # hermetic `check` matrix because it verifies live GitHub and optional registry state.
+# The cutover procedure overrides SOURCE_AUTHORITY_STATE while repositories are live.
 source-authority-audit:
-	.github/scripts/audit_source_authority.sh "$${SOURCE_AUTHORITY_STATE:-pre-archive}"
+	.github/scripts/audit_source_authority.sh "$${SOURCE_AUTHORITY_STATE:-archived}"
 
 # Preserve the existing runtime image names while using component-scoped
 # monorepo build contexts.

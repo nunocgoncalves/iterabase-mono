@@ -106,8 +106,8 @@ gh api repos/nunocgoncalves/iterabase-mono/branches/master/protection/required_s
 ```
 
 The active `master` ruleset requires the two aggregate names at the top of this
-document with strict up-to-date-branch enforcement. Audit that live contract
-without changing it via:
+document with strict up-to-date-branch enforcement. After the one-way cutover,
+audit that live archived-state contract without changing it via:
 
 ```bash
 make source-authority-audit

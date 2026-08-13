@@ -101,6 +101,15 @@ for repository in "${legacy_repositories[@]}"; do
   done < <(gh api "repos/$full_name/actions/workflows?per_page=100" \
     --jq '.workflows[] | [.id,.state] | @tsv')
 
+  while IFS= read -r secret_name; do
+    [[ -n "$secret_name" ]] || continue
+    gh api --method DELETE "repos/$full_name/actions/secrets/$secret_name"
+    printf 'removed Actions secret %s from %s\n' "$secret_name" "$full_name"
+  done < <(gh api --paginate "repos/$full_name/actions/secrets?per_page=100" \
+    --jq '.secrets[].name')
+  secret_count=$(gh api "repos/$full_name/actions/secrets?per_page=1" --jq '.total_count')
+  [[ "$secret_count" == 0 ]] || fail "$full_name still has $secret_count Actions secrets"
+
   gh api --method PATCH "repos/$full_name" -F archived=true >/dev/null
   printf 'archived %s\n' "$full_name"
 done
