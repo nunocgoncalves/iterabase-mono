@@ -5,17 +5,29 @@ plan=${1:?usage: prepare_candidate_runtime.sh PLAN CANDIDATE_DIR ENV_OUTPUT}
 candidate_dir=${2:?usage: prepare_candidate_runtime.sh PLAN CANDIDATE_DIR ENV_OUTPUT}
 env_output=${3:?usage: prepare_candidate_runtime.sh PLAN CANDIDATE_DIR ENV_OUTPUT}
 source_sha=$(jq -r '.source_sha' "$plan")
+helm_bin=${HELM_BIN:-helm}
 
 set_env() { printf '%s\n' "$1" >> "$env_output"; }
-baseline_chart_version() {
-  jq -r --arg chart "$1" '.baseline_dependencies.charts[] | select(.chart == $chart) | .version' "$plan"
+baseline_chart_field() {
+  jq -r --arg chart "$1" --arg field "$2" \
+    '.baseline_dependencies.charts[] | select(.chart == $chart) | .[$field]' "$plan"
 }
 baseline_image_field() {
-  jq -r --arg name "$1" --arg field "$2" '.baseline_dependencies.images[] | select(.name == $name) | .[$field]' "$plan"
+  jq -r --arg name "$1" --arg field "$2" \
+    '.baseline_dependencies.images[] | select(.name == $name) | .[$field]' "$plan"
+}
+selected_chart_version() {
+  jq -r --arg chart "$1" '.chart_matrix[] | select(.chart == $chart) | .version' "$plan"
+}
+chart_version() {
+  local chart=$1 version
+  version=$(selected_chart_version "$chart")
+  if [[ -z "$version" ]]; then
+    version=$(baseline_chart_field "$chart" version)
+  fi
+  printf '%s' "$version"
 }
 
-set_env "ITERABASE_CHART_VERSION=$(baseline_chart_version iterabase-platform)"
-set_env "CONTROL_PLANE_CHART_VERSION=$(baseline_chart_version control-plane)"
 for specification in \
   'control-plane CONTROL_PLANE' \
   'inference-gateway INFERENCE_GATEWAY' \
@@ -28,6 +40,7 @@ for specification in \
     [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
     set_env "${prefix}_IMAGE_REPO=$repository"
     set_env "${prefix}_IMAGE_TAG=$version@$digest"
+    set_env "${prefix}_IMAGE_DIGEST=$digest"
   fi
 done
 
@@ -37,6 +50,8 @@ for metadata in "$candidate_dir"/images/candidate-*.json; do
   name=$(jq -r '.name' "$metadata")
   repository=$(jq -r '.repository' "$metadata")
   digest=$(jq -r '.digest' "$metadata")
+  [[ $(jq -r '.source_sha' "$metadata") == "$source_sha" ]]
+  [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
   immutable="$source_sha@$digest"
   case "$name" in
     control-plane)
@@ -57,53 +72,108 @@ for metadata in "$candidate_dir"/images/candidate-*.json; do
   esac
 done
 
-mkdir -p candidate-local
-extract_chart() {
-  local chart=$1
-  local archive metadata checksums
-  archive=$(find "$candidate_dir/charts" -name "$chart-*.tgz" -print -quit 2>/dev/null || true)
-  [[ -n "$archive" ]] || return 0
+rm -rf candidate-local
+mkdir -p candidate-local/baseline-packages candidate-local/baselines candidate-local/selected
+
+# Pull every published chart by its reviewed version, verify the plan-recorded
+# archive checksum, and only then make its bytes available to a test fixture.
+while IFS=$'\t' read -r chart repository version checksum; do
+  [[ -n "$chart" ]] || continue
+  "$helm_bin" pull "$repository" --version "$version" --destination candidate-local/baseline-packages
+  archive="candidate-local/baseline-packages/$chart-$version.tgz"
+  [[ -f "$archive" ]]
+  [[ "$checksum" =~ ^[0-9a-f]{64}$ ]]
+  printf '%s  %s\n' "$checksum" "$archive" | sha256sum --check -
+  tar -xzf "$archive" -C candidate-local/baselines
+done < <(
+  jq -r '.baseline_dependencies.charts[] | [.chart,.repository,.version,.sha256] | @tsv' "$plan"
+)
+
+# Candidate chart checksums cover the exact selected archives and any companion.
+while IFS= read -r chart; do
+  [[ -n "$chart" ]] || continue
   metadata="$candidate_dir/charts/candidate-chart-$chart.json"
   checksums="$candidate_dir/charts/checksums-$chart.txt"
+  [[ -f "$metadata" && -f "$checksums" ]]
   [[ $(jq -r '.schema_version' "$metadata") == 2 ]]
+  [[ $(jq -r '.artifact_type' "$metadata") == chart ]]
+  [[ $(jq -r '.chart' "$metadata") == "$chart" ]]
   [[ $(jq -r '.source_sha' "$metadata") == "$source_sha" ]]
   (cd "$candidate_dir/charts" && sha256sum --check "$(basename "$checksums")")
-  tar -xzf "$archive" -C candidate-local
+done < <(jq -r '.chart_matrix[].chart' "$plan")
+
+candidate_archive() {
+  local chart=$1 version
+  version=$(selected_chart_version "$chart")
+  [[ -n "$version" ]] || return 1
+  printf '%s/%s-%s.tgz' "$candidate_dir/charts" "$chart" "$version"
+}
+extract_selected_chart() {
+  local chart=$1 archive
+  archive=$(candidate_archive "$chart")
+  [[ -f "$archive" ]]
+  tar -xzf "$archive" -C candidate-local/selected
 }
 
-extract_chart control-plane
-extract_chart inference-gateway
-extract_chart iterabase-platform
+for chart in control-plane inference-gateway iterabase-platform; do
+  if [[ -n $(selected_chart_version "$chart") ]]; then
+    extract_selected_chart "$chart"
+  fi
+done
 
-if [[ -d candidate-local/control-plane ]]; then
-  set_env "CONTROL_PLANE_LOCAL_CHART=$PWD/candidate-local/control-plane"
-  set_env "CONTROL_PLANE_CHART_VERSION="
+# Direct control-plane scenarios consume the selected chart when present and
+# otherwise the checksum-verified published chart directory.
+if [[ -d candidate-local/selected/control-plane ]]; then
+  set_env "CONTROL_PLANE_LOCAL_CHART=$PWD/candidate-local/selected/control-plane"
+  set_env "CONTROL_PLANE_CHART_VERSION=$(chart_version control-plane)"
+elif [[ -d candidate-local/baselines/control-plane ]]; then
+  set_env "CONTROL_PLANE_LOCAL_CHART=$PWD/candidate-local/baselines/control-plane"
+  set_env "CONTROL_PLANE_CHART_VERSION=$(chart_version control-plane)"
 fi
 
-if [[ -d candidate-local/iterabase-platform ]]; then
-  companion_archive=$(find "$candidate_dir/charts" -name 'cert-manager-substrate-*.tgz' -print -quit)
-  [[ -n "$companion_archive" ]]
-  tar -xzf "$companion_archive" -C candidate-local
-  set_env "ITERABASE_LOCAL_CHART=$PWD/candidate-local/iterabase-platform"
-  set_env "ITERABASE_PLATFORM_LOCAL_CHART=$PWD/candidate-local/iterabase-platform"
-  set_env "ITERABASE_CHART_VERSION="
-elif [[ -d candidate-local/inference-gateway ]]; then
-  # Compose the selected gateway chart into the reviewed published platform
-  # baseline; do not resolve any bumped-but-unpublished repository version.
-  platform_version=$(baseline_chart_version iterabase-platform)
-  substrate_version=$(baseline_chart_version cert-manager-substrate)
-  [[ -n "$platform_version" && "$platform_version" != null ]]
-  [[ -n "$substrate_version" && "$substrate_version" != null ]]
-  mkdir -p candidate-local/platform-baseline
-  helm pull oci://ghcr.io/nunocgoncalves/iterabase-charts/iterabase-platform \
-    --version "$platform_version" --untar --untardir candidate-local/platform-baseline
-  helm pull oci://ghcr.io/nunocgoncalves/iterabase-charts/cert-manager-substrate \
-    --version "$substrate_version" --untar --untardir candidate-local/platform-baseline
-  mkdir -p candidate-local/platform-baseline/iterabase-platform/charts
-  rm -f candidate-local/platform-baseline/iterabase-platform/charts/inference-gateway-*.tgz
-  cp "$candidate_dir"/charts/inference-gateway-*.tgz \
-    candidate-local/platform-baseline/iterabase-platform/charts/
-  set_env "ITERABASE_LOCAL_CHART=$PWD/candidate-local/platform-baseline/iterabase-platform"
-  set_env "ITERABASE_PLATFORM_LOCAL_CHART=$PWD/candidate-local/platform-baseline/iterabase-platform"
-  set_env "ITERABASE_CHART_VERSION="
+# Build one platform fixture from the selected outer chart (if any) or its
+# verified published baseline, then replace selected nested chart members with
+# their exact retained archives.
+mkdir -p candidate-local/runtime
+if [[ -d candidate-local/selected/iterabase-platform ]]; then
+  cp -R candidate-local/selected/iterabase-platform candidate-local/runtime/
+  companion_version=$(selected_chart_version iterabase-platform)
+  companion="$candidate_dir/charts/cert-manager-substrate-$companion_version.tgz"
+  [[ -f "$companion" ]]
+  tar -xzf "$companion" -C candidate-local/runtime
+elif [[ -d candidate-local/baselines/iterabase-platform ]]; then
+  cp -R candidate-local/baselines/iterabase-platform candidate-local/runtime/
+  [[ -d candidate-local/baselines/cert-manager-substrate ]]
+  cp -R candidate-local/baselines/cert-manager-substrate candidate-local/runtime/
+fi
+
+platform_dir=candidate-local/runtime/iterabase-platform
+if [[ -d "$platform_dir" ]]; then
+  mkdir -p "$platform_dir/charts"
+  for chart in control-plane inference-gateway; do
+    if archive=$(candidate_archive "$chart" 2>/dev/null); then
+      [[ -f "$archive" ]]
+      rm -rf "$platform_dir/charts/$chart" "$platform_dir/charts/$chart-"*.tgz
+      cp "$archive" "$platform_dir/charts/"
+    fi
+  done
+  platform_version=$(chart_version iterabase-platform)
+  set_env "ITERABASE_LOCAL_CHART=$PWD/$platform_dir"
+  set_env "ITERABASE_PLATFORM_LOCAL_CHART=$PWD/$platform_dir"
+  set_env "ITERABASE_CHART_VERSION=$platform_version"
+
+  substrate_dir=candidate-local/runtime/cert-manager-substrate
+  [[ -d "$substrate_dir" ]]
+  tar -czf candidate-local/runtime-iterabase-platform.tgz \
+    -C candidate-local/runtime iterabase-platform
+  tar -czf candidate-local/runtime-cert-manager-substrate.tgz \
+    -C candidate-local/runtime cert-manager-substrate
+  set_env "FORGE_E2E_PLATFORM_CHART_ARCHIVE=$PWD/candidate-local/runtime-iterabase-platform.tgz"
+  set_env "FORGE_E2E_SUBSTRATE_CHART_ARCHIVE=$PWD/candidate-local/runtime-cert-manager-substrate.tgz"
+elif [[ -d candidate-local/baselines/cert-manager-substrate ]]; then
+  # The tool-runner scenario asks for the substrate as a sibling of the
+  # platform path even though it does not install the platform chart itself.
+  mkdir -p candidate-local/baselines/platform-placeholder
+  set_env "ITERABASE_PLATFORM_LOCAL_CHART=$PWD/candidate-local/baselines/platform-placeholder"
+  set_env "ITERABASE_CHART_VERSION=$(chart_version cert-manager-substrate)"
 fi

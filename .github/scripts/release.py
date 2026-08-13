@@ -92,18 +92,34 @@ def chart_metadata(path: Path) -> dict[str, str]:
     return result
 
 
-def chart_default_image_version(path: Path) -> str:
-    in_image = False
-    for raw in path.read_text(encoding="utf-8").splitlines():
-        if raw == "image:":
-            in_image = True
+def chart_value(path: Path, key: str) -> str:
+    wanted = key.split(".")
+    stack: list[tuple[int, str]] = []
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise ReleaseError(f"cannot read chart values {path}: {exc}") from exc
+    for raw in lines:
+        if not raw.strip() or raw.lstrip().startswith("#"):
             continue
-        if in_image and raw and not raw.startswith(" "):
-            break
-        match = re.match(r'^\s+tag:\s*["\']?([^"\'#\s]+)', raw)
-        if in_image and match:
-            return require_semver(match.group(1), f"{path} image.tag")
-    raise ReleaseError(f"cannot resolve default image.tag from {path}")
+        match = re.match(r"^(\s*)([A-Za-z0-9_-]+):(?:\s*(.*?))?\s*$", raw)
+        if match is None:
+            continue
+        indent = len(match.group(1))
+        name = match.group(2)
+        value = (match.group(3) or "").split(" #", 1)[0].strip()
+        while stack and stack[-1][0] >= indent:
+            stack.pop()
+        current = [item[1] for item in stack] + [name]
+        if value and current == wanted:
+            return value.strip("\"'")
+        if not value:
+            stack.append((indent, name))
+    raise ReleaseError(f"cannot resolve {key} from {path}")
+
+
+def chart_image_version(path: Path, key: str = "image.tag") -> str:
+    return require_semver(chart_value(path, key), f"{path} {key}")
 
 
 def chart_dependencies(path: Path) -> list[dict[str, str]]:
@@ -294,68 +310,137 @@ def make_plan(
             if scenario not in scenarios:
                 scenarios.append(scenario)
 
-    # Runtime validation uses exact retained archives for these reviewed,
-    # already-published baselines whenever the corresponding chart is not in
-    # the candidate bundle. Selected chart archives replace them before tests.
-    baseline_charts: list[dict[str, Any]] = []
+    # Derive product baselines from every artifact-backed runtime fixture in the
+    # selected suite union. Owner/source checks use the exact checkout; Kind and
+    # real-machine fixtures must use either a selected candidate or an immutable
+    # published identity recorded here.
+    selected_set = set(selected)
+    scenario_set = set(scenarios)
     control_scenarios = {"controlplane-identity", "tool-runner-contract"}
     platform_scenarios = {"inference-contract", "cert-issuers", "internal-tls"}
-    if control_scenarios.intersection(scenarios) and "control-plane-chart" not in selected:
+    real_machine = any(targets["targets"][target]["real_machine"] for target in selected)
+    uses_control_chart = bool(control_scenarios.intersection(scenario_set))
+    uses_platform_chart = bool(platform_scenarios.intersection(scenario_set)) or real_machine
+    uses_substrate_chart = uses_platform_chart or "tool-runner-contract" in scenario_set
+
+    baseline_charts: list[dict[str, Any]] = []
+
+    def add_baseline_chart(chart: str, version: str) -> None:
+        if any(item["chart"] == chart for item in baseline_charts):
+            return
         baseline_charts.append(
             {
-                "chart": "control-plane",
-                "version": fixtures["control_plane_chart"],
-                "repository": "oci://ghcr.io/nunocgoncalves/iterabase-charts/control-plane",
+                "chart": chart,
+                "version": version,
+                "repository": f"oci://ghcr.io/nunocgoncalves/iterabase-charts/{chart}",
             }
         )
-    needs_platform_baseline = bool(platform_scenarios.intersection(scenarios)) or (
-        "forge" in selected
-        and bool(
-            set(selected).intersection({"control-plane-chart", "inference-gateway-chart"})
-        )
-    )
-    if needs_platform_baseline and "iterabase-platform-chart" not in selected:
-        for chart in ("iterabase-platform", "cert-manager-substrate"):
-            baseline_charts.append(
-                {
-                    "chart": chart,
-                    "version": fixtures["platform_chart"],
-                    "repository": f"oci://ghcr.io/nunocgoncalves/iterabase-charts/{chart}",
-                }
-            )
 
+    if uses_control_chart and "control-plane-chart" not in selected_set:
+        add_baseline_chart("control-plane", fixtures["control_plane_chart"])
+    if uses_platform_chart and "iterabase-platform-chart" not in selected_set:
+        add_baseline_chart("iterabase-platform", fixtures["platform_chart"])
+    if uses_substrate_chart and "iterabase-platform-chart" not in selected_set:
+        add_baseline_chart("cert-manager-substrate", fixtures["platform_chart"])
+
+    image_definitions = {
+        image["name"]: image
+        for target in ("control-plane", "inference-gateway")
+        for image in targets["targets"][target]["images"]
+    }
     baseline_images: list[dict[str, Any]] = []
-    chart_targets = set(selected).intersection(
-        {"control-plane-chart", "inference-gateway-chart", "iterabase-platform-chart"}
-    )
-    if "control-plane" not in selected and chart_targets.intersection(
-        {"control-plane-chart", "iterabase-platform-chart"}
-    ):
-        for image in targets["targets"]["control-plane"]["images"]:
-            baseline_images.append(
-                {
-                    "name": image["name"],
-                    "target": "control-plane",
-                    "repository": image["repository"],
-                    "version": chart_default_image_version(
-                        root / "charts" / "charts" / "control-plane" / "values.yaml"
-                    ),
-                }
-            )
-    if "inference-gateway" not in selected and chart_targets.intersection(
-        {"inference-gateway-chart", "iterabase-platform-chart"}
-    ):
-        image = targets["targets"]["inference-gateway"]["images"][0]
-        baseline_images.append(
-            {
-                "name": image["name"],
-                "target": "inference-gateway",
-                "repository": image["repository"],
-                "version": chart_default_image_version(
-                    root / "charts" / "charts" / "inference-gateway" / "values.yaml"
-                ),
+
+    def add_baseline_image(
+        name: str,
+        target: str,
+        *,
+        version: str | None = None,
+        version_chart: str | None = None,
+        values_path: str | None = None,
+        value_key: str = "image.tag",
+    ) -> None:
+        image: dict[str, Any] = {
+            "name": name,
+            "target": target,
+            "repository": image_definitions[name]["repository"],
+        }
+        if version is not None:
+            image["version"] = version
+        else:
+            image["version_from"] = {
+                "chart": version_chart,
+                "values_path": values_path,
+                "value_key": value_key,
             }
-        )
+        baseline_images.append(image)
+
+    control_values = root / "charts" / "charts" / "control-plane" / "values.yaml"
+    inference_values = root / "charts" / "charts" / "inference-gateway" / "values.yaml"
+    selected_control_chart = bool(
+        selected_set.intersection({"control-plane-chart", "iterabase-platform-chart"})
+    )
+    selected_inference_chart = bool(
+        selected_set.intersection({"inference-gateway-chart", "iterabase-platform-chart"})
+    )
+
+    uses_control_image = bool(scenario_set) or real_machine
+    uses_tool_runner_image = "tool-runner-contract" in scenario_set or real_machine
+    uses_inference_image = uses_platform_chart
+    if "control-plane" not in selected_set and uses_control_image:
+        if selected_control_chart:
+            add_baseline_image(
+                "control-plane",
+                "control-plane",
+                version=chart_image_version(control_values),
+            )
+        else:
+            source_chart = "iterabase-platform" if uses_platform_chart else "control-plane"
+            values_path = (
+                "charts/control-plane/values.yaml"
+                if source_chart == "iterabase-platform"
+                else "values.yaml"
+            )
+            add_baseline_image(
+                "control-plane",
+                "control-plane",
+                version_chart=source_chart,
+                values_path=values_path,
+            )
+    if "control-plane" not in selected_set and uses_tool_runner_image:
+        if selected_control_chart:
+            add_baseline_image(
+                "control-plane-tool-runner",
+                "control-plane",
+                version=chart_image_version(control_values, "toolRunner.image.tag"),
+            )
+        else:
+            source_chart = "iterabase-platform" if uses_platform_chart else "control-plane"
+            values_path = (
+                "charts/control-plane/values.yaml"
+                if source_chart == "iterabase-platform"
+                else "values.yaml"
+            )
+            add_baseline_image(
+                "control-plane-tool-runner",
+                "control-plane",
+                version_chart=source_chart,
+                values_path=values_path,
+                value_key="toolRunner.image.tag",
+            )
+    if "inference-gateway" not in selected_set and uses_inference_image:
+        if selected_inference_chart:
+            add_baseline_image(
+                "inference-gateway",
+                "inference-gateway",
+                version=chart_image_version(inference_values),
+            )
+        else:
+            add_baseline_image(
+                "inference-gateway",
+                "inference-gateway",
+                version_chart="iterabase-platform",
+                values_path="charts/inference-gateway/values.yaml",
+            )
 
     plan = {
         "schema_version": 3,
@@ -370,7 +455,7 @@ def make_plan(
             for name in KIND_TARGETS
             if name in scenarios
         ],
-        "real_machine": any(targets["targets"][target]["real_machine"] for target in selected),
+        "real_machine": real_machine,
         "chart_runtime": any(
             bool(targets["targets"][target].get("chart_runtime")) for target in selected
         ),
@@ -622,6 +707,9 @@ def build_parser() -> argparse.ArgumentParser:
     evidence.add_argument("--output", type=Path, required=True)
     verify = sub.add_parser("verify-candidate")
     verify.add_argument("--directory", type=Path, required=True)
+    image_version = sub.add_parser("image-version")
+    image_version.add_argument("--values", type=Path, required=True)
+    image_version.add_argument("--key", required=True)
     return parser
 
 
@@ -655,6 +743,8 @@ def main() -> int:
             print(compact(evidence))
         elif args.command == "verify-candidate":
             print(compact(verify_candidate(args.directory)))
+        elif args.command == "image-version":
+            print(chart_image_version(args.values, args.key))
     except ReleaseError as exc:
         print(f"release contract error: {exc}", file=sys.stderr)
         return 1
