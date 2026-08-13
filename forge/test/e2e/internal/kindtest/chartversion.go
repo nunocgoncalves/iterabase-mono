@@ -37,6 +37,33 @@ func releasesGitHubRepo() string {
 	return "nunocgoncalves/iterabase-mono"
 }
 
+type githubRelease struct {
+	TagName    string `json:"tag_name"`
+	Prerelease bool   `json:"prerelease"`
+	Draft      bool   `json:"draft"`
+}
+
+// selectLatestChartVersion returns the highest stable chart version and its tag.
+// Component tags use "<component>-v<semver>" in the shared release feed, so a
+// leading v after the chart prefix must be rejected rather than normalized.
+func selectLatestChartVersion(releases []githubRelease, chart string) (best, bestTag string) {
+	prefix := chart + "-"
+	for _, release := range releases {
+		if release.Draft || release.Prerelease || !strings.HasPrefix(release.TagName, prefix) {
+			continue
+		}
+		version := strings.TrimPrefix(release.TagName, prefix)
+		if strings.HasPrefix(version, "v") || !looksSemver(version) {
+			continue
+		}
+		if best == "" || compareSemver(version, best) > 0 {
+			best = version
+			bestTag = release.TagName
+		}
+	}
+	return best, bestTag
+}
+
 // LatestChartVersion resolves the highest stable semver published for the named
 // chart by listing monorepo GitHub releases and filtering tags of the
 // form "<chart>-<semver>". Prereleases and drafts are skipped so PR-time CI
@@ -73,32 +100,11 @@ func LatestChartVersion(t *testing.T, chart string) string {
 			"set CONTROL_PLANE_CHART_VERSION to pin a chart version and skip auto-resolution.",
 			repo, resp.StatusCode)
 	}
-	var releases []struct {
-		TagName    string `json:"tag_name"`
-		Prerelease bool   `json:"prerelease"`
-		Draft      bool   `json:"draft"`
-	}
+	var releases []githubRelease
 	if err := json.NewDecoder(resp.Body).Decode(&releases); err != nil {
 		t.Fatalf("decode github releases for %s: %v", repo, err)
 	}
-	prefix := chart + "-"
-	var best, bestTag string
-	for _, r := range releases {
-		if r.Draft || r.Prerelease {
-			continue
-		}
-		if !strings.HasPrefix(r.TagName, prefix) {
-			continue
-		}
-		ver := strings.TrimPrefix(r.TagName, prefix)
-		if !looksSemver(ver) {
-			continue
-		}
-		if best == "" || compareSemver(ver, best) > 0 {
-			best = ver
-			bestTag = r.TagName
-		}
-	}
+	best, bestTag := selectLatestChartVersion(releases, chart)
 	if best == "" {
 		t.Fatalf("no stable %q release tags found in %s (scanned %d releases)\n"+
 			"set CONTROL_PLANE_CHART_VERSION to pin a chart version.", chart, repo, len(releases))

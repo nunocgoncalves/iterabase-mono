@@ -1,9 +1,6 @@
 package kindtest
 
-import (
-	"strings"
-	"testing"
-)
+import "testing"
 
 // Unit tests for the pure helpers behind chart auto-resolution (HOR-321). The
 // network/helm-backed LatestChartVersion and ChartAppVersion are exercised by
@@ -110,40 +107,19 @@ func TestChartVersionAtLeast(t *testing.T) {
 	}
 }
 
-// TestLatestChartVersionPicksHighestStable guards the core selection invariant
-// at the comparator level: given a mixed tag list, the highest stable semver
-// after the chart- prefix must be selected (prereleases and non-semver tags
-// ignored), mirroring LatestChartVersion's loop.
-func TestLatestChartVersionPicksHighestStable(t *testing.T) {
-	tags := []string{
-		"control-plane-0.2.1",
-		"control-plane-0.2.0",
-		"control-plane-0.3.0-rc.1", // prerelease: skipped
-		"control-plane-0.3.0-rc.2", // prerelease: skipped
-		"control-plane-0.2.10",     // highest stable
-		"some-other-chart-9.9.9",   // different chart: ignored
-		"control-plane-latest",     // not semver: ignored
+func TestSelectLatestChartVersionUsesExactChartTagNamespace(t *testing.T) {
+	releases := []githubRelease{
+		{TagName: "control-plane-0.2.1"},
+		{TagName: "control-plane-v9.0.0"}, // component release, not chart release
+		{TagName: "control-plane-0.2.10"},
+		{TagName: "control-plane-0.3.0-rc.1", Prerelease: true},
+		{TagName: "control-plane-9.0.0", Draft: true},
+		{TagName: "some-other-chart-9.9.9"},
+		{TagName: "control-plane-latest"},
 	}
-	const prefix = "control-plane-"
-	var best string
-	for _, tag := range tags {
-		if !strings.HasPrefix(tag, prefix) {
-			continue
-		}
-		ver := strings.TrimPrefix(tag, prefix)
-		// mirror LatestChartVersion's prerelease skip (chart-releaser marks a
-		// release prerelease when the version carries a - suffix).
-		if strings.Contains(ver, "-") {
-			continue
-		}
-		if !looksSemver(ver) {
-			continue
-		}
-		if best == "" || compareSemver(ver, best) > 0 {
-			best = ver
-		}
-	}
-	if best != "0.2.10" {
-		t.Fatalf("selected %q, want 0.2.10", best)
+
+	version, tag := selectLatestChartVersion(releases, "control-plane")
+	if version != "0.2.10" || tag != "control-plane-0.2.10" {
+		t.Fatalf("selected version %q from tag %q, want chart version 0.2.10", version, tag)
 	}
 }
