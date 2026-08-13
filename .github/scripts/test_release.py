@@ -115,7 +115,15 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertEqual(dependencies["inference-gateway"], "0.2.10")
         self.assertEqual(
             plan["tested_with"]["chart_metadata"]["control-plane"]["appVersion"],
-            "0.0.26",
+            "0.0.25",
+        )
+        self.assertEqual(
+            plan["tested_with"]["chart_metadata"]["inference-gateway"]["appVersion"],
+            "0.2.5",
+        )
+        self.assertEqual(plan["tested_with"]["repository_versions"]["control-plane"], "0.0.26")
+        self.assertEqual(
+            plan["tested_with"]["repository_versions"]["inference-gateway"], "0.2.6"
         )
 
     def test_invalid_source_and_target_are_rejected(self) -> None:
