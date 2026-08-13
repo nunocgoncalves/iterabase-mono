@@ -231,8 +231,10 @@ template; match them in the overlay or via a service-repo ticket.
 ## Release
 
 Raw tags do not publish. `Chart.yaml` is the chart version authority. Dispatch
-the root **Release candidate** workflow for one chart target and an exact master
-SHA; it packages and validates the final archive once and retains it as an
-Actions artifact. Then dispatch **Promote release** with that successful run ID.
+the root **Release candidate** workflow with an explicit affected-target set
+and an exact master SHA. It packages the selected chart archives once, builds
+any selected component/Forge artifacts, and validates the coherent bundle
+before retaining it as Actions artifacts. Then dispatch **Promote release**
+with that successful run ID.
 After founder approval in the protected `release` environment, the unchanged
 archive is published. See [`../docs/release.md`](../docs/release.md).

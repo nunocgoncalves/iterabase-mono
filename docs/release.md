@@ -1,9 +1,9 @@
-# Build-once candidates and protected release promotion
+# Build-once affected-target bundles and protected promotion
 
 HOR-473 makes `master` an integration branch, not a publication trigger. The repository has three manual workflows:
 
-- **Release candidate** (`release-candidate.yml`) builds and validates one target from one exact master SHA.
-- **Promote release** (`release-promote.yml`) verifies a successful candidate run and publishes it after founder approval in the protected `release` environment.
+- **Release candidate** (`release-candidate.yml`) builds and validates an explicit affected-target bundle from one exact master SHA.
+- **Promote release** (`release-promote.yml`) verifies a successful candidate bundle and publishes its exact members after one founder approval in the protected `release` environment.
 - **Release system rehearsal** (`release-rehearsal.yml`) exercises and cleans up disposable package, protected-tag, and prerelease operations after release-system or permission changes.
 
 No push to `master` or tag push publishes an artifact or GitHub Release.
@@ -19,23 +19,23 @@ No push to `master` or tag push publishes an artifact or GitHub Release.
 | `inference-gateway-chart` | chart `Chart.yaml` | inference-gateway OCI chart |
 | `iterabase-platform-chart` | chart `Chart.yaml` | platform chart and same-version certificate-substrate companion |
 
-The protected Git tags remain `control-plane-v<version>`, `inference-gateway-v<version>`, `forge-v<version>`, and `<chart>-<version>`. One candidate and promotion run handles one logical target. Forge's platform matrix is one target, not four releases.
+The protected Git tags remain `control-plane-v<version>`, `inference-gateway-v<version>`, `forge-v<version>`, and `<chart>-<version>`. Targets keep independent versions and namespaced releases, but one product change may release any coherent subset together. Forge's platform matrix is one target, not four releases.
 
-## Candidate flow
+## Candidate bundle flow
 
 Dispatch **Release candidate** from `master` with:
 
-- one target from the table above; and
+- a comma-separated target set such as `control-plane,control-plane-chart,forge`; and
 - one full commit SHA contained in `master`.
 
-The workflow infers the version from source. A caller cannot supply a second, conflicting version.
+The workflow trims and validates the explicit target set, rejects empty, unknown, or duplicate members, and canonicalizes it in repository target order. CI may suggest affected targets, but it does not silently choose release intent. Every selected version is inferred from source; callers cannot supply conflicting versions.
 
-1. Preflight validates the repository release contract, exact source membership, version authority, production-tag uniqueness, and absence of every planned semantic image/chart identity. Existing semantic artifacts or an unavailable registry fail before candidate builds and validation begin.
-2. Image targets fail closed if the full-source-SHA alias already exists without evidence from this run, then build once, push a canonical digest, and create that immutable alias in the existing GHCR package. Tests consume `repository:<full-sha>@sha256:<digest>`.
-3. Chart targets package the final archive once. Forge produces its four final GoReleaser archives once. Archives, checksums, SBOMs, and metadata remain GitHub Actions artifacts; candidate runs do not create persistent run-specific GHCR package repositories.
-4. Only the selected target's complete owner, chart runtime, Kind, and mandatory real-machine suites run. Chart runtime and platform real-machine jobs download and install the exact packaged candidate (and its companion where applicable); missing mandatory capacity is incomplete.
-5. A generated candidate bill of materials records source SHA, target/version, exact artifact identities, native chart dependencies, fixture inputs, and validation result. There is no hand-maintained global compatibility manifest.
-6. The final `release-candidate` Actions artifact contains the plan, evidence, exact chart/Forge files, checksums, SBOMs, and image digest metadata. It is retained for 90 days pending promotion or expiry.
+1. Preflight validates the repository release contract, exact source membership, target set, version authorities, production-tag uniqueness, and absence of every planned semantic image/chart identity. Existing semantic artifacts or an unavailable registry fail before builds and validation begin.
+2. Every selected target is built exactly once. Image targets push canonical digests plus immutable full-SHA aliases in existing GHCR packages. Chart and Forge archives remain Actions artifacts; candidate runs create no persistent run-specific package namespace.
+3. Validation consumes all selected candidates together. For example, a selected control-plane chart installs the selected control-plane image digest, and selected Forge validation runs with both. Shared owner, chart, Kind, and real-machine suites are deduplicated into one union.
+4. Any unselected dependency used by validation resolves to an explicit, reviewed, already-published baseline. Candidate evidence distinguishes selected candidate identities from baseline dependencies; it never treats a bumped but unpublished repository version as an available baseline.
+5. A generated bundle bill of materials records source SHA, selected target/version pairs, exact artifact identities, published baselines, native chart dependencies, fixture inputs, and validation result. There is no hand-maintained global compatibility manifest.
+6. The final `release-candidate` Actions artifact contains the canonical plan, evidence, exact chart/Forge files, checksums, SBOMs, and image digest metadata. It is retained for 90 days pending promotion or expiry.
 
 ## Promotion flow
 
@@ -46,29 +46,30 @@ Before approval, the workflow verifies:
 - the run belongs to this repository's `Release candidate` workflow;
 - it was manually dispatched from `master` and concluded successfully;
 - its source SHA remains contained in `master`;
-- it represents exactly one known target;
+- every selected target is known and source-versioned;
 - its plan and every artifact checksum match the candidate evidence.
 
-The publication job then waits for founder approval in the protected `release` environment. After approval it:
+The publication job then waits once for founder approval in the protected `release` environment. After approval it re-verifies the bundle and preflights **every** semantic image, chart, protected tag, and GitHub Release destination before the first mutation. It then:
 
 - adds semantic image tags to the tested digests;
-- pushes unchanged chart archives to `oci://ghcr.io/nunocgoncalves/iterabase-charts`;
-- creates or verifies the protected namespaced Git tag at the exact source SHA; and
-- creates one GitHub Release with the exact candidate files and evidence.
+- pushes unchanged chart archives;
+- creates or verifies each protected namespaced Git tag at the exact source SHA; and
+- creates one GitHub Release per selected target, attaching that target's exact candidate files plus the shared bundle plan and evidence.
 
-Nothing is rebuilt. Existing identities are accepted only when byte/digest/source identical, allowing a single-target retry without a coordinated partial-promotion ledger.
+Nothing is rebuilt. GitHub and GHCR do not provide a cross-package transaction, so promotion is resumable rather than falsely atomic: an identical already-published member is verified and skipped, a missing member continues, and any conflicting digest, archive, tag, or Release asset fails closed.
 
 ## Generated compatibility evidence
 
-Compatibility evidence answers “what exact combination did this candidate run prove?” It is generated from actual inputs:
+Compatibility evidence answers “what exact combination did this bundle prove?” It is generated from actual inputs:
 
-- component `VERSION` files;
-- chart versions, `appVersion`, and dependency versions;
+- selected component `VERSION` files and chart metadata;
+- selected chart dependencies;
+- explicit published baseline identities for unselected dependencies;
 - E2E fixture constants;
 - image digests and archive checksums;
-- source SHA and selected scenarios.
+- source SHA and deduplicated selected scenarios.
 
-Bundle compatibility remains expressed where it is real: the platform chart's native dependency metadata. Independent targets do not share a synthetic lockstep compatibility version.
+Targets retain independent versions. A bundle records a tested combination without imposing a synthetic lockstep platform version.
 
 ## Release-system rehearsal
 
@@ -102,4 +103,4 @@ Release-only implementation changes are handled by these focused contract checks
 
 ## Rollback
 
-No overlay deploys automatically. Consumers continue pinning immutable versions. Disable or revert the manual workflows to stop publication. Never overwrite or delete an immutable production release to roll back behavior; publish a corrected version and update consumers deliberately.
+No overlay deploys automatically. Consumers continue pinning immutable versions. Disable or revert the manual workflows to stop publication. Never overwrite or delete an immutable production release to roll back behavior; publish a corrected version and update consumers deliberately. If publication stops between bundle members, resume the exact verified candidate rather than rebuilding it.
