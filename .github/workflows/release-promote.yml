@@ -122,15 +122,13 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASES: ${{ needs.verify-candidate.outputs.releases }}
         run: |
-          .github/scripts/check_promotion_destinations.sh candidate '${{ github.repository_owner }}'
+          .github/scripts/check_promotion_destinations.sh \
+            candidate '${{ github.repository_owner }}' '${{ github.repository }}'
           while IFS=$'\t' read -r tag _target; do
             direct="$(git ls-remote --tags origin "refs/tags/$tag" | awk '{print $1}')"
             peeled="$(git ls-remote --tags origin "refs/tags/$tag^{}" | awk '{print $1}')"
             existing="${peeled:-$direct}"
             if [ -n "$existing" ]; then test "$existing" = '${{ needs.verify-candidate.outputs.source_sha }}'; fi
-            if gh release view "$tag" >/dev/null 2>&1; then
-              test "$(gh release view "$tag" --json tagName --jq .tagName)" = "$tag"
-            fi
           done < <(jq -r '.[] | [.production_tag,.target] | @tsv' <<<"$RELEASES")
       - name: Promote tested image digests by adding semantic aliases
         if: needs.verify-candidate.outputs.has_images == 'true'
@@ -192,8 +190,15 @@ jobs:
           while IFS=$'\t' read -r target version tag artifact_types; do
             assets=(candidate/candidate-plan.json candidate/candidate-evidence.json)
             if jq -e 'index("image")' <<<"$artifact_types" >/dev/null; then
-              while IFS= read -r asset; do assets+=("$asset"); done \
-                < <(find candidate/assets/images -type f -name 'candidate-*' | sort)
+              while IFS= read -r name; do
+                assets+=(
+                  "candidate/assets/images/candidate-$name.json"
+                  "candidate/assets/images/candidate-$name.spdx.json"
+                )
+              done < <(
+                jq -r --arg target "$target" \
+                  '.image_matrix[] | select(.target == $target) | .name' candidate/candidate-plan.json
+              )
             fi
             if jq -e 'index("chart")' <<<"$artifact_types" >/dev/null; then
               chart="$(jq -r --arg target "$target" '.chart_matrix[] | select(.target == $target) | .chart' candidate/candidate-plan.json)"

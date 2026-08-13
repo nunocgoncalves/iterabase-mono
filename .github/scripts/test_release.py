@@ -159,12 +159,38 @@ class ReleaseContractTests(unittest.TestCase):
             for item in plan["baseline_dependencies"]["charts"]
         }
         self.assertIn(("iterabase-platform", "0.3.1"), baseline_charts)
-        baseline_images = {
-            (item["target"], item["version"])
-            for item in plan["baseline_dependencies"]["images"]
-        }
-        self.assertNotIn(("inference-gateway", "0.2.6"), baseline_images)
-        self.assertNotIn(("control-plane", "0.0.25"), baseline_images)
+        baseline_images = plan["baseline_dependencies"]["images"]
+        self.assertEqual({item["name"] for item in baseline_images}, {"inference-gateway"})
+        self.assertEqual(
+            baseline_images[0]["version_from"]["chart"], "iterabase-platform"
+        )
+
+    def test_runtime_baseline_graph_covers_forge_chart_and_image_only_fixtures(self) -> None:
+        forge = self.plan("forge")
+        self.assertEqual(
+            {item["chart"] for item in forge["baseline_dependencies"]["charts"]},
+            {"iterabase-platform", "cert-manager-substrate"},
+        )
+        self.assertEqual(
+            {item["name"] for item in forge["baseline_dependencies"]["images"]},
+            {"control-plane", "control-plane-tool-runner", "inference-gateway"},
+        )
+
+        control_chart = self.plan("control-plane-chart")
+        self.assertIn(
+            "cert-manager-substrate",
+            {item["chart"] for item in control_chart["baseline_dependencies"]["charts"]},
+        )
+        self.assertEqual(
+            {item["name"] for item in control_chart["baseline_dependencies"]["images"]},
+            {"control-plane", "control-plane-tool-runner"},
+        )
+
+        image_only = self.plan("control-plane")
+        self.assertIn(
+            "inference-gateway",
+            {item["name"] for item in image_only["baseline_dependencies"]["images"]},
+        )
 
     def test_prerelease_and_v_prefix_are_rejected(self) -> None:
         for value in ("v1.2.3", "1.2.3-rc.1", "01.2.3", "latest"):
@@ -331,7 +357,24 @@ class ReleaseContractTests(unittest.TestCase):
             docker.chmod(0o755)
             helm = root / "helm"
             helm.write_text(
-                "#!/usr/bin/env bash\nset -eu\nrepository=$2\ndestination=''\nversion=''\nwhile [ $# -gt 0 ]; do case \"$1\" in --destination) destination=$2; shift 2;; --version) version=$2; shift 2;; *) shift;; esac; done\nchart=${repository##*/}\nmkdir -p \"$destination\"\nprintf baseline > \"$destination/$chart-$version.tgz\"\n",
+                "#!/usr/bin/env bash\n"
+                "set -eu\n"
+                "repository=$2\n"
+                "destination=''\n"
+                "version=''\n"
+                "while [ $# -gt 0 ]; do case \"$1\" in --destination) destination=$2; shift 2;; --version) version=$2; shift 2;; *) shift;; esac; done\n"
+                "chart=${repository##*/}\n"
+                "fixture=$(mktemp -d)\n"
+                "mkdir -p \"$fixture/$chart\" \"$destination\"\n"
+                "printf 'apiVersion: v2\\nname: %s\\nversion: %s\\n' \"$chart\" \"$version\" > \"$fixture/$chart/Chart.yaml\"\n"
+                "if [ \"$chart\" = iterabase-platform ]; then\n"
+                "  mkdir -p \"$fixture/$chart/charts/control-plane\" \"$fixture/$chart/charts/inference-gateway\"\n"
+                "  printf 'image:\\n  tag: 0.0.19\\ntoolRunner:\\n  image:\\n    tag: 0.0.19\\n' > \"$fixture/$chart/charts/control-plane/values.yaml\"\n"
+                "  printf 'image:\\n  tag: 0.2.4\\n' > \"$fixture/$chart/charts/inference-gateway/values.yaml\"\n"
+                "elif [ \"$chart\" = control-plane ]; then\n"
+                "  printf 'image:\\n  tag: 0.0.19\\ntoolRunner:\\n  image:\\n    tag: 0.0.19\\n' > \"$fixture/$chart/values.yaml\"\n"
+                "fi\n"
+                "tar -czf \"$destination/$chart-$version.tgz\" -C \"$fixture\" \"$chart\"\n",
                 encoding="utf-8",
             )
             helm.chmod(0o755)
@@ -352,6 +395,135 @@ class ReleaseContractTests(unittest.TestCase):
             resolved = release.load_json(plan_path)
             self.assertTrue(all(item["digest"] == digest for item in resolved["baseline_dependencies"]["images"]))
             self.assertRegex(resolved["baseline_dependencies"]["charts"][0]["sha256"], r"^[0-9a-f]{64}$")
+            versions = {item["name"]: item["version"] for item in resolved["baseline_dependencies"]["images"]}
+            self.assertEqual(versions["inference-gateway"], "0.2.4")
+
+    def test_runtime_rejects_a_baseline_chart_that_does_not_match_the_plan_checksum(self) -> None:
+        plan = {
+            "source_sha": self.sha,
+            "chart_matrix": [],
+            "baseline_dependencies": {
+                "images": [],
+                "charts": [
+                    {
+                        "chart": "cert-manager-substrate",
+                        "repository": "oci://example/cert-manager-substrate",
+                        "version": "0.3.1",
+                        "sha256": "f" * 64,
+                    }
+                ],
+            },
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            plan_path = root / "plan.json"
+            plan_path.write_text(release.compact(plan) + "\n", encoding="utf-8")
+            candidate = root / "candidates"
+            candidate.mkdir()
+            output = root / "environment"
+            helm = root / "helm"
+            helm.write_text(
+                "#!/usr/bin/env bash\n"
+                "set -eu\n"
+                "repository=$2\n"
+                "destination=''\n"
+                "version=''\n"
+                "while [ $# -gt 0 ]; do case \"$1\" in --destination) destination=$2; shift 2;; --version) version=$2; shift 2;; *) shift;; esac; done\n"
+                "chart=${repository##*/}\n"
+                "mkdir -p \"$destination\"\n"
+                "printf different > \"$destination/$chart-$version.tgz\"\n",
+                encoding="utf-8",
+            )
+            helm.chmod(0o755)
+            result = subprocess.run(
+                [
+                    "bash",
+                    str(ROOT / ".github/scripts/prepare_candidate_runtime.sh"),
+                    str(plan_path),
+                    str(candidate),
+                    str(output),
+                ],
+                cwd=root,
+                check=False,
+                capture_output=True,
+                text=True,
+                env={**os.environ, "HELM_BIN": str(helm)},
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("did NOT match", result.stderr)
+
+    def test_promotion_preflights_existing_release_asset_bytes(self) -> None:
+        plan = self.plan("control-plane")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            candidate = root / "candidate"
+            images = candidate / "assets" / "images"
+            images.mkdir(parents=True)
+            (candidate / "candidate-plan.json").write_text(
+                release.compact(plan) + "\n", encoding="utf-8"
+            )
+            (candidate / "candidate-evidence.json").write_text(
+                '{"schema_version":3}\n', encoding="utf-8"
+            )
+            for image in plan["image_matrix"]:
+                name = image["name"]
+                (images / f"candidate-{name}.json").write_text(
+                    "metadata\n", encoding="utf-8"
+                )
+                (images / f"candidate-{name}.spdx.json").write_text(
+                    "sbom\n", encoding="utf-8"
+                )
+
+            docker = root / "docker"
+            docker.write_text(
+                "#!/usr/bin/env bash\nprintf 'not found\\n' >&2\nexit 1\n",
+                encoding="utf-8",
+            )
+            docker.chmod(0o755)
+            helm = root / "helm"
+            helm.write_text("#!/usr/bin/env bash\nexit 1\n", encoding="utf-8")
+            helm.chmod(0o755)
+            existing = root / "existing-plan.json"
+            existing.write_bytes((candidate / "candidate-plan.json").read_bytes())
+            gh = root / "gh"
+            gh.write_text(
+                "#!/usr/bin/env bash\n"
+                "set -eu\n"
+                "if [ \"$2\" = view ]; then\n"
+                "  printf '%s\\n' '{\"tagName\":\"control-plane-v0.0.26\",\"assets\":[{\"name\":\"candidate-plan.json\"}]}'\n"
+                "elif [ \"$2\" = download ]; then\n"
+                "  destination=''\n"
+                "  while [ $# -gt 0 ]; do case \"$1\" in --dir) destination=$2; shift 2;; *) shift;; esac; done\n"
+                "  cp \"$EXISTING_RELEASE_ASSET\" \"$destination/candidate-plan.json\"\n"
+                "fi\n",
+                encoding="utf-8",
+            )
+            gh.chmod(0o755)
+            command = [
+                "bash",
+                str(ROOT / ".github/scripts/check_promotion_destinations.sh"),
+                str(candidate),
+                "nunocgoncalves",
+                "nunocgoncalves/iterabase-mono",
+            ]
+            environment = {
+                **os.environ,
+                "DOCKER_BIN": str(docker),
+                "HELM_BIN": str(helm),
+                "GH_BIN": str(gh),
+                "EXISTING_RELEASE_ASSET": str(existing),
+            }
+            matching = subprocess.run(
+                command, check=False, capture_output=True, text=True, env=environment
+            )
+            self.assertEqual(matching.returncode, 0, matching.stderr)
+
+            existing.write_text("conflict\n", encoding="utf-8")
+            conflicting = subprocess.run(
+                command, check=False, capture_output=True, text=True, env=environment
+            )
+            self.assertNotEqual(conflicting.returncode, 0)
+            self.assertIn("conflicts with the candidate", conflicting.stderr)
 
     def test_candidate_preflight_rejects_existing_semantic_image_versions(self) -> None:
         result, _ = self.check_availability(
@@ -407,7 +579,7 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertIn("Reject existing semantic artifacts before candidate validation", candidate)
         self.assertIn("check_release_availability.sh candidate-plan.json", candidate)
         self.assertIn("resolve_release_baselines.sh candidate-plan.json", candidate)
-        self.assertIn("check_promotion_destinations.sh candidate", promotion)
+        self.assertIn("check_promotion_destinations.sh \\\n            candidate", promotion)
         self.assertIn("Preflight every semantic destination before publication", promotion)
         self.assertIn("Create or verify protected namespaced tags", promotion)
         self.assertIn("candidate_bundle: true", candidate)
@@ -419,10 +591,25 @@ class ReleaseContractTests(unittest.TestCase):
             "output-file: candidate-charts/candidate-chart-${{ matrix.chart }}.spdx.json",
             candidate,
         )
+        kind = candidate.split("  kind-candidates:\n", 1)[1].split(
+            "\n  real-machine-candidates:\n", 1
+        )[0]
+        real_machine = candidate.split("  real-machine-candidates:\n", 1)[1].split(
+            "\n  validation:\n", 1
+        )[0]
+        self.assertIn("name: candidate-plan", kind)
+        self.assertIn("name: candidate-plan", real_machine)
+        self.assertIn(
+            "needs: [preflight, image-candidates, forge-candidate, chart-candidate]",
+            real_machine,
+        )
+        self.assertIn("prepare_candidate_runtime.sh", real_machine)
         self.assertIn("--release-notes /dev/null", candidate)
         self.assertIn("prepare_candidate_runtime.sh", candidate)
-        runtime_helper = (ROOT / ".github" / "scripts" / "prepare_candidate_runtime.sh").read_text(encoding="utf-8")
-        self.assertIn('tar -xzf "$companion_archive" -C candidate-local', runtime_helper)
+        runtime_helper = (
+            ROOT / ".github" / "scripts" / "prepare_candidate_runtime.sh"
+        ).read_text(encoding="utf-8")
+        self.assertIn('printf \'%s  %s\\n\' "$checksum" "$archive" | sha256sum --check -', runtime_helper)
 
     def test_candidate_validation_allows_unselected_jobs_to_skip(self) -> None:
         for target_set in (*release.TARGET_NAMES, "control-plane,control-plane-chart,forge"):

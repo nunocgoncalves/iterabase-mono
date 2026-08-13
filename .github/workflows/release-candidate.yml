@@ -66,13 +66,17 @@ jobs:
           git merge-base --is-ancestor "$REQUESTED_SHA" origin/master
       - name: Validate and resolve the affected target bundle from source authority
         id: plan
+        env:
+          REQUESTED_TARGETS: ${{ inputs.targets }}
+          REQUESTED_SHA: ${{ inputs.master_sha }}
+          RUN_ID: ${{ github.run_id }}
         run: |
           python3 .github/scripts/test_release.py
           python3 .github/scripts/release.py validate
           python3 .github/scripts/release.py plan \
-            --targets '${{ inputs.targets }}' \
-            --master-sha '${{ inputs.master_sha }}' \
-            --run-id '${{ github.run_id }}' \
+            --targets "$REQUESTED_TARGETS" \
+            --master-sha "$REQUESTED_SHA" \
+            --run-id "$RUN_ID" \
             --output candidate-plan.json \
             --github-output "$GITHUB_OUTPUT"
       - name: Reject existing protected production tags
@@ -83,17 +87,13 @@ jobs:
             test -z "$(git ls-remote --tags origin "refs/tags/$tag" "refs/tags/$tag^{}")"
           done < <(jq -r '.[].production_tag' <<<"$RELEASES")
       - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
-        if: steps.plan.outputs.has_images == 'true'
       - uses: ./.github/actions/setup-kubernetes-tools
-        if: steps.plan.outputs.has_chart == 'true'
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.4.0
-        if: steps.plan.outputs.has_images == 'true'
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Log in to the chart registry
-        if: steps.plan.outputs.has_chart == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: echo "$GH_TOKEN" | helm registry login ghcr.io -u '${{ github.actor }}' --password-stdin
@@ -508,6 +508,10 @@ jobs:
         with:
           ref: ${{ inputs.master_sha }}
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: candidate-plan
+          path: .
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         if: needs.preflight.outputs.has_images == 'true'
         with:
           pattern: candidate-image-*
@@ -538,10 +542,11 @@ jobs:
 
   real-machine-candidates:
     name: Exact candidate real machine — ${{ matrix.name }}
-    needs: [preflight, forge-candidate, chart-candidate]
+    needs: [preflight, image-candidates, forge-candidate, chart-candidate]
     if: >-
       always() && needs.preflight.result == 'success' &&
       needs.preflight.outputs.run_real_machine == 'true' &&
+      (needs.image-candidates.result == 'success' || needs.image-candidates.result == 'skipped') &&
       (needs.forge-candidate.result == 'success' || needs.forge-candidate.result == 'skipped') &&
       (needs.chart-candidate.result == 'success' || needs.chart-candidate.result == 'skipped')
     runs-on: ubuntu-latest
@@ -564,6 +569,16 @@ jobs:
         with:
           ref: ${{ inputs.master_sha }}
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: candidate-plan
+          path: .
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        if: needs.preflight.outputs.has_images == 'true'
+        with:
+          pattern: candidate-image-*
+          path: candidates/images
+          merge-multiple: true
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         if: needs.preflight.outputs.has_forge == 'true'
         with:
           name: candidate-forge
@@ -579,29 +594,21 @@ jobs:
           go-version: 1.26.5
           cache-dependency-path: forge/test/e2e/go.sum
           cache-scope: candidate-real-${{ matrix.name }}
-      - name: Resolve exact Forge or platform-chart candidate
-        env:
-          PLAN: ${{ needs.preflight.outputs.plan }}
+      - uses: ./.github/actions/setup-kubernetes-tools
+      - run: .github/scripts/add_helm_repositories.sh
+      - name: Resolve the exact composed runtime bundle
         run: |
-          set_env() { printf '%s\n' "$1" >> "$GITHUB_ENV"; }
+          .github/scripts/prepare_candidate_runtime.sh \
+            candidate-plan.json candidates "$GITHUB_ENV"
           forge_archive="$(find candidates/forge -name 'forge_*_linux_amd64.tar.gz' -print -quit 2>/dev/null || true)"
           if [ -n "$forge_archive" ]; then
+            (cd candidates/forge && sha256sum --check checksums.txt)
+            test "$(jq -r '.schema_version' candidates/forge/candidate-forge.json)" = 2
+            test "$(jq -r '.source_sha' candidates/forge/candidate-forge.json)" = '${{ inputs.master_sha }}'
             mkdir candidate-bin
             tar -xzf "$forge_archive" -C candidate-bin
             chmod +x candidate-bin/forge
-            set_env "FORGE_E2E_BINARY=$GITHUB_WORKSPACE/candidate-bin/forge"
-          fi
-
-          platform_archive="$(find candidates/charts -name 'iterabase-platform-*.tgz' -print -quit 2>/dev/null || true)"
-          if [ -n "$platform_archive" ]; then
-            companion_archive="$(find candidates/charts -name 'cert-manager-substrate-*.tgz' -print -quit)"
-            test -n "$companion_archive"
-            (cd candidates/charts && sha256sum --check checksums-iterabase-platform.txt)
-            test "$(jq -r '.schema_version' candidates/charts/candidate-chart-iterabase-platform.json)" = 2
-            test "$(jq -r '.source_sha' candidates/charts/candidate-chart-iterabase-platform.json)" = '${{ inputs.master_sha }}'
-            set_env "ITERABASE_CHART_VERSION=$(jq -r '.chart_matrix[] | select(.chart == "iterabase-platform") | .version' <<<"$PLAN")"
-            set_env "FORGE_E2E_PLATFORM_CHART_ARCHIVE=$GITHUB_WORKSPACE/$platform_archive"
-            set_env "FORGE_E2E_SUBSTRATE_CHART_ARCHIVE=$GITHUB_WORKSPACE/$companion_archive"
+            printf 'FORGE_E2E_BINARY=%s\n' "$GITHUB_WORKSPACE/candidate-bin/forge" >> "$GITHUB_ENV"
           fi
       - name: Require mandatory capacity credentials
         env:
