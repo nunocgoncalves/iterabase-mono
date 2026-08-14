@@ -29,6 +29,11 @@ const UID_A = 1000;
 const GID_A = 1000;
 const UID_B = 1001;
 const GID_B = 1001;
+const BREAK_MODE = process.env.HARNESS_ISOLATION_BREAK ?? "";
+
+if (!["", "cross-session-read"].includes(BREAK_MODE)) {
+  throw new Error(`unknown HARNESS_ISOLATION_BREAK mode: ${BREAK_MODE}`);
+}
 
 function sh(cmd) {
   execSync(cmd, { stdio: "ignore" });
@@ -80,6 +85,13 @@ function runProbe(label, { uid, gid, sandbox, sibling }) {
 }
 
 setup();
+if (BREAK_MODE === "cross-session-read") {
+  // Sensitivity fixture for HOR-484: deliberately make B traversable/readable.
+  // Running this exact image must fail the normal gate rather than masking the
+  // cross-session access. The Make negative target expects the non-zero exit.
+  sh(`chmod 0755 ${B} ${B}/session && chmod 0644 ${B}/session/secret.txt`);
+  console.log("INTENTIONAL BREAK: sandbox B is readable by session A");
+}
 
 const a = await runProbe("probe A (sandbox=A, sibling=B)", {
   uid: UID_A,

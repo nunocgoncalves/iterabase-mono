@@ -59,8 +59,8 @@ test-unit: ## Run unit tests (skips integration/Docker tests via -short).
 	go test -short -race -count=1 ./...
 
 .PHONY: test
-test: manifests generate fmt vet setup-envtest ## Run tests (unit + envtest + integration).
-	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test ./... -coverprofile cover.out
+test: manifests generate fmt vet setup-envtest ## Run tests (unit + envtest + integration) fresh, without cached results.
+	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test -count=1 -coverprofile cover.out ./...
 
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter
@@ -234,10 +234,20 @@ harness-lint: ## Typecheck the harness (tsc --noEmit).
 harness-image: ## Build the harness container image.
 	$(CONTAINER_TOOL) build -t $(HARNESS_IMG) -f harness/Dockerfile harness/
 
-.PHONY: harness-isolation-test
-harness-isolation-test: ## Run the Linux sandbox isolation tests (setpriv launcher + per-session UID isolation) in a container. HOR-381 gate (bullets 1-5).
+.PHONY: harness-isolation-image harness-isolation-test harness-isolation-negative-test
+harness-isolation-image: ## Build the Linux sandbox isolation fixture image.
 	$(CONTAINER_TOOL) build -t $(HARNESS_ISOLATION_IMG) -f harness/isolation/Dockerfile harness/
+
+harness-isolation-test: harness-isolation-image ## Require the Linux setpriv/UID/filesystem and fresh-process isolation gate; missing container/kernel prerequisites fail.
 	$(CONTAINER_TOOL) run --rm $(HARNESS_ISOLATION_IMG)
+
+harness-isolation-negative-test: harness-isolation-image ## Prove an intentional cross-session access break fails the real isolation gate.
+	@if $(CONTAINER_TOOL) run --rm -e HARNESS_ISOLATION_BREAK=cross-session-read $(HARNESS_ISOLATION_IMG); then \
+		echo "intentional cross-session access break unexpectedly passed"; \
+		exit 1; \
+	else \
+		echo "intentional cross-session access break failed the isolation gate as expected"; \
+	fi
 
 ##@ Tool runner (Node 24 trusted gateway runner — HOR-397)
 

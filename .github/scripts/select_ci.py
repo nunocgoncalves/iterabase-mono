@@ -128,6 +128,7 @@ def selection(paths: list[str], select_all: bool = False) -> dict[str, object]:
                 is_ui = relative.startswith("ui/")
                 is_harness = relative.startswith("harness/")
                 is_tool_runner = relative.startswith("tool-runner/")
+                is_component_makefile = relative == "Makefile"
                 is_proto = relative.startswith("proto/") or relative in {
                     "buf.gen.yaml",
                     "buf.gateway.gen.yaml",
@@ -137,12 +138,14 @@ def selection(paths: list[str], select_all: bool = False) -> dict[str, object]:
                 )
 
                 selected["ui"] |= is_ui
-                selected["harness"] |= is_harness or is_proto
+                selected["harness"] |= is_harness or is_proto or is_component_makefile
                 selected["tool_runner"] |= is_tool_runner or is_proto
                 selected["proto"] |= is_proto
-                selected["control_plane"] |= not (is_harness or is_tool_runner)
+                selected["control_plane"] |= is_component_makefile or not (
+                    is_harness or is_tool_runner
+                )
 
-                if is_ui or not (is_harness or is_tool_runner):
+                if is_ui or is_component_makefile or not (is_harness or is_tool_runner):
                     selected_images.add("control-plane")
                 if is_harness:
                     selected_images.add("control-plane-harness")

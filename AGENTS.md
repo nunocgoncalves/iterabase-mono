@@ -49,7 +49,7 @@ Use root targets for atomic checks and component targets while working inside on
 ```bash
 make workspace-check  # go work sync freshness + every module's go list
 make build            # production Go binaries, preserving component outputs
-make test             # component Go tests + Forge nested E2E harness tests
+make test             # component tests + required Linux harness isolation + Forge E2E harness tests
 make lint             # all Go modules, including Forge E2E
 make codegen-check    # protobuf freshness
 make charts-check     # Helm/static chart validation

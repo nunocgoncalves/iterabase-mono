@@ -149,6 +149,9 @@ jobs:
       - name: Unit and native transport integration tests
         run: make harness-test
         working-directory: control-plane
+      - name: Required Linux process and UID isolation gate (no skip)
+        run: make harness-isolation-test
+        working-directory: control-plane
 
   tool-runner:
     name: tool-runner

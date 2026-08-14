@@ -16,7 +16,7 @@ Branch protection therefore does not depend on a changing matrix job name.
 | --- | --- | --- |
 | control-plane `ci / ci` (format, lint, build, unit, integration, envtest) | `CI / control-plane` | Ported |
 | control-plane `ci / ui` | `CI / dashboard` | Ported |
-| control-plane `ci / harness` | `CI / harness` | Ported |
+| control-plane `ci / harness` | `CI / harness` | Ported; includes required Linux setpriv/UID/process isolation |
 | control-plane `ci / tool-runner` | `CI / tool-runner` | Ported |
 | control-plane `ci / proto` | `CI / protobuf` | Ported |
 | inference-gateway `ci / ci` (format/imports, vet, lint, build, testcontainers tests) | `CI / inference-gateway` | Ported |
@@ -59,7 +59,11 @@ single-component, shared-contract, and cross-component changes.
 - Root Makefile, Go workspace metadata, affected-target selector code, shared setup actions, and PR/E2E workflow contracts fan out to every owner.
 - Release candidate/promotion/rehearsal implementation, target metadata, and component `VERSION` files run focused release contract checks and do not select unrelated product images, Kind scenarios, or CPU/GPU suites.
 - Control-plane UI, harness, tool-runner, and protobuf contracts select their
-  focused checks. Protobuf changes fan out to both generated Node consumers.
+  focused checks. The selected harness job always executes the Linux
+  setpriv/UID/process isolation container; missing Docker/kernel prerequisites
+  fail rather than skip. `control-plane/Makefile` selects both control-plane and
+  harness gates so edits to the required target cannot bypass execution.
+  Protobuf changes fan out to both generated Node consumers.
 - Forge source/E2E changes retain the existing Forge unit, real-machine, and
   deterministic Kind gates.
 - Chart changes run chart static/runtime checks and the current local-chart Kind
@@ -96,6 +100,9 @@ and cache restore.
 
 Kind clusters, databases, mutable fixtures, vendored/generated outputs, test
 results, credentials, customer data, and release evidence are never cached.
+Full control-plane Go validation uses `-count=1`, so restored build caches cannot
+substitute cached test results. The root `make test` matrix also runs the Linux
+harness isolation container and therefore requires Docker.
 Failure logs remain in job output. Cluster state and credentials are not retained
 as cache or artifact data.
 

@@ -161,15 +161,18 @@ make harness-build        # tsc -> dist
 make harness-test         # vitest (unit + router-transport integration)
 make harness-lint         # tsc --noEmit
 make harness-image        # build the worker image
-make harness-isolation-test   # Linux container: setpriv launcher + per-UID isolation (bullets 1-5)
+make harness-isolation-test   # required Linux container gate: setpriv + per-UID/process isolation
+make harness-isolation-negative-test # prove an intentional cross-session access break is detected
 ```
 
 Generated `src/gen/` + `internal/harnessrpc/` are committed; `make proto-check`
 (CI) guards freshness. Tests: TS unit + router-transport integration (mock CP)
-for the protocol/supervisor/outbox/child-process; the Linux-container isolation
-gate (setpriv + per-session UID `EACCES`). The Go mTLS test server (real
-TS-client ↔ Go-server wire) + the sequential pi-extension-state isolation test
-land as follow-ups. E2E (real turn) is HOR-249/HOR-245 integration.
+for the protocol/supervisor/outbox/child-process; the required, non-skippable
+Linux-container isolation gate (setpriv + per-session UID `EACCES`) runs in the
+selected harness CI job and the root `make test` matrix. `make harness-test`
+also runs the native Go mTLS test server (real TS-client ↔ Go-server wire), and
+the isolation container's second phase proves sequential process-state isolation
+and PVC-only restoration. E2E (real turn) is HOR-249/HOR-245 integration.
 
 ## Sequencing
 

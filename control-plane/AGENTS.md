@@ -19,6 +19,7 @@ make fmt-check
 make proto-check        # lint/regenerate protobufs and verify freshness
 make ui-test
 make harness-test
+make harness-isolation-test # required Linux setpriv/UID/filesystem gate; needs Docker
 make tool-runner-test
 make docker-build       # control-plane image
 ```
