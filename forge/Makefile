@@ -55,8 +55,10 @@ test-e2e-gpu-broken-policy:
 	cat "$$output"; \
 	if [ "$$status" -eq 0 ]; then echo "broken deleteEmptyDir policy unexpectedly passed" >&2; exit 1; fi; \
 	grep -Fq 'building intentional HOR-411 mutation with deleteEmptyDir=false' "$$output"; \
-	grep -Fq 'upgrade-failed' "$$output"; \
-	grep -Eq 'cannot delete Pods with local storage|use --delete-emptydir-data' "$$output"
+	grep -Fq 'baseline GPU workload ready:' "$$output"; \
+	grep -Fq 'deleteEmptyDir: false' "$$output"; \
+	grep -Fq 'pod-deletion-required' "$$output"; \
+	grep -Fq 'upgrade-failed' "$$output"
 
 # Compatibility alias: real inference now follows GPU smoke on the same VM.
 test-e2e-inference-gpu: test-e2e-gpu
