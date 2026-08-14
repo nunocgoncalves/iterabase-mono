@@ -56,26 +56,27 @@ func (collector Collector) Collect(ctx context.Context) error {
 		"namespaces,nodes,pods,deployments,statefulsets,daemonsets,jobs,services,endpointslices,ingresses,persistentvolumeclaims",
 		"-A", "-o", "yaml")
 	kube("kubernetes-events", "get", "events", "-A", "--sort-by=.lastTimestamp", "-o", "yaml")
-	podsJSON := kube("kubernetes-pods", "get", "pods", "-A", "-o", "json")
+	// Parse only namespace/name pairs. Redacting a full Pod JSON document before
+	// parsing can intentionally rewrite credential-shaped fields inside pod specs
+	// and make otherwise valid JSON malformed. Names are sufficient to drive the
+	// subsequent describe/log collection and cannot contain secret values.
+	podNames := kube("kubernetes-pods", "get", "pods", "-A", "-o", `jsonpath={range .items[*]}{.metadata.namespace}{"\t"}{.metadata.name}{"\n"}{end}`)
 	helmJSON := helm("helm-list", "list", "-A", "-o", "json")
 
-	var pods struct {
-		Items []struct {
-			Metadata struct {
-				Name      string `json:"name"`
-				Namespace string `json:"namespace"`
-			} `json:"metadata"`
-		} `json:"items"`
-	}
-	if err := json.Unmarshal([]byte(podsJSON), &pods); err != nil {
-		collected = append(collected, fmt.Errorf("decode pods for diagnostics: %w", err))
-	} else {
-		for _, pod := range pods.Items {
-			base := safeName(pod.Metadata.Namespace + "-" + pod.Metadata.Name)
-			kube("describe-"+base, "describe", "pod", pod.Metadata.Name, "-n", pod.Metadata.Namespace)
-			kube("logs-"+base, "logs", pod.Metadata.Name, "-n", pod.Metadata.Namespace, "--all-containers", "--prefix", "--tail=500")
-			kube("logs-previous-"+base, "logs", pod.Metadata.Name, "-n", pod.Metadata.Namespace, "--all-containers", "--prefix", "--previous", "--tail=500")
+	for _, line := range strings.Split(strings.TrimSpace(podNames), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
 		}
+		if len(fields) != 2 {
+			collected = append(collected, fmt.Errorf("decode pod identity %q", line))
+			continue
+		}
+		namespace, name := fields[0], fields[1]
+		base := safeName(namespace + "-" + name)
+		kube("describe-"+base, "describe", "pod", name, "-n", namespace)
+		kube("logs-"+base, "logs", name, "-n", namespace, "--all-containers", "--prefix", "--tail=500")
+		kube("logs-previous-"+base, "logs", name, "-n", namespace, "--all-containers", "--prefix", "--previous", "--tail=500")
 	}
 
 	var releases []struct {

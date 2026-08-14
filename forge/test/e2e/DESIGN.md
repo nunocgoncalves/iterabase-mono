@@ -50,11 +50,9 @@ The inference path depends on GPU readiness, so a second VM/operator installatio
 
 - `kind-controlplane-identity`: standalone control-plane chart and identity/JWT contract.
 - `kind-inference-contract`: umbrella cross-service catalog/auth contract.
-- `kind-cert-issuers`: minimal cert-manager/self-signed issuer values contract.
-- `kind-internal-tls`: two-phase Helm transition and live internal transport contract.
 - `kind-tool-runner-contract`: exact Flux artifact materialization through the chart-managed Node runner, mTLS gateway registration, and pinned generation drain using the monorepo-local control-plane/charts builds.
 
-These remain isolated because clean chart installation, cluster-scoped CRDs/issuers, hooks, and value combinations are part of what they test. Sharing a cluster could mask missing resources or leak state between releases.
+These remain isolated because clean chart installation and contract-specific state are part of what they test. Sharing a cluster could mask missing resources or leak state between releases. Certificate substrate, issuer, internal-TLS, and observability chart authority moved to the chart-owned compiled suite in `charts/test/e2e` under HOR-416.
 
 ## Coverage mapping
 
@@ -70,8 +68,8 @@ These remain isolated because clean chart installation, cluster-scoped CRDs/issu
 | `TestInferenceFlowGPU` | `digitalocean-gpu/apply-platform`, `run-real-inference` | real control-plane/vLLM/gateway completion |
 | `TestControlPlaneIdentity` | `kind-controlplane-identity` | unchanged, fresh Kind cluster |
 | `TestInferenceFlowContract` | `kind-inference-contract` | unchanged plus restored PermissionPolicy materialization |
-| `TestCertIssuers` | `kind-cert-issuers` | unchanged, fresh Kind cluster |
-| `TestInternalTLS` | `kind-internal-tls` | unchanged, fresh Kind cluster |
+| `TestCertIssuers` | `charts/fresh-install` | migrated to chart authority; issuer and CSI identity on fresh Kind |
+| `TestInternalTLS` | `charts/internal-tls` | migrated to chart authority; verified HTTPS plus rejected plaintext datastore transport |
 | HOR-397 cross-component acceptance | `kind-tool-runner-contract` | Flux artifact → materializer → runner → mTLS registration → pinned drain |
 
 ## CI

@@ -62,6 +62,9 @@ spec:
   duration: 2160h
   renewBefore: 360h
   dnsNames:
+    # Grafana's co-located provisioning sidecars call the pod-local server while
+    # validating this exact identity against the same internal CA.
+    - localhost
     - {{ printf "%s-grafana" .Release.Name }}
     - {{ printf "%s-grafana.%s" .Release.Name $ns }}
     - {{ printf "%s-grafana.%s.svc" .Release.Name $ns }}

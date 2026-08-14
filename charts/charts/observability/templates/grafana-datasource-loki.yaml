@@ -24,10 +24,8 @@ data:
         jsonData:
           maxLines: 1000
           {{- if (dig "internalTLS" "enabled" false (.Values.global | default (dict))) }}
-          # The internal CA is cert-manager-generated; mounting it into Grafana for
-          # proper datasource CA verification is a fast-follow. The connection is
-          # still TLS-encrypted (in-cluster).
-          tlsSkipVerify: true
+          # Grafana's process trust store contains the generated internal CA.
+          tlsSkipVerify: false
           {{- end }}
 {{- end }}
 {{- end }}

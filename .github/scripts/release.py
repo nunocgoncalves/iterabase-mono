@@ -358,6 +358,7 @@ def scenario_matrix(scenarios: list[dict[str, Any]], tier: str) -> list[dict[str
         matrix.append(
             {
                 "id": scenario["id"],
+                "owner": scenario["suite"]["owner"],
                 "name": metadata.get("capacity") or name,
                 "target": metadata["make_target"],
                 "timeout": metadata["timeout_minutes"],
@@ -444,7 +445,17 @@ def make_plan(
 
     source_suites = source_suites_for_targets(selected)
     scenarios = release_scenarios(compiled_catalogue, selected)
-    kind_matrix = scenario_matrix(scenarios, "F2")
+    chart_runtime = any(target.endswith("-chart") for target in selected)
+    # Chart releases run the chart owner's complete candidate matrix through the
+    # reusable charts-runtime workflow. Image-only releases still select any
+    # chart-owned F2 scenario that names the image target in the generic exact-
+    # candidate matrix, without duplicating chart-release jobs.
+    kind_scenarios = [
+        scenario
+        for scenario in scenarios
+        if not (chart_runtime and scenario["suite"]["owner"] == "charts")
+    ]
+    kind_matrix = scenario_matrix(kind_scenarios, "F2")
     real_machine_matrix = scenario_matrix(scenarios, "F3")
 
     # Derive product baselines from every artifact-backed runtime fixture in the
@@ -454,7 +465,14 @@ def make_plan(
     selected_set = set(selected)
     scenario_names = {scenario["metadata"]["name"] for scenario in scenarios}
     control_scenarios = {"kind-controlplane-identity", "kind-tool-runner-contract"}
-    platform_scenarios = {"kind-inference-contract", "kind-cert-issuers", "kind-internal-tls"}
+    platform_scenarios = {
+        "kind-inference-contract",
+        "certificate-ownership-migration",
+        "fresh-install",
+        "observability",
+        "observability-tls",
+        "internal-tls",
+    }
     real_machine = bool(real_machine_matrix)
     uses_control_chart = bool(control_scenarios.intersection(scenario_names))
     uses_platform_chart = bool(platform_scenarios.intersection(scenario_names)) or real_machine
@@ -591,7 +609,7 @@ def make_plan(
         "kind_matrix": kind_matrix,
         "real_machine_matrix": real_machine_matrix,
         "real_machine": real_machine,
-        "chart_runtime": any(target.endswith("-chart") for target in selected),
+        "chart_runtime": chart_runtime,
         "image_matrix": images,
         "chart_matrix": chart_matrix,
         "forge": "forge" in selected,

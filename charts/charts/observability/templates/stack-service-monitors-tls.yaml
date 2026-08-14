@@ -1,0 +1,124 @@
+{{- if .Values.enabled }}
+{{- if (dig "internalTLS" "enabled" false (.Values.global | default (dict))) }}
+{{- $ns := .Release.Namespace }}
+{{- $release := .Release.Name }}
+{{- if (index .Values "kube-prometheus-stack" "enabled") }}
+# The upstream self-monitors assign one scheme to both the TLS-enabled server
+# and the plaintext config-reloader port. Own the mixed protocol explicitly:
+# product endpoints verify the generated internal CA and exact Service DNS;
+# config-reloader remains on its native HTTP-only metrics port.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ $release }}-prometheus-internal-tls
+  labels:
+    {{- include "observability.labels" . | nindent 4 }}
+spec:
+  namespaceSelector:
+    matchNames: [{{ $ns | quote }}]
+  selector:
+    matchLabels:
+      app: kube-prometheus-stack-prometheus
+      release: {{ $release | quote }}
+  endpoints:
+    - port: http-web
+      path: /metrics
+      scheme: https
+      tlsConfig:
+        ca:
+          secret:
+            name: observability-prometheus-tls
+            key: ca.crt
+        serverName: {{ printf "%s-kube-prometheus-prometheus.%s.svc" $release $ns | quote }}
+        insecureSkipVerify: false
+    - port: reloader-web
+      path: /metrics
+      scheme: http
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ $release }}-alertmanager-internal-tls
+  labels:
+    {{- include "observability.labels" . | nindent 4 }}
+spec:
+  namespaceSelector:
+    matchNames: [{{ $ns | quote }}]
+  selector:
+    matchLabels:
+      app: kube-prometheus-stack-alertmanager
+      release: {{ $release | quote }}
+  endpoints:
+    - port: http-web
+      path: /metrics
+      scheme: https
+      tlsConfig:
+        ca:
+          secret:
+            name: observability-alertmanager-tls
+            key: ca.crt
+        serverName: {{ printf "%s-kube-prometheus-alertmanager.%s.svc" $release $ns | quote }}
+        insecureSkipVerify: false
+    - port: reloader-web
+      path: /metrics
+      scheme: http
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ $release }}-grafana-internal-tls
+  labels:
+    {{- include "observability.labels" . | nindent 4 }}
+spec:
+  namespaceSelector:
+    matchNames: [{{ $ns | quote }}]
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: grafana
+      app.kubernetes.io/instance: {{ $release }}
+  endpoints:
+    - port: http-web
+      path: /metrics
+      scheme: https
+      tlsConfig:
+        ca:
+          secret:
+            name: observability-grafana-tls
+            key: ca.crt
+        serverName: {{ printf "%s-grafana.%s.svc" $release $ns | quote }}
+        insecureSkipVerify: false
+{{- end }}
+{{- if .Values.loki.enabled }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ $release }}-loki-internal-tls
+  labels:
+    {{- include "observability.labels" . | nindent 4 }}
+spec:
+  namespaceSelector:
+    matchNames: [{{ $ns | quote }}]
+  selector:
+    matchLabels:
+      iterabase.com/observability-backend: loki
+    matchExpressions:
+      # The Loki chart propagates singleBinary.service.labels to its shared
+      # headless Service. That Service also selects the HTTP-only canary; only
+      # the release-scoped client Service is the TLS backend identity.
+      - key: variant
+        operator: DoesNotExist
+  endpoints:
+    - port: http-metrics
+      path: /metrics
+      scheme: https
+      tlsConfig:
+        ca:
+          secret:
+            name: observability-loki-tls
+            key: ca.crt
+        serverName: {{ printf "%s-loki.%s.svc" $release $ns | quote }}
+        insecureSkipVerify: false
+{{- end }}
+{{- end }}
+{{- end }}

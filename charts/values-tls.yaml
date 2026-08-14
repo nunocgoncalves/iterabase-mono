@@ -24,6 +24,11 @@ reloader:
 observability:
   kube-prometheus-stack:
     prometheus:
+      # The observability chart renders a mixed-protocol self-monitor: the
+      # Prometheus endpoint is verified HTTPS while config-reloader remains on
+      # its native HTTP port. Disable the upstream all-one-scheme monitor.
+      serviceMonitor:
+        selfMonitor: false
       prometheusSpec:
         web:
           tlsConfig:
@@ -35,18 +40,23 @@ observability:
               name: observability-prometheus-tls
               key: tls.key
     alertmanager:
+      # As with Prometheus, the chart-owned monitor keeps the HTTPS server and
+      # HTTP config-reloader endpoints explicit rather than assigning one scheme
+      # to both ports.
+      serviceMonitor:
+        selfMonitor: false
       alertmanagerSpec:
-        # Serve HTTPS (web.tlsConfig above) AND make Prometheus alert it over
-        # HTTPS. kps wires alertmanagerSpec.scheme/tlsConfig onto the Prometheus
-        # alerting endpoint (templates/prometheus/prometheus.yaml), so Prometheus
-        # talks TLS to Alertmanager instead of plaintext->HTTPS (which silently
-        # drops every alert when internalTLS is on). insecureSkipVerify because
-        # the internal CA is cert-manager-generated (mounting it into Prometheus
-        # for verification is a fast-follow); the connection is still TLS-
-        # encrypted in-cluster.
+        # Prometheus verifies Alertmanager against the generated internal CA and
+        # the exact release Service identity. This is trust evidence, not merely
+        # encryption.
         scheme: https
         tlsConfig:
-          insecureSkipVerify: true
+          ca:
+            secret:
+              name: observability-alertmanager-tls
+              key: ca.crt
+          serverName: iterabase-kube-prometheus-alertmanager.iterabase-system.svc
+          insecureSkipVerify: false
         web:
           tlsConfig:
             cert:
@@ -57,26 +67,48 @@ observability:
               name: observability-alertmanager-tls
               key: tls.key
     grafana:
-      # Disable the kps default http:// Prometheus + Alertmanager datasources;
-      # the observability chart renders https:// ones (same uids) when TLS is on.
+      # Disable the upstream HTTP self-monitor and default datasources. The
+      # observability chart owns their verified-HTTPS replacements.
+      serviceMonitor:
+        enabled: false
       sidecar:
         datasources:
           defaultDatasourceEnabled: false
           alertmanager:
             enabled: false
-      # Serve HTTPS via GF_SERVER_* env vars (override grafana.ini); the cert is
-      # mounted from the chart-rendered Certificate via extraSecretMounts (the
-      # grafana chart's extraVolumes does not support secret volumes).
+          reloadURL: https://localhost:3000/api/admin/provisioning/datasources/reload
+          # Grafana can start after the sidecar's initial list. Keep that
+          # one-shot reload request alive until the HTTPS listener is Ready.
+          maxTotalRetries: 10
+          maxConnectRetries: 10
+          env:
+            REQUESTS_CA_BUNDLE: /etc/grafana/tls/ca.crt
+          extraMounts:
+            - name: grafana-tls
+              mountPath: /etc/grafana/tls
+              readOnly: true
+        dashboards:
+          reloadURL: https://localhost:3000/api/admin/provisioning/dashboards/reload
+          maxTotalRetries: 10
+          maxConnectRetries: 10
+          env:
+            REQUESTS_CA_BUNDLE: /etc/grafana/tls/ca.crt
+          extraMounts:
+            - name: grafana-tls
+              mountPath: /etc/grafana/tls
+              readOnly: true
+      # Serve HTTPS and add the generated CA to Grafana's process trust store so
+      # datasource health checks validate the actual Service identities.
       env:
         GF_SERVER_PROTOCOL: https
         GF_SERVER_CERT_FILE: /etc/grafana/tls/tls.crt
         GF_SERVER_CERT_KEY: /etc/grafana/tls/tls.key
+        SSL_CERT_FILE: /etc/grafana/tls/ca.crt
       extraSecretMounts:
         - name: grafana-tls
           secretName: observability-grafana-tls
           mountPath: /etc/grafana/tls
           readOnly: true
-      # Probes must use HTTPS once GF_SERVER_PROTOCOL=https (default is HTTP).
       readinessProbe:
         httpGet:
           path: /api/health
@@ -87,19 +119,28 @@ observability:
           path: /api/health
           port: grafana
           scheme: HTTPS
-  # Promtail pushes to Loki over HTTPS when internalTLS is on (Loki serves
-  # HTTPS via the leaf cert above). The default http:// client URL in the
-  # observability chart's values.yaml is overridden here with an https:// URL +
-  # tls_config (insecure_skip_verify: the internal CA is cert-manager-generated;
-  # the push is still TLS-encrypted). Without this, promtail->Loki is plaintext-
-  # >HTTPS and no workload logs reach Loki under TLS. Only applied with this TLS
-  # preset, so the plaintext kind path (values-observability.yaml) is untouched.
+  # Promtail verifies Loki against the internal CA and the release-scoped
+  # Service DNS identity. The CA comes from the Loki leaf Secret and is mounted
+  # read-only; no insecure positive path remains.
   promtail:
+    extraVolumes:
+      - name: internal-ca
+        secret:
+          secretName: observability-loki-tls
+          items:
+            - key: ca.crt
+              path: ca.crt
+    extraVolumeMounts:
+      - name: internal-ca
+        mountPath: /etc/iterabase/internal-ca
+        readOnly: true
     config:
       clients:
         - url: https://{{ .Release.Name }}-loki:3100/loki/api/v1/push
           tls_config:
-            insecure_skip_verify: true
+            ca_file: /etc/iterabase/internal-ca/ca.crt
+            server_name: '{{ .Release.Name }}-loki.{{ .Release.Namespace }}.svc'
+            insecure_skip_verify: false
   loki:
     # structuredConfig lives under the loki chart's nested `loki:` value
     # (.Values.loki.structuredConfig), so the path from the observability chart
@@ -125,6 +166,9 @@ observability:
             cert_file: /etc/loki/tls/tls.crt
             key_file: /etc/loki/tls/tls.key
     singleBinary:
+      service:
+        labels:
+          iterabase.com/observability-backend: loki
       extraVolumes:
         - name: loki-tls
           secret:
@@ -132,4 +176,23 @@ observability:
       extraVolumeMounts:
         - name: loki-tls
           mountPath: /etc/loki/tls
+          readOnly: true
+    gateway:
+      nginxConfig:
+        schema: https
+        locationSnippet: |-
+          proxy_ssl_trusted_certificate /etc/iterabase/internal-ca/ca.crt;
+          proxy_ssl_verify on;
+          proxy_ssl_server_name on;
+          proxy_ssl_name {{ .Release.Name }}-loki.{{ .Release.Namespace }}.svc.cluster.local;
+      extraVolumes:
+        - name: internal-ca
+          secret:
+            secretName: observability-loki-tls
+            items:
+              - key: ca.crt
+                path: ca.crt
+      extraVolumeMounts:
+        - name: internal-ca
+          mountPath: /etc/iterabase/internal-ca
           readOnly: true

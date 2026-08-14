@@ -17,8 +17,8 @@ func (executor *fixtureExecutor) Run(_ context.Context, command process.Command)
 	executor.commands = append(executor.commands, command)
 	joined := strings.Join(command.Args, " ")
 	switch {
-	case strings.Contains(joined, "get pods -A -o json"):
-		return process.Result{Output: `{"items":[{"metadata":{"name":"api-0","namespace":"iterabase-system"}}]}`}, nil
+	case strings.Contains(joined, "get pods -A -o jsonpath="):
+		return process.Result{Output: "iterabase-system\tapi-0\n"}, nil
 	case command.Name == "helm" && strings.Contains(joined, "list -A -o json"):
 		return process.Result{Output: `[{"name":"platform","namespace":"iterabase-system"}]`}, nil
 	default:

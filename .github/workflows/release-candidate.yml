@@ -539,7 +539,10 @@ jobs:
       - uses: ./.github/actions/setup-go
         with:
           go-version: 1.26.5
-          cache-dependency-path: forge/test/e2e/go.sum
+          cache-dependency-path: |
+            forge/test/e2e/go.sum
+            charts/test/e2e/go.mod
+            testkit/e2e/go.mod
           cache-scope: candidate-kind-${{ matrix.name }}
       - uses: ./.github/actions/setup-kubernetes-tools
       - run: .github/scripts/add_helm_repositories.sh
@@ -548,11 +551,12 @@ jobs:
           .github/scripts/prepare_candidate_runtime.sh
           candidate-plan.json candidates "$GITHUB_ENV"
       - name: Run candidate-backed scenario
-        working-directory: forge
+        working-directory: ${{ matrix.owner }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ITERABASE_E2E_FIXTURE_MODE: candidate
           ITERABASE_E2E_CANDIDATE_PLAN: ${{ github.workspace }}/candidate-plan.json
+          E2E_SKIP_BUILD_DEPS: ${{ matrix.owner == 'charts' && 'true' || 'false' }}
         run: make ${{ matrix.target }}
 
   real-machine-candidates:

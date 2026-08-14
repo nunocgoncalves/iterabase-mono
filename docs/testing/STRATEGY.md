@@ -123,7 +123,7 @@ A normal F2 failure bundle includes cluster resources, events, pod describes, cu
 
 Pull requests run affected owner checks and deterministic selected E2E. Changes to `testkit/e2e`, catalogue discovery, or shared CI selection fan out conservatively because they can invalidate every owner and release decision. Required checks do not silently skip selected deterministic scenarios.
 
-Release planning takes an explicit non-empty target set and selects the union of every compiled scenario whose `release_targets` intersects it. It does not use changed-file narrowing. The compiled metadata supplies Kind and real-machine Make targets, bounds, and capacity requirements. Target source checks and current chart-runtime jobs remain mechanically derived from target kind until their owner scenarios migrate under HOR-416.
+Release planning takes an explicit non-empty target set and selects the union of every compiled scenario whose `release_targets` intersects it. It does not use changed-file narrowing. The compiled metadata supplies owner, Kind and real-machine Make targets, bounds, and capacity requirements. Chart releases execute the chart owner's complete exact-candidate matrix through the reusable chart workflow; image-only releases can select chart-owned scenarios through the owner-aware generic candidate matrix without duplicating chart-release jobs.
 
 The release gate preserves these invariants:
 
