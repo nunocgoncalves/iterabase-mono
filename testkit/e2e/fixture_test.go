@@ -25,11 +25,17 @@ func TestFixtureValidationRejectsFloatingAndIncompleteInputs(t *testing.T) {
 
 func TestFixtureFromEnvRecordsSourceAndPublishedModes(t *testing.T) {
 	t.Run("source", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "source-inputs.json")
+		data := `{"mode":"published","inputs":[{"name":"platform","kind":"published-chart","reference":"oci://example/platform:1.2.3"}]}`
+		if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
 		t.Setenv(fixtureModeEnv, string(FixtureSource))
 		t.Setenv(fixtureSourceSHAEnv, strings.Repeat("a", 40))
 		t.Setenv(fixtureSourceDirtyEnv, "true")
+		t.Setenv(fixtureSourceInputsFileEnv, path)
 		fixture := FixtureFromEnv(t)
-		if fixture.Mode != FixtureSource || !fixture.Dirty || fixture.SourceSHA != strings.Repeat("a", 40) {
+		if fixture.Mode != FixtureSource || !fixture.Dirty || fixture.SourceSHA != strings.Repeat("a", 40) || len(fixture.Inputs) != 1 {
 			t.Fatalf("source fixture = %+v", fixture)
 		}
 	})

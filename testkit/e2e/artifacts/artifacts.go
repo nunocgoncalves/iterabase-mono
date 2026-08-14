@@ -43,7 +43,7 @@ func Collect(entries []Entry, destination string, redactor *redact.Redactor) err
 	seen := make(map[string]struct{}, len(entries))
 	for _, entry := range entries {
 		clean := filepath.Clean(entry.Name)
-		if clean == "." || filepath.IsAbs(clean) || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+		if clean == "." || clean == ".." || filepath.IsAbs(clean) || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
 			return fmt.Errorf("invalid artifact name %q", entry.Name)
 		}
 		if _, exists := seen[clean]; exists {

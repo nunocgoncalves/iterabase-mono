@@ -53,13 +53,14 @@ test:
 	$(MAKE) testkit-test
 	$(MAKE) -C control-plane ui-deps ui-test harness-deps harness-test harness-isolation-test tool-runner-deps tool-runner-test test
 	$(MAKE) -C inference-gateway test
-	$(MAKE) -C forge test test-e2e-unit
+	$(MAKE) -C forge test
 
 # Shared mechanics, every owner entrypoint example, and compiled catalogue.
 testkit-test:
 	cd testkit/e2e && go test -race -count=1 ./...
 	$(MAKE) -C control-plane test-e2e-unit
 	$(MAKE) -C charts test-e2e-unit
+	$(MAKE) -C forge test-e2e-unit
 	go run ./testkit/e2e/cmd/e2e-catalogue --format json --output /tmp/iterabase-e2e-catalogue.json
 	go run ./testkit/e2e/cmd/e2e-catalogue --format markdown --output /tmp/iterabase-e2e-catalogue.md
 
