@@ -290,7 +290,7 @@ func waitForGPUUpgradeNode(t *testing.T, state *digitalOceanGPUState, previousUI
 	t.Helper()
 	// A containerized driver replacement briefly restarts k3s on this single
 	// node. Observe that expected unavailable state through SSH, then parse one
-	// coherent node/workload snapshot only after the API is serving again. The
+	// coherent node/workload/operator snapshot only after the API is serving again. The
 	// replacement pod UID prevents the baseline upgrade-done label from being
 	// mistaken for completion before the upgrade controller starts its cycle.
 	const observe = `
@@ -306,10 +306,16 @@ pods="$(sudo k3s kubectl --request-timeout=15s get pods -n forge-gpu-upgrade -l 
   echo __K3S_NOT_READY__
   exit 0
 }
+policies="$(sudo k3s kubectl --request-timeout=15s get clusterpolicy -o json 2>/dev/null)" || {
+  echo __K3S_NOT_READY__
+  exit 0
+}
 echo __K3S_READY__
 printf '%s' "$nodes" | base64 -w0
 printf '\n'
 printf '%s' "$pods" | base64 -w0
+printf '\n'
+printf '%s' "$policies" | base64 -w0
 printf '\n'
 `
 	deadline := time.Now().Add(timeout)
@@ -323,13 +329,15 @@ printf '\n'
 			time.Sleep(5 * time.Second)
 			continue
 		}
-		if len(lines) != 3 || lines[0] != "__K3S_READY__" {
+		if len(lines) != 4 || lines[0] != "__K3S_READY__" {
 			t.Fatalf("unexpected GPU upgrade observation response: %q", out)
 		}
 		var nodes corev1.NodeList
 		decodeGPUUpgradeSnapshot(t, lines[1], &nodes)
 		var pods corev1.PodList
 		decodeGPUUpgradeSnapshot(t, lines[2], &pods)
+		var policies unstructured.UnstructuredList
+		decodeGPUUpgradeSnapshot(t, lines[3], &policies)
 		if len(nodes.Items) != 1 {
 			t.Fatalf("GPU upgrade fixture has %d nodes, want 1", len(nodes.Items))
 		}
@@ -345,7 +353,15 @@ printf '\n'
 				break
 			}
 		}
-		if upgradeState == "upgrade-done" && !node.Spec.Unschedulable && nodeReady(node) && recreatedReady {
+		policyReady := false
+		if len(policies.Items) == 1 {
+			policyState, found, stateErr := unstructured.NestedString(policies.Items[0].Object, "status", "state")
+			if stateErr != nil {
+				t.Fatalf("read ClusterPolicy readiness during GPU upgrade: %v", stateErr)
+			}
+			policyReady = found && policyState == "ready"
+		}
+		if upgradeState == "upgrade-done" && !node.Spec.Unschedulable && nodeReady(node) && recreatedReady && policyReady {
 			return
 		}
 		time.Sleep(5 * time.Second)
