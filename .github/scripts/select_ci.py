@@ -119,6 +119,22 @@ def selection(paths: list[str], select_all: bool = False) -> dict[str, object]:
                 )
                 continue
 
+            # Shared E2E mechanics and catalogue discovery can invalidate every
+            # owner and release-suite selection, so they deliberately fan out.
+            if path.startswith("testkit/e2e/"):
+                for name in OUTPUTS:
+                    selected[name] = True
+                selected_images.update(
+                    {
+                        "control-plane",
+                        "control-plane-harness",
+                        "control-plane-harness-isolation",
+                        "control-plane-tool-runner",
+                        "inference-gateway",
+                    }
+                )
+                continue
+
             # Generated release records are evidence, not product inputs.
             if path.startswith("release/"):
                 continue

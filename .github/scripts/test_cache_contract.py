@@ -44,15 +44,18 @@ class CacheContractTests(unittest.TestCase):
         self.assertIn('files+=("$path")', action)
         self.assertIn('"${files[@]}"', action)
 
-    def test_all_workspace_sums_define_go_cache(self) -> None:
+    def test_all_workspace_dependency_manifests_define_go_cache(self) -> None:
         workflow = (ROOT / ".github/workflows/ci.yml").read_text()
-        for go_sum in (
+        for dependency in (
             "control-plane/go.sum",
             "inference-gateway/go.sum",
             "forge/go.sum",
             "forge/test/e2e/go.sum",
+            "testkit/e2e/go.mod",
+            "control-plane/test/e2e/go.mod",
+            "charts/test/e2e/go.mod",
         ):
-            self.assertIn(go_sum, workflow)
+            self.assertIn(dependency, workflow)
 
     def test_external_actions_are_commit_pinned(self) -> None:
         workflow_files = list((ROOT / ".github").glob("**/*.yml"))

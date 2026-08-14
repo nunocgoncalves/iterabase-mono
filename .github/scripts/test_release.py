@@ -17,12 +17,18 @@ SPEC.loader.exec_module(release)
 
 
 class ReleaseContractTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.catalogue = release.load_scenario_catalogue(ROOT)
+
     def setUp(self) -> None:
         self.targets = release.load_json(ROOT / "release" / "targets.json")
         self.sha = "a" * 40
 
     def plan(self, targets: str) -> dict:
-        return release.make_plan(self.targets, targets, self.sha, "123", ROOT)
+        return release.make_plan(
+            self.targets, targets, self.sha, "123", ROOT, self.catalogue
+        )
 
     def check_availability(
         self,
@@ -75,7 +81,62 @@ class ReleaseContractTests(unittest.TestCase):
             return result, commands
 
     def test_repository_contract_is_valid(self) -> None:
-        release.validate_contract(self.targets, ROOT)
+        release.validate_contract(self.targets, ROOT, self.catalogue)
+        self.assertEqual(self.targets["schema_version"], 3)
+        self.assertNotIn("suite_mapping_until", self.targets)
+        for definition in self.targets["targets"].values():
+            self.assertTrue(
+                {"source_suites", "kind_scenarios", "real_machine", "chart_runtime"}.isdisjoint(definition)
+            )
+
+    def test_compiled_catalogue_preserves_or_strengthens_every_target_suite(self) -> None:
+        expected = {
+            "control-plane": (
+                {"controlplane-identity", "inference-contract", "internal-tls", "tool-runner-contract"},
+                set(),
+            ),
+            "inference-gateway": ({"inference-contract", "internal-tls"}, set()),
+            "forge": (set(), {"cpu", "gpu"}),
+            "control-plane-chart": ({"controlplane-identity", "tool-runner-contract"}, set()),
+            "inference-gateway-chart": ({"inference-contract", "internal-tls"}, set()),
+            "iterabase-platform-chart": (
+                {"controlplane-identity", "inference-contract", "cert-issuers", "internal-tls", "tool-runner-contract"},
+                {"cpu", "gpu"},
+            ),
+        }
+        for target, (kind, real) in expected.items():
+            with self.subTest(target=target):
+                plan = self.plan(target)
+                self.assertGreaterEqual({item["name"] for item in plan["kind_matrix"]}, kind)
+                self.assertGreaterEqual(
+                    {item["name"] for item in plan["real_machine_matrix"]}, real
+                )
+                self.assertTrue(
+                    all(item["mandatory"] for item in plan["real_machine_matrix"])
+                )
+
+    def test_coordinated_release_uses_the_catalogue_union_without_narrowing(self) -> None:
+        selected = "control-plane,inference-gateway,forge,control-plane-chart,inference-gateway-chart,iterabase-platform-chart"
+        plan = self.plan(selected)
+        self.assertEqual(
+            {item["name"] for item in plan["kind_matrix"]},
+            {"controlplane-identity", "inference-contract", "cert-issuers", "internal-tls", "tool-runner-contract"},
+        )
+        self.assertEqual(
+            {item["name"] for item in plan["real_machine_matrix"]}, {"cpu", "gpu"}
+        )
+        self.assertEqual(
+            set(plan["selected_scenarios"]),
+            {
+                "forge/digitalocean-cpu",
+                "forge/digitalocean-gpu",
+                "forge/kind-controlplane-identity",
+                "forge/kind-inference-contract",
+                "forge/kind-cert-issuers",
+                "forge/kind-internal-tls",
+                "forge/kind-tool-runner-contract",
+            },
+        )
 
     def test_component_versions_are_local_authorities(self) -> None:
         self.assertEqual(release.read_version(ROOT / "control-plane" / "VERSION"), "0.0.26")
@@ -686,6 +747,14 @@ class ReleaseContractTests(unittest.TestCase):
         candidate = (ROOT / ".github" / "workflows" / "release-candidate.yml").read_text(
             encoding="utf-8"
         )
+        self.assertIn(
+            "steps.resolved.outputs.real_machine_matrix || '[{\"name\":\"cpu\"",
+            candidate,
+        )
+        legacy_plan = self.plan("forge")
+        legacy_plan.pop("real_machine_matrix")
+        selected = release.candidate_job_selection(legacy_plan)
+        self.assertTrue(selected["real-machine-candidates"])
         validation = candidate.split("  validation:\n", 1)[1].split("\n  evidence:\n", 1)[0]
         self.assertIn("PLAN: ${{ needs.preflight.outputs.plan }}", validation)
         self.assertIn("ref: ${{ github.workflow_sha }}", validation)
@@ -699,6 +768,21 @@ class ReleaseContractTests(unittest.TestCase):
     def test_platform_chart_keeps_mandatory_real_machine_validation(self) -> None:
         plan = self.plan("iterabase-platform-chart")
         self.assertTrue(plan["real_machine"])
+        self.assertEqual(
+            {item["capacity"] for item in plan["real_machine_matrix"]}, {"cpu", "gpu"}
+        )
+
+    def test_e2e_workflows_record_exact_fixture_modes_without_floating_latest(self) -> None:
+        workflow = (ROOT / ".github" / "workflows" / "e2e.yml").read_text()
+        self.assertNotIn("FORGE_E2E_USE_LATEST_RELEASE", workflow)
+        self.assertNotIn("published-latest", workflow)
+        self.assertIn("ITERABASE_E2E_FIXTURE_MODE: source", workflow)
+        self.assertIn("ITERABASE_E2E_FIXTURE_MODE: published", workflow)
+        candidate = (ROOT / ".github" / "workflows" / "release-candidate.yml").read_text()
+        self.assertIn("real_machine_matrix", candidate)
+        self.assertIn("include: ${{ fromJSON(needs.preflight.outputs.real_machine_matrix) }}", candidate)
+        self.assertIn("ITERABASE_E2E_FIXTURE_MODE: candidate", candidate)
+        self.assertIn("ITERABASE_E2E_CANDIDATE_PLAN", candidate)
 
     def test_release_workflows_never_publish_from_push_or_tag_events(self) -> None:
         for name in ("release-candidate.yml", "release-promote.yml", "release-rehearsal.yml"):

@@ -25,7 +25,7 @@ Branch protection therefore does not depend on a changing matrix job name.
 | Forge `e2e / digitalocean-cpu` | `E2E / digitalocean-cpu` | Ported; Forge source PRs/manual runs |
 | Forge `e2e / digitalocean-gpu` | `E2E / digitalocean-gpu` | Ported; Forge source PRs/manual/nightly |
 | Forge five source-composed Kind jobs | `E2E / kind-*` | Ported; Forge and chart contract paths |
-| Forge five nightly published-compatibility jobs | `E2E / published-latest-*` | Ported |
+| Forge five nightly published-compatibility jobs | `E2E / published-pinned-*` | Ported; exact fixture record, no floating latest |
 | charts `ci / lint` | `CI / charts-static` | Ported |
 | charts `ci / certificate-ownership-migration` | `E2E / charts-runtime / certificate-ownership-migration` | Ported |
 | charts `ci / install` | `E2E / charts-runtime / install` | Ported |
@@ -56,7 +56,7 @@ a move retain their owners. `.github/scripts/select_ci.py` is the owner-mapping
 source of truth, and its tests prove deletion-only, cross-owner move, docs-only,
 single-component, shared-contract, and cross-component changes.
 
-- Root Makefile, Go workspace metadata, affected-target selector code, shared setup actions, and PR/E2E workflow contracts fan out to every owner.
+- Root Makefile, Go workspace metadata, `testkit/e2e`, affected-target selector code, shared setup actions, and PR/E2E workflow contracts fan out to every owner.
 - Release candidate/promotion/rehearsal implementation, target metadata, and component `VERSION` files run focused release contract checks and do not select unrelated product images, Kind scenarios, or CPU/GPU suites.
 - Control-plane UI, harness, tool-runner, and protobuf contracts select their
   focused checks. The selected harness job always executes the Linux
@@ -70,7 +70,7 @@ single-component, shared-contract, and cross-component changes.
   scenarios. This is source composition from one checkout; no matching-branch
   lookup or cross-repository checkout exists.
 - Markdown and repository documentation alone select no expensive owner job.
-- `.github/scripts/select_ci.py` remains the PR affected-target authority. `release/targets.json` temporarily maps each explicitly requested release target to its required candidate suites; the candidate workflow deduplicates their union until HOR-476 replaces scenario lists with compiled metadata. It is not a second PR path selector and does not choose release intent.
+- `.github/scripts/select_ci.py` remains the PR affected-target authority. Release E2E selection is separate: the candidate workflow compiles every owner `TestE2E` registration and takes the complete union associated with the founder-requested targets. `release/targets.json` contains artifact/version authority only; it has no parallel suite map and does not choose release intent.
 
 Run the fixture matrix locally with:
 
@@ -85,8 +85,7 @@ versions. Helm, Kind, kubectl, and kubeconform archives are pinned in
 `.github/tools/checksums.txt`; archives are checksum-verified after both download
 and cache restore.
 
-- Go module/build caches use OS, architecture, exact Go version, and all four
-  workspace `go.sum` files. There are no fallback restore keys.
+- Go module/build caches use OS, architecture, exact Go version, and all workspace module manifests/checksum files, including shared testkit and owner E2E modules. There are no fallback restore keys.
 - npm caches contain downloads only and use exact Node version plus the owning
   `package-lock.json`. `node_modules` is always rebuilt by `npm ci`.
 - Helm caches contain only `~/.cache/helm` downloads and use exact Helm version

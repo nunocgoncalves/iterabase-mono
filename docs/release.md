@@ -90,6 +90,8 @@ Compatibility evidence answers “what exact combination did this bundle prove?�
 - image digests and archive checksums;
 - source SHA and deduplicated selected scenarios.
 
+The scenario set is compiled from each owner `TestE2E` entrypoint via `make e2e-catalogue`. Scenario metadata—not `release/targets.json` or changed-file narrowing—associates release targets with Kind/real-machine Make targets, bounds, and mandatory CPU/GPU capacity. A coordinated request takes the conservative union. The release target file retains artifact/version authority only.
+
 Targets retain independent versions. A bundle records a tested combination without imposing a synthetic lockstep platform version.
 
 ## Release-system rehearsal

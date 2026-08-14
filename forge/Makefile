@@ -8,6 +8,14 @@ BINARY := bin/forge
 GO := go
 GOBUILDFLAGS := -trimpath
 
+# Every suite execution records an explicit fixture mode. CI may override these
+# with candidate-plan or pinned-published inputs; there is no floating latest.
+ITERABASE_E2E_FIXTURE_MODE ?= source
+ITERABASE_E2E_SOURCE_SHA ?= $(shell git rev-parse HEAD)
+ITERABASE_E2E_SOURCE_DIRTY ?= $(if $(shell git status --porcelain),true,false)
+ITERABASE_E2E_PUBLISHED_FIXTURE ?= $(CURDIR)/test/e2e/published-fixture.json
+export ITERABASE_E2E_FIXTURE_MODE ITERABASE_E2E_SOURCE_SHA ITERABASE_E2E_SOURCE_DIRTY ITERABASE_E2E_PUBLISHED_FIXTURE ITERABASE_E2E_CANDIDATE_PLAN
+
 VERSION := $(shell version="$$(git describe --tags --match 'forge-v*' --always --dirty 2>/dev/null)" && printf '%s\n' "$$version" | sed 's/^forge-//' || echo dev)
 COMMIT  := $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
 DATE    := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -53,10 +61,10 @@ test-e2e-tool-runner:
 test-e2e-inference:
 	cd test/e2e && go test -v -race -count=1 -timeout 15m -run '^TestE2E$$/^kind-inference-contract$$' .
 
-# Run package-level pure tests while excluding the infrastructure scenario
-# entrypoint, then run pure harness unit tests (runner + kind/chart helpers).
-# The nested module is outside the root module's ./... and needs this CI target.
+# Run the hermetic shared-runner scenario, package-level pure tests excluding
+# infrastructure scenarios, and pure Kind/chart helper tests.
 test-e2e-unit:
+	cd test/e2e && go test -race -count=1 -run '^TestE2E$$/^hermetic-example$$' .
 	cd test/e2e && go test -race -count=1 -skip '^TestE2E$$' .
 	cd test/e2e && go test -race -count=1 ./internal/...
 

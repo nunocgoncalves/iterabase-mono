@@ -1,12 +1,12 @@
 SHELL := /usr/bin/env bash
 .SHELLFLAGS := -euo pipefail -c
 
-GO_MODULES := control-plane inference-gateway forge forge/test/e2e
-GO_MODULE_FILES := $(foreach module,$(GO_MODULES),$(module)/go.mod $(module)/go.sum)
+GO_MODULES := control-plane inference-gateway forge forge/test/e2e testkit/e2e control-plane/test/e2e charts/test/e2e
+GO_MODULE_FILES := $(foreach module,$(GO_MODULES),$(module)/go.mod $(wildcard $(module)/go.sum))
 WORKSPACE_FILES := go.work go.work.sum $(GO_MODULE_FILES)
 CONTAINER_TOOL ?= docker
 
-.PHONY: workspace-sync workspace-check workspace-list fmt-check vet build test lint codegen-check charts-check release-check release-security-audit source-authority-check source-authority-audit docker-build check install-hooks pre-commit clean
+.PHONY: workspace-sync workspace-check workspace-list fmt-check vet build test testkit-test testkit-kind-example e2e-catalogue e2e-catalogue-check lint codegen-check charts-check release-check release-security-audit source-authority-check source-authority-audit docker-build check install-hooks pre-commit clean
 
 workspace-sync:
 	go work sync
@@ -32,6 +32,8 @@ fmt-check:
 		echo ":: fmt-check $$module"; \
 		$(MAKE) -C "$$module" fmt-check; \
 	done
+	@out=$$(gofmt -l testkit/e2e control-plane/test/e2e charts/test/e2e); \
+	if [[ -n "$$out" ]]; then echo "gofmt needed:"; echo "$$out"; exit 1; fi
 
 vet:
 	@for module in $(GO_MODULES); do \
@@ -48,15 +50,36 @@ build:
 # inference-gateway integration tests; infrastructure E2E scenarios remain
 # explicit Forge targets and are not run here.
 test:
+	$(MAKE) testkit-test
 	$(MAKE) -C control-plane ui-deps ui-test harness-deps harness-test harness-isolation-test tool-runner-deps tool-runner-test test
 	$(MAKE) -C inference-gateway test
 	$(MAKE) -C forge test test-e2e-unit
+
+# Shared mechanics, every owner entrypoint example, and compiled catalogue.
+testkit-test:
+	cd testkit/e2e && go test -race -count=1 ./...
+	$(MAKE) -C control-plane test-e2e-unit
+	$(MAKE) -C charts test-e2e-unit
+	go run ./testkit/e2e/cmd/e2e-catalogue --format json --output /tmp/iterabase-e2e-catalogue.json
+	go run ./testkit/e2e/cmd/e2e-catalogue --format markdown --output /tmp/iterabase-e2e-catalogue.md
+
+testkit-kind-example:
+	cd testkit/e2e && go test -race -count=1 -tags=e2e_kind -run '^TestRealKindLifecycle' ./kind
+
+e2e-catalogue:
+	go run ./testkit/e2e/cmd/e2e-catalogue --format json
+
+e2e-catalogue-check: testkit-test
 
 lint:
 	$(MAKE) -C control-plane ui-deps ui-lint harness-deps harness-lint tool-runner-deps tool-runner-lint lint
 	$(MAKE) -C inference-gateway lint
 	$(MAKE) -C forge lint
 	cd forge/test/e2e && golangci-lint run ./...
+	@for module in testkit/e2e control-plane/test/e2e charts/test/e2e; do \
+		echo ":: golangci-lint $$module"; \
+		(cd "$$module" && golangci-lint run ./...); \
+	done
 
 codegen-check:
 	$(MAKE) -C control-plane proto-check

@@ -9,7 +9,6 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 )
 
 // This file implements auto-resolution of the control-plane Helm chart version
@@ -130,33 +129,12 @@ func listGitHubReleases(client *http.Client, firstPageURL, token string) ([]gith
 	return releases, nil
 }
 
-// LatestChartVersion resolves the highest stable semver published for the named
-// chart by listing every page of monorepo GitHub releases and filtering tags of
-// the form "<chart>-<semver>". Prereleases and drafts are skipped so PR-time CI
-// tracks stable service releases (chart-releaser marks a release prerelease when
-// the chart version carries a -prerelease suffix).
-//
-// It authenticates with GITHUB_TOKEN when present (CI has it; raises the rate
-// limit from 60 to 5000 req/hour) and falls back to unauthenticated access
-// otherwise. On failure it fails the test with a message pointing at
-// CONTROL_PLANE_CHART_VERSION as the manual pin escape hatch.
+// LatestChartVersion is retained only to fail old callers loudly. HOR-476
+// prohibits floating published fixtures; callers must provide an exact version.
 func LatestChartVersion(t *testing.T, chart string) string {
 	t.Helper()
-	repo := releasesGitHubRepo()
-	url := fmt.Sprintf("https://api.github.com/repos/%s/releases?per_page=100", repo)
-	client := &http.Client{Timeout: 30 * time.Second}
-	releases, err := listGitHubReleases(client, url, os.Getenv("GITHUB_TOKEN"))
-	if err != nil {
-		t.Fatalf("github releases request for %s: %v\n"+
-			"set CONTROL_PLANE_CHART_VERSION to pin a chart version and skip auto-resolution.", repo, err)
-	}
-	best, bestTag := selectLatestChartVersion(releases, chart)
-	if best == "" {
-		t.Fatalf("no stable %q release tags found in %s (scanned %d releases)\n"+
-			"set CONTROL_PLANE_CHART_VERSION to pin a chart version.", chart, repo, len(releases))
-	}
-	t.Logf("resolved latest %s chart version: %s (from tag %s)", chart, best, bestTag)
-	return best
+	t.Fatalf("floating latest chart resolution for %q is prohibited; provide an exact published fixture", chart)
+	return ""
 }
 
 // ChartAppVersion returns the appVersion declared by the chart's metadata,

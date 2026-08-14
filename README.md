@@ -8,6 +8,7 @@ Public monorepo for Iterabase product source.
 | [`inference-gateway/`](inference-gateway/) | Inference gateway | OpenAI-compatible inference gateway |
 | [`forge/`](forge/) | Forge | Host and k3s substrate installer |
 | [`charts/`](charts/) | Charts | Helm chart sources |
+| [`testkit/e2e/`](testkit/e2e/) | E2E testkit | Shared deterministic test mechanics and compiled catalogue |
 
 Deployment overlays and the marketing site remain separate repositories and are not
 part of this monorepo.
@@ -32,8 +33,7 @@ historical evidence, and emergency boundary.
 
 ## Go workspace
 
-The committed [`go.work`](go.work) supports atomic changes while preserving four
-independently buildable modules:
+The committed [`go.work`](go.work) supports atomic changes while preserving independently buildable product, shared-testkit, and owner-suite modules:
 
 | Module directory | Module path |
 | --- | --- |
@@ -41,6 +41,9 @@ independently buildable modules:
 | `inference-gateway/` | `github.com/nunocgoncalves/iterabase-mono/inference-gateway` |
 | `forge/` | `github.com/nunocgoncalves/iterabase-mono/forge` |
 | `forge/test/e2e/` | `github.com/nunocgoncalves/iterabase-mono/forge/test/e2e` |
+| `testkit/e2e/` | `github.com/nunocgoncalves/iterabase-mono/testkit/e2e` |
+| `control-plane/test/e2e/` | `github.com/nunocgoncalves/iterabase-mono/control-plane/test/e2e` |
+| `charts/test/e2e/` | `github.com/nunocgoncalves/iterabase-mono/charts/test/e2e` |
 
 Run the atomic local matrix from the repository root:
 
@@ -51,6 +54,8 @@ make test             # module tests + Linux harness isolation; Docker required
 make lint
 make codegen-check    # protobuf lint/regeneration freshness
 make charts-check     # Helm and rendered-resource checks
+make testkit-test     # shared race tests + owner examples + compiled catalogue
+make e2e-catalogue    # emit registered scenarios as JSON
 ```
 
 Use `make -C <component> <target>` for a narrower component command. See the

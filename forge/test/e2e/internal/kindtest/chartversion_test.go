@@ -8,10 +8,9 @@ import (
 	"testing"
 )
 
-// Unit tests for the pure helpers behind chart auto-resolution (HOR-321). The
-// network/helm-backed LatestChartVersion and ChartAppVersion are exercised by
-// the control-plane e2e itself; these cover the parsing/comparison logic that
-// decides which release wins. Run with: make test-e2e-unit.
+// Unit tests for chart metadata parsing and the historical release-feed parser.
+// Runtime floating-latest resolution now fails closed; exact fixtures supply the
+// version consumed by ChartAppVersion. Run with: make test-e2e-unit.
 
 func TestParseAppVersion(t *testing.T) {
 	cases := []struct {

@@ -3,8 +3,6 @@ package e2e
 import (
 	"os"
 	"testing"
-
-	"github.com/nunocgoncalves/iterabase-mono/forge/test/e2e/internal/kindtest"
 )
 
 const (
@@ -28,9 +26,6 @@ func platformChartVersion(t *testing.T, localChart string) string {
 	if localChart != "" {
 		return ""
 	}
-	if os.Getenv("FORGE_E2E_USE_LATEST_RELEASE") == "true" {
-		return kindtest.LatestChartVersion(t, "iterabase-platform")
-	}
 	return pinnedPlatformChartVersion
 }
 
@@ -41,9 +36,6 @@ func controlPlaneChartVersion(t *testing.T, localChart string) string {
 	}
 	if localChart != "" {
 		return ""
-	}
-	if os.Getenv("FORGE_E2E_USE_LATEST_RELEASE") == "true" {
-		return kindtest.LatestChartVersion(t, "control-plane")
 	}
 	return pinnedControlPlaneChartVersion
 }

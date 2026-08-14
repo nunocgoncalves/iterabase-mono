@@ -42,7 +42,7 @@ import (
 // The umbrella chart is published at
 // oci://ghcr.io/nunocgoncalves/iterabase-charts/iterabase-platform. PR tests
 // use coordinated chart source when available and the reviewed pinned release
-// otherwise; the scheduled compatibility matrix opts into latest stable. The
+// otherwise; the scheduled compatibility matrix records the same explicit pin. The
 // umbrella bakes in matching control-plane + gateway image tags. Override
 // via env for local dev / pinning: ITERABASE_LOCAL_CHART points at a local chart directory,
 // ITERABASE_LOCAL_IMAGE loads a locally-built image into the Kind nodes, and

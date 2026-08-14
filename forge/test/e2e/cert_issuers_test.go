@@ -23,7 +23,7 @@ import (
 // oci://ghcr.io/nunocgoncalves/iterabase-charts/iterabase-platform. Platform
 // 0.3+ publishes cert-manager-substrate at the same version. PR tests use the
 // coordinated local chart when supplied by CI, otherwise the reviewed pinned
-// release; the scheduled compatibility matrix opts into latest stable. Override
+// release; the scheduled compatibility matrix records the same explicit pin. Override
 // for local dev/pinning: ITERABASE_PLATFORM_LOCAL_CHART points at a local directory (helm
 // installs the path directly), ITERABASE_CHART_VERSION pins a specific release.
 func runCertIssuers(t *testing.T) {
