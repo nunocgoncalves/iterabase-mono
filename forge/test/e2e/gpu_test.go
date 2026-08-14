@@ -131,16 +131,17 @@ func createDropletIn(ctx context.Context, client *godo.Client, name, pubKeyStr, 
 }
 
 type digitalOceanGPUState struct {
-	ctx          context.Context
-	provisioner  GPUVMProvisioner
-	runID        string
-	keep         bool
-	pubKey       string
-	privKeyPath  string
-	vm           *GPUVM
-	forgeBin     string
-	forgeHome    string
-	chartVersion string
+	ctx             context.Context
+	provisioner     GPUVMProvisioner
+	runID           string
+	keep            bool
+	pubKey          string
+	privKeyPath     string
+	vm              *GPUVM
+	forgeBin        string
+	forgeHome       string
+	chartVersion    string
+	upgradeEvidence *gpuUpgradeEvidence
 }
 
 func newDigitalOceanGPUState(t *testing.T) *digitalOceanGPUState {
@@ -184,9 +185,9 @@ func provisionGPUStage(t *testing.T, state *digitalOceanGPUState) {
 }
 
 func applyGPUSubstrateStage(t *testing.T, state *digitalOceanGPUState) {
-	cfgPath := writeForgeConfigGPU(t, state.runID, state.vm.IP, state.privKeyPath)
+	cfgPath := writeForgeConfigGPUDriver(t, state.runID, state.vm.IP, state.privKeyPath, gpuUpgradeBaselineDriver)
 	out := applyOnce(t, state.forgeBin, state.forgeHome, cfgPath)
-	assertApplyMarkers(t, out, "node ready: true", "gpu ready: true")
+	assertApplyMarkers(t, out, "node ready: true", "gpu ready: true", "gpu driver: "+gpuUpgradeBaselineDriver)
 	t.Logf("apply output:\n%s", out)
 }
 
@@ -263,8 +264,12 @@ func checkGPUSmoke(t *testing.T, kcPath string) {
 
 // writeForgeConfigGPU writes a k3s + GPU (no platform chart) forge.yaml.
 func writeForgeConfigGPU(t *testing.T, name, ip, keyPath string) string {
+	return writeForgeConfigGPUDriver(t, name, ip, keyPath, "")
+}
+
+func writeForgeConfigGPUDriver(t *testing.T, name, ip, keyPath, driverVersion string) string {
 	return writeForgeConfigSpec(t, forgeConfigSpec{
-		Name: name, Address: ip, SSHKeyPath: keyPath, GPU: true,
+		Name: name, Address: ip, SSHKeyPath: keyPath, GPU: true, GPUDriverVersion: driverVersion,
 	})
 }
 
@@ -292,12 +297,16 @@ func dumpGPUDiagnostics(t *testing.T, ip, keyPath string) {
 	t.Helper()
 	t.Log("=== GPU diagnostics ===")
 	cmds := []string{
-		"sudo k3s kubectl get clusterpolicy -o jsonpath='{range .items[*]}{.metadata.name}: state={.status.state}{\"\\n\"}{end}'",
-		"sudo k3s kubectl get pods -n gpu-operator -o wide",
-		"sudo k3s kubectl logs -n gpu-operator ds/nvidia-container-toolkit-daemonset --tail=100 --all-containers=true",
+		"sudo k3s kubectl get clusterpolicy -o yaml",
+		"sudo k3s kubectl get nodes -o wide --show-labels",
+		"sudo k3s kubectl describe nodes",
+		"sudo k3s kubectl get daemonsets,pods -n gpu-operator -o wide",
+		"for pod in $(sudo k3s kubectl get pods -n gpu-operator -o name); do echo --- $pod; sudo k3s kubectl logs -n gpu-operator $pod --tail=200 --all-containers=true --prefix=true 2>&1 || true; done",
+		"sudo k3s kubectl get deployment,pods,pvc -n forge-gpu-upgrade -o wide 2>&1 || true",
+		"sudo k3s kubectl logs -n forge-gpu-upgrade -l app.kubernetes.io/name=gpu-driver-upgrade-workload --tail=200 --prefix=true 2>&1 || true",
+		"sudo k3s kubectl get events -A --sort-by=.lastTimestamp | tail -100",
 		"echo '--- k3s containerd config: nvidia/cdi entries? ---'; sudo grep -iE 'nvidia|cdi|runtime' /var/lib/rancher/k3s/agent/etc/containerd/config.toml 2>/dev/null || echo 'no k3s containerd config or no nvidia/cdi entries'",
 		"echo '--- /etc/containerd ---'; sudo ls /etc/containerd/ 2>/dev/null || echo 'no /etc/containerd'",
-		"sudo k3s kubectl get events -n gpu-operator --sort-by=.lastTimestamp | tail -15",
 	}
 	for _, c := range cmds {
 		out, err := sshRun(t, ip, keyPath, c)

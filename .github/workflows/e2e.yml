@@ -7,6 +7,12 @@ on:
   schedule:
     - cron: "0 3 * * *"
   workflow_dispatch:
+    inputs:
+      gpu_policy_red_proof:
+        description: "Run the intentional HOR-411 deleteEmptyDir=false GPU mutation instead of the green GPU scenario"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -117,7 +123,11 @@ jobs:
       (needs.changes.outputs.forge_real_e2e == 'true' &&
       (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'))
     runs-on: ubuntu-latest
-    timeout-minutes: 65
+    timeout-minutes: 115
+    env:
+      ITERABASE_E2E_FIXTURE_MODE: source
+      ITERABASE_E2E_SOURCE_SHA: ${{ github.sha }}
+      ITERABASE_E2E_SOURCE_INPUTS: ${{ github.workspace }}/forge/test/e2e/published-fixture.json
     concurrency:
       group: e2e-digitalocean-gpu
       cancel-in-progress: false
@@ -129,14 +139,19 @@ jobs:
           cache-dependency-path: ${{ env.GO_CACHE_DEPENDENCIES }}
           cache-scope: e2e-digitalocean-gpu
       - name: Composed GPU E2E
+        if: inputs.gpu_policy_red_proof != true
         run: make test-e2e-gpu
         working-directory: forge
         env:
           DIGITALOCEAN_TOKEN: ${{ secrets.DIGITALOCEAN_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ITERABASE_E2E_FIXTURE_MODE: source
-          ITERABASE_E2E_SOURCE_SHA: ${{ github.sha }}
-          ITERABASE_E2E_SOURCE_INPUTS: ${{ github.workspace }}/forge/test/e2e/published-fixture.json
+      - name: Intentional HOR-411 broken-policy red proof
+        if: inputs.gpu_policy_red_proof == true
+        run: make test-e2e-gpu-broken-policy
+        working-directory: forge
+        env:
+          DIGITALOCEAN_TOKEN: ${{ secrets.DIGITALOCEAN_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   kind:
     name: kind-${{ matrix.name }}

@@ -12,19 +12,20 @@ import (
 // writers vary only the fields relevant to the contract they exercise, so the
 // common k3s/host recipe cannot drift across files.
 type forgeConfigSpec struct {
-	Name            string
-	Address         string
-	SSHKeyPath      string
-	RunLabel        bool
-	DualStack       bool
-	GPU             bool
-	ChartVersion    string
-	ChartRepository string
-	ChartRelease    string
-	ChartNamespace  string
-	OverlayRepo     string
-	OverlayRef      string
-	Flux            bool
+	Name             string
+	Address          string
+	SSHKeyPath       string
+	RunLabel         bool
+	DualStack        bool
+	GPU              bool
+	GPUDriverVersion string
+	ChartVersion     string
+	ChartRepository  string
+	ChartRelease     string
+	ChartNamespace   string
+	OverlayRepo      string
+	OverlayRef       string
+	Flux             bool
 }
 
 func writeForgeConfigSpec(t *testing.T, spec forgeConfigSpec) string {
@@ -63,6 +64,11 @@ spec:
 		cfg.WriteString(`  gpu:
     enabled: true
 `)
+		if spec.GPUDriverVersion != "" {
+			fmt.Fprintf(&cfg, `    driver:
+      version: %q
+`, spec.GPUDriverVersion)
+		}
 	}
 	if spec.ChartVersion != "" {
 		fmt.Fprintf(&cfg, `  chart:
