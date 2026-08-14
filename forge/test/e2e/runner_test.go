@@ -71,16 +71,6 @@ func TestE2E(t *testing.T) {
 			"exercise-inference-contract", runInferenceFlowContract,
 		),
 		simpleForgeScenario(
-			forgeScenarioMetadata("kind-cert-issuers", "Proves the current certificate substrate and issuer composition on fresh Kind.", sharede2e.TierF2,
-				[]string{"HOR-416", "HOR-475"}, []string{"iterabase-platform-chart"}, "test-e2e-cert-issuers", 20, ""),
-			"exercise-certificate-contract", runCertIssuers,
-		),
-		simpleForgeScenario(
-			forgeScenarioMetadata("kind-internal-tls", "Proves the current internal TLS transport composition on fresh Kind.", sharede2e.TierF2,
-				[]string{"HOR-416", "HOR-475"}, []string{"control-plane", "inference-gateway", "inference-gateway-chart", "iterabase-platform-chart"}, "test-e2e-internal-tls", 25, ""),
-			"exercise-internal-tls-contract", runInternalTLS,
-		),
-		simpleForgeScenario(
 			forgeScenarioMetadata("kind-tool-runner-contract", "Proves exact Flux artifact materialization, tool registration, pinning, drain, and retirement on fresh Kind.", sharede2e.TierF2,
 				[]string{"HOR-477"}, []string{"control-plane", "control-plane-chart", "iterabase-platform-chart"}, "test-e2e-tool-runner", 35, ""),
 			"exercise-tool-runner-contract", runToolRunnerContract,

@@ -38,11 +38,14 @@ no hostNetwork. The LB implementation is pluggable:
   helm install iterabase charts/iterabase-platform -n iterabase-system \
     -f values-kind.yaml --set control-plane.toolRunner.enabled=false --wait
   ```
-  then curl the self-signed edge:
+  then verify the self-signed edge against its generated certificate and DNS identity:
   ```sh
   LB_IP=$(kubectl get svc -n iterabase-system -l app.kubernetes.io/name=ingress-nginx \
     -o jsonpath='{.items[0].status.loadBalancer.ingress[0].ip}')
-  curl -k --resolve gateway.iterabase.local:443:"$LB_IP" https://gateway.iterabase.local/health
+  kubectl get secret iterabase-gateway-tls -n iterabase-system \
+    -o jsonpath='{.data.tls\.crt}' | base64 -d >/tmp/iterabase-gateway.crt
+  curl --cacert /tmp/iterabase-gateway.crt \
+    --resolve gateway.iterabase.local:443:"$LB_IP" https://gateway.iterabase.local/health
   ```
 - **bare-metal/OPO1** — MetalLB L2 with a real pool (e.g. a VLAN range); see the
   prod overlay below.
@@ -134,8 +137,8 @@ kubectl annotate --overwrite $cert_crds \
 helm rollback iterabase <pre-0.3-revision> -n iterabase-system --wait
 ```
 
-CI exercises both directions against the released 0.2.2 chart via
-`scripts/check-certificate-migration.sh`.
+The chart-owned compiled Kind scenario exercises both directions against the
+released 0.2.2 chart via `make test-e2e-certificate-migration`.
 
 ## Flux-backed gateway tool runner
 
@@ -188,8 +191,20 @@ explicit deletion validation.
 ## Develop
 
 ```sh
-make check   # helm lint (all) + helm template (umbrella + control-plane) + kubeconform
+make check                  # Helm lint/template + kubeconform + static contracts
+make check-tls              # TLS presets, including observability + TLS together
+make test-e2e-unit          # compiled suite + intentional break fixtures (no cluster)
+make test-e2e-install       # one fresh Kind cluster
+make test-e2e-observability
+make test-e2e-observability-tls
+make test-e2e-internal-tls
+make test-e2e-certificate-migration
 ```
+
+The runtime targets are chart-owned typed Go scenarios built on `testkit/e2e`.
+Each target creates exactly one isolated Kind cluster, runs once without retries,
+and collects shared redacted diagnostics on failure. See
+[`test/e2e/README.md`](test/e2e/README.md) for scenario and fixture contracts.
 
 Requires `helm` and `kubeconform`. Add the external repos first:
 

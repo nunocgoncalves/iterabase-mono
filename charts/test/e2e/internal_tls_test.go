@@ -1,0 +1,179 @@
+package e2e_test
+
+import (
+	"net/http"
+	"strings"
+	"testing"
+	"time"
+
+	sharede2e "github.com/nunocgoncalves/iterabase-mono/testkit/e2e"
+	"github.com/nunocgoncalves/iterabase-mono/testkit/e2e/httpx"
+)
+
+func internalTLSScenario() sharede2e.Definition {
+	diagnostics, cleanup := scenarioHooks()
+	return sharede2e.Define(sharede2e.Scenario[*chartState]{
+		Metadata: chartScenarioMetadata(
+			"internal-tls",
+			"Installs the minimal internal-TLS platform and proves issued identities, gateway dependency readiness, verified control-plane HTTPS, and real Redis/PostgreSQL transport enforcement.",
+			"test-e2e-internal-tls", 30,
+			[]string{"HOR-371", "HOR-416", "HOR-475"},
+			[]string{"control-plane", "inference-gateway", "control-plane-chart", "inference-gateway-chart", "iterabase-platform-chart"},
+		),
+		NewState: newChartState,
+		Stages: []sharede2e.Stage[*chartState]{
+			{Name: "create-kind", Run: createKindStage},
+			{Name: "install-certificate-substrate", DependsOn: []string{"create-kind"}, Run: installCertificateSubstrateStage},
+			{Name: "install-internal-tls-platform", DependsOn: []string{"install-certificate-substrate"}, Run: installInternalTLSPlatformStage},
+			{Name: "assert-internal-identities", DependsOn: []string{"install-internal-tls-platform"}, Run: assertInternalIdentitiesStage},
+			{Name: "assert-gateway-dependencies", DependsOn: []string{"assert-internal-identities"}, Run: assertGatewayDependenciesStage},
+			{Name: "assert-control-plane-verified-https", DependsOn: []string{"assert-internal-identities"}, Run: assertControlPlaneVerifiedHTTPSStage},
+			{Name: "assert-rendered-client-config", DependsOn: []string{"assert-gateway-dependencies"}, Run: assertRenderedTLSClientConfigStage},
+			{Name: "assert-redis-transport", DependsOn: []string{"assert-internal-identities"}, Run: assertRedisTransportStage},
+			{Name: "assert-postgresql-transport", DependsOn: []string{"assert-internal-identities"}, Run: assertPostgreSQLTransportStage},
+		},
+		Diagnostics: diagnostics,
+		Cleanup:     cleanup,
+	})
+}
+
+func installInternalTLSPlatformStage(t *testing.T, state *chartState) {
+	t.Helper()
+	state.installPlatform(t, 16*time.Minute,
+		filepathFromCharts(state, "values-tls.yaml"),
+		state.writeValues(t, "internal-tls-runtime", runtimePlatformValues()),
+	)
+	assertCandidateImages(t, state)
+}
+
+func assertInternalIdentitiesStage(t *testing.T, state *chartState) {
+	t.Helper()
+	state.kubectl(t, 4*time.Minute, "wait", "--for=condition=Ready", "clusterissuer/internal-ca", "--timeout=3m")
+	for _, certificate := range []string{
+		testRelease + "-postgresql-tls", testRelease + "-redis-tls", testRelease + "-control-plane-api-tls",
+	} {
+		state.kubectl(t, 4*time.Minute, "wait", "--for=condition=Ready", "certificate/"+certificate, "-n", testNamespace, "--timeout=3m")
+	}
+}
+
+func assertGatewayDependenciesStage(t *testing.T, state *chartState) {
+	t.Helper()
+	state.kubectl(t, 6*time.Minute, "rollout", "status", "deployment/"+testRelease+"-gateway", "-n", testNamespace, "--timeout=5m")
+	forward := state.forward(t, "svc/"+testRelease+"-gateway", 8080, "http")
+	client, err := httpx.Client(15 * time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := requireHTTP(t, client, http.MethodGet, forward.URL+"/readyz", nil, http.StatusOK)
+	if !strings.Contains(string(body), `"fresh":true`) {
+		t.Fatalf("gateway snapshot is not fresh: %s", stateSafeBody(body))
+	}
+	state.stopForward(t, forward)
+}
+
+func assertControlPlaneVerifiedHTTPSStage(t *testing.T, state *chartState) {
+	t.Helper()
+	state.kubectl(t, 6*time.Minute, "rollout", "status", "deployment/"+testRelease+"-control-plane-api", "-n", testNamespace, "--timeout=5m")
+	ca := decodeSecretValue(t, state, testRelease+"-internal-ca-root", "ca.crt")
+	forward := state.forward(t, "svc/"+testRelease+"-control-plane-api", 8080, "https")
+	client := verifiedClient(t, ca, testRelease+"-control-plane-api."+testNamespace+".svc")
+	requireHTTP(t, client, http.MethodGet, forward.URL+"/healthz", nil, http.StatusOK)
+	state.stopForward(t, forward)
+}
+
+func assertRenderedTLSClientConfigStage(t *testing.T, state *chartState) {
+	t.Helper()
+	pod := state.firstPod(t, "app.kubernetes.io/name=inference-gateway")
+	out := state.kubectl(t, 30*time.Second, "exec", "-n", testNamespace, pod, "--", "printenv", "DATABASE_URL", "REDIS_URL", "REDIS_TLS_CA_FILE")
+	if !strings.Contains(out, "sslmode=verify-full") || !strings.Contains(out, "sslrootcert=") {
+		t.Fatalf("gateway DATABASE_URL does not require verified PostgreSQL TLS: %s", out)
+	}
+	if !strings.Contains(out, "rediss://") || !strings.Contains(out, "/etc/iterabase/internal-ca/ca.crt") {
+		t.Fatalf("gateway Redis configuration does not require CA-backed rediss: %s", out)
+	}
+}
+
+func assertRedisTransportStage(t *testing.T, state *chartState) {
+	t.Helper()
+	manifest := `apiVersion: v1
+kind: Pod
+metadata:
+  name: redis-transport-probe
+  namespace: iterabase-system
+spec:
+  restartPolicy: Never
+  containers:
+    - name: probe
+      image: redis:7-alpine
+      env:
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: iterabase-redis
+              key: redis-password
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          if redis-cli -h iterabase-redis -p 6379 -a "$REDIS_PASSWORD" PING 2>/dev/null | grep -q PONG; then
+            echo "authenticated plaintext unexpectedly succeeded" >&2
+            exit 1
+          fi
+          test "$(redis-cli --tls --cacert /ca/ca.crt -h iterabase-redis -p 6379 PING 2>/dev/null)" = "NOAUTH Authentication required."
+          test "$(redis-cli --tls --cacert /ca/ca.crt -h iterabase-redis -p 6379 -a "$REDIS_PASSWORD" PING 2>/dev/null)" = PONG
+      volumeMounts:
+        - name: ca
+          mountPath: /ca
+          readOnly: true
+  volumes:
+    - name: ca
+      secret:
+        secretName: iterabase-internal-ca-root
+        items:
+          - key: ca.crt
+            path: ca.crt
+`
+	state.kubectl(t, 30*time.Second, "apply", "-f", state.writeManifest(t, "redis-transport.yaml", manifest))
+	state.kubectl(t, 3*time.Minute, "wait", "--for=jsonpath={.status.phase}=Succeeded", "pod/redis-transport-probe", "-n", testNamespace, "--timeout=2m")
+}
+
+func assertPostgreSQLTransportStage(t *testing.T, state *chartState) {
+	t.Helper()
+	manifest := `apiVersion: v1
+kind: Pod
+metadata:
+  name: postgresql-transport-probe
+  namespace: iterabase-system
+spec:
+  restartPolicy: Never
+  containers:
+    - name: probe
+      image: postgres:16-alpine
+      env:
+        - name: PGPASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: iterabase-postgresql
+              key: password
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          if psql "host=iterabase-postgresql port=5432 user=controlplane dbname=controlplane sslmode=disable connect_timeout=5" -c "select 1" >/tmp/plain 2>&1; then
+            echo "authenticated plaintext unexpectedly succeeded" >&2
+            exit 1
+          fi
+          psql "host=iterabase-postgresql port=5432 user=controlplane dbname=controlplane sslmode=verify-full sslrootcert=/ca/ca.crt connect_timeout=5" -c "select 1" | grep -q "(1 row)"
+      volumeMounts:
+        - name: ca
+          mountPath: /ca
+          readOnly: true
+  volumes:
+    - name: ca
+      secret:
+        secretName: iterabase-internal-ca-root
+        items:
+          - key: ca.crt
+            path: ca.crt
+`
+	state.kubectl(t, 30*time.Second, "apply", "-f", state.writeManifest(t, "postgresql-transport.yaml", manifest))
+	state.kubectl(t, 3*time.Minute, "wait", "--for=jsonpath={.status.phase}=Succeeded", "pod/postgresql-transport-probe", "-n", testNamespace, "--timeout=2m")
+}

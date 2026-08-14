@@ -8,16 +8,49 @@ RENDER := /tmp/$(UMBRELLA).rendered.yaml
 RENDER_CP := /tmp/$(CONTROLPLANE).rendered.yaml
 RENDER_TLS := /tmp/$(UMBRELLA).tls.rendered.yaml
 RENDER_OBS := /tmp/$(UMBRELLA).observability.rendered.yaml
+RENDER_OBS_TLS := /tmp/$(UMBRELLA).observability-tls.rendered.yaml
 E2E_SOURCE_SHA ?= $(shell git rev-parse HEAD)
 E2E_SOURCE_DIRTY ?= $(if $(shell git status --porcelain),true,false)
+ITERABASE_E2E_FIXTURE_MODE ?= source
+ITERABASE_E2E_SOURCE_INPUTS ?= $(CURDIR)/test/e2e/source-fixture.json
+ITERABASE_E2E_PUBLISHED_FIXTURE ?= $(CURDIR)/test/e2e/published-fixture.json
+E2E_ENV := ITERABASE_E2E_FIXTURE_MODE=$(ITERABASE_E2E_FIXTURE_MODE) \
+	ITERABASE_E2E_SOURCE_SHA=$(E2E_SOURCE_SHA) \
+	ITERABASE_E2E_SOURCE_DIRTY=$(E2E_SOURCE_DIRTY) \
+	ITERABASE_E2E_SOURCE_INPUTS=$(ITERABASE_E2E_SOURCE_INPUTS) \
+	ITERABASE_E2E_PUBLISHED_FIXTURE=$(ITERABASE_E2E_PUBLISHED_FIXTURE) \
+	ITERABASE_CHARTS_ROOT=$(CURDIR)
+ifeq ($(E2E_SKIP_BUILD_DEPS),true)
+E2E_BUILD_DEPS :=
+else
+E2E_BUILD_DEPS := build-deps
+endif
 
-.PHONY: build-deps lint template kubeconform template-controlplane kubeconform-controlplane template-tls kubeconform-tls template-observability kubeconform-observability check-certificate-substrate check-service-selectors check-redis-exporter-auth check-artifact-config check-tool-runner check-manager-contract check check-tls check-observability test-e2e-unit clean
+.PHONY: build-deps lint template kubeconform template-controlplane kubeconform-controlplane template-tls kubeconform-tls template-observability kubeconform-observability template-observability-tls kubeconform-observability-tls check-certificate-substrate check-service-selectors check-redis-exporter-auth check-artifact-config check-tool-runner check-manager-contract check-observability-tls check check-tls check-observability test-e2e test-e2e-unit test-e2e-certificate-migration test-e2e-install test-e2e-observability test-e2e-observability-tls test-e2e-internal-tls clean
 
-# Compile the chart-owned suite entrypoint and run its hermetic shared-testkit scenario.
+# Compile the owner entrypoint and run hermetic mechanics plus intentional break
+# fixtures without provisioning infrastructure.
 test-e2e-unit:
-	cd test/e2e && ITERABASE_E2E_FIXTURE_MODE=source ITERABASE_E2E_SOURCE_SHA=$(E2E_SOURCE_SHA) \
-		ITERABASE_E2E_SOURCE_DIRTY=$(E2E_SOURCE_DIRTY) \
-		go test -race -count=1 -run '^TestE2E$$/^hermetic-example$$' .
+	cd test/e2e && $(E2E_ENV) go test -race -count=1 -run '^TestE2E$$/^hermetic-example$$' .
+	cd test/e2e && $(E2E_ENV) go test -race -count=1 -run '^TestUnit' .
+
+# Each target creates one fresh isolated Kind cluster and runs exactly once.
+test-e2e: test-e2e-certificate-migration test-e2e-install test-e2e-observability test-e2e-observability-tls test-e2e-internal-tls
+
+test-e2e-certificate-migration: $(E2E_BUILD_DEPS)
+	cd test/e2e && $(E2E_ENV) go test -v -race -count=1 -timeout 35m -run '^TestE2E$$/^certificate-ownership-migration$$' .
+
+test-e2e-install: $(E2E_BUILD_DEPS)
+	cd test/e2e && $(E2E_ENV) go test -v -race -count=1 -timeout 30m -run '^TestE2E$$/^fresh-install$$' .
+
+test-e2e-observability: $(E2E_BUILD_DEPS)
+	cd test/e2e && $(E2E_ENV) go test -v -race -count=1 -timeout 40m -run '^TestE2E$$/^observability$$' .
+
+test-e2e-observability-tls: $(E2E_BUILD_DEPS)
+	cd test/e2e && $(E2E_ENV) go test -v -race -count=1 -timeout 45m -run '^TestE2E$$/^observability-tls$$' .
+
+test-e2e-internal-tls: $(E2E_BUILD_DEPS)
+	cd test/e2e && $(E2E_ENV) go test -v -race -count=1 -timeout 30m -run '^TestE2E$$/^internal-tls$$' .
 
 # control-plane has its own file:// dep (postgresql) and observability has its
 # own upstream deps (kube-prometheus-stack + loki); build them first so the
@@ -83,7 +116,7 @@ check-manager-contract:
 
 check: lint kubeconform kubeconform-controlplane kubeconform-observability check-certificate-substrate check-service-selectors check-redis-exporter-auth check-artifact-config check-tool-runner check-manager-contract
 
-check-tls: kubeconform-tls check-redis-exporter-auth
+check-tls: kubeconform-tls kubeconform-observability-tls check-redis-exporter-auth check-observability-tls
 
 # Static check with the observability stack + every component's metrics on
 # (values-observability.yaml). Catches conditional/render errors in the
@@ -100,6 +133,18 @@ kubeconform-observability: template-observability
 
 check-observability: kubeconform-observability
 
+# Combined static path for the TLS-on observability wiring that neither preset
+# exercises alone.
+template-observability-tls: build-deps
+	helm template iterabase $(CHARTS_DIR)/$(UMBRELLA) --namespace iterabase-system -f values-observability.yaml -f values-tls.yaml > $(RENDER_OBS_TLS)
+	@echo "rendered $(RENDER_OBS_TLS)"
+
+kubeconform-observability-tls: template-observability-tls
+	kubeconform -strict -kubernetes-version 1.31.0 -ignore-missing-schemas $(RENDER_OBS_TLS)
+
+check-observability-tls: template-observability-tls
+	./scripts/check-observability-tls.sh $(RENDER_OBS_TLS)
+
 clean:
-	rm -f $(RENDER) $(RENDER_CP) $(RENDER_OBS)
+	rm -f $(RENDER) $(RENDER_CP) $(RENDER_TLS) $(RENDER_OBS) $(RENDER_OBS_TLS)
 	rm -rf $(CHARTS_DIR)/$(UMBRELLA)/charts $(CHARTS_DIR)/$(CERT_MANAGER_SUBSTRATE)/charts $(CHARTS_DIR)/$(CONTROLPLANE)/charts $(CHARTS_DIR)/$(OBSERVABILITY)/charts

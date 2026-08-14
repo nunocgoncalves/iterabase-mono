@@ -98,9 +98,9 @@ class ReleaseContractTests(unittest.TestCase):
             "inference-gateway": ({"inference-contract", "internal-tls"}, set()),
             "forge": (set(), {"cpu", "gpu"}),
             "control-plane-chart": ({"controlplane-identity", "tool-runner-contract"}, set()),
-            "inference-gateway-chart": ({"inference-contract", "internal-tls"}, set()),
+            "inference-gateway-chart": ({"inference-contract"}, set()),
             "iterabase-platform-chart": (
-                {"controlplane-identity", "inference-contract", "cert-issuers", "internal-tls", "tool-runner-contract"},
+                {"controlplane-identity", "inference-contract", "tool-runner-contract"},
                 {"cpu", "gpu"},
             ),
         }
@@ -114,13 +114,26 @@ class ReleaseContractTests(unittest.TestCase):
                 self.assertTrue(
                     all(item["mandatory"] for item in plan["real_machine_matrix"])
                 )
+                self.assertEqual(plan["chart_runtime"], target.endswith("-chart"))
+
+    def test_chart_owner_routes_without_duplicate_chart_release_jobs(self) -> None:
+        image_only = self.plan("control-plane")
+        internal_tls = next(
+            item for item in image_only["kind_matrix"] if item["name"] == "internal-tls"
+        )
+        self.assertEqual(internal_tls["owner"], "charts")
+        self.assertFalse(image_only["chart_runtime"])
+
+        chart_release = self.plan("iterabase-platform-chart")
+        self.assertTrue(chart_release["chart_runtime"])
+        self.assertNotIn("charts", {item["owner"] for item in chart_release["kind_matrix"]})
 
     def test_coordinated_release_uses_the_catalogue_union_without_narrowing(self) -> None:
         selected = "control-plane,inference-gateway,forge,control-plane-chart,inference-gateway-chart,iterabase-platform-chart"
         plan = self.plan(selected)
         self.assertEqual(
             {item["name"] for item in plan["kind_matrix"]},
-            {"controlplane-identity", "inference-contract", "cert-issuers", "internal-tls", "tool-runner-contract"},
+            {"controlplane-identity", "inference-contract", "tool-runner-contract"},
         )
         self.assertEqual(
             {item["name"] for item in plan["real_machine_matrix"]}, {"cpu", "gpu"}
@@ -132,9 +145,12 @@ class ReleaseContractTests(unittest.TestCase):
                 "forge/digitalocean-gpu",
                 "forge/kind-controlplane-identity",
                 "forge/kind-inference-contract",
-                "forge/kind-cert-issuers",
-                "forge/kind-internal-tls",
                 "forge/kind-tool-runner-contract",
+                "charts/certificate-ownership-migration",
+                "charts/fresh-install",
+                "charts/internal-tls",
+                "charts/observability",
+                "charts/observability-tls",
             },
         )
 
@@ -164,7 +180,7 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertEqual([item["chart"] for item in plan["chart_matrix"]], ["control-plane"])
         self.assertTrue(plan["forge"])
         self.assertTrue(plan["real_machine"])
-        self.assertEqual(len(plan["kind_matrix"]), 4)
+        self.assertEqual(len(plan["kind_matrix"]), 3)
 
     def test_single_forge_target_remains_supported(self) -> None:
         plan = self.plan("forge")
@@ -244,7 +260,7 @@ class ReleaseContractTests(unittest.TestCase):
         )
         self.assertEqual(
             {item["name"] for item in control_chart["baseline_dependencies"]["images"]},
-            {"control-plane", "control-plane-tool-runner"},
+            {"control-plane", "control-plane-tool-runner", "inference-gateway"},
         )
 
         image_only = self.plan("control-plane")

@@ -27,7 +27,7 @@ data:
         isDefault: true
         jsonData:
           httpMethod: POST
-          tlsSkipVerify: true
+          tlsSkipVerify: false
       - name: Alertmanager
         uid: alertmanager
         type: alertmanager
@@ -36,7 +36,7 @@ data:
         jsonData:
           implementation: prometheus
           handleGrafanaManagedAlerts: true
-          tlsSkipVerify: true
+          tlsSkipVerify: false
 {{- end }}
 {{- end }}
 {{- end }}
