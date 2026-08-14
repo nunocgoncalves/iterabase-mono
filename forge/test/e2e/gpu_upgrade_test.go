@@ -3,6 +3,8 @@ package e2e
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -88,11 +90,11 @@ func assertGPUDriverUpgradeStage(t *testing.T, state *digitalOceanGPUState) {
 	if state.upgradeEvidence == nil {
 		t.Fatal("baseline GPU workload evidence is missing")
 	}
+	before := *state.upgradeEvidence
+	waitForGPUUpgradeNode(t, state, before.PodUID, 10*time.Minute)
 	clients := newGPUUpgradeClients(t, state)
-	waitForGPUUpgradeNode(t, clients.typed, 10*time.Minute)
 	assertGPUUpgradeClusterPolicy(t, clients.dynamic)
 
-	before := *state.upgradeEvidence
 	after := waitForGPUUpgradeWorkload(t, clients.typed, before.PodUID, gpuUpgradeCandidateDriver, 10*time.Minute)
 	if after.PodUID == before.PodUID {
 		t.Fatalf("GPU workload pod was not recreated: uid=%s", after.PodUID)
@@ -284,29 +286,82 @@ func parseGPUUpgradeEvidence(logs string) (gpuUpgradeEvidence, error) {
 	return gpuUpgradeEvidence{}, fmt.Errorf("GPU upgrade readiness record not found")
 }
 
-func waitForGPUUpgradeNode(t *testing.T, client kubernetes.Interface, timeout time.Duration) {
+func waitForGPUUpgradeNode(t *testing.T, state *digitalOceanGPUState, previousUID types.UID, timeout time.Duration) {
 	t.Helper()
-	ctx := context.Background()
+	// A containerized driver replacement briefly restarts k3s on this single
+	// node. Observe that expected unavailable state through SSH, then parse one
+	// coherent node/workload snapshot only after the API is serving again. The
+	// replacement pod UID prevents the baseline upgrade-done label from being
+	// mistaken for completion before the upgrade controller starts its cycle.
+	const observe = `
+if ! sudo systemctl is-active --quiet k3s; then
+  echo __K3S_NOT_READY__
+  exit 0
+fi
+nodes="$(sudo k3s kubectl --request-timeout=15s get nodes -o json 2>/dev/null)" || {
+  echo __K3S_NOT_READY__
+  exit 0
+}
+pods="$(sudo k3s kubectl --request-timeout=15s get pods -n forge-gpu-upgrade -l app.kubernetes.io/name=gpu-driver-upgrade-workload -o json 2>/dev/null)" || {
+  echo __K3S_NOT_READY__
+  exit 0
+}
+echo __K3S_READY__
+printf '%s' "$nodes" | base64 -w0
+printf '\n'
+printf '%s' "$pods" | base64 -w0
+printf '\n'
+`
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		nodes, err := client.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+		out, err := sshRun(t, state.vm.IP, state.privKeyPath, observe)
 		if err != nil {
-			t.Fatalf("observe node after GPU driver upgrade: %v", err)
+			t.Fatalf("observe k3s during GPU driver upgrade: %v\n%s", err, out)
 		}
+		lines := strings.Split(strings.TrimSpace(out), "\n")
+		if len(lines) == 1 && lines[0] == "__K3S_NOT_READY__" {
+			time.Sleep(5 * time.Second)
+			continue
+		}
+		if len(lines) != 3 || lines[0] != "__K3S_READY__" {
+			t.Fatalf("unexpected GPU upgrade observation response: %q", out)
+		}
+		var nodes corev1.NodeList
+		decodeGPUUpgradeSnapshot(t, lines[1], &nodes)
+		var pods corev1.PodList
+		decodeGPUUpgradeSnapshot(t, lines[2], &pods)
 		if len(nodes.Items) != 1 {
 			t.Fatalf("GPU upgrade fixture has %d nodes, want 1", len(nodes.Items))
 		}
 		node := &nodes.Items[0]
-		state := node.Labels["nvidia.com/gpu-driver-upgrade-state"]
-		if state == "upgrade-failed" {
+		upgradeState := node.Labels["nvidia.com/gpu-driver-upgrade-state"]
+		if upgradeState == "upgrade-failed" {
 			t.Fatalf("GPU driver upgrade entered upgrade-failed on node %s", node.Name)
 		}
-		if state == "upgrade-done" && !node.Spec.Unschedulable && nodeReady(node) {
+		recreatedReady := false
+		for i := range pods.Items {
+			if pods.Items[i].UID != previousUID && podReady(&pods.Items[i]) {
+				recreatedReady = true
+				break
+			}
+		}
+		if upgradeState == "upgrade-done" && !node.Spec.Unschedulable && nodeReady(node) && recreatedReady {
 			return
 		}
 		time.Sleep(5 * time.Second)
 	}
-	t.Fatalf("GPU node did not reach Ready, schedulable, upgrade-done within %s", timeout)
+	t.Fatalf("GPU node and recreated workload did not reach Ready, schedulable, upgrade-done within %s", timeout)
+}
+
+func decodeGPUUpgradeSnapshot(t *testing.T, encoded string, target any) {
+	t.Helper()
+	data, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		t.Fatalf("decode GPU upgrade observation: %v", err)
+	}
+	if err := json.Unmarshal(data, target); err != nil {
+		t.Fatalf("parse GPU upgrade observation: %v", err)
+	}
 }
 
 func nodeReady(node *corev1.Node) bool {
