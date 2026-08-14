@@ -35,12 +35,16 @@ The old release is an intentional migration input, never the desired test target
 
 Stages:
 
-1. Apply k3s + GPU operator without the platform chart.
-2. Assert ClusterPolicy readiness and run a real GPU smoke pod.
-3. Reconcile the reviewed current platform release on the same host with exact Flux source + companion certificate substrate and the already-proven GPU phase skipped.
-4. Apply identity/catalog resources, wait for real vLLM availability, assert rendered extra arguments, and request a real completion.
+1. Record the exact source/candidate Forge identity and the supported `580.126.20` → `595.71.05` driver inputs.
+2. Apply k3s + GPU operator with the exact baseline driver, without the platform chart.
+3. Assert ClusterPolicy readiness and run a real GPU smoke pod.
+4. Start a representative GPU Deployment with memory-backed `/dev/shm` `emptyDir` and a separate PVC-backed cache sentinel.
+5. Run one Forge reconciliation with the exact candidate driver.
+6. Assert the workload pod was deleted/recreated, `emptyDir` state was fresh, PVC state survived, ClusterPolicy selected the candidate with the pinned deletion/drain policy, the node reached Ready + schedulable + `upgrade-done`, and the recreated workload reported the candidate through `nvidia-smi`.
+7. Reconcile the reviewed current platform release on the same host with exact Flux source + companion certificate substrate and the already-proven GPU phase skipped.
+8. Apply identity/catalog resources, wait for real vLLM availability, assert rendered extra arguments, and request a real completion.
 
-The inference path depends on GPU readiness, so a second VM/operator installation added cost and capacity noise rather than isolation. The chart is introduced only after the substrate smoke assertion, preserving fault localization.
+The inference path depends on GPU readiness, so a second VM/operator installation added cost and capacity noise rather than isolation. The chart is introduced only after the substrate and driver-transition assertions, preserving fault localization. `make test-e2e-gpu-broken-policy` is the intentional HOR-411 red proof: it builds the same source through a Go overlay that changes only `gpuPodDeletion.deleteEmptyDir` to `false`, requires real capacity, and passes only when the normal fixture fails in `upgrade-failed` with the local-storage deletion error. A manual E2E workflow dispatch with `gpu_policy_red_proof=true` runs that mutation using CI's GPU credential; the ordinary PR, nightly, and release paths always run the unmodified green scenario.
 
 ### Kind — fresh cluster per contract
 
@@ -62,6 +66,7 @@ These remain isolated because clean chart installation, cluster-scoped CRDs/issu
 | `TestE2ESecrets` | `digitalocean-cpu/sync-secrets` | env → SSH stdin → Kubernetes Secret |
 | `TestE2EFlux` | `digitalocean-cpu/install-and-reconcile-flux` | controllers, GitRepository artifact, Kustomization |
 | `TestGPUE2E` | `digitalocean-gpu/apply-gpu-substrate`, `assert-gpu-smoke` | operator readiness and usable GPU |
+| HOR-411 / HOR-485 | `digitalocean-gpu/start-emptydir-workload` through `assert-driver-upgrade` | exact supported driver transition, disposable `emptyDir`, preserved PVC cache, operator/node convergence, and post-upgrade GPU use |
 | `TestInferenceFlowGPU` | `digitalocean-gpu/apply-platform`, `run-real-inference` | real control-plane/vLLM/gateway completion |
 | `TestControlPlaneIdentity` | `kind-controlplane-identity` | unchanged, fresh Kind cluster |
 | `TestInferenceFlowContract` | `kind-inference-contract` | unchanged plus restored PermissionPolicy materialization |
@@ -81,7 +86,7 @@ One `e2e.yml` workflow owns:
 
 For a monorepo ticket PR, the Kind matrix composes the control-plane and chart source from the same checkout. Standard Kind scenarios install the local chart source; the tool-runner contract additionally builds the local control-plane and runner images. Scheduled compatibility runs use explicit published releases. Cloud jobs intentionally use distributable releases because their boundary is Forge's real remote OCI installation path, not local source mounting.
 
-The nightly compatibility matrix records an exact published fixture and never floats to `latest`; intentional compatibility-baseline changes are reviewed in source. All E2E invocations are verbose so capacity skips and stage results are visible. Cloud jobs never cancel in progress, allowing test cleanup to destroy VMs; the tagged reaper remains the crash safety net.
+The nightly compatibility matrix records an exact published fixture and never floats to `latest`; intentional compatibility-baseline changes are reviewed in source. All E2E invocations are verbose so capacity skips, exact driver inputs, Forge identity, and stage results are visible. Candidate validation retains mandatory GPU capacity semantics; a missing credential or exhausted capacity fails rather than skipping. Cloud jobs never cancel in progress, allowing test cleanup to destroy VMs; the tagged reaper remains the crash safety net.
 
 ## Rejected alternatives
 

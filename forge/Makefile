@@ -1,4 +1,4 @@
-.PHONY: build test test-unit test-e2e test-e2e-overlay test-e2e-secrets test-e2e-flux test-e2e-cert-issuers test-e2e-controlplane test-e2e-gpu test-e2e-inference test-e2e-inference-gpu test-e2e-internal-tls test-e2e-tool-runner test-e2e-unit lint fmt fmt-check install-hooks clean
+.PHONY: build test test-unit test-e2e test-e2e-overlay test-e2e-secrets test-e2e-flux test-e2e-cert-issuers test-e2e-controlplane test-e2e-gpu test-e2e-gpu-broken-policy test-e2e-inference test-e2e-inference-gpu test-e2e-internal-tls test-e2e-tool-runner test-e2e-unit lint fmt fmt-check install-hooks clean
 
 # Load .env if present (e.g. DIGITALOCEAN_TOKEN for e2e). .env is gitignored.
 -include .env
@@ -42,7 +42,21 @@ test-e2e:
 test-e2e-overlay test-e2e-secrets test-e2e-flux: test-e2e
 
 test-e2e-gpu:
-	cd test/e2e && ITERABASE_E2E_SOURCE_INPUTS="$(ITERABASE_E2E_SOURCE_INPUTS)" go test -v -race -count=1 -timeout 60m -run '^TestE2E$$/^digitalocean-gpu$$' .
+	cd test/e2e && ITERABASE_E2E_SOURCE_INPUTS="$(ITERABASE_E2E_SOURCE_INPUTS)" go test -v -race -count=1 -timeout 100m -run '^TestE2E$$/^digitalocean-gpu$$' .
+
+# Intentional HOR-411 red proof. Build the same source with only the Forge
+# deleteEmptyDir value mutated to false, require real capacity, and prove the
+# normal green fixture catches the operator's local-storage deletion failure.
+test-e2e-gpu-broken-policy:
+	@output=$$(mktemp); trap 'rm -f "$$output"' EXIT; \
+	set +e; (cd test/e2e && FORGE_E2E_BREAK_DELETE_EMPTYDIR=true FORGE_E2E_REQUIRE_CAPACITY=true \
+		ITERABASE_E2E_SOURCE_INPUTS="$(ITERABASE_E2E_SOURCE_INPUTS)" \
+		go test -v -race -count=1 -timeout 100m -run '^TestE2E$$/^digitalocean-gpu$$' .) >"$$output" 2>&1; status=$$?; set -e; \
+	cat "$$output"; \
+	if [ "$$status" -eq 0 ]; then echo "broken deleteEmptyDir policy unexpectedly passed" >&2; exit 1; fi; \
+	grep -Fq 'building intentional HOR-411 mutation with deleteEmptyDir=false' "$$output"; \
+	grep -Fq 'upgrade-failed' "$$output"; \
+	grep -Eq 'cannot delete Pods with local storage|use --delete-emptydir-data' "$$output"
 
 # Compatibility alias: real inference now follows GPU smoke on the same VM.
 test-e2e-inference-gpu: test-e2e-gpu
