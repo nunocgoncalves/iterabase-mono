@@ -106,6 +106,31 @@ func assertGPUDriverUpgradeStage(t *testing.T, state *digitalOceanGPUState) {
 		t.Fatalf("disposable emptyDir was not recreated for pod %s: before=%q after=%q", after.PodUID, before.EmptyDirOwner, after.EmptyDirOwner)
 	}
 	t.Logf("GPU driver transition converged with recreated workload: before=%+v after=%+v", before, after)
+	releaseGPUUpgradeWorkload(t, clients.typed, 2*time.Minute)
+}
+
+func releaseGPUUpgradeWorkload(t *testing.T, client kubernetes.Interface, timeout time.Duration) {
+	t.Helper()
+	propagation := metav1.DeletePropagationForeground
+	if err := client.AppsV1().Deployments(gpuUpgradeNamespace).Delete(context.Background(), gpuUpgradeWorkloadName, metav1.DeleteOptions{
+		PropagationPolicy: &propagation,
+	}); err != nil {
+		t.Fatalf("release GPU upgrade workload: %v", err)
+	}
+	deadline := time.Now().Add(timeout)
+	selector := "app.kubernetes.io/name=" + gpuUpgradeWorkloadName
+	for time.Now().Before(deadline) {
+		pods, err := client.CoreV1().Pods(gpuUpgradeNamespace).List(context.Background(), metav1.ListOptions{LabelSelector: selector})
+		if err != nil {
+			t.Fatalf("observe GPU upgrade workload release: %v", err)
+		}
+		if len(pods.Items) == 0 {
+			t.Log("released the fixture's GPU before the existing real-inference smoke")
+			return
+		}
+		time.Sleep(2 * time.Second)
+	}
+	t.Fatalf("GPU upgrade workload did not release the GPU within %s", timeout)
 }
 
 type gpuUpgradeClients struct {
