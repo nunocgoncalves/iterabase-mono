@@ -14,6 +14,7 @@ ITERABASE_E2E_FIXTURE_MODE ?= source
 ITERABASE_E2E_SOURCE_SHA ?= $(shell git rev-parse HEAD)
 ITERABASE_E2E_SOURCE_DIRTY ?= $(if $(shell git status --porcelain),true,false)
 ITERABASE_E2E_PUBLISHED_FIXTURE ?= $(CURDIR)/test/e2e/published-fixture.json
+ITERABASE_E2E_SOURCE_INPUTS ?= $(ITERABASE_E2E_PUBLISHED_FIXTURE)
 export ITERABASE_E2E_FIXTURE_MODE ITERABASE_E2E_SOURCE_SHA ITERABASE_E2E_SOURCE_DIRTY ITERABASE_E2E_PUBLISHED_FIXTURE ITERABASE_E2E_CANDIDATE_PLAN
 
 VERSION := $(shell version="$$(git describe --tags --match 'forge-v*' --always --dirty 2>/dev/null)" && printf '%s\n' "$$version" | sed 's/^forge-//' || echo dev)
@@ -34,14 +35,14 @@ test-unit:
 # The E2E module has one top-level TestE2E runner. -run selects an isolated
 # scenario; -v is required so capacity skips and named stages remain visible.
 test-e2e:
-	cd test/e2e && go test -v -race -count=1 -timeout 60m -run '^TestE2E$$/^digitalocean-cpu$$' .
+	cd test/e2e && ITERABASE_E2E_SOURCE_INPUTS="$(ITERABASE_E2E_SOURCE_INPUTS)" go test -v -race -count=1 -timeout 60m -run '^TestE2E$$/^digitalocean-cpu$$' .
 
 # Compatibility aliases: overlay, secret-sync, and Flux now compose on the one
 # CPU fixture instead of provisioning three additional droplets.
 test-e2e-overlay test-e2e-secrets test-e2e-flux: test-e2e
 
 test-e2e-gpu:
-	cd test/e2e && go test -v -race -count=1 -timeout 60m -run '^TestE2E$$/^digitalocean-gpu$$' .
+	cd test/e2e && ITERABASE_E2E_SOURCE_INPUTS="$(ITERABASE_E2E_SOURCE_INPUTS)" go test -v -race -count=1 -timeout 60m -run '^TestE2E$$/^digitalocean-gpu$$' .
 
 # Compatibility alias: real inference now follows GPU smoke on the same VM.
 test-e2e-inference-gpu: test-e2e-gpu

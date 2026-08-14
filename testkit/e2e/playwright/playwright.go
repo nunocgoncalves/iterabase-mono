@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/nunocgoncalves/iterabase-mono/testkit/e2e/artifacts"
@@ -41,6 +42,11 @@ func (runner Runner) Run(ctx context.Context, invocation Invocation) error {
 	}
 	if _, err := os.Stat(filepath.Join(invocation.Directory, "package-lock.json")); err != nil {
 		return fmt.Errorf("playwright package must have package-lock.json: %w", err)
+	}
+	for _, arg := range invocation.Args {
+		if arg == "--retries" || strings.HasPrefix(arg, "--retries=") {
+			return fmt.Errorf("playwright retries are locked to zero; invocation cannot set %q", arg)
+		}
 	}
 	_, installErr := runner.Executor.Run(ctx, process.Command{
 		Name: "npm", Args: []string{"ci"}, Dir: invocation.Directory,

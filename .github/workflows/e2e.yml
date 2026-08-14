@@ -107,6 +107,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ITERABASE_E2E_FIXTURE_MODE: source
           ITERABASE_E2E_SOURCE_SHA: ${{ github.sha }}
+          ITERABASE_E2E_SOURCE_INPUTS: ${{ github.workspace }}/forge/test/e2e/published-fixture.json
 
   digitalocean-gpu:
     name: digitalocean-gpu
@@ -135,7 +136,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ITERABASE_E2E_FIXTURE_MODE: source
           ITERABASE_E2E_SOURCE_SHA: ${{ github.sha }}
-          ITERABASE_E2E_PUBLISHED_FIXTURE: ${{ github.workspace }}/forge/test/e2e/published-fixture.json
+          ITERABASE_E2E_SOURCE_INPUTS: ${{ github.workspace }}/forge/test/e2e/published-fixture.json
 
   kind:
     name: kind-${{ matrix.name }}

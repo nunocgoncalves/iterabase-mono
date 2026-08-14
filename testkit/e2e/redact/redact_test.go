@@ -6,6 +6,15 @@ import (
 	"testing"
 )
 
+func TestNilRedactorStillRemovesStructuralSecrets(t *testing.T) {
+	t.Parallel()
+	var redactor *Redactor
+	output := redactor.String("Authorization: Bearer structural-secret")
+	if strings.Contains(output, "structural-secret") {
+		t.Fatalf("nil redactor retained structural secret: %s", output)
+	}
+}
+
 func TestRedactorRemovesRegisteredStructuredAndPEMSecrets(t *testing.T) {
 	t.Parallel()
 	redactor := New("literal-secret")

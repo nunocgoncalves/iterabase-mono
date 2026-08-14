@@ -28,6 +28,25 @@ func TestCollectRedactsTextAndRejectsUndeclaredOpaqueArtifacts(t *testing.T) {
 	}
 }
 
+func TestCollectRejectsParentDirectoryArtifactName(t *testing.T) {
+	t.Parallel()
+	source := filepath.Join(t.TempDir(), "evidence")
+	if err := os.MkdirAll(source, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "escaped.log"), []byte("evidence"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	destination := filepath.Join(root, "collected")
+	if err := Collect([]Entry{{Name: "..", Source: source, Kind: Text}}, destination, nil); err == nil {
+		t.Fatal("parent-directory artifact name unexpectedly accepted")
+	}
+	if _, err := os.Stat(filepath.Join(root, "escaped.log")); !os.IsNotExist(err) {
+		t.Fatalf("artifact escaped destination: %v", err)
+	}
+}
+
 func TestCollectAllowsExplicitSafeSyntheticOpaqueArtifact(t *testing.T) {
 	t.Parallel()
 	source := filepath.Join(t.TempDir(), "screenshot.png")

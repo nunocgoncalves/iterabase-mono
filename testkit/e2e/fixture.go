@@ -11,11 +11,12 @@ import (
 )
 
 const (
-	fixtureModeEnv          = "ITERABASE_E2E_FIXTURE_MODE"
-	fixtureSourceSHAEnv     = "ITERABASE_E2E_SOURCE_SHA"
-	fixtureSourceDirtyEnv   = "ITERABASE_E2E_SOURCE_DIRTY"
-	fixtureCandidatePlanEnv = "ITERABASE_E2E_CANDIDATE_PLAN"
-	fixturePublishedFileEnv = "ITERABASE_E2E_PUBLISHED_FIXTURE"
+	fixtureModeEnv             = "ITERABASE_E2E_FIXTURE_MODE"
+	fixtureSourceSHAEnv        = "ITERABASE_E2E_SOURCE_SHA"
+	fixtureSourceDirtyEnv      = "ITERABASE_E2E_SOURCE_DIRTY"
+	fixtureSourceInputsFileEnv = "ITERABASE_E2E_SOURCE_INPUTS"
+	fixtureCandidatePlanEnv    = "ITERABASE_E2E_CANDIDATE_PLAN"
+	fixturePublishedFileEnv    = "ITERABASE_E2E_PUBLISHED_FIXTURE"
 )
 
 // Fixture records the exact source, candidate, or published inputs used by one
@@ -105,6 +106,19 @@ func FixtureFromEnv(t *testing.T) Fixture {
 			Mode: mode, SourceSHA: os.Getenv(fixtureSourceSHAEnv),
 			Dirty: os.Getenv(fixtureSourceDirtyEnv) == "true",
 		}
+		if path := os.Getenv(fixtureSourceInputsFileEnv); path != "" {
+			inputsFixture, err := fixtureFromFile(path)
+			if err != nil {
+				t.Fatalf("load source fixture inputs: %v", err)
+			}
+			if inputsFixture.Mode != FixturePublished {
+				t.Fatalf("%s must contain published dependency inputs (got mode %q)", fixtureSourceInputsFileEnv, inputsFixture.Mode)
+			}
+			if err := inputsFixture.Validate(); err != nil {
+				t.Fatalf("invalid source fixture inputs: %v", err)
+			}
+			fixture.Inputs = inputsFixture.Inputs
+		}
 	case FixtureCandidate:
 		path := os.Getenv(fixtureCandidatePlanEnv)
 		if path == "" {
@@ -120,12 +134,10 @@ func FixtureFromEnv(t *testing.T) Fixture {
 		if path == "" {
 			t.Fatalf("%s=published requires %s", fixtureModeEnv, fixturePublishedFileEnv)
 		}
-		data, err := os.ReadFile(path)
+		var err error
+		fixture, err = fixtureFromFile(path)
 		if err != nil {
-			t.Fatalf("read published fixture: %v", err)
-		}
-		if err := json.Unmarshal(data, &fixture); err != nil {
-			t.Fatalf("decode published fixture: %v", err)
+			t.Fatalf("load published fixture: %v", err)
 		}
 		if fixture.Mode != FixturePublished {
 			t.Fatalf("published fixture file records mode %q", fixture.Mode)
@@ -137,6 +149,18 @@ func FixtureFromEnv(t *testing.T) Fixture {
 		t.Fatalf("invalid fixture: %v", err)
 	}
 	return fixture
+}
+
+func fixtureFromFile(path string) (Fixture, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return Fixture{}, err
+	}
+	var fixture Fixture
+	if err := json.Unmarshal(data, &fixture); err != nil {
+		return Fixture{}, err
+	}
+	return fixture, nil
 }
 
 // CandidateFixtureFromPlan derives exact candidate and pinned-baseline inputs

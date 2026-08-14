@@ -56,12 +56,12 @@ func (redactor *Redactor) Add(secrets ...string) {
 
 // String returns redacted text.
 func (redactor *Redactor) String(value string) string {
-	if redactor == nil {
-		return value
+	var literals []string
+	if redactor != nil {
+		redactor.mu.RLock()
+		literals = append(literals, redactor.literals...)
+		redactor.mu.RUnlock()
 	}
-	redactor.mu.RLock()
-	literals := append([]string(nil), redactor.literals...)
-	redactor.mu.RUnlock()
 	for _, secret := range literals {
 		value = strings.ReplaceAll(value, secret, replacement)
 	}

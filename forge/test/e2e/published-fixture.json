@@ -2,6 +2,11 @@
   "mode": "published",
   "inputs": [
     {
+      "name": "cert-manager-substrate",
+      "kind": "published-chart",
+      "reference": "oci://ghcr.io/nunocgoncalves/iterabase-charts/cert-manager-substrate:0.3.1"
+    },
+    {
       "name": "certificate-migration-source",
       "kind": "published-chart",
       "reference": "oci://ghcr.io/nunocgoncalves/iterabase-charts/iterabase-platform:0.2.2"

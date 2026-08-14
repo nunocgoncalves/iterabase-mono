@@ -43,7 +43,7 @@ func TestE2E(t *testing.T) {
 				"digitalocean-gpu",
 				"Provisions a fresh GPU host and proves GPU substrate plus minimal real serving composition.",
 				sharede2e.TierF3,
-				[]string{"HOR-481", "HOR-485"},
+				[]string{"HOR-481"},
 				[]string{"forge", "iterabase-platform-chart"},
 				"test-e2e-gpu", 70, "gpu",
 			),

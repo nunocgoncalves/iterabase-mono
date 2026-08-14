@@ -19,6 +19,21 @@ func (executor *recordingExecutor) Run(_ context.Context, command process.Comman
 	return process.Result{}, nil
 }
 
+func TestRunnerRejectsRetryOverride(t *testing.T) {
+	t.Parallel()
+	directory := t.TempDir()
+	if err := os.WriteFile(filepath.Join(directory, "package-lock.json"), []byte(`{"lockfileVersion":3}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	executor := &recordingExecutor{}
+	err := (Runner{Executor: executor}).Run(context.Background(), Invocation{
+		Directory: directory, Timeout: time.Minute, Args: []string{"--retries=1"}, ArtifactDir: t.TempDir(),
+	})
+	if err == nil || len(executor.commands) != 0 {
+		t.Fatalf("retry override error = %v, commands = %+v", err, executor.commands)
+	}
+}
+
 func TestRunnerUsesLockedDependenciesDisablesRetriesAndCollectsArtifacts(t *testing.T) {
 	t.Parallel()
 	directory := t.TempDir()

@@ -32,7 +32,7 @@ Tier is compiled scenario metadata, not an estimate of importance. A higher tier
 
 Every suite execution records exactly one mode:
 
-- **`source`** — one full source SHA plus an explicit dirty-worktree bit for local development. Local charts/images may be built from that checkout; every unselected dependency remains explicitly pinned. Candidate fixtures reject dirty source.
+- **`source`** — one full source SHA plus an explicit dirty-worktree bit for local development. Local charts/images may be built from that checkout; every unselected dependency remains explicitly pinned. Source runs that consume published dependencies explicitly set `ITERABASE_E2E_SOURCE_INPUTS` to an exact checked-in input fixture; the library never loads one implicitly. Candidate fixtures reject dirty source.
 - **`candidate`** — the release candidate plan's full source SHA, selected candidate identities, and checksum/digest-pinned published baselines.
 - **`published`** — explicit immutable semantic versions and, where available, digests/checksums.
 
