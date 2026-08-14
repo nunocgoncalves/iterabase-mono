@@ -1,0 +1,20 @@
+{
+  "mode": "published",
+  "inputs": [
+    {
+      "name": "certificate-migration-source",
+      "kind": "published-chart",
+      "reference": "oci://ghcr.io/nunocgoncalves/iterabase-charts/iterabase-platform:0.2.2"
+    },
+    {
+      "name": "control-plane",
+      "kind": "published-chart",
+      "reference": "oci://ghcr.io/nunocgoncalves/iterabase-charts/control-plane:0.4.1"
+    },
+    {
+      "name": "iterabase-platform",
+      "kind": "published-chart",
+      "reference": "oci://ghcr.io/nunocgoncalves/iterabase-charts/iterabase-platform:0.3.1"
+    }
+  ]
+}

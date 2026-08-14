@@ -1,8 +1,11 @@
 go 1.26.0
 
 use (
+	./charts/test/e2e
 	./control-plane
+	./control-plane/test/e2e
 	./forge
 	./forge/test/e2e
 	./inference-gateway
+	./testkit/e2e
 )

@@ -27,6 +27,9 @@ env:
     inference-gateway/go.sum
     forge/go.sum
     forge/test/e2e/go.sum
+    testkit/e2e/go.mod
+    control-plane/test/e2e/go.mod
+    charts/test/e2e/go.mod
 
 jobs:
   preflight:
@@ -40,6 +43,9 @@ jobs:
       image_matrix: ${{ steps.resolved.outputs.image_matrix }}
       chart_matrix: ${{ steps.resolved.outputs.chart_matrix }}
       kind_matrix: ${{ steps.resolved.outputs.kind_matrix }}
+      # A contained pre-HOR-476 master SHA emits no compiled matrix; preserve
+      # its historical mandatory CPU+GPU gate while current SHAs use catalogue metadata.
+      real_machine_matrix: ${{ steps.resolved.outputs.real_machine_matrix || '[{"name":"cpu","target":"test-e2e","timeout":70},{"name":"gpu","target":"test-e2e-gpu","timeout":70}]' }}
       has_images: ${{ steps.resolved.outputs.has_images }}
       has_chart: ${{ steps.resolved.outputs.has_chart }}
       has_forge: ${{ steps.resolved.outputs.has_forge }}
@@ -64,6 +70,13 @@ jobs:
           test "$(git rev-parse HEAD)" = "$REQUESTED_SHA"
           git fetch --no-tags origin master
           git merge-base --is-ancestor "$REQUESTED_SHA" origin/master
+      - uses: ./.github/actions/setup-go
+        with:
+          go-version: 1.26.5
+          # Keep preflight compatible with an older contained master SHA that
+          # predates the shared modules; Forge's E2E sum exists on both sides.
+          cache-dependency-path: forge/test/e2e/go.sum
+          cache-scope: candidate-catalogue
       - name: Validate and resolve the affected target bundle from source authority
         id: plan
         env:
@@ -139,7 +152,7 @@ jobs:
         working-directory: control-plane
       - name: Run complete control-plane owner validation
         run: >-
-          make fmt-check lint build test proto-check
+          make fmt-check lint build test test-e2e-unit proto-check
           ui-lint ui-test
           harness-lint harness-test
           tool-runner-lint tool-runner-test tool-runner-build
@@ -200,7 +213,7 @@ jobs:
         with:
           cache-scope: candidate-charts
       - run: .github/scripts/add_helm_repositories.sh
-      - run: make check check-tls
+      - run: make check check-tls test-e2e-unit
         working-directory: charts
 
   charts-runtime:
@@ -538,6 +551,8 @@ jobs:
         working-directory: forge
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ITERABASE_E2E_FIXTURE_MODE: candidate
+          ITERABASE_E2E_CANDIDATE_PLAN: ${{ github.workspace }}/candidate-plan.json
         run: make ${{ matrix.target }}
 
   real-machine-candidates:
@@ -550,7 +565,7 @@ jobs:
       (needs.forge-candidate.result == 'success' || needs.forge-candidate.result == 'skipped') &&
       (needs.chart-candidate.result == 'success' || needs.chart-candidate.result == 'skipped')
     runs-on: ubuntu-latest
-    timeout-minutes: 70
+    timeout-minutes: ${{ matrix.timeout }}
     permissions:
       contents: read
       packages: read
@@ -559,11 +574,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - name: cpu
-            target: test-e2e
-          - name: gpu
-            target: test-e2e-gpu
+        include: ${{ fromJSON(needs.preflight.outputs.real_machine_matrix) }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
@@ -620,6 +631,8 @@ jobs:
           DIGITALOCEAN_TOKEN: ${{ secrets.DIGITALOCEAN_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           FORGE_E2E_REQUIRE_CAPACITY: "true"
+          ITERABASE_E2E_FIXTURE_MODE: candidate
+          ITERABASE_E2E_CANDIDATE_PLAN: ${{ github.workspace }}/candidate-plan.json
         run: make ${{ matrix.target }}
 
   validation:

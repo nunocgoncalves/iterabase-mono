@@ -1,18 +1,9 @@
 {
-  "schema_version": 2,
-  "suite_mapping_until": "HOR-476",
+  "schema_version": 3,
   "targets": {
     "control-plane": {
       "version_file": "control-plane/VERSION",
       "tag_prefix": "control-plane-v",
-      "source_suites": ["control-plane"],
-      "kind_scenarios": [
-        "controlplane-identity",
-        "inference-contract",
-        "internal-tls",
-        "tool-runner-contract"
-      ],
-      "real_machine": false,
       "images": [
         {
           "name": "control-plane",
@@ -37,9 +28,6 @@
     "inference-gateway": {
       "version_file": "inference-gateway/VERSION",
       "tag_prefix": "inference-gateway-v",
-      "source_suites": ["inference-gateway"],
-      "kind_scenarios": ["inference-contract", "internal-tls"],
-      "real_machine": false,
       "images": [
         {
           "name": "inference-gateway",
@@ -52,42 +40,21 @@
     "forge": {
       "version_file": "forge/VERSION",
       "tag_prefix": "forge-v",
-      "source_suites": ["forge"],
-      "kind_scenarios": [],
-      "real_machine": true,
       "images": []
     },
     "control-plane-chart": {
       "chart": "control-plane",
       "tag_prefix": "control-plane-",
-      "source_suites": ["charts"],
-      "chart_runtime": true,
-      "kind_scenarios": ["controlplane-identity", "tool-runner-contract"],
-      "real_machine": false,
       "images": []
     },
     "inference-gateway-chart": {
       "chart": "inference-gateway",
       "tag_prefix": "inference-gateway-",
-      "source_suites": ["charts"],
-      "chart_runtime": true,
-      "kind_scenarios": ["inference-contract", "internal-tls"],
-      "real_machine": false,
       "images": []
     },
     "iterabase-platform-chart": {
       "chart": "iterabase-platform",
       "tag_prefix": "iterabase-platform-",
-      "source_suites": ["charts"],
-      "chart_runtime": true,
-      "kind_scenarios": [
-        "controlplane-identity",
-        "inference-contract",
-        "cert-issuers",
-        "internal-tls",
-        "tool-runner-contract"
-      ],
-      "real_machine": true,
       "images": [],
       "companions": ["cert-manager-substrate"]
     }

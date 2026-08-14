@@ -15,6 +15,7 @@
 | `inference-gateway/` | OpenAI-compatible inference routing, snapshot consumption, auth enforcement, and rate limiting | [`inference-gateway/AGENTS.md`](inference-gateway/AGENTS.md) |
 | `forge/` | Host/k3s bootstrap, substrate reconciliation, and Forge-owned E2E | [`forge/AGENTS.md`](forge/AGENTS.md) |
 | `charts/` | Helm packaging and declarative install/upgrade/rollback behavior | [`charts/AGENTS.md`](charts/AGENTS.md) |
+| `testkit/` | Shared deterministic E2E mechanics and compiled scenario catalogue | [`testkit/AGENTS.md`](testkit/AGENTS.md) |
 | `docs/` | Monorepo-wide durable repository documentation | This file |
 
 The Go modules remain independently buildable. The root `go.work` is for atomic local development; do not merge component modules or introduce cross-module imports without an approved architectural decision.
@@ -53,7 +54,7 @@ make test             # component tests + required Linux harness isolation + For
 make lint             # all Go modules, including Forge E2E
 make codegen-check    # protobuf freshness
 make charts-check     # Helm/static chart validation
-make release-check    # compatibility manifest, suite mapping, and release request contracts
+make release-check    # artifact authority, compiled suite selection, and release request contracts
 make release-security-audit # authenticated GitHub environment, deploy-key, and tag-ruleset audit
 make docker-build     # control-plane and inference-gateway images
 make check            # complete local matrix above

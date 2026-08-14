@@ -23,7 +23,6 @@ import (
 	"time"
 
 	"github.com/digitalocean/godo"
-	"github.com/nunocgoncalves/iterabase-mono/forge/test/e2e/internal/runner"
 	"golang.org/x/crypto/ssh"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -52,7 +51,7 @@ type digitalOceanCPUState struct {
 	chartVersion string
 }
 
-func runDigitalOceanCPU(t *testing.T) {
+func newDigitalOceanCPUState(t *testing.T) *digitalOceanCPUState {
 	token := os.Getenv("DIGITALOCEAN_TOKEN")
 	if token == "" {
 		if os.Getenv("FORGE_E2E_REQUIRE_CAPACITY") == "true" {
@@ -73,18 +72,7 @@ func runDigitalOceanCPU(t *testing.T) {
 	state.chartVersion = platformChartVersion(t, "")
 	t.Logf("run %s (keep=%v)", state.runID, state.keep)
 	t.Cleanup(func() { state.cleanup(t) })
-
-	runner.RunStages(t, state,
-		runner.Stage[*digitalOceanCPUState]{Name: "provision-host", Run: provisionCPUStage},
-		runner.Stage[*digitalOceanCPUState]{Name: "reject-gpu-on-cpu-host", Run: rejectGPUOnCPUStage},
-		runner.Stage[*digitalOceanCPUState]{Name: "install-migration-source", Run: applyBaselineStage},
-		runner.Stage[*digitalOceanCPUState]{Name: "assert-migration-source-edge", Run: assertBaselineStage},
-		runner.Stage[*digitalOceanCPUState]{Name: "upgrade-current-with-exact-flux", Run: runOverlayStage},
-		runner.Stage[*digitalOceanCPUState]{Name: "assert-current-platform", Run: assertCurrentPlatformStage},
-		runner.Stage[*digitalOceanCPUState]{Name: "reapply-current-idempotently", Run: reapplyCurrentPlatformStage},
-		runner.Stage[*digitalOceanCPUState]{Name: "sync-secrets", Run: runSecretsStage},
-		runner.Stage[*digitalOceanCPUState]{Name: "reconcile-flux", Run: runFluxStage},
-	)
+	return state
 }
 
 func provisionCPUStage(t *testing.T, state *digitalOceanCPUState) {

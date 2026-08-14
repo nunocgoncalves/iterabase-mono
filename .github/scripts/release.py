@@ -4,11 +4,13 @@
 from __future__ import annotations
 
 import argparse
+from functools import lru_cache
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
+import subprocess
 import sys
 from typing import Any
 
@@ -22,13 +24,7 @@ TARGET_NAMES = (
     "inference-gateway-chart",
     "iterabase-platform-chart",
 )
-KIND_TARGETS = {
-    "controlplane-identity": ("test-e2e-controlplane", 20),
-    "inference-contract": ("test-e2e-inference", 20),
-    "cert-issuers": ("test-e2e-cert-issuers", 20),
-    "internal-tls": ("test-e2e-internal-tls", 25),
-    "tool-runner-contract": ("test-e2e-tool-runner", 35),
-}
+RUNNABLE_E2E_TIERS = {"F2", "F3"}
 
 
 class ReleaseError(ValueError):
@@ -47,6 +43,51 @@ def load_json(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ReleaseError(f"{path} must contain a JSON object")
     return value
+
+
+@lru_cache(maxsize=4)
+def load_scenario_catalogue(root_value: str | Path) -> dict[str, Any]:
+    root = Path(root_value).resolve()
+    command = [
+        "go",
+        "run",
+        "./testkit/e2e/cmd/e2e-catalogue",
+        "--root",
+        str(root),
+        "--format",
+        "json",
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=root,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
+        catalogue = json.loads(completed.stdout)
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
+        stderr = getattr(exc, "stderr", "")
+        raise ReleaseError(f"cannot compile E2E scenario catalogue: {exc}\n{stderr}") from exc
+    if not isinstance(catalogue, dict) or catalogue.get("schema_version") != 1:
+        raise ReleaseError("compiled E2E scenario catalogue must use schema_version 1")
+    return catalogue
+
+
+def catalogue_scenarios(catalogue: dict[str, Any]) -> list[dict[str, Any]]:
+    suites = catalogue.get("suites")
+    if not isinstance(suites, list):
+        raise ReleaseError("compiled E2E catalogue suites must be a list")
+    scenarios: list[dict[str, Any]] = []
+    for suite in suites:
+        if not isinstance(suite, dict) or not isinstance(suite.get("suite"), dict):
+            raise ReleaseError("compiled E2E catalogue has an invalid suite")
+        for scenario in suite.get("scenarios", []):
+            if not isinstance(scenario, dict) or not isinstance(scenario.get("metadata"), dict):
+                raise ReleaseError("compiled E2E catalogue has an invalid scenario")
+            scenarios.append({**scenario, "suite": suite["suite"]})
+    return sorted(scenarios, key=lambda item: item["id"])
 
 
 def parse_json_object(value: str | None, label: str) -> dict[str, Any]:
@@ -161,34 +202,38 @@ def fixture_versions(root: Path) -> dict[str, str]:
         if match is None:
             raise ReleaseError(f"cannot resolve test fixture {constant}")
         result[name] = require_semver(match.group(1), constant)
+
+    published = load_json(root / "forge" / "test" / "e2e" / "published-fixture.json")
+    if published.get("mode") != "published" or not isinstance(published.get("inputs"), list):
+        raise ReleaseError("published E2E fixture must record exact published inputs")
+    references = [item.get("reference", "") for item in published["inputs"]]
+    if any("latest" in reference.lower() for reference in references):
+        raise ReleaseError("published E2E fixture must not use floating latest")
+    for name, version in result.items():
+        if not any(reference.endswith(":" + version) for reference in references):
+            raise ReleaseError(f"published E2E fixture does not record {name}={version}")
     return result
 
 
-def validate_contract(targets: dict[str, Any], root: Path) -> None:
-    if targets.get("schema_version") != 2:
-        raise ReleaseError("release targets schema_version must be 2")
-    if targets.get("suite_mapping_until") != "HOR-476":
-        raise ReleaseError("temporary suite mapping must name HOR-476")
+def validate_contract(
+    targets: dict[str, Any], root: Path, catalogue: dict[str, Any] | None = None
+) -> None:
+    if targets.get("schema_version") != 3:
+        raise ReleaseError("release targets schema_version must be 3")
+    if "suite_mapping_until" in targets:
+        raise ReleaseError("temporary release suite mapping must be removed")
     definitions = targets.get("targets")
     if not isinstance(definitions, dict) or tuple(definitions) != TARGET_NAMES:
         raise ReleaseError("release target names or order do not match the workflow contract")
 
+    mapping_fields = {"source_suites", "kind_scenarios", "real_machine", "chart_runtime"}
     for target, definition in definitions.items():
         if not isinstance(definition, dict):
             raise ReleaseError(f"target {target} must be an object")
+        if mapping_fields.intersection(definition):
+            raise ReleaseError(f"target {target} retains temporary suite mapping fields")
         if not isinstance(definition.get("tag_prefix"), str):
             raise ReleaseError(f"target {target} is missing tag_prefix")
-        suites = definition.get("source_suites")
-        if not isinstance(suites, list) or any(
-            item not in {"control-plane", "inference-gateway", "forge", "charts"}
-            for item in suites
-        ):
-            raise ReleaseError(f"target {target} has an unknown source suite")
-        scenarios = definition.get("kind_scenarios")
-        if not isinstance(scenarios, list) or any(item not in KIND_TARGETS for item in scenarios):
-            raise ReleaseError(f"target {target} has an unknown Kind scenario")
-        if not isinstance(definition.get("real_machine"), bool):
-            raise ReleaseError(f"target {target} must declare real_machine")
         images = definition.get("images")
         if not isinstance(images, list):
             raise ReleaseError(f"target {target} must declare images")
@@ -208,6 +253,49 @@ def validate_contract(targets: dict[str, Any], root: Path) -> None:
                     raise ReleaseError(f"companion {companion} must match {chart} version")
         else:
             raise ReleaseError(f"target {target} has no version authority")
+
+    compiled = catalogue or load_scenario_catalogue(root)
+    coverage = {target: [] for target in TARGET_NAMES}
+    for scenario in catalogue_scenarios(compiled):
+        metadata = scenario["metadata"]
+        release_targets = metadata.get("release_targets", [])
+        if not isinstance(release_targets, list):
+            raise ReleaseError(f"scenario {scenario['id']} release_targets must be a list")
+        unknown = sorted(set(release_targets) - set(TARGET_NAMES))
+        if unknown:
+            raise ReleaseError(
+                f"scenario {scenario['id']} has unknown release targets: {', '.join(unknown)}"
+            )
+        for target in release_targets:
+            coverage[target].append(scenario)
+        if not release_targets:
+            continue
+        fixture_modes = metadata.get("fixture_modes")
+        if not isinstance(fixture_modes, list) or "candidate" not in fixture_modes:
+            raise ReleaseError(f"release scenario {scenario['id']} lacks candidate fixture mode")
+        tier = metadata.get("tier")
+        if tier not in RUNNABLE_E2E_TIERS:
+            raise ReleaseError(
+                f"release scenario {scenario['id']} uses unsupported executable tier {tier!r}"
+            )
+        timeout = metadata.get("timeout_minutes")
+        if (
+            not metadata.get("make_target")
+            or not isinstance(timeout, int)
+            or isinstance(timeout, bool)
+            or timeout <= 0
+        ):
+            raise ReleaseError(f"release scenario {scenario['id']} lacks runtime metadata")
+        if tier == "F3" and (
+            metadata.get("capacity") not in {"cpu", "gpu"}
+            or metadata.get("mandatory_capacity") is not True
+        ):
+            raise ReleaseError(f"real-machine scenario {scenario['id']} must require named capacity")
+    missing = [target for target, scenarios in coverage.items() if not scenarios]
+    if missing:
+        raise ReleaseError(
+            "compiled E2E catalogue has no release coverage for: " + ", ".join(missing)
+        )
 
     fixture_versions(root)
 
@@ -238,8 +326,58 @@ def parse_targets(value: str | list[str] | tuple[str, ...]) -> list[str]:
     return [target for target in TARGET_NAMES if target in requested]
 
 
+def source_suites_for_targets(selected: list[str]) -> list[str]:
+    suites: list[str] = []
+    for target in selected:
+        suite = "charts" if target.endswith("-chart") else target
+        if suite not in suites:
+            suites.append(suite)
+    return suites
+
+
+def release_scenarios(
+    catalogue: dict[str, Any], selected: list[str]
+) -> list[dict[str, Any]]:
+    selected_set = set(selected)
+    return [
+        scenario
+        for scenario in catalogue_scenarios(catalogue)
+        if selected_set.intersection(scenario["metadata"].get("release_targets", []))
+    ]
+
+
+def scenario_matrix(scenarios: list[dict[str, Any]], tier: str) -> list[dict[str, Any]]:
+    matrix: list[dict[str, Any]] = []
+    for scenario in scenarios:
+        metadata = scenario["metadata"]
+        if metadata.get("tier") != tier:
+            continue
+        name = metadata["name"]
+        if tier == "F2":
+            name = name.removeprefix("kind-")
+        matrix.append(
+            {
+                "id": scenario["id"],
+                "name": metadata.get("capacity") or name,
+                "target": metadata["make_target"],
+                "timeout": metadata["timeout_minutes"],
+                **(
+                    {"capacity": metadata["capacity"], "mandatory": metadata["mandatory_capacity"]}
+                    if tier == "F3"
+                    else {}
+                ),
+            }
+        )
+    return matrix
+
+
 def make_plan(
-    targets: dict[str, Any], selected_targets: str | list[str], master_sha: str, run_id: str, root: Path
+    targets: dict[str, Any],
+    selected_targets: str | list[str],
+    master_sha: str,
+    run_id: str,
+    root: Path,
+    catalogue: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     selected = parse_targets(selected_targets)
     if not SHA.fullmatch(master_sha):
@@ -258,11 +396,11 @@ def make_plan(
         )
     }
     fixtures = fixture_versions(root)
+    compiled_catalogue = catalogue or load_scenario_catalogue(root)
+    validate_contract(targets, root, compiled_catalogue)
     releases: list[dict[str, Any]] = []
     images: list[dict[str, Any]] = []
     chart_matrix: list[dict[str, Any]] = []
-    source_suites: list[str] = []
-    scenarios: list[str] = []
     selected_chart_dependencies: list[dict[str, Any]] = []
 
     for target in selected:
@@ -303,25 +441,24 @@ def make_plan(
                 "artifact_types": artifact_types,
             }
         )
-        for suite in definition["source_suites"]:
-            if suite not in source_suites:
-                source_suites.append(suite)
-        for scenario in definition["kind_scenarios"]:
-            if scenario not in scenarios:
-                scenarios.append(scenario)
+
+    source_suites = source_suites_for_targets(selected)
+    scenarios = release_scenarios(compiled_catalogue, selected)
+    kind_matrix = scenario_matrix(scenarios, "F2")
+    real_machine_matrix = scenario_matrix(scenarios, "F3")
 
     # Derive product baselines from every artifact-backed runtime fixture in the
     # selected suite union. Owner/source checks use the exact checkout; Kind and
     # real-machine fixtures must use either a selected candidate or an immutable
     # published identity recorded here.
     selected_set = set(selected)
-    scenario_set = set(scenarios)
-    control_scenarios = {"controlplane-identity", "tool-runner-contract"}
-    platform_scenarios = {"inference-contract", "cert-issuers", "internal-tls"}
-    real_machine = any(targets["targets"][target]["real_machine"] for target in selected)
-    uses_control_chart = bool(control_scenarios.intersection(scenario_set))
-    uses_platform_chart = bool(platform_scenarios.intersection(scenario_set)) or real_machine
-    uses_substrate_chart = uses_platform_chart or "tool-runner-contract" in scenario_set
+    scenario_names = {scenario["metadata"]["name"] for scenario in scenarios}
+    control_scenarios = {"kind-controlplane-identity", "kind-tool-runner-contract"}
+    platform_scenarios = {"kind-inference-contract", "kind-cert-issuers", "kind-internal-tls"}
+    real_machine = bool(real_machine_matrix)
+    uses_control_chart = bool(control_scenarios.intersection(scenario_names))
+    uses_platform_chart = bool(platform_scenarios.intersection(scenario_names)) or real_machine
+    uses_substrate_chart = uses_platform_chart or "kind-tool-runner-contract" in scenario_names
 
     baseline_charts: list[dict[str, Any]] = []
 
@@ -383,8 +520,8 @@ def make_plan(
         selected_set.intersection({"inference-gateway-chart", "iterabase-platform-chart"})
     )
 
-    uses_control_image = bool(scenario_set) or real_machine
-    uses_tool_runner_image = "tool-runner-contract" in scenario_set or real_machine
+    uses_control_image = bool(scenario_names) or real_machine
+    uses_tool_runner_image = "kind-tool-runner-contract" in scenario_names or real_machine
     uses_inference_image = uses_platform_chart
     if "control-plane" not in selected_set and uses_control_image:
         if selected_control_chart:
@@ -450,15 +587,11 @@ def make_plan(
         "targets": selected,
         "releases": releases,
         "source_suites": source_suites,
-        "kind_matrix": [
-            {"name": name, "target": KIND_TARGETS[name][0], "timeout": KIND_TARGETS[name][1]}
-            for name in KIND_TARGETS
-            if name in scenarios
-        ],
+        "selected_scenarios": [scenario["id"] for scenario in scenarios],
+        "kind_matrix": kind_matrix,
+        "real_machine_matrix": real_machine_matrix,
         "real_machine": real_machine,
-        "chart_runtime": any(
-            bool(targets["targets"][target].get("chart_runtime")) for target in selected
-        ),
+        "chart_runtime": any(target.endswith("-chart") for target in selected),
         "image_matrix": images,
         "chart_matrix": chart_matrix,
         "forge": "forge" in selected,
@@ -471,6 +604,17 @@ def make_plan(
             "chart_metadata": metadata,
             "selected_chart_dependencies": selected_chart_dependencies,
             "fixture_versions": fixtures,
+            "scenario_catalogue": {
+                "schema_version": compiled_catalogue["schema_version"],
+                "selected": [
+                    {
+                        "id": scenario["id"],
+                        "metadata": scenario["metadata"],
+                        "stages": scenario["stages"],
+                    }
+                    for scenario in scenarios
+                ],
+            },
         },
     }
     return plan
@@ -485,6 +629,11 @@ def candidate_job_selection(plan: dict[str, Any]) -> dict[str, bool]:
     for field in ("image_matrix", "chart_matrix", "kind_matrix"):
         if not isinstance(plan.get(field), list):
             raise ReleaseError(f"candidate plan {field} must be a list")
+    # Plans produced by a contained pre-HOR-476 master SHA predate the compiled
+    # matrix. The workflow supplies their historical CPU+GPU matrix; current
+    # plans must still carry a list.
+    if "real_machine_matrix" in plan and not isinstance(plan["real_machine_matrix"], list):
+        raise ReleaseError("candidate plan real_machine_matrix must be a list")
     for field in ("forge", "chart_runtime", "real_machine"):
         if not isinstance(plan.get(field), bool):
             raise ReleaseError(f"candidate plan {field} must be a boolean")
@@ -671,6 +820,7 @@ def write_github_outputs(path: Path, plan: dict[str, Any]) -> None:
         "image_matrix": compact(plan["image_matrix"]),
         "chart_matrix": compact(plan["chart_matrix"]),
         "kind_matrix": compact(plan["kind_matrix"]),
+        "real_machine_matrix": compact(plan["real_machine_matrix"]),
         "has_images": str(bool(plan["image_matrix"])).lower(),
         "has_chart": str(bool(plan["chart_matrix"])).lower(),
         "has_forge": str(bool(plan["forge"])).lower(),

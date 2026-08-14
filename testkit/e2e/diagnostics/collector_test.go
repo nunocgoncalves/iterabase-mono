@@ -1,0 +1,63 @@
+package diagnostics
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/nunocgoncalves/iterabase-mono/testkit/e2e/process"
+	"github.com/nunocgoncalves/iterabase-mono/testkit/e2e/redact"
+)
+
+type fixtureExecutor struct{ commands []process.Command }
+
+func (executor *fixtureExecutor) Run(_ context.Context, command process.Command) (process.Result, error) {
+	executor.commands = append(executor.commands, command)
+	joined := strings.Join(command.Args, " ")
+	switch {
+	case strings.Contains(joined, "get pods -A -o json"):
+		return process.Result{Output: `{"items":[{"metadata":{"name":"api-0","namespace":"iterabase-system"}}]}`}, nil
+	case command.Name == "helm" && strings.Contains(joined, "list -A -o json"):
+		return process.Result{Output: `[{"name":"platform","namespace":"iterabase-system"}]`}, nil
+	default:
+		return process.Result{Output: "token: diagnostic-secret\n"}, nil
+	}
+}
+
+func TestCollectorCapturesRedactedKubernetesHelmAndPodEvidence(t *testing.T) {
+	t.Parallel()
+	executor := &fixtureExecutor{}
+	output := t.TempDir()
+	collector := Collector{
+		Executor: executor, Kubeconfig: "/tmp/kubeconfig", OutputDir: output,
+		Redactor: redact.New("diagnostic-secret"),
+	}
+	if err := collector.Collect(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{
+		"kubernetes-resources.log", "kubernetes-events.log", "describe-iterabase-system-api-0.log",
+		"logs-iterabase-system-api-0.log", "helm-get-iterabase-system-platform.log",
+	} {
+		if _, err := os.Stat(filepath.Join(output, name)); err != nil {
+			t.Fatalf("missing diagnostic %s: %v", name, err)
+		}
+	}
+	if err := filepath.Walk(output, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return err
+		}
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		if strings.Contains(string(data), "diagnostic-secret") {
+			t.Fatalf("secret retained in %s", path)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}

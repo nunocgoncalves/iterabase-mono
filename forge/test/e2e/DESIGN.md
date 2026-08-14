@@ -11,7 +11,7 @@ Decision: HOR-406, approved 2026-08-03.
 
 ## Runner
 
-`TestE2E` is the only top-level infrastructure test. It registers named scenarios through `internal/runner`; `go test -run` selects a scenario and each scenario reports named stage subtests. Stages share explicit scenario state and stop after a failed prerequisite, while parent cleanup and diagnostics still run.
+`TestE2E` is the only top-level infrastructure test. It registers typed scenarios/stages through the shared `testkit/e2e`; `go test -run` selects a scenario and each scenario reports named stage subtests. Failed/skipped prerequisites suppress only dependent stages, independent stages continue, and cleanup/diagnostics still run. Catalogue mode compiles these exact registrations without provisioning infrastructure.
 
 ## Isolation boundary
 
@@ -77,17 +77,17 @@ One `e2e.yml` workflow owns:
 - one serialized CPU cloud job against reviewed published releases;
 - one serialized GPU cloud job against reviewed published releases;
 - a fail-fast-disabled Kind PR matrix with one fresh runner/cluster per contract;
-- a nightly, non-PR-gating Kind compatibility matrix against latest stable published artifacts.
+- a nightly, non-PR-gating Kind compatibility matrix against explicitly pinned published artifacts.
 
 For a monorepo ticket PR, the Kind matrix composes the control-plane and chart source from the same checkout. Standard Kind scenarios install the local chart source; the tool-runner contract additionally builds the local control-plane and runner images. Scheduled compatibility runs use explicit published releases. Cloud jobs intentionally use distributable releases because their boundary is Forge's real remote OCI installation path, not local source mounting.
 
-The nightly compatibility matrix is the only floating-latest consumer. It detects release drift without making an unrelated release silently change another PR's required checks. All E2E invocations are verbose so capacity skips and stage results are visible. Cloud jobs never cancel in progress, allowing test cleanup to destroy VMs; the tagged reaper remains the crash safety net.
+The nightly compatibility matrix records an exact published fixture and never floats to `latest`; intentional compatibility-baseline changes are reviewed in source. All E2E invocations are verbose so capacity skips and stage results are visible. Cloud jobs never cancel in progress, allowing test cleanup to destroy VMs; the tagged reaper remains the crash safety net.
 
 ## Rejected alternatives
 
 - **Merged mega-suite/shared Kind cluster:** weaker artifact-boundary signal and cluster-scoped state leakage.
 - **Fresh VM for every forge phase:** repeated provisioning and k3s/GPU installation without an independent requirement.
-- **Shared harness extraction:** outside HOR-406's Forge-only scope and deferred to the approved monorepo E2E testkit work.
+- **Forge-private runner:** replaced by the approved monorepo `testkit/e2e`; owner assertions remain here while mechanics and compiled metadata are shared.
 
 ## Production impact
 

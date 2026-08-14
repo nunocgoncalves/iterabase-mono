@@ -8,8 +8,16 @@ RENDER := /tmp/$(UMBRELLA).rendered.yaml
 RENDER_CP := /tmp/$(CONTROLPLANE).rendered.yaml
 RENDER_TLS := /tmp/$(UMBRELLA).tls.rendered.yaml
 RENDER_OBS := /tmp/$(UMBRELLA).observability.rendered.yaml
+E2E_SOURCE_SHA ?= $(shell git rev-parse HEAD)
+E2E_SOURCE_DIRTY ?= $(if $(shell git status --porcelain),true,false)
 
-.PHONY: build-deps lint template kubeconform template-controlplane kubeconform-controlplane template-tls kubeconform-tls template-observability kubeconform-observability check-certificate-substrate check-service-selectors check-redis-exporter-auth check-artifact-config check-tool-runner check-manager-contract check check-tls check-observability clean
+.PHONY: build-deps lint template kubeconform template-controlplane kubeconform-controlplane template-tls kubeconform-tls template-observability kubeconform-observability check-certificate-substrate check-service-selectors check-redis-exporter-auth check-artifact-config check-tool-runner check-manager-contract check check-tls check-observability test-e2e-unit clean
+
+# Compile the chart-owned suite entrypoint and run its hermetic shared-testkit scenario.
+test-e2e-unit:
+	cd test/e2e && ITERABASE_E2E_FIXTURE_MODE=source ITERABASE_E2E_SOURCE_SHA=$(E2E_SOURCE_SHA) \
+		ITERABASE_E2E_SOURCE_DIRTY=$(E2E_SOURCE_DIRTY) \
+		go test -race -count=1 -run '^TestE2E$$/^hermetic-example$$' .
 
 # control-plane has its own file:// dep (postgresql) and observability has its
 # own upstream deps (kube-prometheus-stack + loki); build them first so the

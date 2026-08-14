@@ -21,6 +21,9 @@ env:
     inference-gateway/go.sum
     forge/go.sum
     forge/test/e2e/go.sum
+    testkit/e2e/go.mod
+    control-plane/test/e2e/go.mod
+    charts/test/e2e/go.mod
 
 jobs:
   changes:
@@ -67,7 +70,9 @@ jobs:
           go-version: 1.26.5
           cache-dependency-path: ${{ env.GO_CACHE_DEPENDENCIES }}
           cache-scope: e2e-harness
-      - name: Compile scenarios and test harness internals
+      - name: Test shared mechanics and compile every owner entrypoint
+        run: make testkit-test
+      - name: Compile Forge scenarios and test harness internals
         run: make test-e2e-unit
         working-directory: forge
       - name: Install pinned golangci-lint
@@ -100,6 +105,8 @@ jobs:
         env:
           DIGITALOCEAN_TOKEN: ${{ secrets.DIGITALOCEAN_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ITERABASE_E2E_FIXTURE_MODE: source
+          ITERABASE_E2E_SOURCE_SHA: ${{ github.sha }}
 
   digitalocean-gpu:
     name: digitalocean-gpu
@@ -126,6 +133,9 @@ jobs:
         env:
           DIGITALOCEAN_TOKEN: ${{ secrets.DIGITALOCEAN_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ITERABASE_E2E_FIXTURE_MODE: source
+          ITERABASE_E2E_SOURCE_SHA: ${{ github.sha }}
+          ITERABASE_E2E_PUBLISHED_FIXTURE: ${{ github.workspace }}/forge/test/e2e/published-fixture.json
 
   kind:
     name: kind-${{ matrix.name }}
@@ -188,8 +198,10 @@ jobs:
           ITERABASE_LOCAL_CHART: ${{ format('{0}/charts/charts/iterabase-platform', github.workspace) }}
           ITERABASE_PLATFORM_LOCAL_CHART: ${{ format('{0}/charts/charts/iterabase-platform', github.workspace) }}
           CONTROL_PLANE_LOCAL_CHART: ${{ format('{0}/charts/charts/control-plane', github.workspace) }}
+          ITERABASE_E2E_FIXTURE_MODE: source
+          ITERABASE_E2E_SOURCE_SHA: ${{ github.sha }}
   published-compatibility:
-    name: published-latest-${{ matrix.name }}
+    name: published-pinned-${{ matrix.name }}
     needs: [changes, harness]
     if: github.event_name == 'schedule'
     runs-on: ubuntu-latest
@@ -214,7 +226,7 @@ jobs:
             target: test-e2e-tool-runner
             timeout: 35
     concurrency:
-      group: e2e-published-latest-${{ matrix.name }}
+      group: e2e-published-pinned-${{ matrix.name }}
       cancel-in-progress: true
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -224,12 +236,13 @@ jobs:
           cache-dependency-path: ${{ env.GO_CACHE_DEPENDENCIES }}
           cache-scope: e2e-published-${{ matrix.name }}
       - uses: ./.github/actions/setup-kubernetes-tools
-      - name: Run ${{ matrix.name }} against latest published artifacts
+      - name: Run ${{ matrix.name }} against pinned published artifacts
         run: make ${{ matrix.target }}
         working-directory: forge
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          FORGE_E2E_USE_LATEST_RELEASE: "true"
+          ITERABASE_E2E_FIXTURE_MODE: published
+          ITERABASE_E2E_PUBLISHED_FIXTURE: ${{ github.workspace }}/forge/test/e2e/published-fixture.json
   charts-runtime:
     name: charts-runtime
     needs: changes

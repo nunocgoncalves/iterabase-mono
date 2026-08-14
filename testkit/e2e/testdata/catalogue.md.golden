@@ -1,0 +1,19 @@
+# Compiled E2E scenario catalogue
+
+Generated from owner `TestE2E` registrations. Do not edit generated output by hand.
+
+## control-plane
+
+Owner: `control-plane` · Entrypoint: `control-plane/test/e2e`
+
+| Scenario | Tier | Stages | References | Release targets | Fixture modes |
+| --- | --- | --- | --- | --- | --- |
+| `control-plane/identity` | F2 | `install`<br>`assert` ← install | HOR-478 | control-plane | source, candidate |
+
+## charts
+
+Owner: `charts` · Entrypoint: `charts/test/e2e`
+
+| Scenario | Tier | Stages | References | Release targets | Fixture modes |
+| --- | --- | --- | --- | --- | --- |
+| `charts/install` | F2 | `cluster` | HOR-475 | control-plane | source, published |

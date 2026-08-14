@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/digitalocean/godo"
-	"github.com/nunocgoncalves/iterabase-mono/forge/test/e2e/internal/runner"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -136,6 +135,7 @@ type digitalOceanGPUState struct {
 	provisioner  GPUVMProvisioner
 	runID        string
 	keep         bool
+	pubKey       string
 	privKeyPath  string
 	vm           *GPUVM
 	forgeBin     string
@@ -143,7 +143,7 @@ type digitalOceanGPUState struct {
 	chartVersion string
 }
 
-func runDigitalOceanGPU(t *testing.T) {
+func newDigitalOceanGPUState(t *testing.T) *digitalOceanGPUState {
 	token := os.Getenv("DIGITALOCEAN_TOKEN")
 	if token == "" {
 		if os.Getenv("FORGE_E2E_REQUIRE_CAPACITY") == "true" {
@@ -156,17 +156,22 @@ func runDigitalOceanGPU(t *testing.T) {
 	client := godo.NewFromToken(token)
 	pubKey, privKeyPath := generateKey(t)
 	state := &digitalOceanGPUState{
-		ctx:         ctx,
-		provisioner: &doGPUVMProvisioner{client: client},
-		runID:       fmt.Sprintf("forge-gpu-%d", time.Now().Unix()),
-		keep:        os.Getenv("FORGE_E2E_KEEP") != "",
-		privKeyPath: privKeyPath,
-		forgeBin:    buildForge(t),
-		forgeHome:   t.TempDir(),
+		ctx:          ctx,
+		provisioner:  &doGPUVMProvisioner{client: client},
+		runID:        fmt.Sprintf("forge-gpu-%d", time.Now().Unix()),
+		keep:         os.Getenv("FORGE_E2E_KEEP") != "",
+		pubKey:       pubKey,
+		privKeyPath:  privKeyPath,
+		forgeBin:     buildForge(t),
+		forgeHome:    t.TempDir(),
+		chartVersion: platformChartVersion(t, ""),
 	}
-	state.chartVersion = platformChartVersion(t, "")
+	t.Cleanup(func() { state.cleanup(t) })
+	return state
+}
 
-	vm, err := state.provisioner.Provision(ctx, state.runID, pubKey, privKeyPath)
+func provisionGPUStage(t *testing.T, state *digitalOceanGPUState) {
+	vm, err := state.provisioner.Provision(state.ctx, state.runID, state.pubKey, state.privKeyPath)
 	if errors.Is(err, ErrNoGPUCapacity) {
 		if os.Getenv("FORGE_E2E_REQUIRE_CAPACITY") == "true" {
 			t.Fatalf("mandatory GPU release validation incomplete — no capacity: %v", err)
@@ -176,14 +181,6 @@ func runDigitalOceanGPU(t *testing.T) {
 	require.NoError(t, err)
 	state.vm = vm
 	t.Logf("gpu vm ip %s (keep=%v)", vm.IP, state.keep)
-	t.Cleanup(func() { state.cleanup(t) })
-
-	runner.RunStages(t, state,
-		runner.Stage[*digitalOceanGPUState]{Name: "apply-gpu-substrate", Run: applyGPUSubstrateStage},
-		runner.Stage[*digitalOceanGPUState]{Name: "assert-gpu-smoke", Run: assertGPUSmokeStage},
-		runner.Stage[*digitalOceanGPUState]{Name: "apply-platform", Run: applyInferencePlatformStage},
-		runner.Stage[*digitalOceanGPUState]{Name: "run-real-inference", Run: runInferenceGPUStage},
-	)
 }
 
 func applyGPUSubstrateStage(t *testing.T, state *digitalOceanGPUState) {

@@ -62,6 +62,15 @@ test-unit: ## Run unit tests (skips integration/Docker tests via -short).
 test: manifests generate fmt vet setup-envtest ## Run tests (unit + envtest + integration) fresh, without cached results.
 	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test -count=1 -coverprofile cover.out ./...
 
+E2E_SOURCE_SHA ?= $(shell git rev-parse HEAD)
+E2E_SOURCE_DIRTY ?= $(if $(shell git status --porcelain),true,false)
+
+.PHONY: test-e2e-unit
+test-e2e-unit: ## Compile the owner E2E entrypoint and run its hermetic shared-testkit scenario.
+	cd test/e2e && ITERABASE_E2E_FIXTURE_MODE=source ITERABASE_E2E_SOURCE_SHA=$(E2E_SOURCE_SHA) \
+		ITERABASE_E2E_SOURCE_DIRTY=$(E2E_SOURCE_DIRTY) \
+		go test -race -count=1 -run '^TestE2E$$/^hermetic-example$$' .
+
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter
 	"$(GOLANGCI_LINT)" run ./...
