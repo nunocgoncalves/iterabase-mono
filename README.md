@@ -47,7 +47,7 @@ Run the atomic local matrix from the repository root:
 ```bash
 make workspace-check  # go work sync freshness + go list for every module
 make build            # production binaries
-make test             # module tests; Docker required for integration tests
+make test             # module tests + Linux harness isolation; Docker required
 make lint
 make codegen-check    # protobuf lint/regeneration freshness
 make charts-check     # Helm and rendered-resource checks

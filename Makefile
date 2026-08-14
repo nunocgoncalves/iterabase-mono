@@ -48,7 +48,7 @@ build:
 # inference-gateway integration tests; infrastructure E2E scenarios remain
 # explicit Forge targets and are not run here.
 test:
-	$(MAKE) -C control-plane ui-deps ui-test harness-deps harness-test tool-runner-deps tool-runner-test test
+	$(MAKE) -C control-plane ui-deps ui-test harness-deps harness-test harness-isolation-test tool-runner-deps tool-runner-test test
 	$(MAKE) -C inference-gateway test
 	$(MAKE) -C forge test test-e2e-unit
 

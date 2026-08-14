@@ -68,14 +68,14 @@ try {
 ok("cannot readdir mount root (0711 — traverse only)", listErr);
 
 // --- sibling-session EACCES via Node fs ---
-let statSib = true;
+let statSib = false;
 try {
   fs.statSync(`${SIBLING}/session/secret.txt`);
 } catch (e) {
   statSib = e.code === "EACCES";
 }
 ok("cannot stat sibling session file (EACCES)", statSib);
-let readSib = true;
+let readSib = false;
 try {
   fs.readFileSync(`${SIBLING}/session/secret.txt`, "utf8");
 } catch (e) {
@@ -100,7 +100,7 @@ try {
 ok("shell `cat <sibling>/secret` fails", shellCat === false);
 
 // --- sibling-session EACCES via symlink (kernel follows, checks target perms) ---
-let sym = true;
+let sym = false;
 try {
   fs.symlinkSync(`${SIBLING}/session/secret.txt`, `${SANDBOX}/session/lnk`);
   fs.readFileSync(`${SANDBOX}/session/lnk`, "utf8");

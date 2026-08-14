@@ -110,6 +110,21 @@ class ChangedPathCollectionFixtures(unittest.TestCase):
                 self.assertNotIn("git diff --name-only", workflow)
                 self.assertIn(f"name: {workflow_name} / required", workflow)
 
+    def test_control_plane_gates_are_fresh_and_isolation_is_required(self) -> None:
+        component_makefile = (ROOT / "control-plane/Makefile").read_text()
+        root_makefile = (ROOT / "Makefile").read_text()
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+        harness_job = workflow.split("  harness:\n", 1)[1].split(
+            "\n  tool-runner:\n", 1
+        )[0]
+
+        self.assertIn(
+            "go test -count=1 -coverprofile cover.out ./...", component_makefile
+        )
+        self.assertIn("harness-isolation-test", root_makefile)
+        self.assertIn("run: make harness-isolation-test", harness_job)
+        self.assertNotIn("continue-on-error", harness_job)
+
 
 if __name__ == "__main__":
     unittest.main()

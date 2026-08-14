@@ -12,6 +12,12 @@
     "images": ["control-plane"]
   },
   {
+    "name": "control-plane Makefile retains Go and required harness gates",
+    "paths": ["control-plane/Makefile"],
+    "true": ["control_plane", "harness", "images"],
+    "images": ["control-plane"]
+  },
+  {
     "name": "dashboard selects UI and its embedded image",
     "paths": ["control-plane/ui/src/App.tsx"],
     "true": ["control_plane", "ui", "images"],

@@ -97,7 +97,8 @@ make run-gateway        # run the tool gateway (serve); needs DATABASE_URL + mTL
 make migrate-up         # apply DB migrations
 make setup-envtest      # download kube-apiserver assets (for make test)
 make test-unit          # fast unit tests (skips Docker/envtest)
-make test               # unit + envtest + integration (needs Docker)
+make test               # fresh unit + envtest + integration (needs Docker; no cached results)
+make harness-isolation-test # required Linux setpriv/UID/filesystem gate (needs Docker)
 make lint               # golangci-lint
 make fmt-check
 make install-hooks      # use .githooks/pre-commit
