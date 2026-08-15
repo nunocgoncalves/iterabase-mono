@@ -3,6 +3,7 @@ package e2e_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -179,13 +180,22 @@ func assertLokiPersistenceStage(t *testing.T, state *chartState) {
 
 func waitPrometheusValue(ctx context.Context, client *http.Client, baseURL, query, want string, timeout time.Duration) error {
 	return poll.Until(ctx, timeout, 5*time.Second, func(context.Context) (bool, string, error) {
-		_, value, err := prometheusInstantSample(client, baseURL, query)
-		if err != nil {
-			return false, "query failed", err
-		}
-		return value == want, "value=" + value, nil
+		return observePrometheusValue(client, baseURL, query, want)
 	})
 }
+
+func observePrometheusValue(client *http.Client, baseURL, query, want string) (bool, string, error) {
+	_, value, err := prometheusInstantSample(client, baseURL, query)
+	if errors.Is(err, errPrometheusNoSample) {
+		return false, "query returned no sample", nil
+	}
+	if err != nil {
+		return false, "query failed", err
+	}
+	return value == want, "value=" + value, nil
+}
+
+var errPrometheusNoSample = errors.New("query returned no sample")
 
 func prometheusInstantSample(client *http.Client, baseURL, query string) (float64, string, error) {
 	endpoint := baseURL + "/api/v1/query?" + url.Values{"query": {query}}.Encode()
@@ -208,8 +218,14 @@ func prometheusInstantSample(client *http.Client, baseURL, query string) (float6
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
 		return 0, "", err
 	}
-	if payload.Status != "success" || len(payload.Data.Result) == 0 || len(payload.Data.Result[0].Value) != 2 {
-		return 0, "", fmt.Errorf("query returned no sample")
+	if payload.Status != "success" {
+		return 0, "", fmt.Errorf("query status=%q", payload.Status)
+	}
+	if len(payload.Data.Result) == 0 {
+		return 0, "", errPrometheusNoSample
+	}
+	if len(payload.Data.Result[0].Value) != 2 {
+		return 0, "", fmt.Errorf("query returned malformed sample")
 	}
 	var timestamp float64
 	var value string

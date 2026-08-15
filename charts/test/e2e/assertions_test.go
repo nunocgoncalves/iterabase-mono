@@ -3,6 +3,8 @@ package e2e_test
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"slices"
 	"sort"
@@ -282,6 +284,32 @@ func TestUnitHistoricalSampleRejectsFreshReplacement(t *testing.T) {
 	body := []byte(`{"status":"success","data":{"result":[{"values":[[200,"1"]]}]}}`)
 	if err := assertHistoricalPrometheusSample(body, 100, "1"); err == nil {
 		t.Fatal("post-interval sample incorrectly proved persistence")
+	}
+}
+
+func TestUnitPrometheusNoSampleIsPendingReadiness(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		_, _ = writer.Write([]byte(`{"status":"success","data":{"result":[]}}`))
+	}))
+	t.Cleanup(server.Close)
+
+	ready, observation, err := observePrometheusValue(server.Client(), server.URL, "redis_up", "1")
+	if err != nil {
+		t.Fatalf("empty successful query should remain pending: %v", err)
+	}
+	if ready || observation != "query returned no sample" {
+		t.Fatalf("ready=%t observation=%q", ready, observation)
+	}
+}
+
+func TestUnitPrometheusObservationErrorsFailImmediately(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		_, _ = writer.Write([]byte(`not-json`))
+	}))
+	t.Cleanup(server.Close)
+
+	if _, _, err := observePrometheusValue(server.Client(), server.URL, "redis_up", "1"); err == nil {
+		t.Fatal("malformed Prometheus response was treated as pending readiness")
 	}
 }
 
