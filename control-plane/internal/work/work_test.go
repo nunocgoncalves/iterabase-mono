@@ -401,8 +401,15 @@ func seedFoundation(t *testing.T, ctx context.Context, pool *pgxpool.Pool) (stri
 // the private bounded source context reaches only the agent while customer APIs
 // expose only sourcePresentation.
 func TestWorkStartManualSourceBounded(t *testing.T) {
-	pool := testutil.NewPostgresPool(t)
 	ctx := context.Background()
+	bootstrapPool, connStr := testutil.NewPostgres(t)
+	bootstrapPool.Close()
+	config, err := pgxpool.ParseConfig(connStr)
+	require.NoError(t, err)
+	config.MaxConns = 4 // Lower than concurrentStarts to catch nested pool acquisition deadlocks.
+	pool, err := pgxpool.NewWithConfig(ctx, config)
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
 	store := workstore.NewStore(pool)
 	actorID, scopeID, poolID := seedFoundation(t, ctx, pool)
 

@@ -130,6 +130,11 @@ type Store struct {
 	pool *pgxpool.Pool
 }
 
+type attemptQuerier interface {
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
 // NewStore wraps a pool for workflow operations.
 func NewStore(pool *pgxpool.Pool) *Store {
 	return &Store{pool: pool}
@@ -268,7 +273,11 @@ func readRegisteredDefinition(ctx context.Context, tx pgx.Tx, d Definition) (Def
 
 // GetDefinition fetches an active definition by (key, version).
 func (s *Store) GetDefinition(ctx context.Context, key, version string) (Definition, error) {
-	row := s.pool.QueryRow(ctx, `
+	return getDefinition(ctx, s.pool, key, version)
+}
+
+func getDefinition(ctx context.Context, query attemptQuerier, key, version string) (Definition, error) {
+	row := query.QueryRow(ctx, `
 		SELECT id, key, version, digest, spec_json, validation_status, scope_identity_id,
 		       source_type, pool_key, presentation, created_at, updated_at
 		FROM workflow.definitions
@@ -283,7 +292,11 @@ func (s *Store) GetDefinition(ctx context.Context, key, version string) (Definit
 // GetLatestDefinition fetches the most recently created active definition for a
 // key (the version new runs resolve by default when no version is pinned).
 func (s *Store) GetLatestDefinition(ctx context.Context, key string) (Definition, error) {
-	row := s.pool.QueryRow(ctx, `
+	return getLatestDefinition(ctx, s.pool, key)
+}
+
+func getLatestDefinition(ctx context.Context, query attemptQuerier, key string) (Definition, error) {
+	row := query.QueryRow(ctx, `
 		SELECT id, key, version, digest, spec_json, validation_status, scope_identity_id,
 		       source_type, pool_key, presentation, created_at, updated_at
 		FROM workflow.definitions
@@ -397,7 +410,11 @@ func (s *Store) ReplaceTriggerBindings(ctx context.Context, definitionID, source
 
 // ListTriggerBindings returns a definition's active trigger bindings.
 func (s *Store) ListTriggerBindings(ctx context.Context, definitionID string) ([]TriggerBindingRow, error) {
-	rows, err := s.pool.Query(ctx, `
+	return listTriggerBindings(ctx, s.pool, definitionID)
+}
+
+func listTriggerBindings(ctx context.Context, query attemptQuerier, definitionID string) ([]TriggerBindingRow, error) {
+	rows, err := query.Query(ctx, `
 		SELECT id, definition_id, name, source_type, binding_key, created_at, updated_at
 		FROM workflow.trigger_bindings
 		WHERE definition_id = $1::uuid AND deleted_at IS NULL
@@ -488,12 +505,24 @@ func (s *Store) SoftDeleteDefinitionsByOwner(ctx context.Context, scopeIdentityK
 // workflow_pool_binding (nil is normalized to empty = deny all for the workflow
 // path; the binding always carries an explicit set).
 func (s *Store) ResolveForAttempt(ctx context.Context, key, version string) (ResolvedDefinition, error) {
+	return resolveForAttempt(ctx, s.pool, key, version)
+}
+
+// ResolveForAttemptTx resolves through the caller's transaction. Attempt
+// creation uses this path after acquiring its idempotency lock so resolution
+// cannot consume a second pool connection while other starts wait on the same
+// lock, and all immutable inputs share the creation transaction's snapshot.
+func (s *Store) ResolveForAttemptTx(ctx context.Context, tx pgx.Tx, key, version string) (ResolvedDefinition, error) {
+	return resolveForAttempt(ctx, tx, key, version)
+}
+
+func resolveForAttempt(ctx context.Context, query attemptQuerier, key, version string) (ResolvedDefinition, error) {
 	var d Definition
 	var err error
 	if version == "" {
-		d, err = s.GetLatestDefinition(ctx, key)
+		d, err = getLatestDefinition(ctx, query, key)
 	} else {
-		d, err = s.GetDefinition(ctx, key, version)
+		d, err = getDefinition(ctx, query, key, version)
 	}
 	if err != nil {
 		return ResolvedDefinition{}, err
@@ -501,11 +530,11 @@ func (s *Store) ResolveForAttempt(ctx context.Context, key, version string) (Res
 	if d.ValidationStatus == ValidationInvalid {
 		return ResolvedDefinition{}, fmt.Errorf("workflow: definition %s:%s is invalid and cannot start an attempt", d.Key, d.Version)
 	}
-	bindings, err := s.ListTriggerBindings(ctx, d.ID)
+	bindings, err := listTriggerBindings(ctx, query, d.ID)
 	if err != nil {
 		return ResolvedDefinition{}, fmt.Errorf("resolve trigger bindings: %w", err)
 	}
-	permitted, err := s.readPermittedTools(ctx, DefinitionKey(d.Key, d.Version))
+	permitted, err := readPermittedTools(ctx, query, DefinitionKey(d.Key, d.Version))
 	if err != nil {
 		return ResolvedDefinition{}, fmt.Errorf("resolve permitted tools: %w", err)
 	}
@@ -560,9 +589,9 @@ func validateCanonicalSpecForAttempt(d Definition, spec CanonicalSpec) error {
 // here — the complete narrowing is available on ResolvedDefinition.
 // RequestedCapabilities. Absent binding = ErrNotFound (the workflow must be
 // bound to a pool before runs start).
-func (s *Store) readPermittedTools(ctx context.Context, definitionKey string) ([]string, error) {
+func readPermittedTools(ctx context.Context, query attemptQuerier, definitionKey string) ([]string, error) {
 	var raw []byte
-	err := s.pool.QueryRow(ctx, `
+	err := query.QueryRow(ctx, `
 		SELECT permitted_tools FROM toolgateway.workflow_pool_bindings
 		WHERE workflow_definition_key = $1 AND deleted_at IS NULL`, definitionKey).Scan(&raw)
 	if err != nil {

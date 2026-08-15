@@ -99,7 +99,7 @@ func (s *Store) Start(ctx context.Context, in StartInput) (WorkItem, bool, error
 	// Resolve only after the idempotency lookup. An omitted version is part of
 	// the caller's payload, so replay still returns the original item even if a
 	// newer workflow version has since become eligible.
-	resolved, err := s.workflows.ResolveForAttempt(ctx, in.WorkflowKey, in.WorkflowVersion)
+	resolved, err := s.workflows.ResolveForAttemptTx(ctx, tx, in.WorkflowKey, in.WorkflowVersion)
 	if err != nil {
 		if errors.Is(err, workflow.ErrNotFound) {
 			return WorkItem{}, false, fmt.Errorf("%w: workflow is unavailable", ErrInvalidInput)
