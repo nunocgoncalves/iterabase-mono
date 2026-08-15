@@ -110,6 +110,20 @@ class ChangedPathCollectionFixtures(unittest.TestCase):
                 self.assertNotIn("git diff --name-only", workflow)
                 self.assertIn(f"name: {workflow_name} / required", workflow)
 
+    def test_control_plane_deployed_scenarios_are_required_when_selected(self) -> None:
+        workflow = (ROOT / ".github/workflows/e2e.yml").read_text()
+        job = workflow.split("  control-plane-kind:\n", 1)[1].split(
+            "\n  published-compatibility:\n", 1
+        )[0]
+        for target in (
+            "test-e2e-identity",
+            "test-e2e-work",
+            "test-e2e-artifact",
+        ):
+            self.assertIn(f"target: {target}", job)
+        required = workflow.split("  required:\n", 1)[1]
+        self.assertIn("- control-plane-kind", required)
+
     def test_control_plane_gates_are_fresh_and_isolation_is_required(self) -> None:
         component_makefile = (ROOT / "control-plane/Makefile").read_text()
         root_makefile = (ROOT / "Makefile").read_text()

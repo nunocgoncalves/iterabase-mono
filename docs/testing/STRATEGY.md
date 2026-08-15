@@ -56,7 +56,7 @@ Current entrypoints are:
 - `control-plane/test/e2e`
 - `forge/test/e2e`
 
-Each has an F0 hermetic example so registration and shared execution remain testable without infrastructure. Product/chart journeys are added by their delivery tickets; examples are mechanics evidence, not product coverage.
+Each has an F0 hermetic example so registration and shared execution remain testable without infrastructure. Examples are mechanics evidence, not product coverage. The control-plane owner also registers fresh-Kind identity/API, `manual_api` work/recovery, and artifact-durability journeys; chart and Forge owners register their own authoritative scenarios.
 
 Local commands:
 
@@ -67,6 +67,9 @@ make e2e-catalogue      # JSON to stdout
 make e2e-catalogue-check
 make -C charts test-e2e-unit
 make -C control-plane test-e2e-unit
+make -C control-plane test-e2e-identity  # fresh Kind + source-built image
+make -C control-plane test-e2e-work
+make -C control-plane test-e2e-artifact
 make -C forge test-e2e-unit
 ```
 
@@ -121,7 +124,7 @@ A normal F2 failure bundle includes cluster resources, events, pod describes, cu
 
 ## CI and release gates
 
-Pull requests run affected owner checks and deterministic selected E2E. Changes to `testkit/e2e`, catalogue discovery, or shared CI selection fan out conservatively because they can invalidate every owner and release decision. Required checks do not silently skip selected deterministic scenarios.
+Pull requests run affected owner checks and deterministic selected E2E. Control-plane or chart changes select the three control-plane-owned fresh-Kind scenarios independently, preserving failure localization while each gets a fresh cluster. Changes to `testkit/e2e`, catalogue discovery, or shared CI selection fan out conservatively because they can invalidate every owner and release decision. Required checks do not silently skip selected deterministic scenarios.
 
 Release planning takes an explicit non-empty target set and selects the union of every compiled scenario whose `release_targets` intersects it. It does not use changed-file narrowing. The compiled metadata supplies owner, Kind and real-machine Make targets, bounds, and capacity requirements. Chart releases execute the chart owner's complete exact-candidate matrix through the reusable chart workflow; image-only releases can select chart-owned scenarios through the owner-aware generic candidate matrix without duplicating chart-release jobs.
 

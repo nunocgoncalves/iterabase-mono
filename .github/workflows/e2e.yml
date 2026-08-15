@@ -37,6 +37,7 @@ jobs:
     name: select
     runs-on: ubuntu-latest
     outputs:
+      control_plane: ${{ steps.select.outputs.control_plane }}
       forge_e2e: ${{ steps.select.outputs.forge_e2e }}
       forge_real_e2e: ${{ steps.select.outputs.forge_real_e2e }}
       charts: ${{ steps.select.outputs.charts }}
@@ -211,6 +212,53 @@ jobs:
           CONTROL_PLANE_LOCAL_CHART: ${{ format('{0}/charts/charts/control-plane', github.workspace) }}
           ITERABASE_E2E_FIXTURE_MODE: source
           ITERABASE_E2E_SOURCE_SHA: ${{ github.sha }}
+  control-plane-kind:
+    name: control-plane-${{ matrix.name }}
+    needs: changes
+    if: >-
+      (needs.changes.outputs.control_plane == 'true' || needs.changes.outputs.charts == 'true') &&
+      (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ matrix.timeout }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: identity-api
+            target: test-e2e-identity
+            timeout: 30
+          - name: work-recovery
+            target: test-e2e-work
+            timeout: 35
+          - name: artifact-durability
+            target: test-e2e-artifact
+            timeout: 35
+    concurrency:
+      group: e2e-control-plane-${{ matrix.name }}-${{ github.ref }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: ./.github/actions/setup-go
+        with:
+          go-version: 1.26.5
+          cache-dependency-path: ${{ env.GO_CACHE_DEPENDENCIES }}
+          cache-scope: e2e-control-plane-${{ matrix.name }}
+      - uses: ./.github/actions/setup-kubernetes-tools
+      - name: Run source-built control-plane owner scenario
+        working-directory: control-plane
+        env:
+          ITERABASE_E2E_FIXTURE_MODE: source
+          ITERABASE_E2E_DIAGNOSTICS: ${{ runner.temp }}/control-plane-diagnostics/${{ matrix.target }}
+        run: make '${{ matrix.target }}'
+      - name: Upload redacted failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: control-plane-diagnostics-${{ matrix.target }}
+          path: ${{ runner.temp }}/control-plane-diagnostics/${{ matrix.target }}
+          if-no-files-found: ignore
+          retention-days: 7
+
   published-compatibility:
     name: published-pinned-${{ matrix.name }}
     needs: [changes, harness]
@@ -268,6 +316,7 @@ jobs:
       - digitalocean-cpu
       - digitalocean-gpu
       - kind
+      - control-plane-kind
       - published-compatibility
       - charts-runtime
     runs-on: ubuntu-latest

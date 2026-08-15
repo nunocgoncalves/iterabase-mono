@@ -1,0 +1,719 @@
+package e2e_test
+
+import (
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	sharede2e "github.com/nunocgoncalves/iterabase-mono/testkit/e2e"
+	"github.com/nunocgoncalves/iterabase-mono/testkit/e2e/artifacts"
+	"github.com/nunocgoncalves/iterabase-mono/testkit/e2e/diagnostics"
+	"github.com/nunocgoncalves/iterabase-mono/testkit/e2e/httpx"
+	kindcluster "github.com/nunocgoncalves/iterabase-mono/testkit/e2e/kind"
+	"github.com/nunocgoncalves/iterabase-mono/testkit/e2e/kube"
+	"github.com/nunocgoncalves/iterabase-mono/testkit/e2e/process"
+	"github.com/nunocgoncalves/iterabase-mono/testkit/e2e/redact"
+)
+
+const (
+	controlPlaneNamespace = "iterabase-system"
+	controlPlaneRelease   = "iterabase"
+)
+
+type requestEvidence struct {
+	At     time.Time      `json:"at"`
+	Method string         `json:"method"`
+	Path   string         `json:"path"`
+	Status int            `json:"status"`
+	Fields map[string]any `json:"fields,omitempty"`
+}
+
+// deployedState is an owner-local fixture API. Every scenario creates its own
+// state and fresh Kind cluster; later execution/browser scenarios may compose
+// these mechanics without sharing mutable clusters between contracts.
+type deployedState struct {
+	ctx              context.Context
+	repoRoot         string
+	controlRoot      string
+	chartsRoot       string
+	outputDir        string
+	diagnosticsDir   string
+	requestLog       string
+	redactor         *redact.Redactor
+	runner           process.Runner
+	cluster          *kindcluster.Cluster
+	client           kube.Client
+	platform         kube.Chart
+	substrate        kube.Chart
+	forwards         []*kube.Forward
+	apiForward       *kube.Forward
+	apiClient        *http.Client
+	imageRepo        string
+	imageTag         string
+	imageDigest      string
+	adminKey         string
+	tokenKey         string
+	workKey          string
+	workIdentityID   string
+	workItemID       string
+	initialCursor    int64
+	firstAttemptJSON []byte
+	artifactID       string
+	mu               sync.Mutex
+}
+
+func newDeployedState(t *testing.T) *deployedState {
+	t.Helper()
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("get working directory: %v", err)
+	}
+	repoRoot := os.Getenv("ITERABASE_REPOSITORY_ROOT")
+	if repoRoot == "" {
+		repoRoot = filepath.Join(cwd, "..", "..", "..")
+	}
+	repoRoot, err = filepath.Abs(repoRoot)
+	if err != nil {
+		t.Fatalf("resolve repository root: %v", err)
+	}
+	outputDir := filepath.Join(t.TempDir(), "evidence")
+	if err := os.MkdirAll(outputDir, 0o700); err != nil {
+		t.Fatalf("create evidence directory: %v", err)
+	}
+	diagnosticsDir := filepath.Join(outputDir, "diagnostics")
+	if configured := os.Getenv("ITERABASE_E2E_DIAGNOSTICS"); configured != "" {
+		diagnosticsDir = configured
+	}
+	if err := os.MkdirAll(diagnosticsDir, 0o700); err != nil {
+		t.Fatalf("create diagnostics directory: %v", err)
+	}
+	requestLog := filepath.Join(outputDir, "customer-safe-requests.jsonl")
+	if err := os.WriteFile(requestLog, nil, 0o600); err != nil {
+		t.Fatalf("create request evidence: %v", err)
+	}
+	redactor := redact.New()
+	state := &deployedState{
+		ctx: context.Background(), repoRoot: repoRoot,
+		controlRoot: filepath.Join(repoRoot, "control-plane"), chartsRoot: filepath.Join(repoRoot, "charts"),
+		outputDir: outputDir, diagnosticsDir: diagnosticsDir, requestLog: requestLog, redactor: redactor,
+		runner: process.Runner{Redactor: redactor, OutputDir: outputDir},
+	}
+	state.resolveRuntime(t)
+	return state
+}
+
+func (state *deployedState) resolveRuntime(t *testing.T) {
+	t.Helper()
+	mode := sharede2e.FixtureMode(os.Getenv("ITERABASE_E2E_FIXTURE_MODE"))
+	switch mode {
+	case sharede2e.FixtureSource:
+		sha := os.Getenv("ITERABASE_E2E_SOURCE_SHA")
+		if !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(sha) {
+			t.Fatalf("source fixture requires a full source SHA, got %q", sha)
+		}
+		state.imageRepo = "iterabase-control-plane-e2e"
+		state.imageTag = sha
+		state.platform = kube.Chart{Mode: mode, LocalPath: filepath.Join(state.chartsRoot, "charts", "iterabase-platform")}
+		state.substrate = kube.Chart{Mode: mode, LocalPath: filepath.Join(state.chartsRoot, "charts", "cert-manager-substrate")}
+	case sharede2e.FixtureCandidate:
+		state.imageRepo = os.Getenv("CONTROL_PLANE_IMAGE_REPO")
+		state.imageTag = os.Getenv("CONTROL_PLANE_IMAGE_TAG")
+		state.imageDigest = os.Getenv("CONTROL_PLANE_IMAGE_DIGEST")
+		if state.imageRepo == "" || state.imageTag == "" || !regexp.MustCompile(`^sha256:[0-9a-f]{64}$`).MatchString(state.imageDigest) {
+			t.Fatal("candidate fixture requires exact CONTROL_PLANE_IMAGE_REPO/TAG/DIGEST")
+		}
+		platform := os.Getenv("ITERABASE_PLATFORM_LOCAL_CHART")
+		if platform == "" {
+			t.Fatal("candidate fixture requires ITERABASE_PLATFORM_LOCAL_CHART")
+		}
+		platform, err := filepath.Abs(platform)
+		if err != nil {
+			t.Fatalf("resolve candidate platform chart: %v", err)
+		}
+		state.platform = kube.Chart{Mode: mode, LocalPath: platform}
+		state.substrate = kube.Chart{Mode: mode, LocalPath: filepath.Join(filepath.Dir(platform), "cert-manager-substrate")}
+	default:
+		t.Fatalf("control-plane deployed scenarios support source and candidate fixtures, got %q", mode)
+	}
+}
+
+func buildSourceImageStage(t *testing.T, state *deployedState) {
+	t.Helper()
+	if sharede2e.FixtureMode(os.Getenv("ITERABASE_E2E_FIXTURE_MODE")) != sharede2e.FixtureSource {
+		return
+	}
+	image := state.imageRepo + ":" + state.imageTag
+	result, err := state.runner.Run(state.ctx, process.Command{
+		Name: "docker", Args: []string{"build", "--label", "org.opencontainers.image.revision=" + state.imageTag, "-t", image, "."},
+		Dir: state.controlRoot, Timeout: 20 * time.Minute, OutputName: "docker-build-control-plane.log",
+	})
+	if err != nil {
+		t.Fatalf("build source control-plane image: %v\n%s", err, result.Output)
+	}
+	result, err = state.runner.Run(state.ctx, process.Command{
+		Name: "docker", Args: []string{"image", "inspect", "--format={{.Id}}", image},
+		Timeout: 30 * time.Second, OutputName: "docker-inspect-control-plane.log",
+	})
+	if err != nil {
+		t.Fatalf("inspect source control-plane image: %v\n%s", err, result.Output)
+	}
+	state.imageDigest = strings.TrimSpace(result.Output)
+	if !regexp.MustCompile(`^sha256:[0-9a-f]{64}$`).MatchString(state.imageDigest) {
+		t.Fatalf("source image has non-canonical ID %q", state.imageDigest)
+	}
+}
+
+func createControlPlaneKindStage(t *testing.T, state *deployedState) {
+	t.Helper()
+	manager := kindcluster.Manager{Executor: state.runner}
+	cluster, err := manager.Create(state.ctx, "control-plane")
+	if err != nil {
+		t.Fatalf("create Kind cluster: %v", err)
+	}
+	state.cluster = cluster
+	state.client = kube.Client{Executor: state.runner, Kubeconfig: cluster.Kubeconfig, Redactor: state.redactor}
+}
+
+func loadSourceImageStage(t *testing.T, state *deployedState) {
+	t.Helper()
+	if sharede2e.FixtureMode(os.Getenv("ITERABASE_E2E_FIXTURE_MODE")) != sharede2e.FixtureSource {
+		return
+	}
+	image := state.imageRepo + ":" + state.imageTag
+	if err := state.cluster.LoadImage(state.ctx, image); err != nil {
+		t.Fatalf("load source image into Kind: %v", err)
+	}
+	// Docker's local image ID is the config digest. Kubernetes reports the
+	// containerd manifest digest, so resolve that exact runtime identity after
+	// loading and verify the source revision label at the same boundary.
+	nodes, err := state.runner.Run(state.ctx, process.Command{
+		Name: "kind", Args: []string{"get", "nodes", "--name", state.cluster.Name}, Timeout: 30 * time.Second,
+	})
+	if err != nil || strings.TrimSpace(nodes.Output) == "" {
+		t.Fatalf("resolve Kind node for source image inspection: %v", err)
+	}
+	node := strings.Fields(nodes.Output)[0]
+	inspection, err := state.runner.Run(state.ctx, process.Command{
+		Name: "docker", Args: []string{"exec", node, "crictl", "inspecti", image},
+		Timeout: 30 * time.Second, OutputName: "kind-source-image-inspect.json",
+	})
+	if err != nil {
+		t.Fatalf("inspect source image inside Kind: %v\n%s", err, inspection.Output)
+	}
+	var runtimeImage struct {
+		Status struct {
+			RepoDigests []string `json:"repoDigests"`
+			RepoTags    []string `json:"repoTags"`
+		} `json:"status"`
+		Info struct {
+			ImageSpec struct {
+				Config struct {
+					Labels map[string]string `json:"Labels"`
+				} `json:"config"`
+			} `json:"imageSpec"`
+		} `json:"info"`
+	}
+	if err := json.Unmarshal([]byte(inspection.Output), &runtimeImage); err != nil {
+		t.Fatalf("decode Kind source image inspection: %v", err)
+	}
+	if runtimeImage.Info.ImageSpec.Config.Labels["org.opencontainers.image.revision"] != state.imageTag {
+		t.Fatalf("Kind image revision label=%q want=%q", runtimeImage.Info.ImageSpec.Config.Labels["org.opencontainers.image.revision"], state.imageTag)
+	}
+	if len(runtimeImage.Status.RepoDigests) != 1 || len(runtimeImage.Status.RepoTags) != 1 || !strings.Contains(runtimeImage.Status.RepoTags[0], image) {
+		t.Fatalf("Kind source image identity is ambiguous: tags=%v digests=%v", runtimeImage.Status.RepoTags, runtimeImage.Status.RepoDigests)
+	}
+	_, digest, found := strings.Cut(runtimeImage.Status.RepoDigests[0], "@")
+	if !found || !regexp.MustCompile(`^sha256:[0-9a-f]{64}$`).MatchString(digest) {
+		t.Fatalf("Kind source image has no canonical runtime digest: %v", runtimeImage.Status.RepoDigests)
+	}
+	state.imageDigest = digest
+}
+
+func installCertificateSubstrateStage(t *testing.T, state *deployedState) {
+	t.Helper()
+	out, err := state.client.HelmUpgrade(state.ctx, kube.HelmOptions{
+		Release: controlPlaneRelease + "-cert-manager", Namespace: controlPlaneNamespace,
+		Chart: state.substrate, CreateNamespace: true, Wait: true, Timeout: 8 * time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("install certificate substrate: %v\n%s", err, out)
+	}
+}
+
+func installControlPlanePlatformStage(t *testing.T, state *deployedState) {
+	t.Helper()
+	pullPolicy := "IfNotPresent"
+	if sharede2e.FixtureMode(os.Getenv("ITERABASE_E2E_FIXTURE_MODE")) == sharede2e.FixtureSource {
+		pullPolicy = "Never"
+	}
+	values := map[string]any{
+		"global":            map[string]any{"internalTLS": map[string]any{"enabled": true}},
+		"external-dns":      map[string]any{"enabled": false},
+		"inference-gateway": map[string]any{"enabled": false},
+		"redis":             map[string]any{"enabled": false},
+		"minio":             map[string]any{"enabled": true, "artifactService": map[string]any{"enabled": true}},
+		"ingress-nginx":     map[string]any{"enabled": false},
+		"metallb":           map[string]any{"enabled": false},
+		"metallb-config":    map[string]any{"enabled": false},
+		"reloader":          map[string]any{"enabled": false},
+		"control-plane": map[string]any{
+			"image":   map[string]any{"repository": state.imageRepo, "tag": state.imageTag, "pullPolicy": pullPolicy},
+			"gateway": map[string]any{"enabled": false},
+			"dispatch": map[string]any{
+				"enabled":      true,
+				"defaultModel": map[string]any{"id": "deployed-e2e-unused", "api": "openai"},
+			},
+			"toolRunner": map[string]any{"enabled": false},
+			"artifact":   map[string]any{"enabled": true},
+			"ingress":    map[string]any{"enabled": false},
+		},
+	}
+	valuesPath := state.writeJSON(t, "control-plane-platform-values.json", values)
+	out, err := state.client.HelmUpgrade(state.ctx, kube.HelmOptions{
+		Release: controlPlaneRelease, Namespace: controlPlaneNamespace, Chart: state.platform,
+		ValueFiles: []string{valuesPath}, Wait: true, Timeout: 16 * time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("install control-plane platform fixture: %v\n%s", err, out)
+	}
+}
+
+func assertDeploymentReadyStage(t *testing.T, state *deployedState) {
+	t.Helper()
+	state.kubectl(t, 6*time.Minute, "rollout", "status", "deployment/"+controlPlaneRelease+"-control-plane-api", "-n", controlPlaneNamespace, "--timeout=5m")
+	state.kubectl(t, 6*time.Minute, "rollout", "status", "deployment/"+controlPlaneRelease+"-control-plane-manager", "-n", controlPlaneNamespace, "--timeout=5m")
+	state.kubectl(t, 6*time.Minute, "rollout", "status", "deployment/"+controlPlaneRelease+"-control-plane-dispatch", "-n", controlPlaneNamespace, "--timeout=5m")
+	state.kubectl(t, 6*time.Minute, "rollout", "status", "statefulset/"+controlPlaneRelease+"-postgresql", "-n", controlPlaneNamespace, "--timeout=5m")
+	state.kubectl(t, 6*time.Minute, "rollout", "status", "statefulset/"+controlPlaneRelease+"-minio", "-n", controlPlaneNamespace, "--timeout=5m")
+	state.kubectl(t, 4*time.Minute, "wait", "--for=condition=Ready", "certificate/"+controlPlaneRelease+"-control-plane-api-tls", "-n", controlPlaneNamespace, "--timeout=3m")
+	imageLines := state.kubectl(t, 30*time.Second, "get", "pods", "-n", controlPlaneNamespace,
+		"-l", "app.kubernetes.io/name=control-plane", "-o",
+		`jsonpath={range .items[*].status.containerStatuses[*]}{.name}={.imageID}{"\n"}{end}{range .items[*].status.initContainerStatuses[*]}{.name}={.imageID}{"\n"}{end}`)
+	expectedImages := map[string]bool{"api": false, "manager": false, "dispatch": false, "migrate": false, "bootstrap": false}
+	for _, line := range strings.Split(imageLines, "\n") {
+		name, imageID, found := strings.Cut(line, "=")
+		if !found {
+			continue
+		}
+		if _, expected := expectedImages[name]; !expected {
+			continue
+		}
+		if !strings.Contains(imageID, state.imageDigest) {
+			t.Fatalf("deployed %s does not run exact image digest %s: %s", name, state.imageDigest, imageID)
+		}
+		expectedImages[name] = true
+	}
+	for name, found := range expectedImages {
+		if !found {
+			t.Fatalf("deployed control-plane image identity is missing for %s", name)
+		}
+	}
+	migration := state.databaseQuery(t, "SELECT version::text || ':' || dirty::text FROM schema_migrations")
+	if strings.TrimSpace(migration) == "" || strings.HasSuffix(strings.TrimSpace(migration), ":true") {
+		t.Fatalf("database migration state is not clean: %q", migration)
+	}
+	state.openAPI(t)
+	status, body := state.request(t, http.MethodGet, "/readyz", "", nil, nil)
+	requireStatus(t, status, http.StatusOK, body)
+}
+
+func (state *deployedState) captureBootstrapKeys(t *testing.T) {
+	t.Helper()
+	pod := state.firstPod(t, "app.kubernetes.io/name=control-plane,app.kubernetes.io/component=api")
+	ctx, cancel := context.WithTimeout(state.ctx, 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "kubectl", "--kubeconfig", state.cluster.Kubeconfig, "logs", "-n", controlPlaneNamespace, pod, "-c", "bootstrap")
+	output, err := cmd.Output()
+	if err != nil {
+		t.Fatal("read bootstrap credentials from the isolated init-container boundary")
+	}
+	keys := parseBootstrapKeys(string(output))
+	if keys["admin"] == "" || keys["token"] == "" {
+		t.Fatal("bootstrap did not emit the required admin and token credentials")
+	}
+	state.redactor.Add(keys["admin"], keys["token"])
+	state.adminKey = keys["admin"]
+	state.tokenKey = keys["token"]
+}
+
+var bootstrapKeyPattern = regexp.MustCompile(`API key \(scope=([^)]+)\): (\S+)`)
+
+func parseBootstrapKeys(output string) map[string]string {
+	keys := make(map[string]string)
+	for _, match := range bootstrapKeyPattern.FindAllStringSubmatch(output, -1) {
+		keys[match[1]] = match[2]
+	}
+	return keys
+}
+
+func (state *deployedState) createWorkIdentity(t *testing.T, email string) {
+	t.Helper()
+	status, body := state.requestJSON(t, http.MethodPost, "/v1/users", state.adminKey, map[string]any{"email": email, "role": "user"})
+	requireStatus(t, status, http.StatusCreated, body)
+	var user struct {
+		ID string `json:"id"`
+	}
+	mustDecode(t, body, &user)
+	if user.ID == "" {
+		t.Fatal("created work identity has no ID")
+	}
+	status, body = state.requestJSON(t, http.MethodPost, "/v1/api-keys", state.adminKey, map[string]any{
+		"identityID": user.ID, "name": "deployed-e2e", "scope": "work",
+	})
+	requireStatus(t, status, http.StatusCreated, body)
+	var key struct {
+		FullKey string `json:"fullKey"`
+	}
+	mustDecode(t, body, &key)
+	if key.FullKey == "" {
+		t.Fatal("created work API key is empty")
+	}
+	state.redactor.Add(key.FullKey)
+	state.workIdentityID = user.ID
+	state.workKey = key.FullKey
+}
+
+func (state *deployedState) applyWorkFixture(t *testing.T) {
+	t.Helper()
+	manifest := `apiVersion: v1
+kind: Secret
+metadata:
+  name: e2e-placeholder-ca
+  namespace: iterabase-system
+type: Opaque
+stringData:
+  ca.crt: synthetic-not-a-private-key
+---
+apiVersion: platform.iterabase.com/v1alpha1
+kind: AgentPool
+metadata:
+  name: paused-e2e
+  namespace: iterabase-system
+spec:
+  replicas: 0
+  workerImage: invalid.local/unused:fixed
+  podSecurity: baseline
+  identity:
+    trustDomain: iterabase.local
+    caSecretRef: {name: e2e-placeholder-ca}
+  sandbox:
+    storageClassName: standard
+    accessMode: ReadWriteOnce
+    size: 1Gi
+  gateways:
+    controlPlane:
+      url: https://iterabase-control-plane-dispatch.iterabase-system.svc:8091
+      serverName: iterabase-control-plane-dispatch.iterabase-system.svc
+      selector: {podSelector: {matchLabels: {app.kubernetes.io/component: dispatch}}}
+    toolGateway:
+      url: https://iterabase-control-plane-gateway.iterabase-system.svc:8090
+      serverName: iterabase-control-plane-gateway.iterabase-system.svc
+      selector: {podSelector: {matchLabels: {app.kubernetes.io/component: gateway}}}
+    inferenceGateway:
+      url: https://iterabase-gateway.iterabase-system.svc:8443
+      serverName: iterabase-gateway.iterabase-system.svc
+      selector: {podSelector: {matchLabels: {app.kubernetes.io/name: inference-gateway}}}
+  networkPolicy: {egress: denied}
+  workspaceTools: false
+---
+apiVersion: platform.iterabase.com/v1alpha1
+kind: Workflow
+metadata:
+  name: deployed-e2e
+  namespace: iterabase-system
+spec:
+  key: e2e/manual-review
+  version: "1"
+  poolRef: paused-e2e
+  source: {type: manual_api}
+  graph:
+    entryNode: review
+    maxTransitions: 4
+    nodes:
+      - key: review
+        label: {en: Review supplied case, pt: Rever caso fornecido}
+        kind: human_gate
+        outcomes: [accepted]
+        resultPresentation:
+          outcomes:
+            - outcome: accepted
+              summary: {en: Review completed, pt: Revisão concluída}
+          fields:
+            - path: [approved]
+              label: {en: Approved, pt: Aprovado}
+        humanGate:
+          type: approval
+          title: {en: Review required, pt: Revisão necessária}
+          description: {en: Confirm the supplied case., pt: Confirme o caso fornecido.}
+          responseSchema:
+            type: object
+            additionalProperties: false
+            required: [approved]
+            properties: {approved: {type: boolean}}
+          presentation:
+            outcomes: [{en: Accepted, pt: Aceite}]
+            fields:
+              - key: approved
+                label: {en: Approved, pt: Aprovado}
+    terminalOutcomes: [{node: review, outcome: accepted}]
+  presentation:
+    workflowTitle: Deployed review
+    personaName: Operations reviewer
+    locale: en
+`
+	path := state.writeManifest(t, "work-fixture.yaml", manifest)
+	state.kubectl(t, 30*time.Second, "apply", "-f", path)
+	state.kubectl(t, 3*time.Minute, "wait", "--for=jsonpath={.status.ready}=true", "agentpool/paused-e2e", "-n", controlPlaneNamespace, "--timeout=2m")
+	state.kubectl(t, 3*time.Minute, "wait", "--for=jsonpath={.status.ready}=true", "workflow/deployed-e2e", "-n", controlPlaneNamespace, "--timeout=2m")
+}
+
+func (state *deployedState) openAPI(t *testing.T) {
+	t.Helper()
+	if state.apiForward != nil {
+		state.stopForward(t, state.apiForward)
+	}
+	forward, err := state.client.PortForward(state.ctx, controlPlaneNamespace, "svc/"+controlPlaneRelease+"-control-plane-api", 8080, "https")
+	if err != nil {
+		t.Fatalf("port-forward control-plane API: %v", err)
+	}
+	state.forwards = append(state.forwards, forward)
+	state.apiForward = forward
+	ca := state.decodeSecret(t, controlPlaneRelease+"-internal-ca-root", "ca.crt")
+	client, err := httpx.TLSClient(httpx.TLSOptions{
+		Timeout: 20 * time.Second, RootCAPEM: ca,
+		ServerName: controlPlaneRelease + "-control-plane-api." + controlPlaneNamespace + ".svc",
+	})
+	if err != nil {
+		t.Fatalf("create verified API client: %v", err)
+	}
+	state.apiClient = client
+}
+
+func (state *deployedState) restartAPI(t *testing.T) {
+	t.Helper()
+	state.stopAPIForward(t)
+	state.kubectl(t, 30*time.Second, "rollout", "restart", "deployment/"+controlPlaneRelease+"-control-plane-api", "-n", controlPlaneNamespace)
+	state.kubectl(t, 7*time.Minute, "rollout", "status", "deployment/"+controlPlaneRelease+"-control-plane-api", "-n", controlPlaneNamespace, "--timeout=6m")
+	state.captureBootstrapKeys(t) // register newly emitted bootstrap credentials before diagnostics can retain logs
+	state.openAPI(t)
+	status, body := state.request(t, http.MethodGet, "/readyz", "", nil, nil)
+	requireStatus(t, status, http.StatusOK, body)
+}
+
+func (state *deployedState) restartMinIO(t *testing.T) {
+	t.Helper()
+	before := state.kubectl(t, 30*time.Second, "get", "pod", "-n", controlPlaneNamespace,
+		"-l", "app.kubernetes.io/name=minio", "-o", "jsonpath={.items[0].metadata.uid}")
+	state.kubectl(t, 30*time.Second, "rollout", "restart", "statefulset/"+controlPlaneRelease+"-minio", "-n", controlPlaneNamespace)
+	state.kubectl(t, 7*time.Minute, "rollout", "status", "statefulset/"+controlPlaneRelease+"-minio", "-n", controlPlaneNamespace, "--timeout=6m")
+	after := state.kubectl(t, 30*time.Second, "get", "pod", "-n", controlPlaneNamespace,
+		"-l", "app.kubernetes.io/name=minio", "-o", "jsonpath={.items[0].metadata.uid}")
+	if before == "" || after == "" || before == after {
+		t.Fatalf("MinIO process did not restart: before=%q after=%q", before, after)
+	}
+}
+
+func (state *deployedState) decodeSecret(t *testing.T, name, key string) []byte {
+	t.Helper()
+	encoded := state.kubectl(t, 30*time.Second, "get", "secret", name, "-n", controlPlaneNamespace,
+		"-o", fmt.Sprintf("jsonpath={.data.%s}", strings.ReplaceAll(key, ".", `\.`)))
+	decoded, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		t.Fatalf("decode Secret %s/%s: %v", name, key, err)
+	}
+	return decoded
+}
+
+func (state *deployedState) databaseQuery(t *testing.T, query string) string {
+	t.Helper()
+	return state.kubectl(t, 30*time.Second, "exec", "-n", controlPlaneNamespace,
+		"statefulset/"+controlPlaneRelease+"-postgresql", "-c", "postgresql", "--",
+		"psql", "-U", "controlplane", "-d", "controlplane", "-Atc", query)
+}
+
+func (state *deployedState) firstPod(t *testing.T, selector string) string {
+	t.Helper()
+	pod := state.kubectl(t, 30*time.Second, "get", "pods", "-n", controlPlaneNamespace, "-l", selector,
+		"-o", "jsonpath={.items[0].metadata.name}")
+	if pod == "" {
+		t.Fatalf("no pod for selector %q", selector)
+	}
+	return pod
+}
+
+func (state *deployedState) kubectl(t *testing.T, timeout time.Duration, args ...string) string {
+	t.Helper()
+	out, err := state.client.Kubectl(state.ctx, timeout, args...)
+	if err != nil {
+		t.Fatalf("kubectl %s: %v\n%s", strings.Join(args, " "), err, out)
+	}
+	return strings.TrimSpace(out)
+}
+
+func (state *deployedState) writeJSON(t *testing.T, name string, value any) string {
+	t.Helper()
+	data, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal %s: %v", name, err)
+	}
+	return state.writeManifest(t, name, string(append(data, '\n')))
+}
+
+func (state *deployedState) writeManifest(t *testing.T, name, content string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write %s: %v", name, err)
+	}
+	return path
+}
+
+func (state *deployedState) recordRequest(t *testing.T, evidence requestEvidence) {
+	t.Helper()
+	evidence.At = time.Now().UTC()
+	data, err := json.Marshal(evidence)
+	if err != nil {
+		t.Fatalf("marshal request evidence: %v", err)
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	file, err := os.OpenFile(state.requestLog, os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		t.Fatalf("open request evidence: %v", err)
+	}
+	defer file.Close()
+	if _, err := file.Write(append(data, '\n')); err != nil {
+		t.Fatalf("write request evidence: %v", err)
+	}
+}
+
+func (state *deployedState) registerBootstrapSecretsBestEffort() {
+	if state.cluster == nil || state.redactor == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	podCommand := exec.CommandContext(ctx, "kubectl", "--kubeconfig", state.cluster.Kubeconfig, "get", "pods", "-n", controlPlaneNamespace,
+		"-l", "app.kubernetes.io/name=control-plane,app.kubernetes.io/component=api", "-o", "jsonpath={.items[0].metadata.name}")
+	podOutput, err := podCommand.Output()
+	if err != nil || strings.TrimSpace(string(podOutput)) == "" {
+		return
+	}
+	logsCommand := exec.CommandContext(ctx, "kubectl", "--kubeconfig", state.cluster.Kubeconfig, "logs", "-n", controlPlaneNamespace,
+		strings.TrimSpace(string(podOutput)), "-c", "bootstrap")
+	logs, err := logsCommand.Output()
+	if err != nil {
+		return
+	}
+	keys := parseBootstrapKeys(string(logs))
+	state.redactor.Add(keys["admin"], keys["token"])
+}
+
+func controlPlaneDiagnostics(t *testing.T, state *deployedState) {
+	t.Helper()
+	if state.cluster == nil {
+		return
+	}
+	// Bootstrap emits credentials from an init-container boundary. Resolve them
+	// directly into memory before any generic log collector can retain evidence,
+	// including failures that occurred before the scenario's identity setup.
+	state.registerBootstrapSecretsBestEffort()
+	// Add owner-specific database/object-store health without querying Secrets.
+	health := []string{}
+	if out, err := state.client.Kubectl(state.ctx, 45*time.Second, "exec", "-n", controlPlaneNamespace,
+		"statefulset/"+controlPlaneRelease+"-postgresql", "-c", "postgresql", "--",
+		"psql", "-U", "controlplane", "-d", "controlplane", "-Atc",
+		"SELECT 'migration=' || version::text || ',dirty=' || dirty::text FROM schema_migrations"); err == nil {
+		health = append(health, strings.TrimSpace(out))
+	} else {
+		health = append(health, "database-health unavailable: "+err.Error())
+	}
+	if out, err := state.client.Kubectl(state.ctx, 45*time.Second, "get", "statefulset", controlPlaneRelease+"-minio", "-n", controlPlaneNamespace,
+		"-o", "jsonpath=minio-ready={.status.readyReplicas}/{.status.replicas}"); err == nil {
+		health = append(health, strings.TrimSpace(out))
+	} else {
+		health = append(health, "object-store-health unavailable: "+err.Error())
+	}
+	healthPath := filepath.Join(state.outputDir, "service-health.txt")
+	if err := os.WriteFile(healthPath, []byte(strings.Join(health, "\n")+"\n"), 0o600); err != nil {
+		t.Logf("write owner health evidence: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Minute)
+	defer cancel()
+	err := (diagnostics.Collector{
+		Executor: state.runner, Kubeconfig: state.cluster.Kubeconfig,
+		OutputDir: state.diagnosticsDir, Redactor: state.redactor,
+		Artifacts: []artifacts.Entry{
+			{Name: "customer-safe-requests.jsonl", Source: state.requestLog, Kind: artifacts.Text},
+			{Name: "service-health.txt", Source: healthPath, Kind: artifacts.Text},
+		},
+	}).Collect(ctx)
+	if err != nil {
+		t.Logf("best-effort deployed diagnostics: %v", err)
+	}
+}
+
+func cleanupControlPlaneForwards(t *testing.T, state *deployedState) {
+	t.Helper()
+	for i := len(state.forwards) - 1; i >= 0; i-- {
+		if err := state.forwards[i].Stop(); err != nil {
+			t.Errorf("stop port-forward: %v", err)
+		}
+	}
+	state.forwards = nil
+	state.apiForward = nil
+	state.apiClient = nil
+}
+
+func (state *deployedState) stopAPIForward(t *testing.T) {
+	t.Helper()
+	if state.apiForward == nil {
+		return
+	}
+	state.stopForward(t, state.apiForward)
+	state.apiForward = nil
+	state.apiClient = nil
+}
+
+func (state *deployedState) stopForward(t *testing.T, forward *kube.Forward) {
+	t.Helper()
+	if err := forward.Stop(); err != nil {
+		t.Fatalf("stop port-forward: %v", err)
+	}
+	for i, candidate := range state.forwards {
+		if candidate == forward {
+			state.forwards = append(state.forwards[:i], state.forwards[i+1:]...)
+			break
+		}
+	}
+}
+
+func cleanupControlPlaneKind(t *testing.T, state *deployedState) {
+	t.Helper()
+	if state.cluster == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
+	defer cancel()
+	if err := state.cluster.Delete(ctx); err != nil {
+		t.Errorf("delete Kind cluster: %v", err)
+	}
+}
+
+func deployedScenarioHooks() ([]sharede2e.Hook[*deployedState], []sharede2e.Hook[*deployedState]) {
+	return []sharede2e.Hook[*deployedState]{{Name: "deployed-service-evidence", Run: controlPlaneDiagnostics}},
+		[]sharede2e.Hook[*deployedState]{
+			{Name: "stop-port-forwards", Run: cleanupControlPlaneForwards},
+			{Name: "delete-kind-cluster", Run: cleanupControlPlaneKind},
+		}
+}

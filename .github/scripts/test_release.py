@@ -92,15 +92,39 @@ class ReleaseContractTests(unittest.TestCase):
     def test_compiled_catalogue_preserves_or_strengthens_every_target_suite(self) -> None:
         expected = {
             "control-plane": (
-                {"controlplane-identity", "inference-contract", "internal-tls", "tool-runner-contract"},
+                {
+                    "controlplane-identity",
+                    "deployed-identity-api",
+                    "deployed-work-recovery",
+                    "deployed-artifact-durability",
+                    "inference-contract",
+                    "internal-tls",
+                    "tool-runner-contract",
+                },
                 set(),
             ),
             "inference-gateway": ({"inference-contract", "internal-tls"}, set()),
             "forge": (set(), {"cpu", "gpu"}),
-            "control-plane-chart": ({"controlplane-identity", "tool-runner-contract"}, set()),
+            "control-plane-chart": (
+                {
+                    "controlplane-identity",
+                    "deployed-identity-api",
+                    "deployed-work-recovery",
+                    "deployed-artifact-durability",
+                    "tool-runner-contract",
+                },
+                set(),
+            ),
             "inference-gateway-chart": ({"inference-contract"}, set()),
             "iterabase-platform-chart": (
-                {"controlplane-identity", "inference-contract", "tool-runner-contract"},
+                {
+                    "controlplane-identity",
+                    "deployed-identity-api",
+                    "deployed-work-recovery",
+                    "deployed-artifact-durability",
+                    "inference-contract",
+                    "tool-runner-contract",
+                },
                 {"cpu", "gpu"},
             ),
         }
@@ -138,7 +162,14 @@ class ReleaseContractTests(unittest.TestCase):
         plan = self.plan(selected)
         self.assertEqual(
             {item["name"] for item in plan["kind_matrix"]},
-            {"controlplane-identity", "inference-contract", "tool-runner-contract"},
+            {
+                "controlplane-identity",
+                "deployed-identity-api",
+                "deployed-work-recovery",
+                "deployed-artifact-durability",
+                "inference-contract",
+                "tool-runner-contract",
+            },
         )
         self.assertEqual(
             {item["name"] for item in plan["real_machine_matrix"]}, {"cpu", "gpu"}
@@ -146,6 +177,9 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertEqual(
             set(plan["selected_scenarios"]),
             {
+                "control-plane/deployed-artifact-durability",
+                "control-plane/deployed-identity-api",
+                "control-plane/deployed-work-recovery",
                 "forge/digitalocean-cpu",
                 "forge/digitalocean-gpu",
                 "forge/kind-controlplane-identity",
@@ -188,7 +222,7 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertEqual([item["chart"] for item in plan["chart_matrix"]], ["control-plane"])
         self.assertTrue(plan["forge"])
         self.assertTrue(plan["real_machine"])
-        self.assertEqual(len(plan["kind_matrix"]), 3)
+        self.assertEqual(len(plan["kind_matrix"]), 6)
 
     def test_single_forge_target_remains_supported(self) -> None:
         plan = self.plan("forge")
