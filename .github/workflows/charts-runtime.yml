@@ -12,6 +12,11 @@ on:
         required: false
         default: false
         type: boolean
+      image_candidates:
+        description: Download selected image candidates into the composed chart runtime fixture
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -60,6 +65,12 @@ jobs:
         with:
           pattern: candidate-chart-*
           path: ${{ runner.temp }}/candidates/charts
+          merge-multiple: true
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        if: inputs.candidate_bundle && inputs.image_candidates
+        with:
+          pattern: candidate-image-*
+          path: ${{ runner.temp }}/candidates/images
           merge-multiple: true
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         if: inputs.candidate_bundle

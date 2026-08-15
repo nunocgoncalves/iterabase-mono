@@ -74,31 +74,22 @@ func assertStackReadinessStage(t *testing.T, state *chartState) {
 
 func assertEndpointSeparationStage(t *testing.T, state *chartState) {
 	t.Helper()
-	checks := []struct {
-		name, component, service string
-	}{
-		{"postgresql", "database", testRelease + "-postgresql"},
-		{"postgresql", "exporter", testRelease + "-postgresql-exporter"},
-		{"redis", "cache", testRelease + "-redis"},
-		{"redis", "exporter", testRelease + "-redis-exporter"},
-	}
-	sets := make(map[string][]string)
-	for _, check := range checks {
-		selector := fmt.Sprintf("app.kubernetes.io/name=%s,app.kubernetes.io/instance=%s,app.kubernetes.io/component=%s", check.name, testRelease, check.component)
-		expected := strings.Fields(state.kubectl(t, 30*time.Second, "get", "pods", "-n", testNamespace, "-l", selector,
-			"-o", `jsonpath={range .items[*]}{.metadata.name}{"\n"}{end}`))
-		actual := strings.Fields(state.kubectl(t, 30*time.Second, "get", "endpointslices", "-n", testNamespace,
-			"-l", "kubernetes.io/service-name="+check.service,
-			"-o", `jsonpath={range .items[*].endpoints[*]}{.targetRef.name}{"\n"}{end}`))
-		if err := assertEndpointSet(check.service, expected, actual); err != nil {
-			t.Fatal(err)
-		}
-		sets[check.service] = actual
-	}
-	if err := assertDisjointEndpointSets(testRelease+"-postgresql", sets[testRelease+"-postgresql"], testRelease+"-postgresql-exporter", sets[testRelease+"-postgresql-exporter"]); err != nil {
+	// Project only membership fields so shared evidence redaction cannot rewrite
+	// unrelated Pod configuration before the same JSON assertion used by the
+	// intentional-break fixture consumes it.
+	podFields := state.kubectl(t, 30*time.Second, "get", "pods", "-n", testNamespace,
+		"-o", `jsonpath-as-json={.items[*].metadata['name','labels']}`)
+	podsJSON, err := projectEndpointPodsJSON([]byte(podFields))
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := assertDisjointEndpointSets(testRelease+"-redis", sets[testRelease+"-redis"], testRelease+"-redis-exporter", sets[testRelease+"-redis-exporter"]); err != nil {
+	sliceFields := state.kubectl(t, 30*time.Second, "get", "endpointslices", "-n", testNamespace,
+		"-o", `jsonpath-as-json={.items[*]['metadata.labels','endpoints']}`)
+	slicesJSON, err := projectEndpointSlicesJSON([]byte(sliceFields))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := assertServiceEndpointsJSON(podsJSON, slicesJSON, testRelease); err != nil {
 		t.Fatal(err)
 	}
 }

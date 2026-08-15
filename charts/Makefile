@@ -9,6 +9,8 @@ RENDER_CP := /tmp/$(CONTROLPLANE).rendered.yaml
 RENDER_TLS := /tmp/$(UMBRELLA).tls.rendered.yaml
 RENDER_OBS := /tmp/$(UMBRELLA).observability.rendered.yaml
 RENDER_OBS_TLS := /tmp/$(UMBRELLA).observability-tls.rendered.yaml
+TLS_TEST_RELEASE := portable
+TLS_TEST_NAMESPACE := portable-system
 E2E_SOURCE_SHA ?= $(shell git rev-parse HEAD)
 E2E_SOURCE_DIRTY ?= $(if $(shell git status --porcelain),true,false)
 ITERABASE_E2E_FIXTURE_MODE ?= source
@@ -136,14 +138,14 @@ check-observability: kubeconform-observability
 # Combined static path for the TLS-on observability wiring that neither preset
 # exercises alone.
 template-observability-tls: build-deps
-	helm template iterabase $(CHARTS_DIR)/$(UMBRELLA) --namespace iterabase-system -f values-observability.yaml -f values-tls.yaml > $(RENDER_OBS_TLS)
+	helm template $(TLS_TEST_RELEASE) $(CHARTS_DIR)/$(UMBRELLA) --namespace $(TLS_TEST_NAMESPACE) -f values-observability.yaml -f values-tls.yaml > $(RENDER_OBS_TLS)
 	@echo "rendered $(RENDER_OBS_TLS)"
 
 kubeconform-observability-tls: template-observability-tls
 	kubeconform -strict -kubernetes-version 1.31.0 -ignore-missing-schemas $(RENDER_OBS_TLS)
 
 check-observability-tls: template-observability-tls
-	./scripts/check-observability-tls.sh $(RENDER_OBS_TLS)
+	./scripts/check-observability-tls.sh $(RENDER_OBS_TLS) $(TLS_TEST_RELEASE) $(TLS_TEST_NAMESPACE)
 
 clean:
 	rm -f $(RENDER) $(RENDER_CP) $(RENDER_TLS) $(RENDER_OBS) $(RENDER_OBS_TLS)
