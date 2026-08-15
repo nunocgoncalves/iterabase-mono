@@ -314,6 +314,8 @@ func TestUnitPrometheusMalformedSuccessFailsImmediately(t *testing.T) {
 		{name: "missing result", body: `{"status":"success","data":{"resultType":"vector"}}`},
 		{name: "null result", body: `{"status":"success","data":{"resultType":"vector","result":null}}`},
 		{name: "non-array result", body: `{"status":"success","data":{"resultType":"vector","result":{}}}`},
+		{name: "null timestamp", body: `{"status":"success","data":{"resultType":"vector","result":[{"value":[null,"1"]}]}}`},
+		{name: "null value", body: `{"status":"success","data":{"resultType":"vector","result":[{"value":[123,null]}]}}`},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

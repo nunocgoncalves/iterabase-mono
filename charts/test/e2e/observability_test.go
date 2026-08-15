@@ -248,15 +248,21 @@ func prometheusInstantSample(client *http.Client, baseURL, query string) (float6
 	if len(result[0].Value) != 2 {
 		return 0, "", fmt.Errorf("query returned malformed sample")
 	}
-	var timestamp float64
-	var value string
+	var timestamp *float64
+	var value *string
 	if err := json.Unmarshal(result[0].Value[0], &timestamp); err != nil {
-		return 0, "", err
+		return 0, "", fmt.Errorf("decode query timestamp: %w", err)
+	}
+	if timestamp == nil {
+		return 0, "", fmt.Errorf("query timestamp must be a number")
 	}
 	if err := json.Unmarshal(result[0].Value[1], &value); err != nil {
-		return 0, "", err
+		return 0, "", fmt.Errorf("decode query value: %w", err)
 	}
-	return timestamp, value, nil
+	if value == nil {
+		return 0, "", fmt.Errorf("query value must be a string")
+	}
+	return *timestamp, *value, nil
 }
 
 func lokiMarkerURL(baseURL, pod, marker string, start, end time.Time) string {
