@@ -289,7 +289,7 @@ func TestUnitHistoricalSampleRejectsFreshReplacement(t *testing.T) {
 
 func TestUnitPrometheusNoSampleIsPendingReadiness(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
-		_, _ = writer.Write([]byte(`{"status":"success","data":{"result":[]}}`))
+		_, _ = writer.Write([]byte(`{"status":"success","data":{"resultType":"vector","result":[]}}`))
 	}))
 	t.Cleanup(server.Close)
 
@@ -299,6 +299,33 @@ func TestUnitPrometheusNoSampleIsPendingReadiness(t *testing.T) {
 	}
 	if ready || observation != "query returned no sample" {
 		t.Fatalf("ready=%t observation=%q", ready, observation)
+	}
+}
+
+func TestUnitPrometheusMalformedSuccessFailsImmediately(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "missing data", body: `{"status":"success"}`},
+		{name: "null data", body: `{"status":"success","data":null}`},
+		{name: "missing result type", body: `{"status":"success","data":{"result":[]}}`},
+		{name: "unexpected result type", body: `{"status":"success","data":{"resultType":"matrix","result":[]}}`},
+		{name: "missing result", body: `{"status":"success","data":{"resultType":"vector"}}`},
+		{name: "null result", body: `{"status":"success","data":{"resultType":"vector","result":null}}`},
+		{name: "non-array result", body: `{"status":"success","data":{"resultType":"vector","result":{}}}`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+				_, _ = writer.Write([]byte(test.body))
+			}))
+			t.Cleanup(server.Close)
+
+			if _, _, err := observePrometheusValue(server.Client(), server.URL, "redis_up", "1"); err == nil {
+				t.Fatal("malformed successful query was treated as pending readiness")
+			}
+		})
 	}
 }
 

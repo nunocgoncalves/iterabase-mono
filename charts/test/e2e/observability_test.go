@@ -208,12 +208,8 @@ func prometheusInstantSample(client *http.Client, baseURL, query string) (float6
 		return 0, "", fmt.Errorf("status %d", resp.StatusCode)
 	}
 	var payload struct {
-		Status string `json:"status"`
-		Data   struct {
-			Result []struct {
-				Value []json.RawMessage `json:"value"`
-			} `json:"result"`
-		} `json:"data"`
+		Status string          `json:"status"`
+		Data   json.RawMessage `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
 		return 0, "", err
@@ -221,18 +217,43 @@ func prometheusInstantSample(client *http.Client, baseURL, query string) (float6
 	if payload.Status != "success" {
 		return 0, "", fmt.Errorf("query status=%q", payload.Status)
 	}
-	if len(payload.Data.Result) == 0 {
+	if len(payload.Data) == 0 {
+		return 0, "", fmt.Errorf("query response missing data")
+	}
+	var data struct {
+		ResultType string          `json:"resultType"`
+		Result     json.RawMessage `json:"result"`
+	}
+	if err := json.Unmarshal(payload.Data, &data); err != nil {
+		return 0, "", fmt.Errorf("decode query data: %w", err)
+	}
+	if data.ResultType != "vector" {
+		return 0, "", fmt.Errorf("query resultType=%q, want %q", data.ResultType, "vector")
+	}
+	if len(data.Result) == 0 {
+		return 0, "", fmt.Errorf("query response missing result")
+	}
+	var result []struct {
+		Value []json.RawMessage `json:"value"`
+	}
+	if err := json.Unmarshal(data.Result, &result); err != nil {
+		return 0, "", fmt.Errorf("decode query result: %w", err)
+	}
+	if result == nil {
+		return 0, "", fmt.Errorf("query result must be an array")
+	}
+	if len(result) == 0 {
 		return 0, "", errPrometheusNoSample
 	}
-	if len(payload.Data.Result[0].Value) != 2 {
+	if len(result[0].Value) != 2 {
 		return 0, "", fmt.Errorf("query returned malformed sample")
 	}
 	var timestamp float64
 	var value string
-	if err := json.Unmarshal(payload.Data.Result[0].Value[0], &timestamp); err != nil {
+	if err := json.Unmarshal(result[0].Value[0], &timestamp); err != nil {
 		return 0, "", err
 	}
-	if err := json.Unmarshal(payload.Data.Result[0].Value[1], &value); err != nil {
+	if err := json.Unmarshal(result[0].Value[1], &value); err != nil {
 		return 0, "", err
 	}
 	return timestamp, value, nil
