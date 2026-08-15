@@ -30,6 +30,16 @@ observability:
       serviceMonitor:
         selfMonitor: false
       prometheusSpec:
+        # The upstream default Alertmanager endpoint cannot template a TLS
+        # serverName from the actual release. Replace it with the chart-owned
+        # additional config Secret, which derives both target and identity from
+        # .Release.Name/.Release.Namespace.
+        disableAlerting: true
+        additionalAlertManagerConfigsSecret:
+          name: '{{ .Release.Name }}-prometheus-alertmanager-tls-config'
+          key: additional-alertmanager-configs.yaml
+        secrets:
+          - observability-alertmanager-tls
         web:
           tlsConfig:
             cert:
@@ -46,17 +56,6 @@ observability:
       serviceMonitor:
         selfMonitor: false
       alertmanagerSpec:
-        # Prometheus verifies Alertmanager against the generated internal CA and
-        # the exact release Service identity. This is trust evidence, not merely
-        # encryption.
-        scheme: https
-        tlsConfig:
-          ca:
-            secret:
-              name: observability-alertmanager-tls
-              key: ca.crt
-          serverName: iterabase-kube-prometheus-alertmanager.iterabase-system.svc
-          insecureSkipVerify: false
         web:
           tlsConfig:
             cert:

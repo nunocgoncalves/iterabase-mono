@@ -1,0 +1,23 @@
+{{- if .Values.enabled }}
+{{- if (dig "internalTLS" "enabled" false (.Values.global | default (dict))) }}
+{{- $alertmanagerService := printf "%s-kube-prometheus-alertmanager.%s.svc" .Release.Name .Release.Namespace }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ printf "%s-prometheus-alertmanager-tls-config" .Release.Name }}
+  labels:
+    {{- include "observability.labels" . | nindent 4 }}
+type: Opaque
+stringData:
+  additional-alertmanager-configs.yaml: |
+    - api_version: v2
+      scheme: https
+      static_configs:
+        - targets:
+            - {{ printf "%s:9093" $alertmanagerService | quote }}
+      tls_config:
+        ca_file: /etc/prometheus/secrets/observability-alertmanager-tls/ca.crt
+        server_name: {{ $alertmanagerService | quote }}
+        insecure_skip_verify: false
+{{- end }}
+{{- end }}

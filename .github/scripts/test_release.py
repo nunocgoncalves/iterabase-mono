@@ -128,6 +128,11 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertTrue(chart_release["chart_runtime"])
         self.assertNotIn("charts", {item["owner"] for item in chart_release["kind_matrix"]})
 
+        coordinated = self.plan("control-plane,control-plane-chart")
+        self.assertTrue(coordinated["chart_runtime"])
+        self.assertTrue(coordinated["image_matrix"])
+        self.assertNotIn("charts", {item["owner"] for item in coordinated["kind_matrix"]})
+
     def test_coordinated_release_uses_the_catalogue_union_without_narrowing(self) -> None:
         selected = "control-plane,inference-gateway,forge,control-plane-chart,inference-gateway-chart,iterabase-platform-chart"
         plan = self.plan(selected)
@@ -665,6 +670,20 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertIn("Preflight every semantic destination before publication", promotion)
         self.assertIn("Create or verify protected namespaced tags", promotion)
         self.assertIn("candidate_bundle: true", candidate)
+        self.assertIn("image_candidates: ${{ needs.preflight.outputs.has_images == 'true' }}", candidate)
+        chart_runtime_job = candidate.split("  charts-runtime:\n", 1)[1].split(
+            "\n  image-candidates:\n", 1
+        )[0]
+        self.assertIn(
+            "needs: [preflight, image-candidates, chart-candidate]",
+            chart_runtime_job,
+        )
+        charts_runtime = (
+            ROOT / ".github" / "workflows" / "charts-runtime.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("image_candidates:", charts_runtime)
+        self.assertIn("pattern: candidate-image-*", charts_runtime)
+        self.assertIn("${{ runner.temp }}/candidates/images", charts_runtime)
         self.assertIn("path: candidate-charts/", candidate)
         self.assertIn(
             "> 'candidate-charts/candidate-chart-${{ matrix.chart }}.json'", candidate

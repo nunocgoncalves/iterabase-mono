@@ -217,15 +217,17 @@ jobs:
         working-directory: charts
 
   charts-runtime:
-    needs: [preflight, chart-candidate]
+    needs: [preflight, image-candidates, chart-candidate]
     if: >-
       always() && needs.preflight.result == 'success' &&
       needs.preflight.outputs.run_chart_runtime == 'true' &&
+      (needs.image-candidates.result == 'success' || needs.image-candidates.result == 'skipped') &&
       needs.chart-candidate.result == 'success'
     uses: ./.github/workflows/charts-runtime.yml
     with:
       source_ref: ${{ inputs.master_sha }}
       candidate_bundle: true
+      image_candidates: ${{ needs.preflight.outputs.has_images == 'true' }}
 
   image-candidates:
     name: Build image — ${{ matrix.name }}
