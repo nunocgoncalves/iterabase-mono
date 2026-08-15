@@ -54,6 +54,7 @@ class CacheContractTests(unittest.TestCase):
             "testkit/e2e/go.mod",
             "control-plane/test/e2e/go.mod",
             "charts/test/e2e/go.mod",
+            "charts/test/e2e/go.sum",
         ):
             self.assertIn(dependency, workflow)
 

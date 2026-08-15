@@ -87,7 +87,12 @@ func (collector Collector) Collect(ctx context.Context) error {
 		collected = append(collected, fmt.Errorf("decode Helm releases for diagnostics: %w", err))
 	} else {
 		for _, release := range releases {
-			helm("helm-get-"+safeName(release.Namespace+"-"+release.Name), "get", "all", release.Name, "-n", release.Namespace)
+			base := safeName(release.Namespace + "-" + release.Name)
+			helm("helm-get-"+base, "get", "all", release.Name, "-n", release.Namespace)
+			helm("helm-history-"+base, "history", release.Name, "-n", release.Namespace, "--output", "yaml")
+			helm("helm-values-"+base, "get", "values", release.Name, "-n", release.Namespace, "--all")
+			helm("helm-hooks-"+base, "get", "hooks", release.Name, "-n", release.Namespace)
+			helm("helm-status-"+base, "status", release.Name, "-n", release.Namespace)
 		}
 	}
 

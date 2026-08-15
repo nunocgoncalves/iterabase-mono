@@ -190,6 +190,15 @@ func CandidateFixtureFromPlan(path string) (Fixture, error) {
 				Checksum   string `json:"sha256"`
 			} `json:"charts"`
 		} `json:"baseline_dependencies"`
+		TransitionBaselines struct {
+			Charts []struct {
+				Name       string `json:"name"`
+				Chart      string `json:"chart"`
+				Repository string `json:"repository"`
+				Version    string `json:"version"`
+				Checksum   string `json:"sha256"`
+			} `json:"charts"`
+		} `json:"transition_baselines"`
 	}
 	if err := json.Unmarshal(data, &plan); err != nil {
 		return Fixture{}, err
@@ -208,6 +217,11 @@ func CandidateFixtureFromPlan(path string) (Fixture, error) {
 	for _, chart := range plan.Baselines.Charts {
 		fixture.Inputs = append(fixture.Inputs, FixtureInput{
 			Name: chart.Chart, Kind: "published-chart", Reference: chart.Repository + ":" + chart.Version, Checksum: chart.Checksum,
+		})
+	}
+	for _, chart := range plan.TransitionBaselines.Charts {
+		fixture.Inputs = append(fixture.Inputs, FixtureInput{
+			Name: chart.Name, Kind: "published-chart", Reference: chart.Repository + ":" + chart.Version, Checksum: chart.Checksum,
 		})
 	}
 	for _, image := range []struct {

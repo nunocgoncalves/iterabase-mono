@@ -67,6 +67,9 @@ func TestCandidateFixtureFromPlanRecordsSelectedAndPinnedInputs(t *testing.T) {
   "baseline_dependencies":{
     "images":[{"name":"inference-gateway","repository":"ghcr.io/example/gateway","version":"2.0.0","digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}],
     "charts":[{"chart":"iterabase-platform","repository":"oci://example/platform","version":"3.0.0","sha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}]
+  },
+  "transition_baselines":{
+    "charts":[{"name":"supported-platform-predecessor","chart":"iterabase-platform","repository":"oci://example/platform","version":"2.9.0","sha256":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"}]
   }
 }`
 	if err := os.WriteFile(path, []byte(plan), 0o600); err != nil {
@@ -76,10 +79,10 @@ func TestCandidateFixtureFromPlanRecordsSelectedAndPinnedInputs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fixture.Mode != FixtureCandidate || len(fixture.Inputs) != 3 {
+	if fixture.Mode != FixtureCandidate || len(fixture.Inputs) != 4 {
 		t.Fatalf("candidate fixture = %+v", fixture)
 	}
-	if fixture.Inputs[0].Kind != "candidate" || fixture.Inputs[1].Kind != "published-chart" || fixture.Inputs[2].Kind != "published-image" {
+	if fixture.Inputs[0].Kind != "candidate" || fixture.Inputs[1].Kind != "published-chart" || fixture.Inputs[2].Name != "supported-platform-predecessor" || fixture.Inputs[3].Kind != "published-image" {
 		t.Fatalf("candidate inputs are not deterministically sorted: %+v", fixture.Inputs)
 	}
 
@@ -90,7 +93,7 @@ func TestCandidateFixtureFromPlanRecordsSelectedAndPinnedInputs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(fixture.Inputs) != 4 || fixture.Inputs[1].Kind != "candidate-image" {
+	if len(fixture.Inputs) != 5 || fixture.Inputs[1].Kind != "candidate-image" {
 		t.Fatalf("candidate image identity was not recorded: %+v", fixture.Inputs)
 	}
 }

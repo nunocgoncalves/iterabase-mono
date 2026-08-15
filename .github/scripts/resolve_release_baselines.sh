@@ -24,6 +24,21 @@ while IFS=$'\t' read -r chart repository version; do
     <<<"$resolved_charts")
 done < <(jq -r '.baseline_dependencies.charts[] | [.chart,.repository,.version] | @tsv' "$plan")
 
+# Transition predecessors are chart-owned immutable inputs. Verify the checked-in
+# checksum while producing the candidate plan; do not replace it with a mutable
+# discovery result or a global compatibility mapping.
+while IFS=$'\t' read -r name chart repository version checksum; do
+  [[ -n "$name" ]] || continue
+  $helm_bin pull "$repository" --version "$version" --destination "$baseline_root"
+  archive="$baseline_root/$chart-$version.tgz"
+  [[ -f "$archive" ]] || { echo "transition baseline archive missing: $archive" >&2; exit 1; }
+  [[ "$checksum" =~ ^[0-9a-f]{64}$ ]] || {
+    echo "transition baseline $name has invalid checksum $checksum" >&2
+    exit 1
+  }
+  printf '%s  %s\n' "$checksum" "$archive" | sha256sum --check -
+done < <(jq -r '(.transition_baselines.charts // [])[] | [.name,.chart,.repository,.version,.sha256] | @tsv' "$plan")
+
 resolved_images='[]'
 while IFS=$'\x1f' read -r name target repository version source_chart values_path value_key; do
   [[ -n "$name" ]] || continue

@@ -18,6 +18,9 @@ func TestE2E(t *testing.T) {
 		hermeticExampleScenario(),
 		certificateMigrationScenario(),
 		freshInstallScenario(),
+		nMinusOneUpgradeScenario(),
+		featureEnableUpgradeScenario(),
+		reapplyRollbackRecoveryScenario(),
 		observabilityScenario(),
 		observabilityTLSScenario(),
 		internalTLSScenario(),
@@ -28,17 +31,15 @@ func TestE2E(t *testing.T) {
 func chartFixtureFromEnv(t *testing.T) sharede2e.Fixture {
 	t.Helper()
 	fixture := sharede2e.FixtureFromEnv(t)
-	for _, input := range fixture.Inputs {
-		if input.Name == "certificate-migration-source" {
-			return fixture
-		}
-	}
-	fixture.Inputs = append(fixture.Inputs, sharede2e.FixtureInput{
+	fixture = mergeChartFixtureInput(t, fixture, sharede2e.FixtureInput{
 		Name: "certificate-migration-source", Kind: "published-chart",
 		Reference: "oci://ghcr.io/nunocgoncalves/iterabase-charts/iterabase-platform:" + certificateMigrationSourceVersion,
 	})
+	for _, input := range loadTransitionBaselineFixture(t).Inputs {
+		fixture = mergeChartFixtureInput(t, fixture, input)
+	}
 	if err := fixture.Validate(); err != nil {
-		t.Fatalf("add chart runtime dependency to fixture: %v", err)
+		t.Fatalf("add chart runtime dependencies to fixture: %v", err)
 	}
 	return fixture
 }

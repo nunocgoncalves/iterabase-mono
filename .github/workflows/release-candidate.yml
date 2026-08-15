@@ -30,6 +30,7 @@ env:
     testkit/e2e/go.mod
     control-plane/test/e2e/go.mod
     charts/test/e2e/go.mod
+    charts/test/e2e/go.sum
 
 jobs:
   preflight:
@@ -544,6 +545,7 @@ jobs:
           cache-dependency-path: |
             forge/test/e2e/go.sum
             charts/test/e2e/go.mod
+            charts/test/e2e/go.sum
             testkit/e2e/go.mod
           cache-scope: candidate-kind-${{ matrix.name }}
       - uses: ./.github/actions/setup-kubernetes-tools

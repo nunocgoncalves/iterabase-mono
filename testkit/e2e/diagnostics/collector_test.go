@@ -40,6 +40,8 @@ func TestCollectorCapturesRedactedKubernetesHelmAndPodEvidence(t *testing.T) {
 	for _, name := range []string{
 		"kubernetes-resources.log", "kubernetes-events.log", "describe-iterabase-system-api-0.log",
 		"logs-iterabase-system-api-0.log", "helm-get-iterabase-system-platform.log",
+		"helm-history-iterabase-system-platform.log", "helm-values-iterabase-system-platform.log",
+		"helm-hooks-iterabase-system-platform.log", "helm-status-iterabase-system-platform.log",
 	} {
 		if _, err := os.Stat(filepath.Join(output, name)); err != nil {
 			t.Fatalf("missing diagnostic %s: %v", name, err)
