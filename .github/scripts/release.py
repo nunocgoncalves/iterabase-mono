@@ -515,6 +515,9 @@ def make_plan(
     control_scenarios = {"kind-controlplane-identity", "kind-tool-runner-contract"}
     platform_scenarios = {
         "kind-inference-contract",
+        "deployed-identity-api",
+        "deployed-work-recovery",
+        "deployed-artifact-durability",
         "certificate-ownership-migration",
         "fresh-install",
         "observability",

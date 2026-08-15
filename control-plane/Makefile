@@ -64,12 +64,40 @@ test: manifests generate fmt vet setup-envtest ## Run tests (unit + envtest + in
 
 E2E_SOURCE_SHA ?= $(shell git rev-parse HEAD)
 E2E_SOURCE_DIRTY ?= $(if $(shell git status --porcelain),true,false)
+ITERABASE_E2E_FIXTURE_MODE ?= source
+E2E_ENV := ITERABASE_E2E_FIXTURE_MODE=$(ITERABASE_E2E_FIXTURE_MODE) \
+	ITERABASE_E2E_SOURCE_SHA=$(E2E_SOURCE_SHA) \
+	ITERABASE_E2E_SOURCE_DIRTY=$(E2E_SOURCE_DIRTY) \
+	ITERABASE_REPOSITORY_ROOT=$(abspath ..)
+ifeq ($(ITERABASE_E2E_FIXTURE_MODE),source)
+E2E_BUILD_DEPS := e2e-build-deps
+else
+E2E_BUILD_DEPS :=
+endif
 
-.PHONY: test-e2e-unit
-test-e2e-unit: ## Compile the owner E2E entrypoint and run its hermetic shared-testkit scenario.
-	cd test/e2e && ITERABASE_E2E_FIXTURE_MODE=source ITERABASE_E2E_SOURCE_SHA=$(E2E_SOURCE_SHA) \
-		ITERABASE_E2E_SOURCE_DIRTY=$(E2E_SOURCE_DIRTY) \
-		go test -race -count=1 -run '^TestE2E$$/^hermetic-example$$' .
+.PHONY: test-e2e-unit test-e2e test-e2e-identity test-e2e-work test-e2e-artifact e2e-build-deps
+
+test-e2e-unit: ## Compile the owner E2E entrypoint and run hermetic helper tests.
+	cd test/e2e && $(E2E_ENV) go test -race -count=1 -run '^TestE2E$$/^hermetic-example$$' .
+	cd test/e2e && $(E2E_ENV) go test -race -count=1 -skip '^TestE2E$$' .
+
+# Each product contract gets a fresh isolated Kind cluster. Source mode builds
+# the current control-plane image inside the Go scenario; candidate mode uses
+# the exact digest and composed chart fixture prepared by the release gate.
+test-e2e: test-e2e-identity test-e2e-work test-e2e-artifact
+
+test-e2e-identity: $(E2E_BUILD_DEPS)
+	cd test/e2e && $(E2E_ENV) go test -v -race -count=1 -timeout 30m -run '^TestE2E$$/^deployed-identity-api$$' .
+
+test-e2e-work: $(E2E_BUILD_DEPS)
+	cd test/e2e && $(E2E_ENV) go test -v -race -count=1 -timeout 35m -run '^TestE2E$$/^deployed-work-recovery$$' .
+
+test-e2e-artifact: $(E2E_BUILD_DEPS)
+	cd test/e2e && $(E2E_ENV) go test -v -race -count=1 -timeout 35m -run '^TestE2E$$/^deployed-artifact-durability$$' .
+
+e2e-build-deps:
+	../.github/scripts/add_helm_repositories.sh
+	$(MAKE) -C ../charts build-deps
 
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter
