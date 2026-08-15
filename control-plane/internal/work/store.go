@@ -60,7 +60,12 @@ func (s *Store) Start(ctx context.Context, in StartInput) (WorkItem, bool, error
 		return WorkItem{}, false, err
 	}
 
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+	// The transaction-scoped advisory lock below is the serialization boundary
+	// for one logical start key. Read committed deliberately takes the lookup
+	// snapshot after a waiting caller acquires that lock, so it can observe the
+	// winner's committed row instead of failing with a stale serializable
+	// snapshot. All item, attempt, and timeline writes remain one transaction.
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return WorkItem{}, false, fmt.Errorf("begin start: %w", err)
 	}

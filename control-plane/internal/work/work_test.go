@@ -3,6 +3,7 @@ package work_test
 import (
 	"context"
 	"encoding/json"
+	"sync"
 	"testing"
 	"time"
 
@@ -443,12 +444,55 @@ func TestWorkStartManualSourceBounded(t *testing.T) {
 	assert.ErrorContains(t, err, "source payload exceeds")
 	assert.False(t, created)
 
-	// A bounded prepared fixture starts and creates exactly one work item.
+	// Simultaneous identical starts converge at the store boundary without a
+	// client retry: one caller creates and every caller receives the same item.
 	source := json.RawMessage(`{"messageId":"fixture-1","from":"requests@walter.example","subject":"Quotation 4821"}`)
-	item, created, err := start(source, "manual-1")
-	require.NoError(t, err)
-	assert.True(t, created)
+	type startResult struct {
+		item    workstore.WorkItem
+		created bool
+		err     error
+	}
+	const concurrentStarts = 8
+	ready := make(chan struct{}, concurrentStarts)
+	startTogether := make(chan struct{})
+	results := make(chan startResult, concurrentStarts)
+	var starts sync.WaitGroup
+	for range concurrentStarts {
+		starts.Add(1)
+		go func() {
+			defer starts.Done()
+			ready <- struct{}{}
+			<-startTogether
+			item, created, err := start(source, "manual-1")
+			results <- startResult{item: item, created: created, err: err}
+		}()
+	}
+	for range concurrentStarts {
+		<-ready
+	}
+	close(startTogether)
+	starts.Wait()
+	close(results)
+
+	createdCount := 0
+	var item workstore.WorkItem
+	for result := range results {
+		require.NoError(t, result.err)
+		if item.ID == "" {
+			item = result.item
+		}
+		assert.Equal(t, item.ID, result.item.ID)
+		if result.created {
+			createdCount++
+		}
+	}
+	assert.Equal(t, 1, createdCount)
 	assert.Equal(t, "Quote request", item.SourcePresentation.Title)
+	var itemCount, attemptCount int
+	require.NoError(t, pool.QueryRow(ctx, `SELECT count(*) FROM work.work_items WHERE start_identity_id=$1 AND workflow_key='walter/manual' AND start_idempotency_key='manual-1'`, actorID).Scan(&itemCount))
+	require.NoError(t, pool.QueryRow(ctx, `SELECT count(*) FROM work.attempts WHERE work_item_id=$1`, item.ID).Scan(&attemptCount))
+	assert.Equal(t, 1, itemCount)
+	assert.Equal(t, 1, attemptCount)
 
 	// The private bounded source context reaches only the agent; customer APIs
 	// expose only sourcePresentation.
