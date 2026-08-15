@@ -68,6 +68,9 @@ type deployedState struct {
 	workItemID       string
 	initialCursor    int64
 	firstAttemptJSON []byte
+	firstAttemptID   string
+	feedbackID       string
+	revisedAttemptID string
 	artifactID       string
 	mu               sync.Mutex
 }
@@ -337,9 +340,9 @@ func (state *deployedState) captureBootstrapKeys(t *testing.T) {
 	if err != nil {
 		t.Fatal("read bootstrap credentials from the isolated init-container boundary")
 	}
-	keys := parseBootstrapKeys(string(output))
-	if keys["admin"] == "" || keys["token"] == "" {
-		t.Fatal("bootstrap did not emit the required admin and token credentials")
+	keys, err := parseRequiredBootstrapKeys(string(output))
+	if err != nil {
+		t.Fatal(err)
 	}
 	state.redactor.Add(keys["admin"], keys["token"])
 	state.adminKey = keys["admin"]
@@ -354,6 +357,14 @@ func parseBootstrapKeys(output string) map[string]string {
 		keys[match[1]] = match[2]
 	}
 	return keys
+}
+
+func parseRequiredBootstrapKeys(output string) (map[string]string, error) {
+	keys := parseBootstrapKeys(output)
+	if keys["admin"] == "" || keys["token"] == "" {
+		return nil, fmt.Errorf("bootstrap did not emit the required admin and token credentials")
+	}
+	return keys, nil
 }
 
 func (state *deployedState) createWorkIdentity(t *testing.T, email string) {
@@ -597,26 +608,34 @@ func (state *deployedState) recordRequest(t *testing.T, evidence requestEvidence
 	}
 }
 
-func (state *deployedState) registerBootstrapSecretsBestEffort() {
+func (state *deployedState) registerBootstrapSecrets() error {
 	if state.cluster == nil || state.redactor == nil {
-		return
+		return fmt.Errorf("bootstrap secret registration requires an active cluster and redactor")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	podCommand := exec.CommandContext(ctx, "kubectl", "--kubeconfig", state.cluster.Kubeconfig, "get", "pods", "-n", controlPlaneNamespace,
 		"-l", "app.kubernetes.io/name=control-plane,app.kubernetes.io/component=api", "-o", "jsonpath={.items[0].metadata.name}")
 	podOutput, err := podCommand.Output()
-	if err != nil || strings.TrimSpace(string(podOutput)) == "" {
-		return
+	if err != nil {
+		return fmt.Errorf("resolve API pod for bootstrap secret registration: %w", err)
+	}
+	pod := strings.TrimSpace(string(podOutput))
+	if pod == "" {
+		return fmt.Errorf("resolve API pod for bootstrap secret registration: no pod found")
 	}
 	logsCommand := exec.CommandContext(ctx, "kubectl", "--kubeconfig", state.cluster.Kubeconfig, "logs", "-n", controlPlaneNamespace,
-		strings.TrimSpace(string(podOutput)), "-c", "bootstrap")
+		pod, "-c", "bootstrap")
 	logs, err := logsCommand.Output()
 	if err != nil {
-		return
+		return fmt.Errorf("read bootstrap logs for secret registration: %w", err)
 	}
-	keys := parseBootstrapKeys(string(logs))
+	keys, err := parseRequiredBootstrapKeys(string(logs))
+	if err != nil {
+		return err
+	}
 	state.redactor.Add(keys["admin"], keys["token"])
+	return nil
 }
 
 func controlPlaneDiagnostics(t *testing.T, state *deployedState) {
@@ -627,7 +646,10 @@ func controlPlaneDiagnostics(t *testing.T, state *deployedState) {
 	// Bootstrap emits credentials from an init-container boundary. Resolve them
 	// directly into memory before any generic log collector can retain evidence,
 	// including failures that occurred before the scenario's identity setup.
-	state.registerBootstrapSecretsBestEffort()
+	if err := state.registerBootstrapSecrets(); err != nil {
+		t.Logf("skip deployed diagnostics because bootstrap credentials could not be registered: %v", err)
+		return
+	}
 	// Add owner-specific database/object-store health without querying Secrets.
 	health := []string{}
 	if out, err := state.client.Kubectl(state.ctx, 45*time.Second, "exec", "-n", controlPlaneNamespace,
