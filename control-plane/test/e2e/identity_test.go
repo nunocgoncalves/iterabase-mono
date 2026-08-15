@@ -6,6 +6,12 @@ import (
 	"time"
 )
 
+type delegatedTokenResponse struct {
+	AccessToken string `json:"access_token"`
+	TokenType   string `json:"token_type"`
+	ExpiresIn   int    `json:"expires_in"`
+}
+
 func exerciseIdentityAPIStage(t *testing.T, state *deployedState) {
 	t.Helper()
 	state.captureBootstrapKeys(t)
@@ -43,14 +49,15 @@ spec:
 	state.kubectl(t, 30*time.Second, "apply", "-f", state.writeManifest(t, "identity.yaml", identity))
 	state.kubectl(t, 2*time.Minute, "wait", "--for=jsonpath={.status.ready}=true", "identitymapping/deployed-alice",
 		"-n", controlPlaneNamespace, "--timeout=90s")
+	identityID := state.kubectl(t, 30*time.Second, "get", "identitymapping/deployed-alice", "-n", controlPlaneNamespace,
+		"-o", "jsonpath={.status.identityID}")
+	if identityID == "" {
+		t.Fatal("Ready IdentityMapping has no materialized identity ID")
+	}
 
 	status, body = state.requestJSON(t, http.MethodPost, "/v1/token", state.tokenKey, tokenRequest)
 	requireStatus(t, status, http.StatusOK, body)
-	var delegated struct {
-		AccessToken string `json:"access_token"`
-		TokenType   string `json:"token_type"`
-		ExpiresIn   int    `json:"expires_in"`
-	}
+	var delegated delegatedTokenResponse
 	mustDecode(t, body, &delegated)
 	if delegated.AccessToken == "" || delegated.TokenType != "Bearer" || delegated.ExpiresIn <= 0 {
 		t.Fatalf("invalid delegated-token response: token=%v type=%q expires=%d", delegated.AccessToken != "", delegated.TokenType, delegated.ExpiresIn)
@@ -60,8 +67,8 @@ spec:
 	if err != nil {
 		t.Fatalf("verify delegated RS256 token: %v", err)
 	}
-	if subject, _ := claims["sub"].(string); subject == "" {
-		t.Fatalf("delegated token has no subject: %v", claims)
+	if subject, _ := claims["sub"].(string); subject != identityID {
+		t.Fatalf("delegated token subject=%q want materialized identity=%q", subject, identityID)
 	}
 
 	state.createWorkIdentity(t, "deployed-operator@local")
@@ -77,10 +84,25 @@ spec:
 	requireStatus(t, status, http.StatusOK, body)
 	status, body = state.requestJSON(t, http.MethodPost, "/v1/token", oldTokenKey, tokenRequest)
 	requireStatus(t, status, http.StatusOK, body)
+	var restartedDelegated delegatedTokenResponse
+	mustDecode(t, body, &restartedDelegated)
+	if restartedDelegated.AccessToken == "" || restartedDelegated.TokenType != "Bearer" || restartedDelegated.ExpiresIn <= 0 {
+		t.Fatalf("invalid restarted delegated-token response: token=%v type=%q expires=%d", restartedDelegated.AccessToken != "", restartedDelegated.TokenType, restartedDelegated.ExpiresIn)
+	}
+	state.redactor.Add(restartedDelegated.AccessToken)
 	status, restartedJWKS := state.request(t, http.MethodGet, "/.well-known/jwks.json", "", nil, nil)
 	requireStatus(t, status, http.StatusOK, restartedJWKS)
 	if string(restartedJWKS) != string(jwksBody) {
 		t.Fatal("JWKS changed across API process restart")
+	}
+	var restartedKeys jwkSet
+	mustDecode(t, restartedJWKS, &restartedKeys)
+	restartedClaims, err := verifyRS256(restartedDelegated.AccessToken, restartedKeys)
+	if err != nil {
+		t.Fatalf("verify restarted delegated RS256 token: %v", err)
+	}
+	if subject, _ := restartedClaims["sub"].(string); subject != identityID {
+		t.Fatalf("restarted delegated token subject=%q want materialized identity=%q", subject, identityID)
 	}
 
 	state.kubectl(t, 30*time.Second, "delete", "identitymapping/deployed-alice", "-n", controlPlaneNamespace)

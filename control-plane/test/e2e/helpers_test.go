@@ -16,6 +16,13 @@ Service account "agent-fleet" API key (scope=token): cp-token-secret
 	}
 }
 
+func TestParseRequiredBootstrapKeysRejectsIncompleteOutput(t *testing.T) {
+	_, err := parseRequiredBootstrapKeys(`Admin API key (scope=admin): cp-admin-secret`)
+	if err == nil || !strings.Contains(err.Error(), "required admin and token credentials") {
+		t.Fatalf("error=%v", err)
+	}
+}
+
 func TestReadSSEEvents(t *testing.T) {
 	stream := strings.NewReader(`: heartbeat
 

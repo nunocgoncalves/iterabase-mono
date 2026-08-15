@@ -16,7 +16,11 @@ import (
 	"github.com/nunocgoncalves/iterabase-mono/testkit/e2e/poll"
 )
 
-const privateSourceMarker = "PRIVATE-SOURCE-MUST-NOT-LEAK-478"
+const (
+	privateSourceMarker     = "PRIVATE-SOURCE-MUST-NOT-LEAK-478"
+	workFeedbackCategory    = "poor_output"
+	workFeedbackExplanation = "Use the reviewed business evidence."
+)
 
 type workItemResponse struct {
 	ID               string `json:"id"`
@@ -42,6 +46,8 @@ type blockerResponse struct {
 type feedbackResponse struct {
 	ID               string  `json:"id"`
 	AttemptID        string  `json:"attemptId"`
+	Category         string  `json:"category"`
+	Explanation      *string `json:"explanation,omitempty"`
 	RevisedAttemptID *string `json:"revisedAttemptId,omitempty"`
 }
 
@@ -69,18 +75,26 @@ func concurrentIdempotentStartStage(t *testing.T, state *deployedState) {
 		body   []byte
 		err    error
 	}
+	ready := make(chan struct{}, concurrency)
+	startTogether := make(chan struct{})
 	results := make(chan result, concurrency)
 	var wait sync.WaitGroup
 	for range concurrency {
 		wait.Add(1)
 		go func() {
 			defer wait.Done()
+			ready <- struct{}{}
+			<-startTogether
 			status, body, requestErr := state.doRequest(http.MethodPost, "/v1/work-items", state.workKey, payload, map[string]string{
 				"Content-Type": "application/json", "Idempotency-Key": "hor-478-concurrent-1",
 			})
 			results <- result{status: status, body: body, err: requestErr}
 		}()
 	}
+	for range concurrency {
+		<-ready
+	}
+	close(startTogether)
 	wait.Wait()
 	close(results)
 
@@ -203,18 +217,21 @@ func workCommandsAndHistoryStage(t *testing.T, state *deployedState) {
 	if firstAttemptID == "" {
 		t.Fatal("first attempt has no ID")
 	}
+	state.firstAttemptID = firstAttemptID
 	status, nodesBody := state.request(t, http.MethodGet, "/v1/work-attempts/"+firstAttemptID+"/nodes", state.workKey, nil, nil)
 	requireStatus(t, status, http.StatusOK, nodesBody)
 	assertCustomerSafeJSON(t, nodesBody, privateSourceMarker)
 
 	status, body = state.requestJSON(t, http.MethodPost, "/v1/work-items/"+state.workItemID+"/feedback", state.workKey,
-		map[string]any{"attemptId": firstAttemptID, "category": "poor_output", "explanation": "Use the reviewed business evidence."})
+		map[string]any{"attemptId": firstAttemptID, "category": workFeedbackCategory, "explanation": workFeedbackExplanation})
 	requireStatus(t, status, http.StatusCreated, body)
 	var feedback feedbackResponse
 	mustDecode(t, body, &feedback)
-	if feedback.ID == "" || feedback.AttemptID != firstAttemptID || feedback.RevisedAttemptID != nil {
-		t.Fatalf("feedback unexpectedly started work: %s", safeResponse(body))
+	if feedback.ID == "" || feedback.AttemptID != firstAttemptID || feedback.Category != workFeedbackCategory ||
+		feedback.Explanation == nil || *feedback.Explanation != workFeedbackExplanation || feedback.RevisedAttemptID != nil {
+		t.Fatalf("feedback unexpectedly started work or changed content: %s", safeResponse(body))
 	}
+	state.feedbackID = feedback.ID
 	status, attemptsBody = state.request(t, http.MethodGet, "/v1/work-items/"+state.workItemID+"/attempts", state.workKey, nil, nil)
 	requireStatus(t, status, http.StatusOK, attemptsBody)
 	mustDecode(t, attemptsBody, &attempts)
@@ -227,10 +244,15 @@ func workCommandsAndHistoryStage(t *testing.T, state *deployedState) {
 	requireStatus(t, status, http.StatusCreated, body)
 	var revised workItemResponse
 	mustDecode(t, body, &revised)
-	if revised.CurrentAttemptID == firstAttemptID {
+	if revised.CurrentAttemptID == "" || revised.CurrentAttemptID == firstAttemptID {
 		t.Fatalf("revision did not create a new attempt: %s", safeResponse(body))
 	}
+	revisedAttemptID := revised.CurrentAttemptID
 	revised = waitForBlockedWorkItem(t, state)
+	if revised.CurrentAttemptID != revisedAttemptID {
+		t.Fatalf("blocked revision attempt=%q want=%q", revised.CurrentAttemptID, revisedAttemptID)
+	}
+	state.revisedAttemptID = revisedAttemptID
 	status, body = state.requestJSON(t, http.MethodPost, "/v1/work-blockers/"+revised.Blocker.ID+"/responses", state.workKey,
 		map[string]any{"outcome": "accepted", "response": map[string]any{"approved": true}})
 	requireStatus(t, status, http.StatusOK, body)
@@ -287,12 +309,40 @@ func restartAndReconnectStage(t *testing.T, state *deployedState) {
 	if len(attempts) != 2 {
 		t.Fatalf("API restart duplicated or lost attempts: %d", len(attempts))
 	}
+
+	status, feedbackListBody := state.request(t, http.MethodGet, "/v1/work-items/"+state.workItemID+"/feedback", state.workKey, nil, nil)
+	requireStatus(t, status, http.StatusOK, feedbackListBody)
+	assertCustomerSafeJSON(t, feedbackListBody, privateSourceMarker)
+	var feedbackList []feedbackResponse
+	mustDecode(t, feedbackListBody, &feedbackList)
+	if len(feedbackList) != 1 {
+		t.Fatalf("feedback list after restart has %d records, want 1", len(feedbackList))
+	}
+	assertPersistedFeedback(t, state, feedbackList[0])
+
+	status, feedbackDetailBody := state.request(t, http.MethodGet,
+		"/v1/work-items/"+state.workItemID+"/feedback/"+state.feedbackID, state.workKey, nil, nil)
+	requireStatus(t, status, http.StatusOK, feedbackDetailBody)
+	assertCustomerSafeJSON(t, feedbackDetailBody, privateSourceMarker)
+	var feedbackDetail feedbackResponse
+	mustDecode(t, feedbackDetailBody, &feedbackDetail)
+	assertPersistedFeedback(t, state, feedbackDetail)
+
 	status, doneList := state.request(t, http.MethodGet, "/v1/work-items?state=done", state.workKey, nil, nil)
 	requireStatus(t, status, http.StatusOK, doneList)
 	var items []workItemResponse
 	mustDecode(t, doneList, &items)
 	if len(items) != 1 || items[0].ID != state.workItemID {
 		t.Fatalf("done filter after restart returned %s", safeResponse(doneList))
+	}
+}
+
+func assertPersistedFeedback(t *testing.T, state *deployedState, feedback feedbackResponse) {
+	t.Helper()
+	if feedback.ID != state.feedbackID || feedback.AttemptID != state.firstAttemptID ||
+		feedback.Category != workFeedbackCategory || feedback.Explanation == nil || *feedback.Explanation != workFeedbackExplanation ||
+		feedback.RevisedAttemptID == nil || *feedback.RevisedAttemptID != state.revisedAttemptID {
+		t.Fatalf("feedback history changed across restart: %+v", feedback)
 	}
 }
 
