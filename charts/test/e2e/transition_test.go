@@ -78,7 +78,7 @@ type helmHistoryEntry struct {
 func nMinusOneUpgradeScenario() sharede2e.Definition {
 	diagnostics, cleanup := scenarioHooks()
 	return sharede2e.Define(sharede2e.Scenario[*chartState]{
-		Metadata: chartScenarioMetadata(
+		Metadata: transitionScenarioMetadata(
 			"n-minus-one-upgrade",
 			"Upgrades the checksum-pinned supported predecessor to the exact current chart pair and proves schema ownership, persistent state, immutable Secrets, PVCs, Jobs, hooks, and rollout health.",
 			"test-e2e-upgrade", 40,
@@ -104,7 +104,7 @@ func nMinusOneUpgradeScenario() sharede2e.Definition {
 func featureEnableUpgradeScenario() sharede2e.Definition {
 	diagnostics, cleanup := scenarioHooks()
 	return sharede2e.Define(sharede2e.Scenario[*chartState]{
-		Metadata: chartScenarioMetadata(
+		Metadata: transitionScenarioMetadata(
 			"feature-enable-upgrade",
 			"Starts from the supported internal-TLS predecessor without observability, pre-applies exact current operator CRDs, then enables the verified-HTTPS observability composition.",
 			"test-e2e-feature-enable", 50,
@@ -134,7 +134,7 @@ func featureEnableUpgradeScenario() sharede2e.Definition {
 func reapplyRollbackRecoveryScenario() sharede2e.Definition {
 	diagnostics, cleanup := scenarioHooks()
 	return sharede2e.Define(sharede2e.Scenario[*chartState]{
-		Metadata: chartScenarioMetadata(
+		Metadata: transitionScenarioMetadata(
 			"reapply-rollback-recovery",
 			"Reapplies current intent without rolling stable workloads, then exercises the supported inverse rollback to the declared predecessor and forward recovery while retaining state.",
 			"test-e2e-reapply-rollback", 45,
@@ -268,6 +268,7 @@ func resolveTransitionBaselinesStage(t *testing.T, state *chartState) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	assertCurrentPairNewerThanPredecessor(t, state, baselines)
 	directory := filepath.Join(state.outputDir, "transition-baselines")
 	if err := os.MkdirAll(directory, 0o700); err != nil {
 		t.Fatalf("create transition baseline directory: %v", err)
@@ -293,6 +294,37 @@ func resolveTransitionBaselinesStage(t *testing.T, state *chartState) {
 		baselines[name] = baseline
 	}
 	state.transitionBaselines = baselines
+}
+
+func assertCurrentPairNewerThanPredecessor(t *testing.T, state *chartState, baselines map[string]transitionBaseline) {
+	t.Helper()
+	for _, pair := range []struct {
+		name  string
+		chart kube.Chart
+	}{
+		{name: platformPredecessorName, chart: state.platform},
+		{name: substratePredecessorName, chart: state.substrate},
+	} {
+		baseline, ok := baselines[pair.name]
+		if !ok {
+			t.Fatalf("transition baseline %s is missing", pair.name)
+		}
+		current := currentChartVersion(t, state, pair.chart)
+		if err := newerChartVersionError(current, baseline.Version); err != nil {
+			t.Fatalf("%s: %v", pair.name, err)
+		}
+	}
+}
+
+func newerChartVersionError(current, predecessor string) error {
+	comparison, err := compareNumericVersions(current, predecessor)
+	if err != nil {
+		return fmt.Errorf("compare current chart %q with predecessor %q: %w", current, predecessor, err)
+	}
+	if comparison <= 0 {
+		return fmt.Errorf("current chart version %s is not newer than supported predecessor %s", current, predecessor)
+	}
+	return nil
 }
 
 func verifyArchiveChecksum(path, expected string) error {
@@ -430,22 +462,74 @@ func captureLifecycleSnapshot(t *testing.T, state *chartState) lifecycleSnapshot
 		snapshot.PVCs[name] = state.kubectl(t, 30*time.Second, "get", "pvc/"+name, "-n", testNamespace,
 			"-o", "jsonpath={.metadata.uid}/{.spec.volumeName}")
 	}
-	for _, selector := range []string{
-		"app.kubernetes.io/name=postgresql,app.kubernetes.io/component=database",
-		"app.kubernetes.io/name=minio,app.kubernetes.io/component=object-store",
-		"app.kubernetes.io/name=redis,app.kubernetes.io/component=cache",
-		"app.kubernetes.io/name=control-plane,app.kubernetes.io/component=api",
-		"app.kubernetes.io/name=inference-gateway",
-	} {
-		pods := strings.Fields(state.kubectl(t, 30*time.Second, "get", "pods", "-n", testNamespace, "-l", selector,
-			"-o", `jsonpath={range .items[*]}{.metadata.name}={.metadata.uid}{"\n"}{end}`))
-		sort.Strings(pods)
-		if len(pods) == 0 {
-			t.Fatalf("no pod identity found for %s", selector)
+	for _, release := range []string{testRelease, testRelease + "-cert-manager"} {
+		releaseSelector := "app.kubernetes.io/instance=" + release
+		workloadData := state.kubectl(t, 30*time.Second, "get", "deployments,statefulsets,daemonsets", "-n", testNamespace,
+			"-l", releaseSelector, "-o", "json")
+		workloads, err := stableWorkloadSelectorsJSON([]byte(workloadData))
+		if err != nil {
+			t.Fatalf("discover stable workloads for release %s: %v", release, err)
 		}
-		snapshot.Pods[selector] = strings.Join(pods, ",")
+		for _, workload := range workloads {
+			identities := strings.Fields(state.kubectl(t, 30*time.Second, "get", "pods", "-n", testNamespace,
+				"-l", workload.Selector, "-o", `go-template={{range .items}}{{if not .metadata.deletionTimestamp}}{{.metadata.name}}={{.metadata.uid}}{{"\n"}}{{end}}{{end}}`))
+			if len(identities) == 0 {
+				t.Fatalf("%s/%s has no stable pod identity", release, workload.Key)
+			}
+			for _, identity := range identities {
+				name, uid, ok := strings.Cut(identity, "=")
+				if !ok || name == "" || uid == "" {
+					t.Fatalf("%s/%s returned invalid pod identity %q", release, workload.Key, identity)
+				}
+				snapshot.Pods[release+"/"+workload.Key+"/"+name] = uid
+			}
+		}
 	}
 	return snapshot
+}
+
+type stableWorkloadSelector struct {
+	Key      string
+	Selector string
+}
+
+func stableWorkloadSelectorsJSON(workloadData []byte) ([]stableWorkloadSelector, error) {
+	var workloads struct {
+		Items []struct {
+			Kind     string `json:"kind"`
+			Metadata struct {
+				Name string `json:"name"`
+			} `json:"metadata"`
+			Spec struct {
+				Selector struct {
+					MatchLabels      map[string]string `json:"matchLabels"`
+					MatchExpressions []json.RawMessage `json:"matchExpressions"`
+				} `json:"selector"`
+			} `json:"spec"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(workloadData, &workloads); err != nil {
+		return nil, fmt.Errorf("decode stable workloads: %w", err)
+	}
+	if len(workloads.Items) == 0 {
+		return nil, errors.New("release has no stable workloads")
+	}
+	selectors := make([]stableWorkloadSelector, 0, len(workloads.Items))
+	for _, workload := range workloads.Items {
+		if workload.Metadata.Name == "" || len(workload.Spec.Selector.MatchLabels) == 0 || len(workload.Spec.Selector.MatchExpressions) != 0 {
+			return nil, fmt.Errorf("%s/%s requires an exact matchLabels selector", workload.Kind, workload.Metadata.Name)
+		}
+		labels := make([]string, 0, len(workload.Spec.Selector.MatchLabels))
+		for key, value := range workload.Spec.Selector.MatchLabels {
+			labels = append(labels, key+"="+value)
+		}
+		sort.Strings(labels)
+		selectors = append(selectors, stableWorkloadSelector{
+			Key: strings.ToLower(workload.Kind) + "/" + workload.Metadata.Name, Selector: strings.Join(labels, ","),
+		})
+	}
+	sort.Slice(selectors, func(i, j int) bool { return selectors[i].Key < selectors[j].Key })
+	return selectors, nil
 }
 
 func secretDigest(t *testing.T, state *chartState, name string) string {
@@ -466,12 +550,8 @@ func secretDigest(t *testing.T, state *chartState, name string) string {
 }
 
 func assertUpgradeContractStage(t *testing.T, state *chartState) {
-	baseline := requireTransitionBaseline(t, state, platformPredecessorName)
 	currentPlatform := currentChartVersion(t, state, state.platform)
 	currentSubstrate := currentChartVersion(t, state, state.substrate)
-	if currentPlatform == baseline.Version {
-		t.Fatalf("current platform %s equals supported predecessor", currentPlatform)
-	}
 	assertReleaseChartVersion(t, state, testRelease, "iterabase-platform", currentPlatform)
 	assertReleaseChartVersion(t, state, testRelease+"-cert-manager", "cert-manager-substrate", currentSubstrate)
 	assertSchemaOwnership(t, state)
@@ -572,8 +652,9 @@ func assertLifecycleHealth(t *testing.T, state *chartState) {
 
 func assertOperatorCRDsAbsentStage(t *testing.T, state *chartState) {
 	for _, crd := range operatorCRDs {
-		if _, err := state.kubectlResult(30*time.Second, "get", "crd/"+crd); err == nil {
-			t.Fatalf("operator CRD %s unexpectedly existed before feature enablement", crd)
+		name := state.kubectl(t, 30*time.Second, "get", "crd/"+crd, "--ignore-not-found", "-o", "name")
+		if name != "" {
+			t.Fatalf("operator CRD %s unexpectedly existed before feature enablement: %s", crd, name)
 		}
 	}
 }
@@ -611,11 +692,32 @@ func preapplyCurrentOperatorCRDsStage(t *testing.T, state *chartState) {
 	state.kubectl(t, 3*time.Minute, "apply", "--server-side", "--force-conflicts", "--field-manager="+transitionFieldManager, "-f", path)
 	for _, crd := range operatorCRDs {
 		state.kubectl(t, 3*time.Minute, "wait", "--for=condition=Established", "crd/"+crd, "--timeout=2m")
-		status := state.kubectl(t, 30*time.Second, "get", "crd/"+crd,
-			"-o", `jsonpath={.status.conditions[?(@.type=="Established")].status}`)
-		if status != "True" {
-			t.Fatalf("%s Established status=%q want=True", crd, status)
-		}
+	}
+	// CRD schemas contain credential-shaped property names that text redaction
+	// can make invalid JSON. Keep the exact kubectl payload in a private
+	// temporary file and expose only command stderr to the shared runner.
+	statusPath := filepath.Join(t.TempDir(), "operator-crd-statuses.json")
+	if err := os.WriteFile(statusPath, nil, 0o600); err != nil {
+		t.Fatalf("create operator CRD status file: %v", err)
+	}
+	statusArgs := []string{"-o", "pipefail", "-c", `kubectl --kubeconfig "$KUBECONFIG_PATH" get "$@" -o json > "$CRD_STATUS_OUTPUT"`, "--"}
+	for _, crd := range operatorCRDs {
+		statusArgs = append(statusArgs, "crd/"+crd)
+	}
+	if _, err := state.runner.Run(state.ctx, process.Command{
+		Name: "bash", Args: statusArgs,
+		Env: map[string]string{"KUBECONFIG_PATH": state.cluster.Kubeconfig, "CRD_STATUS_OUTPUT": statusPath}, Timeout: 30 * time.Second,
+	}); err != nil {
+		t.Fatalf("read operator CRD statuses: %v", err)
+	}
+	statuses, err := os.ReadFile(statusPath)
+	if err != nil {
+		t.Fatalf("read operator CRD status file: %v", err)
+	}
+	if err := assertEstablishedCRDsJSON(statuses, operatorCRDs); err != nil {
+		t.Fatal(err)
+	}
+	for _, crd := range operatorCRDs {
 		managers := state.kubectl(t, 30*time.Second, "get", "crd/"+crd, "-o", "jsonpath={.metadata.managedFields[*].manager}")
 		if !slices.Contains(strings.Fields(managers), transitionFieldManager) {
 			t.Fatalf("%s was not server-side applied by %s: %s", crd, transitionFieldManager, managers)
@@ -692,7 +794,7 @@ func selectBundledCRD(existing, candidate bundledCRD) (bundledCRD, error) {
 	if candidateVersion == "" {
 		return existing, nil
 	}
-	comparison, err := compareOperatorVersions(existingVersion, candidateVersion)
+	comparison, err := compareNumericVersions(existingVersion, candidateVersion)
 	if err != nil {
 		return bundledCRD{}, fmt.Errorf("compare duplicate bundled CRD %q versions: %w", existing.header.Metadata.Name, err)
 	}
@@ -705,13 +807,16 @@ func selectBundledCRD(existing, candidate bundledCRD) (bundledCRD, error) {
 	return bundledCRD{}, fmt.Errorf("conflicting duplicate bundled CRD %q has equal authoritative version %q", existing.header.Metadata.Name, existingVersion)
 }
 
-func compareOperatorVersions(left, right string) (int, error) {
+func compareNumericVersions(left, right string) (int, error) {
 	parse := func(version string) ([]int, error) {
 		parts := strings.Split(strings.TrimPrefix(version, "v"), ".")
+		if len(parts) != 3 {
+			return nil, fmt.Errorf("invalid numeric version %q", version)
+		}
 		values := make([]int, len(parts))
 		for index, part := range parts {
 			value, err := strconv.Atoi(part)
-			if err != nil {
+			if err != nil || value < 0 {
 				return nil, fmt.Errorf("invalid numeric version %q", version)
 			}
 			values[index] = value
@@ -821,8 +926,8 @@ func rollbackRelease(t *testing.T, state *chartState, release string, revision i
 func assertRollbackBoundaryStage(t *testing.T, state *chartState) {
 	platform := requireTransitionBaseline(t, state, platformPredecessorName)
 	substrate := requireTransitionBaseline(t, state, substratePredecessorName)
-	assertReleaseChartVersion(t, state, testRelease, platform.Chart, platform.Version)
-	assertReleaseChartVersion(t, state, testRelease+"-cert-manager", substrate.Chart, substrate.Version)
+	assertRollbackReleaseHistory(t, state, testRelease, platform.Chart, platform.Version, 4)
+	assertRollbackReleaseHistory(t, state, testRelease+"-cert-manager", substrate.Chart, substrate.Version, 4)
 	assertPersistedState(t, state)
 	assertRetainedState(t, state.snapshots["current"], captureLifecycleSnapshot(t, state), false)
 	assertLifecycleHealth(t, state)
@@ -886,6 +991,27 @@ func assertReleaseRevision(t *testing.T, state *chartState, release string, want
 	if entry.Revision != want || entry.Status != "deployed" {
 		t.Fatalf("%s revision=%d status=%q want revision=%d deployed", release, entry.Revision, entry.Status, want)
 	}
+}
+
+func assertRollbackReleaseHistory(t *testing.T, state *chartState, release, chart, version string, revision int) {
+	t.Helper()
+	entry, err := currentHelmHistoryEntry([]byte(state.process(t, 60*time.Second, "helm", "history", release,
+		"--namespace", testNamespace, "--kubeconfig", state.cluster.Kubeconfig, "--output", "json")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rollbackHistoryError(entry, chart, version, revision); err != nil {
+		t.Fatalf("%s rollback boundary: %v", release, err)
+	}
+}
+
+func rollbackHistoryError(entry helmHistoryEntry, chart, version string, revision int) error {
+	wantChart := chart + "-" + version
+	if entry.Revision != revision || entry.Status != "deployed" || entry.Chart != wantChart {
+		return fmt.Errorf("revision=%d status=%q chart=%q want revision=%d status=deployed chart=%q",
+			entry.Revision, entry.Status, entry.Chart, revision, wantChart)
+	}
+	return nil
 }
 
 func currentHelmHistoryEntry(data []byte) (helmHistoryEntry, error) {
@@ -972,13 +1098,57 @@ func TestUnitRetainedStateRejectsSecretPVCAndReapplyRolloutChanges(t *testing.T)
 	}
 }
 
-func TestUnitCurrentHelmHistoryUsesNewestDeployedRevision(t *testing.T) {
+func TestUnitRollbackBoundaryRejectsIncorrectHelmHistory(t *testing.T) {
 	entry, err := currentHelmHistoryEntry([]byte(`[{"revision":3,"status":"superseded","chart":"iterabase-platform-0.3.11"},{"revision":4,"status":"deployed","chart":"iterabase-platform-0.3.10"}]`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if entry.Revision != 4 || entry.Chart != "iterabase-platform-0.3.10" {
-		t.Fatalf("current history entry=%+v", entry)
+	if err := rollbackHistoryError(entry, "iterabase-platform", "0.3.10", 4); err != nil {
+		t.Fatalf("valid rollback history rejected: %v", err)
+	}
+	for name, changed := range map[string]helmHistoryEntry{
+		"wrong revision": {Revision: 3, Status: "deployed", Chart: "iterabase-platform-0.3.10"},
+		"wrong status":   {Revision: 4, Status: "failed", Chart: "iterabase-platform-0.3.10"},
+		"wrong chart":    {Revision: 4, Status: "deployed", Chart: "iterabase-platform-0.3.11"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := rollbackHistoryError(changed, "iterabase-platform", "0.3.10", 4); err == nil {
+				t.Fatal("intentional rollback history break passed")
+			}
+		})
+	}
+}
+
+func TestUnitTransitionCurrentMustBeNewerThanPredecessor(t *testing.T) {
+	metadata := transitionScenarioMetadata("fixture-mode-contract", "fixture mode contract", "", 0, nil, nil)
+	if !slices.Equal(metadata.FixtureModes, []sharede2e.FixtureMode{sharede2e.FixtureSource, sharede2e.FixtureCandidate}) {
+		t.Fatalf("transition fixture modes=%v", metadata.FixtureModes)
+	}
+	if err := newerChartVersionError("0.3.11", "0.3.10"); err != nil {
+		t.Fatalf("newer current chart rejected: %v", err)
+	}
+	for _, current := range []string{"0.3.10", "0.3.9", "0.3.1", "0.3.11-rc.1"} {
+		if err := newerChartVersionError(current, "0.3.10"); err == nil {
+			t.Fatalf("non-newer or unsupported current chart version %q passed", current)
+		}
+	}
+}
+
+func TestUnitStableWorkloadSnapshotIncludesEveryController(t *testing.T) {
+	workloads := []byte(`{"items":[
+		{"kind":"Deployment","metadata":{"name":"manager"},"spec":{"selector":{"matchLabels":{"component":"manager","app":"control-plane"}}}},
+		{"kind":"DaemonSet","metadata":{"name":"csi"},"spec":{"selector":{"matchLabels":{"app":"csi"}}}}
+	]}`)
+	selectors, err := stableWorkloadSelectorsJSON(workloads)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []stableWorkloadSelector{
+		{Key: "daemonset/csi", Selector: "app=csi"},
+		{Key: "deployment/manager", Selector: "app=control-plane,component=manager"},
+	}
+	if !slices.Equal(selectors, want) {
+		t.Fatalf("stable workload selectors=%v want=%v", selectors, want)
 	}
 }
 
