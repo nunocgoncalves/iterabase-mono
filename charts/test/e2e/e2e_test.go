@@ -53,6 +53,12 @@ func chartScenarioMetadata(name, description, makeTarget string, minutes int, re
 	}
 }
 
+func transitionScenarioMetadata(name, description, makeTarget string, minutes int, references, targets []string) sharede2e.ScenarioMetadata {
+	metadata := chartScenarioMetadata(name, description, makeTarget, minutes, references, targets)
+	metadata.FixtureModes = []sharede2e.FixtureMode{sharede2e.FixtureSource, sharede2e.FixtureCandidate}
+	return metadata
+}
+
 func hermeticExampleScenario() sharede2e.Definition {
 	return sharede2e.Define(sharede2e.Scenario[*exampleState]{
 		Metadata: sharede2e.ScenarioMetadata{
