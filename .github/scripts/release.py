@@ -215,6 +215,53 @@ def fixture_versions(root: Path) -> dict[str, str]:
     return result
 
 
+def chart_transition_baselines(root: Path) -> dict[str, list[dict[str, str]]]:
+    path = root / "charts" / "test" / "e2e" / "transition-baselines.json"
+    fixture = load_json(path)
+    if fixture.get("mode") != "published" or not isinstance(fixture.get("inputs"), list):
+        raise ReleaseError("chart transition baselines must record published fixture inputs")
+    expected = {
+        "supported-platform-predecessor": "iterabase-platform",
+        "supported-substrate-predecessor": "cert-manager-substrate",
+    }
+    charts: list[dict[str, str]] = []
+    for item in fixture["inputs"]:
+        if not isinstance(item, dict):
+            raise ReleaseError("chart transition baseline input must be an object")
+        name = item.get("name")
+        reference = item.get("reference")
+        checksum = item.get("checksum")
+        if item.get("kind") != "published-chart" or name not in expected:
+            raise ReleaseError(f"unexpected chart transition baseline {name!r}")
+        if not isinstance(reference, str) or ":" not in reference:
+            raise ReleaseError(f"chart transition baseline {name} has no exact OCI version")
+        repository, version = reference.rsplit(":", 1)
+        require_semver(version, f"chart transition baseline {name}")
+        chart = repository.rsplit("/", 1)[-1]
+        if not repository.startswith("oci://") or chart != expected[name]:
+            raise ReleaseError(f"chart transition baseline {name} has invalid reference {reference!r}")
+        if not isinstance(checksum, str) or not re.fullmatch(r"[0-9a-f]{64}", checksum):
+            raise ReleaseError(f"chart transition baseline {name} has no exact archive checksum")
+        charts.append(
+            {
+                "name": name,
+                "chart": chart,
+                "repository": repository,
+                "version": version,
+                "sha256": checksum,
+            }
+        )
+    if len(charts) != len(expected) or {item["name"] for item in charts} != set(expected):
+        raise ReleaseError("chart transition baseline pair is incomplete or duplicated")
+    if len({item["version"] for item in charts}) != 1:
+        raise ReleaseError("platform and substrate transition baselines must use one version")
+    current = chart_metadata(root / "charts" / "charts" / "iterabase-platform" / "Chart.yaml")["version"]
+    predecessor = charts[0]["version"]
+    if tuple(map(int, predecessor.split("."))) >= tuple(map(int, current.split("."))):
+        raise ReleaseError("chart transition predecessor must be older than current authority")
+    return {"charts": charts}
+
+
 def validate_contract(
     targets: dict[str, Any], root: Path, catalogue: dict[str, Any] | None = None
 ) -> None:
@@ -298,6 +345,7 @@ def validate_contract(
         )
 
     fixture_versions(root)
+    chart_transition_baselines(root)
 
 
 def repository_versions(root: Path, targets: dict[str, Any]) -> dict[str, str]:
@@ -472,8 +520,16 @@ def make_plan(
         "observability",
         "observability-tls",
         "internal-tls",
+        "n-minus-one-upgrade",
+        "feature-enable-upgrade",
+        "reapply-rollback-recovery",
     }
     real_machine = bool(real_machine_matrix)
+    transition_baselines = (
+        chart_transition_baselines(root)
+        if any(scenario["suite"]["owner"] == "charts" for scenario in scenarios)
+        else {"charts": []}
+    )
     uses_control_chart = bool(control_scenarios.intersection(scenario_names))
     uses_platform_chart = bool(platform_scenarios.intersection(scenario_names)) or real_machine
     uses_substrate_chart = uses_platform_chart or "kind-tool-runner-contract" in scenario_names
@@ -491,12 +547,19 @@ def make_plan(
             }
         )
 
+    platform_runtime_baseline = fixtures["platform_chart"]
+    if transition_baselines["charts"]:
+        platform_runtime_baseline = next(
+            item["version"]
+            for item in transition_baselines["charts"]
+            if item["name"] == "supported-platform-predecessor"
+        )
     if uses_control_chart and "control-plane-chart" not in selected_set:
         add_baseline_chart("control-plane", fixtures["control_plane_chart"])
     if uses_platform_chart and "iterabase-platform-chart" not in selected_set:
-        add_baseline_chart("iterabase-platform", fixtures["platform_chart"])
+        add_baseline_chart("iterabase-platform", platform_runtime_baseline)
     if uses_substrate_chart and "iterabase-platform-chart" not in selected_set:
-        add_baseline_chart("cert-manager-substrate", fixtures["platform_chart"])
+        add_baseline_chart("cert-manager-substrate", platform_runtime_baseline)
 
     image_definitions = {
         image["name"]: image
@@ -617,11 +680,13 @@ def make_plan(
             "images": baseline_images,
             "charts": baseline_charts,
         },
+        "transition_baselines": transition_baselines,
         "tested_with": {
             "repository_versions": versions,
             "chart_metadata": metadata,
             "selected_chart_dependencies": selected_chart_dependencies,
             "fixture_versions": fixtures,
+            "transition_baselines": transition_baselines,
             "scenario_catalogue": {
                 "schema_version": compiled_catalogue["schema_version"],
                 "selected": [

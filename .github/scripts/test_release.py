@@ -153,9 +153,12 @@ class ReleaseContractTests(unittest.TestCase):
                 "forge/kind-tool-runner-contract",
                 "charts/certificate-ownership-migration",
                 "charts/fresh-install",
+                "charts/feature-enable-upgrade",
                 "charts/internal-tls",
+                "charts/n-minus-one-upgrade",
                 "charts/observability",
                 "charts/observability-tls",
+                "charts/reapply-rollback-recovery",
             },
         )
 
@@ -218,6 +221,16 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertEqual(
             plan["tested_with"]["repository_versions"]["inference-gateway"], "0.2.6"
         )
+        transition = plan["transition_baselines"]["charts"]
+        self.assertEqual(
+            [(item["name"], item["chart"], item["version"]) for item in transition],
+            [
+                ("supported-platform-predecessor", "iterabase-platform", "0.3.10"),
+                ("supported-substrate-predecessor", "cert-manager-substrate", "0.3.10"),
+            ],
+        )
+        self.assertTrue(all(len(item["sha256"]) == 64 for item in transition))
+        self.assertEqual(plan["tested_with"]["transition_baselines"], plan["transition_baselines"])
 
     def test_invalid_source_and_target_sets_are_rejected(self) -> None:
         for targets in ("", "everything", "forge,forge", "forge,", ",forge"):
@@ -240,7 +253,7 @@ class ReleaseContractTests(unittest.TestCase):
             (item["chart"], item["version"])
             for item in plan["baseline_dependencies"]["charts"]
         }
-        self.assertIn(("iterabase-platform", "0.3.1"), baseline_charts)
+        self.assertIn(("iterabase-platform", "0.3.10"), baseline_charts)
         baseline_images = plan["baseline_dependencies"]["images"]
         self.assertEqual({item["name"] for item in baseline_images}, {"inference-gateway"})
         self.assertEqual(
@@ -425,6 +438,9 @@ class ReleaseContractTests(unittest.TestCase):
 
     def test_baseline_resolver_records_immutable_image_and_chart_identities(self) -> None:
         plan = self.plan("control-plane")
+        # This fixture synthesizes chart archives; owner-pinned transition
+        # archives are checksum-tested separately and cannot be regenerated.
+        plan["transition_baselines"] = {"charts": []}
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             plan_path = root / "plan.json"
@@ -479,6 +495,62 @@ class ReleaseContractTests(unittest.TestCase):
             self.assertRegex(resolved["baseline_dependencies"]["charts"][0]["sha256"], r"^[0-9a-f]{64}$")
             versions = {item["name"]: item["version"] for item in resolved["baseline_dependencies"]["images"]}
             self.assertEqual(versions["inference-gateway"], "0.2.4")
+
+    def test_runtime_rejects_a_transition_predecessor_with_wrong_archive_bytes(self) -> None:
+        plan = {
+            "source_sha": self.sha,
+            "image_matrix": [],
+            "chart_matrix": [],
+            "baseline_dependencies": {"images": [], "charts": []},
+            "transition_baselines": {
+                "charts": [
+                    {
+                        "name": "supported-platform-predecessor",
+                        "chart": "iterabase-platform",
+                        "repository": "oci://example/iterabase-platform",
+                        "version": "0.3.10",
+                        "sha256": "f" * 64,
+                    }
+                ]
+            },
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            plan_path = root / "plan.json"
+            plan_path.write_text(release.compact(plan) + "\n", encoding="utf-8")
+            candidates = root / "candidates"
+            candidates.mkdir()
+            output = root / "environment"
+            helm = root / "helm"
+            helm.write_text(
+                "#!/usr/bin/env bash\n"
+                "set -eu\n"
+                "repository=$2\n"
+                "destination=''\n"
+                "version=''\n"
+                "while [ $# -gt 0 ]; do case \"$1\" in --destination) destination=$2; shift 2;; --version) version=$2; shift 2;; *) shift;; esac; done\n"
+                "chart=${repository##*/}\n"
+                "mkdir -p \"$destination\"\n"
+                "printf 'wrong bytes' > \"$destination/$chart-$version.tgz\"\n",
+                encoding="utf-8",
+            )
+            helm.chmod(0o755)
+            result = subprocess.run(
+                [
+                    "bash",
+                    str(ROOT / ".github/scripts/prepare_candidate_runtime.sh"),
+                    str(plan_path),
+                    str(candidates),
+                    str(output),
+                ],
+                cwd=root,
+                check=False,
+                capture_output=True,
+                text=True,
+                env={**os.environ, "HELM_BIN": str(helm)},
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("FAILED", result.stdout + result.stderr)
 
     def test_runtime_rejects_a_baseline_chart_that_does_not_match_the_plan_checksum(self) -> None:
         plan = {

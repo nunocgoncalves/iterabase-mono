@@ -73,7 +73,30 @@ for metadata in "$candidate_dir"/images/candidate-*.json; do
 done
 
 rm -rf candidate-local
-mkdir -p candidate-local/baseline-packages candidate-local/baselines candidate-local/selected
+mkdir -p candidate-local/baseline-packages candidate-local/baselines candidate-local/selected candidate-local/transition-packages
+
+# Pull the chart-owned supported predecessor pair and verify its owner-pinned
+# archive checksums before exposing the exact packages to lifecycle scenarios.
+while IFS=$'\t' read -r name chart repository version checksum; do
+  [[ -n "$name" ]] || continue
+  "$helm_bin" pull "$repository" --version "$version" --destination candidate-local/transition-packages
+  archive="candidate-local/transition-packages/$chart-$version.tgz"
+  [[ -f "$archive" ]]
+  [[ "$checksum" =~ ^[0-9a-f]{64}$ ]]
+  printf '%s  %s\n' "$checksum" "$archive" | sha256sum --check -
+  case "$name" in
+    supported-platform-predecessor)
+      set_env "ITERABASE_E2E_PREDECESSOR_PLATFORM_ARCHIVE=$PWD/$archive"
+      ;;
+    supported-substrate-predecessor)
+      set_env "ITERABASE_E2E_PREDECESSOR_SUBSTRATE_ARCHIVE=$PWD/$archive"
+      ;;
+    *)
+      echo "unknown chart transition baseline $name" >&2
+      exit 1
+      ;;
+  esac
+done < <(jq -r '(.transition_baselines.charts // [])[] | [.name,.chart,.repository,.version,.sha256] | @tsv' "$plan")
 
 # Pull every published chart by its reviewed version, verify the plan-recorded
 # archive checksum, and only then make its bytes available to a test fixture.

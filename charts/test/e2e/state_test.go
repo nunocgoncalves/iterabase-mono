@@ -30,17 +30,19 @@ const (
 )
 
 type chartState struct {
-	ctx            context.Context
-	chartsRoot     string
-	outputDir      string
-	diagnosticsDir string
-	redactor       *redact.Redactor
-	runner         process.Runner
-	cluster        *kindcluster.Cluster
-	client         kube.Client
-	forwards       []*kube.Forward
-	platform       kube.Chart
-	substrate      kube.Chart
+	ctx                 context.Context
+	chartsRoot          string
+	outputDir           string
+	diagnosticsDir      string
+	redactor            *redact.Redactor
+	runner              process.Runner
+	cluster             *kindcluster.Cluster
+	client              kube.Client
+	forwards            []*kube.Forward
+	platform            kube.Chart
+	substrate           kube.Chart
+	transitionBaselines map[string]transitionBaseline
+	snapshots           map[string]lifecycleSnapshot
 }
 
 func newChartState(t *testing.T) *chartState {
@@ -71,7 +73,7 @@ func newChartState(t *testing.T) *chartState {
 	redactor := redact.New()
 	state := &chartState{
 		ctx: context.Background(), chartsRoot: chartsRoot, outputDir: outputDir, diagnosticsDir: diagnosticsDir, redactor: redactor,
-		runner: process.Runner{Redactor: redactor, OutputDir: outputDir},
+		runner: process.Runner{Redactor: redactor, OutputDir: outputDir}, snapshots: make(map[string]lifecycleSnapshot),
 	}
 	state.platform, state.substrate = resolveCharts(t, chartsRoot)
 	return state
@@ -299,23 +301,23 @@ func applyCandidateImages(values map[string]any) {
 
 func (state *chartState) installSubstrate(t *testing.T) {
 	t.Helper()
-	_, err := state.client.HelmUpgrade(state.ctx, kube.HelmOptions{
+	out, err := state.client.HelmUpgrade(state.ctx, kube.HelmOptions{
 		Release: testRelease + "-cert-manager", Namespace: testNamespace, Chart: state.substrate,
 		CreateNamespace: true, Wait: true, Timeout: 8 * time.Minute,
 	})
 	if err != nil {
-		t.Fatalf("install certificate substrate: %v", err)
+		t.Fatalf("install certificate substrate: %v\n%s", err, out)
 	}
 }
 
 func (state *chartState) installPlatform(t *testing.T, timeout time.Duration, valueFiles ...string) {
 	t.Helper()
-	_, err := state.client.HelmUpgrade(state.ctx, kube.HelmOptions{
+	out, err := state.client.HelmUpgrade(state.ctx, kube.HelmOptions{
 		Release: testRelease, Namespace: testNamespace, Chart: state.platform,
 		ValueFiles: valueFiles, Wait: true, Timeout: timeout,
 	})
 	if err != nil {
-		t.Fatalf("install platform: %v", err)
+		t.Fatalf("install platform: %v\n%s", err, out)
 	}
 }
 

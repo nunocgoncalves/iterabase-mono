@@ -140,6 +140,30 @@ helm rollback iterabase <pre-0.3-revision> -n iterabase-system --wait
 The chart-owned compiled Kind scenario exercises both directions against the
 released 0.2.2 chart via `make test-e2e-certificate-migration`.
 
+### Enabling an operator-backed dependency during upgrade
+
+Helm does not install CRDs from a dependency that was disabled on the original
+release. Before enabling observability—or another operator-backed dependency—
+extract CRDs from the **exact target chart archive**, select the authoritative
+schema for duplicate CRDs using its operator-owned version annotation, apply
+those CRDs server-side, and wait for every CRD to become `Established` before
+running `helm upgrade`. Forge performs this sequence automatically. Direct Helm
+operators must perform the same ordered operation; applying the regular custom
+resources first can fail during REST mapping before any chart hook executes.
+
+The chart-owned `test/e2e/transition-baselines.json` currently declares platform
+and substrate `0.3.10` as the checksum-pinned supported predecessor for current
+`0.3.11`. The supported inverse boundary is current → that declared predecessor
+within the post-0.3 companion-ownership model, followed by a current forward
+recovery. Roll back the platform release before the companion substrate. CRDs,
+generated Secrets, and PVCs are retained. The separate pre-0.3 ownership
+handoff above remains mandatory; arbitrary-version rollback safety is not
+claimed.
+
+Run `make test-e2e-feature-enable` for the absent-CRD path and
+`make test-e2e-reapply-rollback` for idempotent reapply plus inverse/forward
+recovery evidence.
+
 ## Flux-backed gateway tool runner
 
 The control-plane chart can deploy the HOR-397 Node 24 runner as a two-container
@@ -195,6 +219,9 @@ make check                  # Helm lint/template + kubeconform + static contract
 make check-tls              # TLS presets, including observability + TLS together
 make test-e2e-unit          # compiled suite + intentional break fixtures (no cluster)
 make test-e2e-install       # one fresh Kind cluster
+make test-e2e-upgrade       # checksum-pinned N-1 -> exact current transition
+make test-e2e-feature-enable # disabled operator dependency -> CRDs -> current
+make test-e2e-reapply-rollback # idempotent reapply + inverse/forward recovery
 make test-e2e-observability
 make test-e2e-observability-tls
 make test-e2e-internal-tls

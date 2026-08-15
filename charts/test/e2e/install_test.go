@@ -19,7 +19,7 @@ func freshInstallScenario() sharede2e.Definition {
 			"fresh-install",
 			"Installs the ordered certificate substrate and minimal platform edge, then proves manager, issuer, workload identity, and verified gateway readiness.",
 			"test-e2e-install", 30,
-			[]string{"HOR-408", "HOR-416"},
+			[]string{"HOR-408", "HOR-416", "HOR-475"},
 			[]string{"control-plane-chart", "inference-gateway-chart", "iterabase-platform-chart"},
 		),
 		NewState: newChartState,

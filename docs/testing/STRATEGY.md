@@ -33,7 +33,7 @@ Tier is compiled scenario metadata, not an estimate of importance. A higher tier
 Every suite execution records exactly one mode:
 
 - **`source`** — one full source SHA plus an explicit dirty-worktree bit for local development. Local charts/images may be built from that checkout; every unselected dependency remains explicitly pinned. Source runs that consume published dependencies explicitly set `ITERABASE_E2E_SOURCE_INPUTS` to an exact checked-in input fixture; the library never loads one implicitly. Candidate fixtures reject dirty source.
-- **`candidate`** — the release candidate plan's full source SHA, selected candidate identities, and checksum/digest-pinned published baselines.
+- **`candidate`** — the release candidate plan's full source SHA, selected candidate identities, checksum/digest-pinned published baselines, and any owner-declared checksum-pinned transition predecessor required by a selected lifecycle scenario.
 - **`published`** — explicit immutable semantic versions and, where available, digests/checksums.
 
 There is no default inside the library, floating `latest`, matching-branch lookup, coordinated-ref fallback, or silent source→published fallback. Owner Make targets explicitly choose source mode for local use. Candidate and published workflows override it with their exact retained inputs. The fixture record is printed before scenarios execute and retained in candidate evidence.
@@ -117,7 +117,7 @@ Component artifacts are fail-closed:
 
 That declaration is required for Playwright screenshots/traces and is part of the reviewable scenario code. Customer/production browser artifacts do not qualify.
 
-A normal F2 failure bundle includes cluster resources, events, pod describes, current/previous logs, Helm list/state, process output, and declared component evidence. Diagnostics are best effort and do not suppress teardown.
+A normal F2 failure bundle includes cluster resources, events, pod describes, current/previous logs, Helm list/state, revision history, effective values, hooks, status, process output, and declared component evidence. Diagnostics are best effort and do not suppress teardown.
 
 ## CI and release gates
 
@@ -129,6 +129,7 @@ The release gate preserves these invariants:
 
 - all selected artifacts are exact candidates built once;
 - unselected runtime dependencies are immutable manifest/plan-pinned published baselines;
+- lifecycle predecessors come from owner-local immutable fixture authority, are copied into the generated candidate plan, and are checksum-verified before execution;
 - coordinated target sets execute the deduplicated scenario union;
 - Forge and platform-chart release coverage includes both CPU and GPU F3 scenarios;
 - missing mandatory CPU/GPU credentials or capacity is incomplete/failing, never passing;
