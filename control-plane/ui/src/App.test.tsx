@@ -543,7 +543,7 @@ describe("Platform v1 Dashboard", () => {
         return json([]);
       if (url.endsWith("/blocker")) return json(blocker);
       if (url === "/v1/artifacts" && init?.method === "POST")
-        return json({ id: "artifact-1" }, 201);
+        return json({ artifactId: "artifact-1" }, 201);
       if (url.includes("/work-blockers/blocker-1/responses"))
         return json({ ...blocker, state: "resolved" });
       return fetchMock(input, init);

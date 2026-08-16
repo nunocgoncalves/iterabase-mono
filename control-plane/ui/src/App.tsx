@@ -1463,7 +1463,10 @@ function BlockerForm({
       const refs: Array<{ artifactId: string; metadata?: unknown }> = [];
       if (file) {
         const artifact = await uploadArtifact(token, file);
-        refs.push({ artifactId: artifact.id, metadata: { name: file.name } });
+        refs.push({
+          artifactId: artifact.artifactId,
+          metadata: { name: file.name },
+        });
       }
       await respondToBlocker(
         token,
