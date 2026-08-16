@@ -46,6 +46,7 @@ function allowNetworkOutage(observability: BrowserObservability): void {
   );
   observability.allowRequestFailure(
     /^\/v1\//,
+    /^net::(ERR_ABORTED|ERR_INCOMPLETE_CHUNKED_ENCODING)$/,
     "HOR-483 intentionally interrupts active API/SSE requests before Go restores the same deployed fixture.",
   );
   observability.allowConsoleError(
@@ -93,10 +94,6 @@ test("uses in-memory authentication, real loading/error responses, and both loca
   await page.getByRole("button", { name: "PT", exact: true }).click();
   await expect(page.getByRole("region", { name: "Trabalho" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Concluído" })).toBeVisible();
-  observability.allowRequestFailure(
-    /^\/v1\/work-events$/,
-    "Disconnect intentionally aborts the in-memory authenticated SSE subscription before returning to the key form.",
-  );
   await page.getByRole("button", { name: "Desligar" }).click();
   await expect(
     page.getByRole("heading", { name: "Ligar ao Painel" }),

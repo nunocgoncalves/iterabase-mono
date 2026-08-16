@@ -362,32 +362,73 @@ func collectBrowserEvidence(state *deployedState, artifactRoot string) error {
 	if _, err := os.Stat(marker); err != nil {
 		return fmt.Errorf("Playwright did not produce the sanitized artifact marker: %w", err)
 	}
-	entries := []artifacts.Entry{
+	textEntries := []artifacts.Entry{
 		{Name: "report.json", Source: filepath.Join(artifactRoot, "report.json"), Kind: artifacts.Text},
 		{Name: "network.jsonl", Source: filepath.Join(artifactRoot, "network.jsonl"), Kind: artifacts.Text},
-		{Name: "failure-evidence", Source: filepath.Join(artifactRoot, "safe-opaque"), Kind: artifacts.SafeSyntheticOpaque},
 		{Name: "sanitized.marker", Source: marker, Kind: artifacts.Text},
 	}
 	for _, output := range []string{"playwright-npm-ci.log", "playwright-test.log"} {
 		path := filepath.Join(state.outputDir, output)
 		if _, err := os.Stat(path); err == nil {
-			entries = append(entries, artifacts.Entry{Name: output, Source: path, Kind: artifacts.Text})
+			textEntries = append(textEntries, artifacts.Entry{Name: output, Source: path, Kind: artifacts.Text})
 		}
 	}
-	if err := validateBrowserEvidence(entries, state.adminKey, state.tokenKey, state.workKey); err != nil {
-		return err
+
+	secrets := []string{state.adminKey, state.tokenKey, state.workKey}
+	state.redactor.Add(browserEvidenceCredentialVariants(secrets...)...)
+	stagingRoot, err := os.MkdirTemp(state.outputDir, "browser-sanitized-text-")
+	if err != nil {
+		return fmt.Errorf("create sanitized browser evidence staging directory: %w", err)
 	}
-	return artifacts.Collect(entries, filepath.Join(state.diagnosticsDir, "browser"), state.redactor)
+	defer os.RemoveAll(stagingRoot)
+	if err := artifacts.Collect(textEntries, stagingRoot, state.redactor); err != nil {
+		return fmt.Errorf("stage sanitized browser text evidence: %w", err)
+	}
+	stagedTextEntries := make([]artifacts.Entry, 0, len(textEntries))
+	for _, entry := range textEntries {
+		stagedTextEntries = append(stagedTextEntries, artifacts.Entry{
+			Name: entry.Name, Source: filepath.Join(stagingRoot, filepath.Clean(entry.Name)), Kind: artifacts.Text,
+		})
+	}
+	if err := validateBrowserEvidence(stagedTextEntries, secrets...); err != nil {
+		return fmt.Errorf("validate sanitized browser text evidence: %w", err)
+	}
+
+	destination := filepath.Join(state.diagnosticsDir, "browser")
+	if err := artifacts.Collect(stagedTextEntries, destination, state.redactor); err != nil {
+		return fmt.Errorf("retain sanitized browser text evidence: %w", err)
+	}
+	for _, entry := range textEntries {
+		if err := os.Remove(entry.Source); err != nil {
+			return fmt.Errorf("remove raw browser text evidence %s: %w", entry.Source, err)
+		}
+	}
+
+	opaqueEntries := []artifacts.Entry{{
+		Name: "failure-evidence", Source: filepath.Join(artifactRoot, "safe-opaque"), Kind: artifacts.SafeSyntheticOpaque,
+	}}
+	if err := validateBrowserEvidence(opaqueEntries, secrets...); err != nil {
+		return fmt.Errorf("validate sanitized opaque browser evidence: %w", err)
+	}
+	if err := artifacts.Collect(opaqueEntries, destination, state.redactor); err != nil {
+		return fmt.Errorf("retain sanitized opaque browser evidence: %w", err)
+	}
+	return nil
 }
 
-func validateBrowserEvidence(entries []artifacts.Entry, secrets ...string) error {
-	variants := make([][]byte, 0, len(secrets)*2)
+func browserEvidenceCredentialVariants(secrets ...string) []string {
+	variants := make([]string, 0, len(secrets)*2)
 	for _, secret := range secrets {
 		if secret == "" {
 			continue
 		}
-		variants = append(variants, []byte(secret), []byte(base64.StdEncoding.EncodeToString([]byte(secret))))
+		variants = append(variants, secret, base64.StdEncoding.EncodeToString([]byte(secret)))
 	}
+	return variants
+}
+
+func validateBrowserEvidence(entries []artifacts.Entry, secrets ...string) error {
+	variants := browserEvidenceCredentialVariants(secrets...)
 	for _, entry := range entries {
 		err := filepath.Walk(entry.Source, func(path string, info os.FileInfo, walkErr error) error {
 			if walkErr != nil {
@@ -401,7 +442,7 @@ func validateBrowserEvidence(entries []artifacts.Entry, secrets ...string) error
 				return err
 			}
 			for _, variant := range variants {
-				if bytes.Contains(data, variant) {
+				if bytes.Contains(data, []byte(variant)) {
 					return fmt.Errorf("browser evidence %s contains a credential literal", path)
 				}
 			}
@@ -422,7 +463,7 @@ func validateBrowserEvidence(entries []artifacts.Entry, secrets ...string) error
 						return err
 					}
 					for _, variant := range variants {
-						if bytes.Contains(content, variant) {
+						if bytes.Contains(content, []byte(variant)) {
 							return fmt.Errorf("browser trace %s entry %s contains a credential literal", path, file.Name)
 						}
 					}

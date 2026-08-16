@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/nunocgoncalves/iterabase-mono/testkit/e2e/artifacts"
+	"github.com/nunocgoncalves/iterabase-mono/testkit/e2e/redact"
 )
 
 func TestDeployedBrowserProxyUsesStableOriginAcrossGoOwnedUpstreams(t *testing.T) {
@@ -90,6 +91,95 @@ func TestBrowserCoordinatorRequiresExplicitBoundedRecovery(t *testing.T) {
 	if status != "recovering" {
 		t.Fatalf("coordinator status=%q want recovering", status)
 	}
+}
+
+func TestCollectBrowserEvidenceRedactsTextBeforeRetentionAndRemovesRawCopies(t *testing.T) {
+	state, artifactRoot := newBrowserEvidenceCollectionFixture(t, false)
+	if err := collectBrowserEvidence(state, artifactRoot); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, path := range []string{
+		filepath.Join(artifactRoot, "report.json"),
+		filepath.Join(artifactRoot, "network.jsonl"),
+		filepath.Join(artifactRoot, "sanitized.marker"),
+		filepath.Join(state.outputDir, "playwright-npm-ci.log"),
+		filepath.Join(state.outputDir, "playwright-test.log"),
+	} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("raw browser text evidence still exists at %s: %v", path, err)
+		}
+	}
+
+	retainedRoot := filepath.Join(state.diagnosticsDir, "browser")
+	for _, name := range []string{"report.json", "network.jsonl", "playwright-npm-ci.log", "playwright-test.log"} {
+		data, err := os.ReadFile(filepath.Join(retainedRoot, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, variant := range browserEvidenceCredentialVariants(state.adminKey, state.tokenKey, state.workKey) {
+			if bytes.Contains(data, []byte(variant)) {
+				t.Fatalf("retained %s contains credential variant %q", name, variant)
+			}
+		}
+	}
+	if _, err := os.Stat(filepath.Join(retainedRoot, "failure-evidence", "screenshot.png")); err != nil {
+		t.Fatalf("sanitized opaque evidence was not retained: %v", err)
+	}
+}
+
+func TestCollectBrowserEvidenceRejectsUnsafeOpaqueAfterRetainingSafeText(t *testing.T) {
+	state, artifactRoot := newBrowserEvidenceCollectionFixture(t, true)
+	err := collectBrowserEvidence(state, artifactRoot)
+	if err == nil || !strings.Contains(err.Error(), "validate sanitized opaque browser evidence") {
+		t.Fatalf("collection error=%v", err)
+	}
+
+	retainedReport := filepath.Join(state.diagnosticsDir, "browser", "report.json")
+	data, readErr := os.ReadFile(retainedReport)
+	if readErr != nil {
+		t.Fatalf("sanitized report was not retained: %v", readErr)
+	}
+	if bytes.Contains(data, []byte(state.workKey)) {
+		t.Fatalf("sanitized report retained work key: %s", data)
+	}
+	if _, statErr := os.Stat(filepath.Join(state.diagnosticsDir, "browser", "failure-evidence")); !os.IsNotExist(statErr) {
+		t.Fatalf("unsafe opaque evidence was retained: %v", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(artifactRoot, "report.json")); !os.IsNotExist(statErr) {
+		t.Fatalf("raw report still exists: %v", statErr)
+	}
+}
+
+func newBrowserEvidenceCollectionFixture(t *testing.T, unsafeOpaque bool) (*deployedState, string) {
+	t.Helper()
+	outputDir := t.TempDir()
+	state := &deployedState{
+		outputDir: outputDir, diagnosticsDir: filepath.Join(outputDir, "diagnostics"),
+		adminKey: "cp-browser-admin", tokenKey: "cp-browser-token", workKey: "cp-browser-work",
+	}
+	state.redactor = redact.New(state.adminKey, state.tokenKey, state.workKey)
+	artifactRoot := filepath.Join(outputDir, "browser-artifacts")
+	if err := os.MkdirAll(filepath.Join(artifactRoot, "safe-opaque"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	files := map[string][]byte{
+		filepath.Join(artifactRoot, "report.json"):                   []byte(`{"received":"` + state.workKey + `","encoded":"` + base64.StdEncoding.EncodeToString([]byte(state.workKey)) + `"}`),
+		filepath.Join(artifactRoot, "network.jsonl"):                 []byte(`{"message":"` + state.adminKey + `"}`),
+		filepath.Join(artifactRoot, "sanitized.marker"):              []byte("Playwright evidence sanitized\n"),
+		filepath.Join(outputDir, "playwright-npm-ci.log"):            []byte("npm completed\n"),
+		filepath.Join(outputDir, "playwright-test.log"):              []byte("test token=" + state.tokenKey + "\n"),
+		filepath.Join(artifactRoot, "safe-opaque", "screenshot.png"): {0, 1, 2, 3},
+	}
+	if unsafeOpaque {
+		files[filepath.Join(artifactRoot, "safe-opaque", "screenshot.png")] = []byte(state.workKey)
+	}
+	for path, content := range files {
+		if err := os.WriteFile(path, content, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return state, artifactRoot
 }
 
 func TestValidateBrowserEvidenceRejectsCredentialsInTextAndTraceArchives(t *testing.T) {
