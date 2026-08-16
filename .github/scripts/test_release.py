@@ -299,7 +299,7 @@ class ReleaseContractTests(unittest.TestCase):
             (item["chart"], item["version"])
             for item in plan["baseline_dependencies"]["charts"]
         }
-        self.assertIn(("iterabase-platform", "0.3.10"), baseline_charts)
+        self.assertIn(("iterabase-platform", "0.3.11"), baseline_charts)
         baseline_images = plan["baseline_dependencies"]["images"]
         self.assertEqual({item["name"] for item in baseline_images}, {"inference-gateway"})
         self.assertEqual(
@@ -331,6 +331,36 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertIn(
             "inference-gateway",
             {item["name"] for item in image_only["baseline_dependencies"]["images"]},
+        )
+
+    def test_control_plane_image_only_uses_current_charts_and_distinct_predecessors(self) -> None:
+        plan = self.plan("control-plane")
+        self.assertEqual(
+            {
+                item["chart"]: item["version"]
+                for item in plan["baseline_dependencies"]["charts"]
+            },
+            {
+                "control-plane": "0.4.9",
+                "iterabase-platform": "0.3.11",
+                "cert-manager-substrate": "0.3.11",
+            },
+        )
+        self.assertEqual(
+            {
+                item["chart"]: item["version"]
+                for item in plan["transition_baselines"]["charts"]
+            },
+            {
+                "iterabase-platform": "0.3.10",
+                "cert-manager-substrate": "0.3.10",
+            },
+        )
+        self.assertEqual(
+            plan["tested_with"]["fixture_versions"]["control_plane_chart"], "0.4.9"
+        )
+        self.assertEqual(
+            plan["tested_with"]["fixture_versions"]["platform_chart"], "0.3.11"
         )
 
     def test_prerelease_and_v_prefix_are_rejected(self) -> None:
@@ -514,7 +544,7 @@ class ReleaseContractTests(unittest.TestCase):
                 "if [ \"$chart\" = iterabase-platform ]; then\n"
                 "  mkdir -p \"$fixture/$chart/charts/control-plane\" \"$fixture/$chart/charts/inference-gateway\"\n"
                 "  printf 'image:\\n  tag: 0.0.19\\ntoolRunner:\\n  image:\\n    tag: 0.0.19\\n' > \"$fixture/$chart/charts/control-plane/values.yaml\"\n"
-                "  printf 'image:\\n  tag: 0.2.4\\n' > \"$fixture/$chart/charts/inference-gateway/values.yaml\"\n"
+                "  printf 'image:\\n  tag: 0.2.5\\n' > \"$fixture/$chart/charts/inference-gateway/values.yaml\"\n"
                 "elif [ \"$chart\" = control-plane ]; then\n"
                 "  printf 'image:\\n  tag: 0.0.19\\ntoolRunner:\\n  image:\\n    tag: 0.0.19\\n' > \"$fixture/$chart/values.yaml\"\n"
                 "fi\n"
@@ -540,7 +570,7 @@ class ReleaseContractTests(unittest.TestCase):
             self.assertTrue(all(item["digest"] == digest for item in resolved["baseline_dependencies"]["images"]))
             self.assertRegex(resolved["baseline_dependencies"]["charts"][0]["sha256"], r"^[0-9a-f]{64}$")
             versions = {item["name"]: item["version"] for item in resolved["baseline_dependencies"]["images"]}
-            self.assertEqual(versions["inference-gateway"], "0.2.4")
+            self.assertEqual(versions["inference-gateway"], "0.2.5")
 
     def test_runtime_rejects_a_transition_predecessor_with_wrong_archive_bytes(self) -> None:
         plan = {

@@ -4,7 +4,7 @@
     {
       "name": "cert-manager-substrate",
       "kind": "published-chart",
-      "reference": "oci://ghcr.io/nunocgoncalves/iterabase-charts/cert-manager-substrate:0.3.1"
+      "reference": "oci://ghcr.io/nunocgoncalves/iterabase-charts/cert-manager-substrate:0.3.11"
     },
     {
       "name": "certificate-migration-source",
@@ -14,12 +14,12 @@
     {
       "name": "control-plane",
       "kind": "published-chart",
-      "reference": "oci://ghcr.io/nunocgoncalves/iterabase-charts/control-plane:0.4.1"
+      "reference": "oci://ghcr.io/nunocgoncalves/iterabase-charts/control-plane:0.4.9"
     },
     {
       "name": "iterabase-platform",
       "kind": "published-chart",
-      "reference": "oci://ghcr.io/nunocgoncalves/iterabase-charts/iterabase-platform:0.3.1"
+      "reference": "oci://ghcr.io/nunocgoncalves/iterabase-charts/iterabase-platform:0.3.11"
     }
   ]
 }

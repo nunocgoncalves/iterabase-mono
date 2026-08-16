@@ -10,8 +10,8 @@ const (
 	// otherwise fall back to pinned released baselines. Explicit version overrides
 	// select a published chart. Baseline upgrades are intentional changes to this
 	// file, not an unrelated release silently changing another PR's test matrix.
-	pinnedPlatformChartVersion     = "0.3.1"
-	pinnedControlPlaneChartVersion = "0.4.1"
+	pinnedPlatformChartVersion     = "0.3.11"
+	pinnedControlPlaneChartVersion = "0.4.9"
 
 	// The CPU cloud scenario starts here only to prove the real ownership handoff
 	// into pinnedPlatformChartVersion. It is not the scenario's desired version.

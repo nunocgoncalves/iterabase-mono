@@ -206,12 +206,53 @@ def fixture_versions(root: Path) -> dict[str, str]:
     published = load_json(root / "forge" / "test" / "e2e" / "published-fixture.json")
     if published.get("mode") != "published" or not isinstance(published.get("inputs"), list):
         raise ReleaseError("published E2E fixture must record exact published inputs")
-    references = [item.get("reference", "") for item in published["inputs"]]
-    if any("latest" in reference.lower() for reference in references):
-        raise ReleaseError("published E2E fixture must not use floating latest")
-    for name, version in result.items():
-        if not any(reference.endswith(":" + version) for reference in references):
-            raise ReleaseError(f"published E2E fixture does not record {name}={version}")
+    inputs: dict[str, dict[str, Any]] = {}
+    for item in published["inputs"]:
+        if not isinstance(item, dict):
+            raise ReleaseError("published E2E fixture input must be an object")
+        name = item.get("name")
+        reference = item.get("reference")
+        if not isinstance(name, str) or not isinstance(reference, str):
+            raise ReleaseError("published E2E fixture input must have a name and reference")
+        if name in inputs:
+            raise ReleaseError(f"published E2E fixture input {name} is duplicated")
+        if "latest" in reference.lower():
+            raise ReleaseError("published E2E fixture must not use floating latest")
+        inputs[name] = item
+
+    authorities = {
+        "platform_chart": (
+            "iterabase-platform",
+            "oci://ghcr.io/nunocgoncalves/iterabase-charts/iterabase-platform",
+        ),
+        "control_plane_chart": (
+            "control-plane",
+            "oci://ghcr.io/nunocgoncalves/iterabase-charts/control-plane",
+        ),
+        "certificate_migration_source": (
+            "certificate-migration-source",
+            "oci://ghcr.io/nunocgoncalves/iterabase-charts/iterabase-platform",
+        ),
+    }
+    for authority, (input_name, repository) in authorities.items():
+        item = inputs.get(input_name)
+        expected = f"{repository}:{result[authority]}"
+        if item is None or item.get("kind") != "published-chart" or item.get("reference") != expected:
+            raise ReleaseError(
+                f"published E2E fixture does not record {authority}={result[authority]}"
+            )
+
+    substrate = inputs.get("cert-manager-substrate")
+    expected_substrate = (
+        "oci://ghcr.io/nunocgoncalves/iterabase-charts/"
+        f"cert-manager-substrate:{result['platform_chart']}"
+    )
+    if (
+        substrate is None
+        or substrate.get("kind") != "published-chart"
+        or substrate.get("reference") != expected_substrate
+    ):
+        raise ReleaseError("published E2E fixture substrate does not match platform_chart")
     return result
 
 
@@ -551,19 +592,12 @@ def make_plan(
             }
         )
 
-    platform_runtime_baseline = fixtures["platform_chart"]
-    if transition_baselines["charts"]:
-        platform_runtime_baseline = next(
-            item["version"]
-            for item in transition_baselines["charts"]
-            if item["name"] == "supported-platform-predecessor"
-        )
     if uses_control_chart and "control-plane-chart" not in selected_set:
         add_baseline_chart("control-plane", fixtures["control_plane_chart"])
     if uses_platform_chart and "iterabase-platform-chart" not in selected_set:
-        add_baseline_chart("iterabase-platform", platform_runtime_baseline)
+        add_baseline_chart("iterabase-platform", fixtures["platform_chart"])
     if uses_substrate_chart and "iterabase-platform-chart" not in selected_set:
-        add_baseline_chart("cert-manager-substrate", platform_runtime_baseline)
+        add_baseline_chart("cert-manager-substrate", fixtures["platform_chart"])
 
     image_definitions = {
         image["name"]: image
