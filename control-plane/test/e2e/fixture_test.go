@@ -503,7 +503,12 @@ func (state *deployedState) captureBootstrapKeys(t *testing.T) {
 	state.tokenKey = keys["token"]
 }
 
-var bootstrapKeyPattern = regexp.MustCompile(`API key \(scope=([^)]+)\): (\S+)`)
+var (
+	bootstrapKeyPattern                = regexp.MustCompile(`API key \(scope=([^)]+)\): (\S+)`)
+	kubectlUnknownStreamWarningPattern = regexp.MustCompile(
+		`^E\d{4} \d{2}:\d{2}:\d{2}\.\d+\s+\d+ websocket\.go:\d+\] Unknown stream id \d+, discarding message$`,
+	)
+)
 
 func parseBootstrapKeys(output string) map[string]string {
 	keys := make(map[string]string)
@@ -701,9 +706,22 @@ func (state *deployedState) decodeSecret(t *testing.T, name, key string) []byte 
 
 func (state *deployedState) databaseQuery(t *testing.T, query string) string {
 	t.Helper()
-	return state.kubectl(t, 30*time.Second, "exec", "-n", controlPlaneNamespace,
+	output := state.kubectl(t, 30*time.Second, "exec", "-n", controlPlaneNamespace,
 		"statefulset/"+controlPlaneRelease+"-postgresql", "-c", "postgresql", "--",
 		"psql", "-U", "controlplane", "-d", "controlplane", "-Atc", query)
+	return cleanDatabaseQueryOutput(output)
+}
+
+func cleanDatabaseQueryOutput(output string) string {
+	lines := strings.Split(output, "\n")
+	clean := lines[:0]
+	for _, line := range lines {
+		if kubectlUnknownStreamWarningPattern.MatchString(line) {
+			continue
+		}
+		clean = append(clean, line)
+	}
+	return strings.TrimSpace(strings.Join(clean, "\n"))
 }
 
 func (state *deployedState) firstPod(t *testing.T, selector string) string {
