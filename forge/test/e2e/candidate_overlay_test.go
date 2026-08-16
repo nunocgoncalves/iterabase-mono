@@ -61,10 +61,10 @@ git config --global filter.iterabase-release-candidates.required true
 }
 
 // prepareCandidateOverlay keeps the public overlay commit as both Forge's
-// resolved source and Flux's exact artifact identity. For selected images, a
-// host-local Git smudge filter appends run-addressed values only to Forge's
-// checkout. The public source commit therefore still matches the Flux artifact
-// while Helm sees the candidate overrides on its first install.
+// resolved source and Flux's exact artifact identity. A host-local Git smudge
+// filter appends Forge-owned real-machine fixture values and any run-addressed
+// image values only to Forge's checkout. The public source commit therefore
+// still matches the Flux artifact while Helm sees the overrides on first install.
 func prepareCandidateOverlay(t *testing.T, runID, ip, keyPath string) candidateOverlayPlan {
 	t.Helper()
 	plan := candidateOverlayPlanForEnvironment(t)
@@ -138,23 +138,17 @@ func candidateOverlayValues(t *testing.T) string {
 
 	// These real-machine scenarios prove Forge/bootstrap and exact candidate
 	// installation. Portable dispatch behavior belongs to control-plane E2E and
-	// requires a customer-specific default model, so keep it out of this fixture.
-	releaseCandidate := os.Getenv("FORGE_E2E_RELEASE_CANDIDATE") == "true"
-
+	// requires a customer-specific default model, so keep it out of every source,
+	// published, and release-candidate machine fixture.
 	var values strings.Builder
-	if releaseCandidate || controlPlane != "" || toolRunner != "" {
-		values.WriteString("\n# Exact run-addressed release candidates.\ncontrol-plane:\n")
-		if releaseCandidate {
-			values.WriteString("  dispatch:\n    enabled: false\n")
-		}
-		if controlPlane != "" {
-			values.WriteString("  image:\n")
-			values.WriteString(controlPlane)
-		}
-		if toolRunner != "" {
-			values.WriteString("  toolRunner:\n    image:\n")
-			values.WriteString(toolRunner)
-		}
+	values.WriteString("\n# Forge real-machine fixture values.\ncontrol-plane:\n  dispatch:\n    enabled: false\n")
+	if controlPlane != "" {
+		values.WriteString("  image:\n")
+		values.WriteString(controlPlane)
+	}
+	if toolRunner != "" {
+		values.WriteString("  toolRunner:\n    image:\n")
+		values.WriteString(toolRunner)
 	}
 	if inference != "" {
 		values.WriteString("inference-gateway:\n  image:\n")
@@ -194,16 +188,28 @@ func TestCandidateOverlayValues(t *testing.T) {
 	}
 }
 
-func TestCandidateOverlayValuesForChartOnly(t *testing.T) {
-	t.Setenv("FORGE_E2E_RELEASE_CANDIDATE", "true")
-	t.Setenv("FORGE_E2E_CHART_REPOSITORY", "oci://ghcr.io/example/candidates/platform")
-	t.Setenv(controlPlaneDigestEnv, "")
-	t.Setenv(toolRunnerDigestEnv, "")
-	t.Setenv(inferenceGatewayDigestEnv, "")
+func TestCandidateOverlayValuesAlwaysDisableCustomerSpecificDispatch(t *testing.T) {
+	for _, fixture := range []struct {
+		name             string
+		mode             string
+		releaseCandidate string
+	}{
+		{name: "source", mode: "source"},
+		{name: "published", mode: "published"},
+		{name: "release-candidate", mode: "source", releaseCandidate: "true"},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			t.Setenv("ITERABASE_E2E_FIXTURE_MODE", fixture.mode)
+			t.Setenv("FORGE_E2E_RELEASE_CANDIDATE", fixture.releaseCandidate)
+			t.Setenv(controlPlaneDigestEnv, "")
+			t.Setenv(toolRunnerDigestEnv, "")
+			t.Setenv(inferenceGatewayDigestEnv, "")
 
-	values := candidateOverlayValues(t)
-	if !strings.Contains(values, "control-plane:\n  dispatch:\n    enabled: false") {
-		t.Fatalf("candidate chart fixture must disable customer-specific dispatch:\n%s", values)
+			values := candidateOverlayValues(t)
+			if !strings.Contains(values, "control-plane:\n  dispatch:\n    enabled: false") {
+				t.Fatalf("%s machine fixture must disable customer-specific dispatch:\n%s", fixture.name, values)
+			}
+		})
 	}
 }
 
