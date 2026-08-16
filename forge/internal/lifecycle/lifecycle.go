@@ -75,7 +75,7 @@ type Result struct {
 	ChartApplied                bool
 	GPUOperatorApplied          bool   // nvidia/gpu-operator release installed/upgraded
 	GPUDriverVersion            string // nvidia driver version pinned via driver.version (empty => chart default)
-	GPUReady                    bool   // ClusterPolicy reached state=ready (the GPU readiness gate)
+	GPUReady                    bool   // operator conditions and live node evidence passed the GPU readiness gate
 	OverlayApplied              bool   // overlay cloned + chart applied with overlay values + CRD instances applied
 	OverlayCommit               string // resolved overlay commit SHA
 	SecretsApplied              bool   // declared Secrets materialized from operator env vars
@@ -572,11 +572,11 @@ func overlayValueFiles(dest string) []string {
 const gpuOperatorRepoName = "nvidia"
 
 // applyGPU runs the GPU node-readiness phase: ensure the host can build the
-// driver, install/upgrade the NVIDIA GPU Operator release, then gate on the
-// operator's ClusterPolicy reaching ready. No-op when GPU is disabled or
-// skipped. Runs after the k3s node is Ready and before the platform chart
-// (substrate before app) so the first ModelBackend-driven GPU pod can schedule
-// immediately.
+// driver, install/upgrade the NVIDIA GPU Operator release, then gate on one
+// coherent operator/node observation for the requested driver. No-op when GPU
+// is disabled or skipped. Runs after the k3s node is Ready and before the
+// platform chart (substrate before app) so the first ModelBackend-driven GPU
+// pod can schedule immediately.
 func applyGPU(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner, d deployer.Deployer, opts ApplyOpts, res *Result) error {
 	if !cfg.Spec.GPU.Enabled || opts.SkipGPU {
 		// Even when the GPU phase is skipped, surface the configured driver pin
@@ -610,36 +610,53 @@ func applyGPU(ctx context.Context, cfg *config.Cluster, p provisioner.Provisione
 	res.GPUOperatorApplied = true
 	res.GPUDriverVersion = cfg.Spec.GPU.Driver.Version
 
-	ready, err := waitForGPU(ctx, p, opts)
+	readiness, err := waitForGPU(ctx, p, cfg.Spec.GPU.Driver.Version, opts)
 	if err != nil {
 		auditFail(cfg, "apply-gpu", err)
 		return err
 	}
-	res.GPUReady = ready
-	if !ready {
-		err = fmt.Errorf("gpu not ready after %s (ClusterPolicy did not reach state=ready)", opts.GPUReadyTimeout)
-		auditFail(cfg, "apply-gpu", err)
-		return err
-	}
+	res.GPUReady = readiness.Ready
 	return nil
 }
 
-// waitForGPU polls the GPU operator's ClusterPolicy readiness until it reports
-// ready or the timeout elapses. Mirrors waitForReady; errors from GPUReady are
-// tolerated (keep polling) since the CR may not exist yet.
-func waitForGPU(ctx context.Context, p provisioner.Provisioner, opts ApplyOpts) (bool, error) {
+// waitForGPU polls one coherent ClusterPolicy/node observation until the
+// operator conditions and live node agree on the requested driver. Query
+// errors are tolerated while the CRD is installing or k3s is restarting, but
+// the final error retains the last observation (or query failure). A terminal
+// driver upgrade failure stops immediately instead of consuming the timeout.
+func waitForGPU(ctx context.Context, p provisioner.Provisioner, requestedDriverVersion string, opts ApplyOpts) (*provisioner.GPUReadiness, error) {
 	deadline := time.Now().Add(opts.GPUReadyTimeout)
+	var last *provisioner.GPUReadiness
+	var lastErr error
 	for {
-		ready, err := p.GPUReady(ctx)
-		if err == nil && ready {
-			return true, nil
+		readiness, err := p.ReadGPUReadiness(ctx, requestedDriverVersion)
+		if err == nil {
+			last = readiness
+			lastErr = nil
+			if readiness.Ready {
+				return readiness, nil
+			}
+			if readiness.Terminal {
+				return readiness, fmt.Errorf("gpu readiness entered a terminal state: %s", readiness)
+			}
+		} else {
+			lastErr = err
 		}
 		if time.Now().After(deadline) {
-			return false, nil
+			if last != nil && lastErr != nil {
+				return last, fmt.Errorf("gpu not ready after %s: %s; latest observation failed: %v", opts.GPUReadyTimeout, last, lastErr)
+			}
+			if last != nil {
+				return last, fmt.Errorf("gpu not ready after %s: %s", opts.GPUReadyTimeout, last)
+			}
+			if lastErr != nil {
+				return nil, fmt.Errorf("gpu not ready after %s; last observation failed: %w", opts.GPUReadyTimeout, lastErr)
+			}
+			return nil, fmt.Errorf("gpu not ready after %s; no readiness observation", opts.GPUReadyTimeout)
 		}
 		select {
 		case <-ctx.Done():
-			return false, ctx.Err()
+			return nil, ctx.Err()
 		case <-time.After(opts.GPUReadyInterval):
 		}
 	}

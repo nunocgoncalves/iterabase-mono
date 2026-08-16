@@ -54,16 +54,19 @@ type installCall struct {
 
 // fakeProv is a controllable provisioner.Provisioner for lifecycle tests.
 type fakeProv struct {
-	pf                provisioner.PreflightResult
-	state             provisioner.HostState
-	ready             bool
-	readyAfterInstall bool
-	kubeconfig        []byte
-	installErr        error
-	installs          []installCall
-	ensureDepsErr     error
-	ensureDepsCalls   int
-	gpuReady          bool
+	pf                 provisioner.PreflightResult
+	state              provisioner.HostState
+	ready              bool
+	readyAfterInstall  bool
+	kubeconfig         []byte
+	installErr         error
+	installs           []installCall
+	ensureDepsErr      error
+	ensureDepsCalls    int
+	gpuReady           bool
+	gpuTerminal        bool
+	gpuReadinessReason string
+	gpuDriverRequests  []string
 }
 
 func (f *fakeProv) Preflight(_ context.Context) (*provisioner.PreflightResult, error) {
@@ -97,7 +100,15 @@ func (f *fakeProv) EnsureDriverBuildDeps(_ context.Context) error {
 	f.ensureDepsCalls++
 	return f.ensureDepsErr
 }
-func (f *fakeProv) GPUReady(_ context.Context) (bool, error) { return f.gpuReady, nil }
+func (f *fakeProv) ReadGPUReadiness(_ context.Context, requestedDriverVersion string) (*provisioner.GPUReadiness, error) {
+	f.gpuDriverRequests = append(f.gpuDriverRequests, requestedDriverVersion)
+	return &provisioner.GPUReadiness{
+		Ready:                  f.gpuReady,
+		Terminal:               f.gpuTerminal,
+		Reason:                 f.gpuReadinessReason,
+		RequestedDriverVersion: requestedDriverVersion,
+	}, nil
+}
 
 func readyPf() provisioner.PreflightResult {
 	return provisioner.PreflightResult{HasSudo: true, HasCurl: true, HasSystemd: true, HasIPv6: true}
@@ -777,6 +788,8 @@ func TestApply_GPU_PinnedDriverEmitsSet(t *testing.T) {
 		"driver.version=570.186",
 	}, op.values)
 	assert.Equal(t, "570.186", res.GPUDriverVersion)
+	require.NotEmpty(t, p.gpuDriverRequests)
+	assert.Equal(t, "570.186", p.gpuDriverRequests[0])
 }
 
 // TestApply_GPU_DriverUpgradePolicy pins the HOR-411 driver-upgrade values that
@@ -860,10 +873,11 @@ func TestApply_SkipGPU_SurfacesConfiguredPin(t *testing.T) {
 func TestApply_GPU_NotReady(t *testing.T) {
 	useTempHome(t)
 	p := &fakeProv{
-		pf:                gpuReadyPf(),
-		kubeconfig:        []byte(minKubeconfig),
-		readyAfterInstall: true,
-		gpuReady:          false, // ClusterPolicy never reaches ready
+		pf:                 gpuReadyPf(),
+		kubeconfig:         []byte(minKubeconfig),
+		readyAfterInstall:  true,
+		gpuReady:           false,
+		gpuReadinessReason: "ClusterPolicy Ready condition is not True",
 	}
 	d := &fakeDeployer{}
 	_, err := Apply(context.Background(), testConfigWithGPU(), p, d, nil, nil, ApplyOpts{
@@ -872,6 +886,28 @@ func TestApply_GPU_NotReady(t *testing.T) {
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "gpu not ready")
+	assert.Contains(t, err.Error(), "Ready condition is not True")
+}
+
+func TestApply_GPU_TerminalUpgradeFailureStopsImmediately(t *testing.T) {
+	useTempHome(t)
+	p := &fakeProv{
+		pf:                 gpuReadyPf(),
+		kubeconfig:         []byte(minKubeconfig),
+		readyAfterInstall:  true,
+		gpuTerminal:        true,
+		gpuReadinessReason: "GPU driver upgrade entered upgrade-failed",
+	}
+	d := &fakeDeployer{}
+	started := time.Now()
+	_, err := Apply(context.Background(), testConfigWithGPU(), p, d, nil, nil, ApplyOpts{
+		ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
+		GPUReadyTimeout: time.Minute, GPUReadyInterval: time.Second,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "terminal state")
+	assert.Contains(t, err.Error(), "upgrade-failed")
+	assert.Less(t, time.Since(started), time.Second)
 }
 
 func TestDestroy_GPU(t *testing.T) {

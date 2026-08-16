@@ -300,16 +300,155 @@ func isAptLockHeld(msg string) bool {
 		strings.Contains(msg, "is held by process")
 }
 
-// GPUReady implements provisioner.Provisioner. It reads the GPU operator's
-// ClusterPolicy status over the host's k3s kubectl. A missing/not-ready CR
-// (including before the operator is installed) returns (false, nil) so the
-// readiness poll keeps going rather than aborting.
-func (p *SSHProvisioner) GPUReady(ctx context.Context) (bool, error) {
-	out, err := p.run(ctx, "sudo k3s kubectl get clusterpolicy -o jsonpath='{.items[0].status.state}'")
+// ReadGPUReadiness implements provisioner.Provisioner. One remote kubectl
+// command collects the ClusterPolicy and live node fields for an observation.
+// Query errors are returned so the lifecycle can retain them as timeout
+// diagnostics while continuing to poll through installation and k3s restarts.
+func (p *SSHProvisioner) ReadGPUReadiness(ctx context.Context, requestedDriverVersion string) (*provisioner.GPUReadiness, error) {
+	out, err := p.run(ctx, "sudo k3s kubectl get clusterpolicy,nodes -o json")
 	if err != nil {
-		return false, nil
+		return nil, fmt.Errorf("read GPU readiness resources: %w", err)
 	}
-	return strings.TrimSpace(out) == "ready", nil
+	readiness, err := parseGPUReadiness(out, requestedDriverVersion)
+	if err != nil {
+		return nil, fmt.Errorf("parse GPU readiness resources: %w", err)
+	}
+	return readiness, nil
+}
+
+type gpuReadinessList struct {
+	Items []gpuReadinessItem `json:"items"`
+}
+
+type gpuReadinessItem struct {
+	Kind     string `json:"kind"`
+	Metadata struct {
+		Name   string            `json:"name"`
+		Labels map[string]string `json:"labels"`
+	} `json:"metadata"`
+	Spec struct {
+		Unschedulable bool `json:"unschedulable"`
+		Driver        struct {
+			Version string `json:"version"`
+		} `json:"driver"`
+	} `json:"spec"`
+	Status struct {
+		State      string `json:"state"`
+		Conditions []struct {
+			Type   string `json:"type"`
+			Status string `json:"status"`
+		} `json:"conditions"`
+	} `json:"status"`
+}
+
+func parseGPUReadiness(out, requestedDriverVersion string) (*provisioner.GPUReadiness, error) {
+	var list gpuReadinessList
+	if err := json.Unmarshal([]byte(out), &list); err != nil {
+		return nil, err
+	}
+
+	readiness := &provisioner.GPUReadiness{RequestedDriverVersion: requestedDriverVersion}
+	for i := range list.Items {
+		item := &list.Items[i]
+		switch item.Kind {
+		case "ClusterPolicy":
+			readiness.PolicyCount++
+			if readiness.PolicyCount != 1 {
+				continue
+			}
+			readiness.PolicyName = item.Metadata.Name
+			readiness.PolicyState = item.Status.State
+			readiness.PolicyDriverVersion = item.Spec.Driver.Version
+			for _, condition := range item.Status.Conditions {
+				switch condition.Type {
+				case "Ready":
+					readiness.ReadyCondition = condition.Status
+				case "Error":
+					readiness.ErrorCondition = condition.Status
+				}
+			}
+		case "Node":
+			readiness.NodeCount++
+			if readiness.NodeCount != 1 {
+				continue
+			}
+			readiness.NodeName = item.Metadata.Name
+			readiness.NodeSchedulable = !item.Spec.Unschedulable
+			readiness.NodeDriverVersion = item.Metadata.Labels["nvidia.com/cuda.driver-version.full"]
+			readiness.NodeUpgradeState = item.Metadata.Labels["nvidia.com/gpu-driver-upgrade-state"]
+			for _, condition := range item.Status.Conditions {
+				if condition.Type == "Ready" {
+					readiness.NodeReady = condition.Status == "True"
+					break
+				}
+			}
+		}
+	}
+	evaluateGPUReadiness(readiness)
+	return readiness, nil
+}
+
+func evaluateGPUReadiness(readiness *provisioner.GPUReadiness) {
+	if readiness.PolicyCount != 1 {
+		readiness.Reason = fmt.Sprintf("expected one ClusterPolicy, found %d", readiness.PolicyCount)
+		return
+	}
+	if readiness.NodeCount != 1 {
+		readiness.Reason = fmt.Sprintf("expected one node, found %d", readiness.NodeCount)
+		return
+	}
+	if readiness.NodeUpgradeState == "upgrade-failed" {
+		readiness.Terminal = true
+		readiness.Reason = "GPU driver upgrade entered upgrade-failed"
+		return
+	}
+	if reason := gpuPolicyReadinessIssue(readiness); reason != "" {
+		readiness.Reason = reason
+		return
+	}
+	if reason := gpuNodeReadinessIssue(readiness); reason != "" {
+		readiness.Reason = reason
+		return
+	}
+
+	readiness.Ready = true
+	if readiness.PolicyState == "notReady" {
+		readiness.Reason = "operator conditions and live node evidence converged; legacy ClusterPolicy state remains contradictory"
+	} else {
+		readiness.Reason = "operator conditions and live node evidence converged"
+	}
+}
+
+func gpuPolicyReadinessIssue(readiness *provisioner.GPUReadiness) string {
+	switch {
+	case readiness.RequestedDriverVersion != "" && readiness.PolicyDriverVersion != readiness.RequestedDriverVersion:
+		return "ClusterPolicy has not selected the requested driver"
+	case readiness.ReadyCondition != "True":
+		return "ClusterPolicy Ready condition is not True"
+	case readiness.ErrorCondition != "False":
+		return "ClusterPolicy Error condition is not False"
+	case readiness.PolicyState != "ready" && readiness.PolicyState != "notReady":
+		return "ClusterPolicy legacy state is missing or unsupported"
+	default:
+		return ""
+	}
+}
+
+func gpuNodeReadinessIssue(readiness *provisioner.GPUReadiness) string {
+	switch {
+	case !readiness.NodeReady:
+		return "GPU node is not Ready"
+	case !readiness.NodeSchedulable:
+		return "GPU node is unschedulable"
+	case readiness.NodeUpgradeState != "" && readiness.NodeUpgradeState != "upgrade-done":
+		return "GPU driver upgrade is still in progress"
+	case readiness.NodeDriverVersion == "":
+		return "GPU node does not report a loaded driver"
+	case readiness.RequestedDriverVersion != "" && readiness.NodeDriverVersion != readiness.RequestedDriverVersion:
+		return "GPU node has not loaded the requested driver"
+	default:
+		return ""
+	}
 }
 
 func parseOS(out string) string {
