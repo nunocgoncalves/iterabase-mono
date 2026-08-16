@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	stderrors "errors"
 	"fmt"
 	"hash/fnv"
 	"net/url"
@@ -25,6 +26,15 @@ import (
 	"github.com/nunocgoncalves/iterabase-mono/control-plane/api/v1alpha1"
 	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/gateway"
 )
+
+type missingSecretDependencyError struct {
+	namespace string
+	name      string
+}
+
+func (e *missingSecretDependencyError) Error() string {
+	return fmt.Sprintf("secret %s/%s not found", e.namespace, e.name)
+}
 
 const (
 	agentPoolFinalizer = "platform.iterabase.com/agentpool-finalizer"
@@ -128,9 +138,17 @@ func (r *AgentPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, nil
 	}
 
-	// Validate (structural) before doing anything. A validation error is
-	// surfaced in status and does not requeue — the user must fix the CR.
+	// Validate before doing anything. Structurally invalid desired state is
+	// observed and waits for a generation change. A referenced Secret that has
+	// not appeared yet is instead an external dependency: do not advance the
+	// generation gate, and retry on the bounded health cadence without adding a
+	// Secret informer or caching credential values (HOR-438).
 	if err := r.validateSpec(ctx, &pool); err != nil {
+		var dependencyErr *missingSecretDependencyError
+		if stderrors.As(err, &dependencyErr) {
+			_ = r.patchStatus(ctx, &pool, false, 0, fmt.Sprintf("dependency: %v", err), false)
+			return ctrl.Result{RequeueAfter: healthRequeueInterval}, nil
+		}
 		_ = r.patchStatus(ctx, &pool, false, 0, fmt.Sprintf("validation: %v", err), true)
 		return ctrl.Result{}, nil
 	}
@@ -233,10 +251,6 @@ func (r *AgentPoolReconciler) validateSpec(ctx context.Context, pool *v1alpha1.A
 	if pool.Spec.Identity.CASecretRef.Name == "" {
 		return fmt.Errorf("spec.identity.caSecretRef.name is required")
 	}
-	// CA Secret existence.
-	if err := r.secretExists(ctx, pool.Namespace, pool.Spec.Identity.CASecretRef.Name); err != nil {
-		return fmt.Errorf("caSecretRef: %w", err)
-	}
 	// Gateways.
 	for name, ep := range map[string]v1alpha1.GatewayEndpoint{
 		"controlPlane":     pool.Spec.Gateways.ControlPlane,
@@ -292,6 +306,7 @@ func (r *AgentPoolReconciler) validateSpec(ctx context.Context, pool *v1alpha1.A
 	// declaration would silently win instead of failing closed (ARCH-018/
 	// HOR-245).
 	seenBindings := make(map[string]bool)
+	bindingSecrets := make([]string, 0, len(pool.Spec.CredentialBindings))
 	for i, b := range pool.Spec.CredentialBindings {
 		if b.ToolName == "" {
 			return fmt.Errorf("spec.credentialBindings[%d].toolName is required", i)
@@ -331,9 +346,6 @@ func (r *AgentPoolReconciler) validateSpec(ctx context.Context, pool *v1alpha1.A
 		default:
 			return fmt.Errorf("spec.credentialBindings[%d].scheme must be bearer or oauth_client_credentials", i)
 		}
-		if err := r.secretExists(ctx, pool.Namespace, secretName); err != nil {
-			return fmt.Errorf("credentialBindings[%d]: %w", i, err)
-		}
 		seenResources := make(map[string]bool)
 		for j, c := range b.ResourceConstraints {
 			if c.Resource == "" {
@@ -346,6 +358,19 @@ func (r *AgentPoolReconciler) validateSpec(ctx context.Context, pool *v1alpha1.A
 				return fmt.Errorf("spec.credentialBindings[%d].resourceConstraints[%d].resource %q is duplicated", i, j, c.Resource)
 			}
 			seenResources[c.Resource] = true
+		}
+		bindingSecrets = append(bindingSecrets, secretName)
+	}
+
+	// Check external dependencies only after every structural field has been
+	// validated, so an invalid spec remains non-retrying even if it also names a
+	// Secret that has not appeared yet.
+	if err := r.secretExists(ctx, pool.Namespace, pool.Spec.Identity.CASecretRef.Name); err != nil {
+		return fmt.Errorf("caSecretRef: %w", err)
+	}
+	for i, secretName := range bindingSecrets {
+		if err := r.secretExists(ctx, pool.Namespace, secretName); err != nil {
+			return fmt.Errorf("credentialBindings[%d]: %w", i, err)
 		}
 	}
 	return nil
@@ -463,7 +488,7 @@ func (r *AgentPoolReconciler) secretExists(ctx context.Context, ns, name string)
 	meta.SetGroupVersionKind(corev1.SchemeGroupVersion.WithKind("Secret"))
 	if err := r.APIReader.Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, &meta); err != nil {
 		if errors.IsNotFound(err) {
-			return fmt.Errorf("secret %s/%s not found", ns, name)
+			return &missingSecretDependencyError{namespace: ns, name: name}
 		}
 		return err
 	}

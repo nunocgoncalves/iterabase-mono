@@ -280,6 +280,8 @@ func TestAgentPoolValidation(t *testing.T) {
 	err := newReconciler(ca).validateSpec(ctx, badBinding)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not found")
+	var missingDependency *missingSecretDependencyError
+	assert.ErrorAs(t, err, &missingDependency)
 
 	// Duplicate gateway grants -> rejected.
 	dup := validAgentPool("b2", ns)
@@ -309,6 +311,18 @@ func TestAgentPoolValidation(t *testing.T) {
 	err = newReconciler().validateSpec(ctx, noCA) // no secrets seeded
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "caSecretRef")
+	assert.ErrorAs(t, err, &missingDependency)
+
+	// Structural invalidity wins over a simultaneously absent dependency, so
+	// the reconciler does not poll forever for a Secret that cannot make the
+	// desired state valid.
+	invalidAndMissing := validAgentPool("b4-structural", ns)
+	invalidAndMissing.Spec.Replicas = 1
+	invalidAndMissing.Spec.Gateways.ControlPlane.URL = "http://control-plane:8080"
+	err = newReconciler().validateSpec(ctx, invalidAndMissing)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must be https://")
+	assert.NotErrorAs(t, err, &missingDependency)
 
 	// Single-replica ReadWriteOnce is valid (HOR-427 RWO single-worker mode).
 	rwoOk := validAgentPool("b5", ns)
@@ -369,6 +383,64 @@ func TestAgentPoolValidation(t *testing.T) {
 	err = newReconciler(ca, creds).validateSpec(ctx, dupResource)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "duplicated")
+}
+
+// TestAgentPoolLateSecretRecovery proves HOR-438's reconciliation semantics
+// without waiting for the production 30-second cadence: a missing referenced
+// Secret is retryable external state, does not advance ObservedGeneration or
+// materialize partial authorization, and the same CR converges after only the
+// dependencies are created.
+func TestAgentPoolLateSecretRecovery(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	require.NoError(t, clientgoscheme.AddToScheme(scheme))
+	require.NoError(t, v1alpha1.AddToScheme(scheme))
+
+	pool := validAgentPool("late-secret-pool", "default")
+	pool.UID = types.UID("late-secret-pool-uid")
+	pool.Generation = 7
+	pool.Spec.Replicas = 0
+	recorder := &recordingMaterializer{}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&v1alpha1.AgentPool{}).WithObjects(pool).Build()
+	r := &AgentPoolReconciler{Client: c, Scheme: scheme, APIReader: c, Store: recorder}
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: pool.Name, Namespace: pool.Namespace}}
+
+	result, err := r.Reconcile(ctx, req)
+	require.NoError(t, err)
+	assert.Equal(t, healthRequeueInterval, result.RequeueAfter)
+	var pending v1alpha1.AgentPool
+	require.NoError(t, c.Get(ctx, req.NamespacedName, &pending))
+	assert.Zero(t, pending.Status.ObservedGeneration)
+	assert.False(t, pending.Status.Ready)
+	assert.Contains(t, pending.Status.Message, "dependency:")
+	recorder.mu.Lock()
+	assert.Empty(t, recorder.calls)
+	recorder.mu.Unlock()
+
+	require.NoError(t, c.Create(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "platform-ca", Namespace: "default"}}))
+	require.NoError(t, c.Create(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "graph-creds", Namespace: "default"}}))
+
+	// The first dependency-free pass installs the finalizer; its immediate
+	// requeue then performs atomic gateway materialization and scaled-zero
+	// assembly for the original generation.
+	result, err = r.Reconcile(ctx, req)
+	require.NoError(t, err)
+	assert.True(t, result.Requeue)
+	_, err = r.Reconcile(ctx, req)
+	require.NoError(t, err)
+
+	var recovered v1alpha1.AgentPool
+	require.NoError(t, c.Get(ctx, req.NamespacedName, &recovered))
+	assert.Equal(t, int64(7), recovered.Status.ObservedGeneration)
+	assert.True(t, recovered.Status.Ready)
+	assert.Equal(t, pool.UID, recovered.UID)
+	assert.Equal(t, int64(7), recovered.Generation)
+	recorder.mu.Lock()
+	require.Len(t, recorder.calls, 1)
+	assert.Equal(t, "default/late-secret-pool", recorder.calls[0].key)
+	require.Len(t, recorder.calls[0].grants, 1)
+	require.Len(t, recorder.calls[0].bindings, 1)
+	recorder.mu.Unlock()
 }
 
 // TestAgentPoolGatewayMaterialization exercises the Git->DB bridge (HOR-245,
