@@ -119,6 +119,11 @@ func selectBootstrapEvidencePod(pods []bootstrapEvidencePod, excludedUIDs map[st
 		if !found || bootstrap.State.Terminated == nil || bootstrap.State.Terminated.ExitCode != 0 {
 			continue
 		}
+		// A restarted init container may have emitted credentials retained in its
+		// previous logs. Reject it because only the current attempt is read here.
+		if bootstrap.RestartCount != 0 {
+			continue
+		}
 		eligible = append(eligible, pod)
 	}
 	if len(eligible) == 1 {

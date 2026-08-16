@@ -39,6 +39,8 @@ func TestSelectBootstrapEvidencePodRejectsStaleOrIncompleteCandidates(t *testing
 	waiting := successfulBootstrapEvidencePod("api-waiting", "uid-waiting")
 	waiting.Status.InitContainerStatuses[0].State.Terminated = nil
 	waiting.Status.InitContainerStatuses[0].State.Waiting = &bootstrapContainerWaiting{Reason: "PodInitializing"}
+	restarted := successfulBootstrapEvidencePod("api-restarted", "uid-restarted")
+	restarted.Status.InitContainerStatuses[0].RestartCount = 1
 
 	for name, testCase := range map[string]struct {
 		pods     []bootstrapEvidencePod
@@ -49,9 +51,10 @@ func TestSelectBootstrapEvidencePodRejectsStaleOrIncompleteCandidates(t *testing
 			pods:     []bootstrapEvidencePod{successfulBootstrapEvidencePod("api-old", "uid-old")},
 			excluded: map[string]struct{}{"uid-old": {}}, want: "excluded_uids=1",
 		},
-		"terminating":     {pods: []bootstrapEvidencePod{terminating}, want: "deleting=true"},
-		"failed-init":     {pods: []bootstrapEvidencePod{failed}, want: "terminated(exit=1,reason=Error)"},
-		"incomplete-init": {pods: []bootstrapEvidencePod{waiting}, want: "waiting(reason=PodInitializing)"},
+		"terminating":       {pods: []bootstrapEvidencePod{terminating}, want: "deleting=true"},
+		"failed-init":       {pods: []bootstrapEvidencePod{failed}, want: "terminated(exit=1,reason=Error)"},
+		"incomplete-init":   {pods: []bootstrapEvidencePod{waiting}, want: "waiting(reason=PodInitializing)"},
+		"restarted-success": {pods: []bootstrapEvidencePod{restarted}, want: "restart_count=1"},
 		"ambiguous": {
 			pods: []bootstrapEvidencePod{
 				successfulBootstrapEvidencePod("api-new-a", "uid-new-a"),
