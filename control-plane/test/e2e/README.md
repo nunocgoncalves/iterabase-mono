@@ -11,7 +11,7 @@ Each F2 scenario creates and deletes its own fresh Kind cluster. The reusable `d
 - `deployed-artifact-durability`: upload/publication, work linking, download, MinIO/API restart persistence, admin deletion, and durable tombstones.
 - `deployed-execution-contracts`: exact source/candidate image composition, late-Secret AgentPool recovery with real discovery/invocation, worker SPIFFE/mTLS, in-flight cancellation and generation fencing on worker replacement, durable assignment and inference, immutable Flux tool registration and invocation attribution, concurrent duplicate idempotency, non-idempotent `outcome_unknown` without silent retry across runner recovery, artifact lineage, disposable-child/session isolation, human-gate resume, and exact consequential repetition confirmation.
 
-The execution scenario replaces Forge's former `kind-inference-contract` and `kind-tool-runner-contract` ownership. Forge retains real host/GPU substrate and serving authority; the identity scenario remains duplicated temporarily until its separate replacement/removal gate.
+The execution scenario provides green replacement evidence for Forge's `kind-inference-contract` and `kind-tool-runner-contract`. Those Forge scenarios remain registered through HOR-481's approved ownership-removal slice; Forge also retains real host/GPU substrate and serving authority. The identity scenario likewise remains duplicated until its separate replacement/removal gate.
 
 ## Commands
 

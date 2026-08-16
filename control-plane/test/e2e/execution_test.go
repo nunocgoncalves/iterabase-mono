@@ -619,7 +619,8 @@ func exerciseIdempotentInvocationRaceStage(t *testing.T, state *deployedState) {
 
 func exerciseIsolationCompositionStage(t *testing.T, state *deployedState) {
 	t.Helper()
-	prepareCommand := `rm -f background-timer-state background-fd-state; exec 9>background-fd-state; (sleep 2; echo leaked >&9; echo leaked >background-timer-state) </dev/null >/dev/null 2>&1 & printf intended-pvc-state > intended.txt; printf 'child=%s' "$PPID"`
+	const orphanMutationDelay = 2 * time.Second
+	prepareCommand := fmt.Sprintf(`rm -f background-timer-state background-fd-state; exec 9>background-fd-state; (sleep %d; echo leaked >&9; echo leaked >background-timer-state) </dev/null >/dev/null 2>&1 & printf intended-pvc-state > intended.txt; printf 'child=%%s' "$PPID"`, int(orphanMutationDelay/time.Second))
 	extraNodes := `
       - key: hold
         label: {en: Hold execution, pt: Suspender execução}
@@ -661,6 +662,15 @@ func exerciseIsolationCompositionStage(t *testing.T, state *deployedState) {
 	sessionA := state.databaseQuery(t, fmt.Sprintf("SELECT session_id FROM runtime.workflow_runs WHERE id='%s'::uuid", attemptA))
 	uidA := state.databaseQuery(t, fmt.Sprintf("SELECT uid::text FROM runtime.session_uid_allocations WHERE session_id='%s' AND state='in_use'", sessionA))
 	pidA := toolResultPID(t, state, attemptA)
+
+	// The first child is already disposed once the human gate is blocked. Wait
+	// beyond the orphan's declared mutation deadline before any absence check,
+	// so a leaked timer/descriptor cannot make this required gate false-pass.
+	select {
+	case <-time.After(orphanMutationDelay + time.Second):
+	case <-state.ctx.Done():
+		t.Fatalf("waiting for disposed-child mutation deadline: %v", state.ctx.Err())
+	}
 
 	probe := fmt.Sprintf(`set -eu; test ! -e intended.txt; if ls /data/sandboxes >/dev/null 2>&1; then exit 90; fi; if cat /data/sandboxes/%s/workspace/intended.txt >/dev/null 2>&1; then exit 91; fi; printf 'child=%%s' "$PPID"`, sessionA)
 	state.applyYAML(t, "isolation-b.yaml", workflowYAML("isolation-b", "e2e/isolation-b", "1", "E2E_MODE:isolation E2E_BASH:"+base64.StdEncoding.EncodeToString([]byte(probe)), true, nil, "", ""))

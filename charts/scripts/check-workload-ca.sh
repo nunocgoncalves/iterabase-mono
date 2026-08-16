@@ -87,10 +87,15 @@ if match is None:
 PY
 
 hostname="$release-control-plane-dispatch.$namespace.svc"
+wrong_hostname="wrong-dispatch.$namespace.svc"
 openssl verify -CAfile "$workdir/ca.pem" -verify_hostname "$hostname" "$workdir/dispatch.pem" >/dev/null
+if openssl verify -CAfile "$workdir/ca.pem" -verify_hostname "$wrong_hostname" "$workdir/dispatch.pem" >/dev/null 2>&1; then
+  echo "dispatch certificate unexpectedly verifies for wrong server identity $wrong_hostname" >&2
+  exit 1
+fi
 if openssl verify -CAfile "$workdir/unrelated-ca.pem" "$workdir/dispatch.pem" >/dev/null 2>&1; then
   echo "dispatch certificate unexpectedly verifies against an unrelated workload CA" >&2
   exit 1
 fi
 
-echo "OK: fresh dispatch serving leaf reuses the shared workload CA and rejects an unrelated CA"
+echo "OK: fresh dispatch serving leaf reuses the shared workload CA and rejects a wrong server identity and unrelated CA"
