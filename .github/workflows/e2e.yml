@@ -236,6 +236,9 @@ jobs:
           - name: artifact-durability
             target: test-e2e-artifact
             timeout: 35
+          - name: browser-journeys
+            target: test-e2e-browser
+            timeout: 45
     concurrency:
       group: e2e-control-plane-${{ matrix.name }}-${{ github.ref }}
       cancel-in-progress: true
@@ -247,11 +250,18 @@ jobs:
           cache-dependency-path: ${{ env.GO_CACHE_DEPENDENCIES }}
           cache-scope: e2e-control-plane-${{ matrix.name }}
       - uses: ./.github/actions/setup-kubernetes-tools
+      - uses: ./.github/actions/setup-node
+        if: matrix.target == 'test-e2e-browser'
+        with:
+          node-version: 24.19.0
+          cache-dependency-path: control-plane/test/e2e/playwright/package-lock.json
+          cache-scope: e2e-control-plane-browser
       - name: Run source-built control-plane owner scenario
         working-directory: control-plane
         env:
           ITERABASE_E2E_FIXTURE_MODE: source
           ITERABASE_E2E_DIAGNOSTICS: ${{ runner.temp }}/control-plane-diagnostics/${{ matrix.target }}
+          PLAYWRIGHT_INSTALL_ARGS: ${{ matrix.target == 'test-e2e-browser' && '--with-deps chromium' || 'chromium' }}
         run: make '${{ matrix.target }}'
       - name: Upload redacted failure diagnostics
         if: failure()

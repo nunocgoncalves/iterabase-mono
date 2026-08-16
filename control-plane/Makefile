@@ -75,7 +75,9 @@ else
 E2E_BUILD_DEPS :=
 endif
 
-.PHONY: test-e2e-unit test-e2e test-e2e-identity test-e2e-work test-e2e-artifact test-e2e-execution e2e-build-deps
+PLAYWRIGHT_INSTALL_ARGS ?= chromium
+
+.PHONY: test-e2e-unit test-e2e test-e2e-identity test-e2e-work test-e2e-artifact test-e2e-execution test-e2e-browser playwright-browser-deps e2e-build-deps
 
 test-e2e-unit: ## Compile the owner E2E entrypoint and run hermetic helper tests.
 	cd test/e2e && $(E2E_ENV) go test -race -count=1 -run '^TestE2E$$/^hermetic-example$$' .
@@ -84,7 +86,7 @@ test-e2e-unit: ## Compile the owner E2E entrypoint and run hermetic helper tests
 # Each product contract gets a fresh isolated Kind cluster. Source mode builds
 # the current control-plane image inside the Go scenario; candidate mode uses
 # the exact digest and composed chart fixture prepared by the release gate.
-test-e2e: test-e2e-identity test-e2e-work test-e2e-artifact test-e2e-execution
+test-e2e: test-e2e-identity test-e2e-work test-e2e-artifact test-e2e-execution test-e2e-browser
 
 test-e2e-identity: $(E2E_BUILD_DEPS)
 	cd test/e2e && $(E2E_ENV) go test -v -race -count=1 -timeout 30m -run '^TestE2E$$/^deployed-identity-api$$' .
@@ -97,6 +99,13 @@ test-e2e-artifact: $(E2E_BUILD_DEPS)
 
 test-e2e-execution: $(E2E_BUILD_DEPS)
 	cd test/e2e && $(E2E_ENV) go test -v -race -count=1 -timeout 55m -run '^TestE2E$$/^deployed-execution-contracts$$' .
+
+playwright-browser-deps:
+	cd test/e2e/playwright && npm ci && npm run lint
+	cd test/e2e/playwright && npx --no-install playwright install $(PLAYWRIGHT_INSTALL_ARGS)
+
+test-e2e-browser: $(E2E_BUILD_DEPS) playwright-browser-deps
+	cd test/e2e && $(E2E_ENV) go test -v -race -count=1 -timeout 45m -run '^TestE2E$$/^deployed-browser-journeys$$' .
 
 e2e-build-deps:
 	../.github/scripts/add_helm_repositories.sh

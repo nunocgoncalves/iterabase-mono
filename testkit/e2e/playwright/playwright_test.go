@@ -48,6 +48,7 @@ func TestRunnerUsesLockedDependenciesDisablesRetriesAndCollectsArtifacts(t *test
 	runner := Runner{Executor: executor}
 	err := runner.Run(context.Background(), Invocation{
 		Directory: directory, Timeout: time.Minute, Args: []string{"tests/journey.spec.ts"},
+		Env:         map[string]string{"ITERABASE_BROWSER_ENDPOINT": "http://127.0.0.1:1234"},
 		Artifacts:   []artifacts.Entry{{Name: "report.txt", Source: report, Kind: artifacts.Text}},
 		ArtifactDir: filepath.Join(directory, "collected"),
 	})
@@ -59,6 +60,11 @@ func TestRunnerUsesLockedDependenciesDisablesRetriesAndCollectsArtifacts(t *test
 	}
 	if !slices.Contains(executor.commands[1].Args, "--no-install") || !slices.Contains(executor.commands[1].Args, "--retries=0") {
 		t.Fatalf("Playwright command is not locked/retry-free: %v", executor.commands[1].Args)
+	}
+	for _, command := range executor.commands {
+		if command.Env["ITERABASE_BROWSER_ENDPOINT"] != "http://127.0.0.1:1234" {
+			t.Fatalf("Playwright environment was not supplied to %s: %v", command.Name, command.Env)
+		}
 	}
 	if _, err := os.Stat(filepath.Join(directory, "collected", "report.txt")); err != nil {
 		t.Fatalf("browser artifact not collected: %v", err)

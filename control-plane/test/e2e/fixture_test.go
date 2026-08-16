@@ -70,6 +70,7 @@ type deployedState struct {
 	forwards         []*kube.Forward
 	apiForward       *kube.Forward
 	apiClient        *http.Client
+	browserProxy     *deployedBrowserProxy
 	imageRepo        string
 	imageTag         string
 	imageDigest      string
@@ -667,6 +668,9 @@ func (state *deployedState) openAPI(t *testing.T) {
 		t.Fatalf("create verified API client: %v", err)
 	}
 	state.apiClient = client
+	if state.browserProxy != nil {
+		state.browserProxy.setTarget(forward.URL, client.Transport)
+	}
 }
 
 func (state *deployedState) restartAPI(t *testing.T) {
@@ -873,6 +877,9 @@ func (state *deployedState) stopAPIForward(t *testing.T) {
 	t.Helper()
 	if state.apiForward == nil {
 		return
+	}
+	if state.browserProxy != nil {
+		state.browserProxy.clearTarget()
 	}
 	state.stopForward(t, state.apiForward)
 	state.apiForward = nil

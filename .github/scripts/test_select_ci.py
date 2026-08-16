@@ -119,8 +119,11 @@ class ChangedPathCollectionFixtures(unittest.TestCase):
             "test-e2e-identity",
             "test-e2e-work",
             "test-e2e-artifact",
+            "test-e2e-browser",
         ):
             self.assertIn(f"target: {target}", job)
+        self.assertIn("playwright/package-lock.json", job)
+        self.assertIn("--with-deps chromium", job)
         execution_job = workflow.split("  control-plane-execution-kind:\n", 1)[1].split(
             "\n  published-compatibility:\n", 1
         )[0]

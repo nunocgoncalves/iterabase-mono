@@ -56,7 +56,7 @@ Current entrypoints are:
 - `control-plane/test/e2e`
 - `forge/test/e2e`
 
-Each has an F0 hermetic example so registration and shared execution remain testable without infrastructure. Examples are mechanics evidence, not product coverage. The control-plane owner also registers fresh-Kind identity/API, `manual_api` work/recovery, and artifact-durability journeys; chart and Forge owners register their own authoritative scenarios.
+Each has an F0 hermetic example so registration and shared execution remain testable without infrastructure. Examples are mechanics evidence, not product coverage. The control-plane owner also registers fresh-Kind identity/API, `manual_api` work/recovery, artifact-durability, execution, and locked-Chromium browser journeys; chart and Forge owners register their own authoritative scenarios.
 
 Local commands:
 
@@ -70,6 +70,8 @@ make -C control-plane test-e2e-unit
 make -C control-plane test-e2e-identity  # fresh Kind + source-built image
 make -C control-plane test-e2e-work
 make -C control-plane test-e2e-artifact
+make -C control-plane test-e2e-execution
+make -C control-plane test-e2e-browser
 make -C forge test-e2e-unit
 ```
 
@@ -106,7 +108,7 @@ The testkit provides:
 - component-declared artifact collection;
 - a Go seam that runs `npm ci`, invokes the locked Playwright binary with `--retries=0`, and collects declared traces/screenshots/reports.
 
-Playwright/TypeScript owns browser assertions. Go owns fixture/runtime orchestration and process/artifact lifecycle. HOR-483 adds browser behavior; this testkit does not.
+Playwright/TypeScript owns browser assertions. Go owns fixture/runtime orchestration and process/artifact lifecycle. The control-plane browser owner uses the shared process seam, a Go-owned stable proxy to the verified deployed endpoint, and a Go restart coordinator; Playwright cannot provision or replace the stack.
 
 ## Failure evidence and secret handling
 
@@ -118,7 +120,7 @@ Component artifacts are fail-closed:
 - opaque/binary bytes are rejected by default;
 - an owner may explicitly declare an artifact **safe synthetic opaque** when its fixture cannot contain credentials or customer data.
 
-That declaration is required for Playwright screenshots/traces and is part of the reviewable scenario code. Customer/production browser artifacts do not qualify.
+That declaration is required for Playwright screenshots/traces and is part of the reviewable scenario code. The control-plane fixture is wholly synthetic; its owner sanitizes trace archive entries before declaration, deletes raw evidence, and independently rejects retained work-key literals before shared collection. Customer/production browser artifacts do not qualify.
 
 A normal F2 failure bundle includes cluster resources, events, pod describes, current/previous logs, Helm list/state, revision history, effective values, hooks, status, process output, and declared component evidence. Diagnostics are best effort and do not suppress teardown.
 

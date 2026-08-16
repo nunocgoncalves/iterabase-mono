@@ -20,6 +20,7 @@ func TestE2E(t *testing.T) {
 		deployedWorkRecoveryScenario(),
 		deployedArtifactDurabilityScenario(),
 		deployedExecutionContractsScenario(),
+		deployedBrowserJourneysScenario(),
 	)
 	suite.Run(t)
 }
@@ -38,6 +39,30 @@ func deployedExecutionMetadata(name, description, makeTarget string, timeout int
 	metadata := deployedMetadata(name, description, makeTarget, timeout, references)
 	metadata.ReleaseTargets = []string{"control-plane", "inference-gateway", "control-plane-chart", "inference-gateway-chart", "iterabase-platform-chart"}
 	return metadata
+}
+
+func deployedBrowserJourneysScenario() sharede2e.Definition {
+	diagnostics, cleanup := deployedBrowserScenarioHooks()
+	return sharede2e.Define(sharede2e.Scenario[*deployedState]{
+		Metadata: deployedMetadata(
+			"deployed-browser-journeys",
+			"Runs locked Chromium journeys against the source-built Dashboard and real API/SSE/artifact boundaries under Go-owned fresh-Kind orchestration.",
+			"test-e2e-browser", 45,
+			[]string{"HOR-483", "HOR-490"},
+		),
+		NewState: newDeployedState,
+		Stages: []sharede2e.Stage[*deployedState]{
+			{Name: "build-source-image", Run: buildSourceImageStage},
+			{Name: "create-kind", DependsOn: []string{"build-source-image"}, Run: createControlPlaneKindStage},
+			{Name: "load-source-image", DependsOn: []string{"create-kind"}, Run: loadSourceImageStage},
+			{Name: "install-certificate-substrate", DependsOn: []string{"load-source-image"}, Run: installCertificateSubstrateStage},
+			{Name: "install-control-plane", DependsOn: []string{"install-certificate-substrate"}, Run: installControlPlanePlatformStage},
+			{Name: "assert-deployment-ready", DependsOn: []string{"install-control-plane"}, Run: assertDeploymentReadyStage},
+			{Name: "setup-browser-fixtures", DependsOn: []string{"assert-deployment-ready"}, Run: setupBrowserFixturesStage},
+			{Name: "run-playwright-journeys", DependsOn: []string{"setup-browser-fixtures"}, Run: runPlaywrightJourneysStage},
+		},
+		Diagnostics: diagnostics, Cleanup: cleanup,
+	})
 }
 
 func deployedExecutionContractsScenario() sharede2e.Definition {
