@@ -23,6 +23,13 @@ func TestParseRequiredBootstrapKeysRejectsIncompleteOutput(t *testing.T) {
 	}
 }
 
+func TestCleanDatabaseQueryOutputDropsKubectlStreamWarning(t *testing.T) {
+	output := "E0816 13:00:19.754266   42934 websocket.go:296] Unknown stream id 1, discarding message\n10005\n"
+	if cleaned := cleanDatabaseQueryOutput(output); cleaned != "10005" {
+		t.Fatalf("cleaned database output=%q want 10005", cleaned)
+	}
+}
+
 func TestReadSSEEvents(t *testing.T) {
 	stream := strings.NewReader(`: heartbeat
 
