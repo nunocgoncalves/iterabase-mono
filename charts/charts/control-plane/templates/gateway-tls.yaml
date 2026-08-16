@@ -97,3 +97,33 @@ spec:
   ca:
     secretName: {{ $caName }}
 {{- end }}
+{{- if and .Values.enabled .Values.dispatch.enabled .Values.dispatch.tls.generated }}
+---
+# Render the dispatch leaf in the shared CA scope. On a fresh install Helm
+# evaluates every lookup before creating resources; generating this leaf in a
+# separate template would therefore create an unrelated transient CA. Reusing
+# $ca here makes first-install and upgrade trust identical while preserving the
+# stable serving Secret through lookup.
+{{- $dispatchTLSName := include "control-plane.dispatchTLSSecretName" . }}
+{{- $existingDispatchTLS := lookup "v1" "Secret" .Release.Namespace $dispatchTLSName }}
+{{- $dispatchName := include "control-plane.dispatchName" . }}
+{{- $dispatchDNSNames := list $dispatchName (printf "%s.%s" $dispatchName .Release.Namespace) (printf "%s.%s.svc" $dispatchName .Release.Namespace) (printf "%s.%s.svc.cluster.local" $dispatchName .Release.Namespace) }}
+{{- $dispatchCert := genSignedCert $dispatchName nil $dispatchDNSNames 3650 $ca }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $dispatchTLSName }}
+  labels:
+    {{- include "control-plane.labels" . | nindent 4 }}
+    app.kubernetes.io/component: dispatch
+type: kubernetes.io/tls
+data:
+{{- if $existingDispatchTLS }}
+{{- range $k, $v := $existingDispatchTLS.data }}
+  {{ $k }}: {{ $v }}
+{{- end }}
+{{- else }}
+  tls.crt: {{ $dispatchCert.Cert | b64enc | quote }}
+  tls.key: {{ $dispatchCert.Key | b64enc | quote }}
+{{- end }}
+{{- end }}
