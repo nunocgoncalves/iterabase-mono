@@ -8,6 +8,7 @@ source_sha=$(jq -r '.source_sha' "$plan")
 helm_bin=${HELM_BIN:-helm}
 
 set_env() { printf '%s\n' "$1" >> "$env_output"; }
+set_env "ITERABASE_E2E_SOURCE_SHA=$source_sha"
 baseline_chart_field() {
   jq -r --arg chart "$1" --arg field "$2" \
     '.baseline_dependencies.charts[] | select(.chart == $chart) | .[$field]' "$plan"
@@ -30,6 +31,7 @@ chart_version() {
 
 for specification in \
   'control-plane CONTROL_PLANE' \
+  'control-plane-harness HARNESS' \
   'inference-gateway INFERENCE_GATEWAY' \
   'control-plane-tool-runner TOOL_RUNNER'; do
   read -r name prefix <<<"$specification"
@@ -58,6 +60,11 @@ for metadata in "$candidate_dir"/images/candidate-*.json; do
       set_env "CONTROL_PLANE_IMAGE_REPO=$repository"
       set_env "CONTROL_PLANE_IMAGE_TAG=$immutable"
       set_env "CONTROL_PLANE_IMAGE_DIGEST=$digest"
+      ;;
+    control-plane-harness)
+      set_env "HARNESS_IMAGE_REPO=$repository"
+      set_env "HARNESS_IMAGE_TAG=$immutable"
+      set_env "HARNESS_IMAGE_DIGEST=$digest"
       ;;
     inference-gateway)
       set_env "INFERENCE_GATEWAY_IMAGE_REPO=$repository"

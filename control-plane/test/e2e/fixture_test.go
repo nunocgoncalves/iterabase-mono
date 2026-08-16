@@ -38,6 +38,18 @@ type requestEvidence struct {
 	Fields map[string]any `json:"fields,omitempty"`
 }
 
+type deployedImage struct {
+	name       string
+	repository string
+	tag        string
+	digest     string
+	contextDir string
+	dockerfile string
+	local      bool
+}
+
+func (image *deployedImage) reference() string { return image.repository + ":" + image.tag }
+
 // deployedState is an owner-local fixture API. Every scenario creates its own
 // state and fresh Kind cluster; later execution/browser scenarios may compose
 // these mechanics without sharing mutable clusters between contracts.
@@ -61,6 +73,14 @@ type deployedState struct {
 	imageRepo        string
 	imageTag         string
 	imageDigest      string
+	harnessImage     deployedImage
+	toolRunnerImage  deployedImage
+	inferenceImage   deployedImage
+	runtimeImage     deployedImage
+	toolDigests      map[string]string
+	toolV2           []toolFixture
+	fluxRevision     string
+	fluxDigest       string
 	adminKey         string
 	tokenKey         string
 	workKey          string
@@ -126,6 +146,10 @@ func (state *deployedState) resolveRuntime(t *testing.T) {
 		}
 		state.imageRepo = "iterabase-control-plane-e2e"
 		state.imageTag = sha
+		state.harnessImage = deployedImage{name: "harness", repository: "iterabase-harness-e2e", tag: sha, contextDir: filepath.Join(state.controlRoot, "harness"), local: true}
+		state.toolRunnerImage = deployedImage{name: "tool-runner", repository: "iterabase-tool-runner-e2e", tag: sha, contextDir: filepath.Join(state.controlRoot, "tool-runner"), local: true}
+		state.inferenceImage = deployedImage{name: "inference-gateway", repository: "iterabase-inference-gateway-e2e", tag: sha, contextDir: filepath.Join(state.repoRoot, "inference-gateway"), local: true}
+		state.runtimeImage = deployedImage{name: "runtime-fixture", repository: "iterabase-runtime-fixture-e2e", tag: sha, contextDir: filepath.Join(state.controlRoot, "test", "e2e", "fixtures", "runtime"), local: true}
 		state.platform = kube.Chart{Mode: mode, LocalPath: filepath.Join(state.chartsRoot, "charts", "iterabase-platform")}
 		state.substrate = kube.Chart{Mode: mode, LocalPath: filepath.Join(state.chartsRoot, "charts", "cert-manager-substrate")}
 	case sharede2e.FixtureCandidate:
@@ -135,6 +159,14 @@ func (state *deployedState) resolveRuntime(t *testing.T) {
 		if state.imageRepo == "" || state.imageTag == "" || !regexp.MustCompile(`^sha256:[0-9a-f]{64}$`).MatchString(state.imageDigest) {
 			t.Fatal("candidate fixture requires exact CONTROL_PLANE_IMAGE_REPO/TAG/DIGEST")
 		}
+		state.harnessImage = candidateImage(t, "harness", "HARNESS")
+		state.toolRunnerImage = candidateImage(t, "tool-runner", "TOOL_RUNNER")
+		state.inferenceImage = candidateImage(t, "inference-gateway", "INFERENCE_GATEWAY")
+		sha := os.Getenv("ITERABASE_E2E_SOURCE_SHA")
+		if !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(sha) {
+			t.Fatalf("candidate fixture requires a full source SHA for deterministic fixture identity, got %q", sha)
+		}
+		state.runtimeImage = deployedImage{name: "runtime-fixture", repository: "iterabase-runtime-fixture-e2e", tag: sha, contextDir: filepath.Join(state.controlRoot, "test", "e2e", "fixtures", "runtime"), local: true}
 		platform := os.Getenv("ITERABASE_PLATFORM_LOCAL_CHART")
 		if platform == "" {
 			t.Fatal("candidate fixture requires ITERABASE_PLATFORM_LOCAL_CHART")
@@ -148,6 +180,18 @@ func (state *deployedState) resolveRuntime(t *testing.T) {
 	default:
 		t.Fatalf("control-plane deployed scenarios support source and candidate fixtures, got %q", mode)
 	}
+}
+
+func candidateImage(t *testing.T, name, prefix string) deployedImage {
+	t.Helper()
+	image := deployedImage{
+		name: name, repository: os.Getenv(prefix + "_IMAGE_REPO"), tag: os.Getenv(prefix + "_IMAGE_TAG"),
+		digest: os.Getenv(prefix + "_IMAGE_DIGEST"),
+	}
+	if image.repository == "" || image.tag == "" || !regexp.MustCompile(`^sha256:[0-9a-f]{64}$`).MatchString(image.digest) {
+		t.Fatalf("candidate fixture requires exact %s_IMAGE_REPO/TAG/DIGEST", prefix)
+	}
+	return image
 }
 
 func buildSourceImageStage(t *testing.T, state *deployedState) {
@@ -173,6 +217,45 @@ func buildSourceImageStage(t *testing.T, state *deployedState) {
 	state.imageDigest = strings.TrimSpace(result.Output)
 	if !regexp.MustCompile(`^sha256:[0-9a-f]{64}$`).MatchString(state.imageDigest) {
 		t.Fatalf("source image has non-canonical ID %q", state.imageDigest)
+	}
+}
+
+func buildExecutionImagesStage(t *testing.T, state *deployedState) {
+	t.Helper()
+	mode := sharede2e.FixtureMode(os.Getenv("ITERABASE_E2E_FIXTURE_MODE"))
+	images := []*deployedImage{&state.runtimeImage}
+	if mode == sharede2e.FixtureSource {
+		images = append([]*deployedImage{&state.harnessImage, &state.toolRunnerImage, &state.inferenceImage}, images...)
+	}
+	for _, image := range images {
+		buildLocalImage(t, state, image)
+	}
+}
+
+func buildLocalImage(t *testing.T, state *deployedState, image *deployedImage) {
+	t.Helper()
+	args := []string{"build", "--label", "org.opencontainers.image.revision=" + os.Getenv("ITERABASE_E2E_SOURCE_SHA"), "-t", image.reference()}
+	if image.dockerfile != "" {
+		args = append(args, "-f", image.dockerfile)
+	}
+	args = append(args, ".")
+	result, err := state.runner.Run(state.ctx, process.Command{
+		Name: "docker", Args: args, Dir: image.contextDir, Timeout: 20 * time.Minute,
+		OutputName: "docker-build-" + image.name + ".log",
+	})
+	if err != nil {
+		t.Fatalf("build source %s image: %v\n%s", image.name, err, result.Output)
+	}
+	result, err = state.runner.Run(state.ctx, process.Command{
+		Name: "docker", Args: []string{"image", "inspect", "--format={{.Id}}", image.reference()},
+		Timeout: 30 * time.Second, OutputName: "docker-inspect-" + image.name + ".log",
+	})
+	if err != nil {
+		t.Fatalf("inspect source %s image: %v\n%s", image.name, err, result.Output)
+	}
+	image.digest = strings.TrimSpace(result.Output)
+	if !regexp.MustCompile(`^sha256:[0-9a-f]{64}$`).MatchString(image.digest) {
+		t.Fatalf("source %s image has non-canonical ID %q", image.name, image.digest)
 	}
 }
 
@@ -242,6 +325,65 @@ func loadSourceImageStage(t *testing.T, state *deployedState) {
 	state.imageDigest = digest
 }
 
+func loadExecutionImagesStage(t *testing.T, state *deployedState) {
+	t.Helper()
+	for _, image := range []*deployedImage{&state.harnessImage, &state.toolRunnerImage, &state.inferenceImage, &state.runtimeImage} {
+		if !image.local {
+			continue
+		}
+		loadLocalImage(t, state, image)
+	}
+}
+
+func loadLocalImage(t *testing.T, state *deployedState, image *deployedImage) {
+	t.Helper()
+	if err := state.cluster.LoadImage(state.ctx, image.reference()); err != nil {
+		t.Fatalf("load source %s image into Kind: %v", image.name, err)
+	}
+	nodes, err := state.runner.Run(state.ctx, process.Command{
+		Name: "kind", Args: []string{"get", "nodes", "--name", state.cluster.Name}, Timeout: 30 * time.Second,
+	})
+	if err != nil || strings.TrimSpace(nodes.Output) == "" {
+		t.Fatalf("resolve Kind node for %s image inspection: %v", image.name, err)
+	}
+	node := strings.Fields(nodes.Output)[0]
+	inspection, err := state.runner.Run(state.ctx, process.Command{
+		Name: "docker", Args: []string{"exec", node, "crictl", "inspecti", image.reference()},
+		Timeout: 30 * time.Second, OutputName: "kind-source-image-" + image.name + ".json",
+	})
+	if err != nil {
+		t.Fatalf("inspect source %s image inside Kind: %v\n%s", image.name, err, inspection.Output)
+	}
+	var runtimeImage struct {
+		Status struct {
+			RepoDigests []string `json:"repoDigests"`
+			RepoTags    []string `json:"repoTags"`
+		} `json:"status"`
+		Info struct {
+			ImageSpec struct {
+				Config struct {
+					Labels map[string]string `json:"Labels"`
+				} `json:"config"`
+			} `json:"imageSpec"`
+		} `json:"info"`
+	}
+	if err := json.Unmarshal([]byte(inspection.Output), &runtimeImage); err != nil {
+		t.Fatalf("decode Kind %s image inspection: %v", image.name, err)
+	}
+	wantRevision := os.Getenv("ITERABASE_E2E_SOURCE_SHA")
+	if runtimeImage.Info.ImageSpec.Config.Labels["org.opencontainers.image.revision"] != wantRevision {
+		t.Fatalf("Kind %s image revision label=%q want=%q", image.name, runtimeImage.Info.ImageSpec.Config.Labels["org.opencontainers.image.revision"], wantRevision)
+	}
+	if len(runtimeImage.Status.RepoDigests) != 1 || len(runtimeImage.Status.RepoTags) != 1 {
+		t.Fatalf("Kind %s image identity is ambiguous: tags=%v digests=%v", image.name, runtimeImage.Status.RepoTags, runtimeImage.Status.RepoDigests)
+	}
+	_, digest, found := strings.Cut(runtimeImage.Status.RepoDigests[0], "@")
+	if !found || !regexp.MustCompile(`^sha256:[0-9a-f]{64}$`).MatchString(digest) {
+		t.Fatalf("Kind %s image has no canonical runtime digest: %v", image.name, runtimeImage.Status.RepoDigests)
+	}
+	image.digest = digest
+}
+
 func installCertificateSubstrateStage(t *testing.T, state *deployedState) {
 	t.Helper()
 	out, err := state.client.HelmUpgrade(state.ctx, kube.HelmOptions{
@@ -288,6 +430,18 @@ func installControlPlanePlatformStage(t *testing.T, state *deployedState) {
 	})
 	if err != nil {
 		t.Fatalf("install control-plane platform fixture: %v\n%s", err, out)
+	}
+}
+
+func (state *deployedState) installPlatformValues(t *testing.T, name string, values map[string]any, timeout time.Duration) {
+	t.Helper()
+	valuesPath := state.writeJSON(t, name, values)
+	out, err := state.client.HelmUpgrade(state.ctx, kube.HelmOptions{
+		Release: controlPlaneRelease, Namespace: controlPlaneNamespace, Chart: state.platform,
+		ValueFiles: []string{valuesPath}, Wait: true, Timeout: timeout,
+	})
+	if err != nil {
+		t.Fatalf("install platform fixture: %v\n%s", err, out)
 	}
 }
 

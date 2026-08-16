@@ -49,10 +49,8 @@ The inference path depends on GPU readiness, so a second VM/operator installatio
 ### Kind — fresh cluster per contract
 
 - `kind-controlplane-identity`: standalone control-plane chart and identity/JWT contract.
-- `kind-inference-contract`: umbrella cross-service catalog/auth contract.
-- `kind-tool-runner-contract`: exact Flux artifact materialization through the chart-managed Node runner, mTLS gateway registration, and pinned generation drain using the monorepo-local control-plane/charts builds.
 
-These remain isolated because clean chart installation and contract-specific state are part of what they test. Sharing a cluster could mask missing resources or leak state between releases. Certificate substrate, issuer, internal-TLS, and observability chart authority moved to the chart-owned compiled suite in `charts/test/e2e` under HOR-416.
+HOR-477 moved the portable inference, AgentPool execution, immutable Flux tool, tool-runner, artifact, isolation, and consequence contracts to control-plane's `deployed-execution-contracts` fresh-Kind scenario. Forge no longer registers or selects `kind-inference-contract` or `kind-tool-runner-contract`; its inference helper seam remains only for the real-GPU scenario. Certificate substrate, issuer, internal-TLS, and observability chart authority moved to the chart-owned compiled suite in `charts/test/e2e` under HOR-416.
 
 ## Coverage mapping
 
@@ -67,10 +65,10 @@ These remain isolated because clean chart installation and contract-specific sta
 | HOR-411 / HOR-485 | `digitalocean-gpu/start-emptydir-workload` through `assert-driver-upgrade` | exact supported driver transition, disposable `emptyDir`, preserved PVC cache, operator/node convergence, and post-upgrade GPU use |
 | `TestInferenceFlowGPU` | `digitalocean-gpu/apply-platform`, `run-real-inference` | real control-plane/vLLM/gateway completion |
 | `TestControlPlaneIdentity` | `kind-controlplane-identity` | unchanged, fresh Kind cluster |
-| `TestInferenceFlowContract` | `kind-inference-contract` | unchanged plus restored PermissionPolicy materialization |
+| `TestInferenceFlowContract` | `control-plane/deployed-execution-contracts` | migrated to product authority with real workload mTLS and a deterministic OpenAI-compatible backend |
 | `TestCertIssuers` | `charts/fresh-install` | migrated to chart authority; issuer and CSI identity on fresh Kind |
 | `TestInternalTLS` | `charts/internal-tls` | migrated to chart authority; verified HTTPS plus rejected plaintext datastore transport |
-| HOR-397 cross-component acceptance | `kind-tool-runner-contract` | Flux artifact → materializer → runner → mTLS registration → pinned drain |
+| HOR-397 cross-component acceptance | `control-plane/deployed-execution-contracts` | Flux artifact → materializer → runner → mTLS registration plus exact invocation/artifact attribution |
 
 ## CI
 
@@ -79,10 +77,10 @@ One `e2e.yml` workflow owns:
 - fast harness compilation, unit tests, and nested-module lint;
 - one serialized CPU cloud job against reviewed published releases;
 - one serialized GPU cloud job against reviewed published releases;
-- a fail-fast-disabled Kind PR matrix with one fresh runner/cluster per contract;
-- a nightly, non-PR-gating Kind compatibility matrix against explicitly pinned published artifacts.
+- fail-fast-disabled owner Kind jobs with one fresh runner/cluster per contract;
+- a nightly, non-PR-gating Forge identity compatibility scenario against explicitly pinned published artifacts.
 
-For a monorepo ticket PR, the Kind matrix composes the control-plane and chart source from the same checkout. Standard Kind scenarios install the local chart source; the tool-runner contract additionally builds the local control-plane and runner images. Scheduled compatibility runs use explicit published releases. Cloud jobs intentionally use distributable releases because their boundary is Forge's real remote OCI installation path, not local source mounting.
+For a monorepo ticket PR, Forge's retained identity scenario and the control-plane/chart owner suites compose source from the same checkout. Control-plane's execution owner builds the control-plane, harness, tool-runner, inference-gateway, and deterministic fixture images and verifies their exact runtime digests. Scheduled Forge compatibility uses explicit published releases. Cloud jobs intentionally use distributable releases because their boundary is Forge's real remote OCI installation path, not local source mounting.
 
 The nightly compatibility matrix records an exact published fixture and never floats to `latest`; intentional compatibility-baseline changes are reviewed in source. All E2E invocations are verbose so capacity skips, exact driver inputs, Forge identity, and stage results are visible. Candidate validation retains mandatory GPU capacity semantics; a missing credential or exhausted capacity fails rather than skipping. Cloud jobs never cancel in progress, allowing test cleanup to destroy VMs; the tagged reaper remains the crash safety net.
 
