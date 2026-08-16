@@ -44,7 +44,9 @@ Stages:
 7. Reconcile the reviewed current platform release on the same host with exact Flux source + companion certificate substrate and the already-proven GPU phase skipped.
 8. Apply identity/catalog resources, wait for real vLLM availability, assert rendered extra arguments, and request a real completion.
 
-The inference path depends on GPU readiness, so a second VM/operator installation added cost and capacity noise rather than isolation. The chart is introduced only after the substrate and driver-transition assertions, preserving fault localization. `make test-e2e-gpu-broken-policy` is the intentional HOR-411 red proof: it builds the same source through a Go overlay that changes only `gpuPodDeletion.deleteEmptyDir` to `false`, requires real capacity, and passes only when the active baseline `emptyDir` workload drives the normal fixture through `pod-deletion-required` into `upgrade-failed`. A manual E2E workflow dispatch with `gpu_policy_red_proof=true` runs that mutation using CI's GPU credential; the ordinary PR, nightly, and release paths always run the unmodified green scenario.
+The inference path depends on GPU readiness, so a second VM/operator installation added cost and capacity noise rather than isolation. The chart is introduced only after the substrate and driver-transition assertions, preserving fault localization. Under HOR-494, candidate readiness is generation-current only when ClusterPolicy `Ready=True`/`Error=False`, the selected and node-reported drivers equal the requested candidate, and the node is Ready, schedulable, and `upgrade-done`. The legacy ClusterPolicy state remains explicit evidence: `ready` is normal, while `notReady` is accepted only for the documented GPU Operator status-write conflict when every stronger current signal agrees. The recreated workload and its `nvidia-smi` result remain an independent post-upgrade proof.
+
+`make test-e2e-gpu-broken-policy` is the intentional HOR-411 red proof: it builds the same source through a Go overlay that changes only `gpuPodDeletion.deleteEmptyDir` to `false`, requires real capacity, and passes only when the active baseline `emptyDir` workload drives the normal fixture through `pod-deletion-required` into `upgrade-failed`. A manual E2E workflow dispatch with `gpu_policy_red_proof=true` runs that mutation using CI's GPU credential; the ordinary PR, nightly, and release paths always run the unmodified green scenario.
 
 ### Kind — fresh cluster per contract
 
@@ -64,7 +66,7 @@ These remain isolated because clean chart installation and contract-specific sta
 | `TestE2ESecrets` | `digitalocean-cpu/sync-secrets` | env → SSH stdin → Kubernetes Secret |
 | `TestE2EFlux` | `digitalocean-cpu/install-and-reconcile-flux` | controllers, GitRepository artifact, Kustomization |
 | `TestGPUE2E` | `digitalocean-gpu/apply-gpu-substrate`, `assert-gpu-smoke` | operator readiness and usable GPU |
-| HOR-411 / HOR-485 | `digitalocean-gpu/start-emptydir-workload` through `assert-driver-upgrade` | exact supported driver transition, disposable `emptyDir`, preserved PVC cache, operator/node convergence, and post-upgrade GPU use |
+| HOR-411 / HOR-485 / HOR-494 | `digitalocean-gpu/start-emptydir-workload` through `assert-driver-upgrade` | exact supported driver transition, generation-current readiness authority, disposable `emptyDir`, preserved PVC cache, operator/node convergence, and post-upgrade GPU use |
 | `TestInferenceFlowGPU` | `digitalocean-gpu/apply-platform`, `run-real-inference` | real control-plane/vLLM/gateway completion |
 | `TestControlPlaneIdentity` | `kind-controlplane-identity` | unchanged, fresh Kind cluster |
 | `TestInferenceFlowContract` | `kind-inference-contract` | unchanged plus restored PermissionPolicy materialization |
@@ -94,4 +96,4 @@ The nightly compatibility matrix records an exact published fixture and never fl
 
 ## Production impact
 
-None. This changes test infrastructure only. `FORGE_E2E_KEEP` retains either cloud fixture for debugging; normal cleanup and the reaper remain in place.
+The runner remains test infrastructure: `FORGE_E2E_KEEP` retains either cloud fixture for debugging; normal cleanup and the reaper remain in place. HOR-494 also changes Forge's production GPU readiness authority, documented in `forge/README.md`, and requires a semantic Forge publication before acceptance.

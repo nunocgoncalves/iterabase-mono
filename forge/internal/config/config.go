@@ -198,8 +198,9 @@ func (c *Chart) applyDefaults(install string) {
 // GPU is the opt-in NVIDIA GPU node-readiness configuration. When Enabled,
 // forge installs the NVIDIA GPU Operator (containerized driver + container
 // toolkit + device plugin + RuntimeClass via CDI) as a forge-managed Helm
-// release and gates apply on the operator's ClusterPolicy reaching ready. It is
-// a forge composable dependency, not a chart value — the overlay owns those.
+// release and gates apply on coherent ClusterPolicy conditions plus live node
+// driver/readiness evidence. It is a forge composable dependency, not a chart
+// value — the overlay owns those.
 // v1: single-node, Ubuntu hosts only.
 type GPU struct {
 	Enabled  bool        `yaml:"enabled"`

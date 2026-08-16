@@ -73,8 +73,14 @@ func runStatus(cmd *cobra.Command, _ []string) error {
 		} else {
 			fmt.Fprintf(out, "  driver:        (chart default)\n")
 		}
-		ready, _ := p.GPUReady(ctx)
-		fmt.Fprintf(out, "  clusterpolicy: %s\n", boolLabel(ready, "ready", "notReady"))
+		readiness, readinessErr := p.ReadGPUReadiness(ctx, cfg.Spec.GPU.Driver.Version)
+		if readinessErr != nil {
+			fmt.Fprintln(out, "  clusterpolicy: unavailable")
+			fmt.Fprintf(out, "  evidence:      %v\n", readinessErr)
+		} else {
+			fmt.Fprintf(out, "  clusterpolicy: %s\n", boolLabel(readiness.Ready, "ready", "notReady"))
+			fmt.Fprintf(out, "  evidence:      %s\n", readiness)
+		}
 	}
 	return nil
 }

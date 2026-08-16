@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -344,6 +346,7 @@ printf '%s' "$policies" | base64 -w0
 printf '\n'
 `
 	deadline := time.Now().Add(timeout)
+	lastObservation := "no coherent API observation"
 	for time.Now().Before(deadline) {
 		out, err := sshRun(t, state.vm.IP, state.privKeyPath, observe)
 		if err != nil {
@@ -379,19 +382,30 @@ printf '\n'
 			}
 		}
 		policyReady := false
+		policyEvidence := gpuUpgradePolicyReadiness{PolicyCount: len(policies.Items), ExpectedDriverVersion: gpuUpgradeCandidateDriver}
 		if len(policies.Items) == 1 {
-			policyState, found, stateErr := unstructured.NestedString(policies.Items[0].Object, "status", "state")
-			if stateErr != nil {
-				t.Fatalf("read ClusterPolicy readiness during GPU upgrade: %v", stateErr)
+			var readinessErr error
+			policyEvidence, readinessErr = readGPUUpgradePolicyReadiness(&policies.Items[0], gpuUpgradeCandidateDriver)
+			if readinessErr != nil {
+				t.Fatalf("read ClusterPolicy readiness during GPU upgrade: %v", readinessErr)
 			}
-			policyReady = found && policyState == "ready"
+			policyReady = policyEvidence.Ready()
 		}
-		if upgradeState == "upgrade-done" && !node.Spec.Unschedulable && nodeReady(node) && recreatedReady && policyReady {
+		nodeDriver := node.Labels["nvidia.com/cuda.driver-version.full"]
+		lastObservation = fmt.Sprintf(
+			"policy={%s} node=%q ready=%t schedulable=%t upgradeState=%q driver=%q recreatedWorkloadReady=%t",
+			policyEvidence, node.Name, nodeReady(node), !node.Spec.Unschedulable,
+			upgradeState, nodeDriver, recreatedReady,
+		)
+		nodeConverged := upgradeState == "upgrade-done" &&
+			nodeDriver == gpuUpgradeCandidateDriver &&
+			!node.Spec.Unschedulable && nodeReady(node)
+		if nodeConverged && recreatedReady && policyReady {
 			return
 		}
 		time.Sleep(5 * time.Second)
 	}
-	t.Fatalf("GPU node and recreated workload did not reach Ready, schedulable, upgrade-done within %s", timeout)
+	t.Fatalf("GPU node, operator, and recreated workload did not converge on driver %s within %s; last observation: %s", gpuUpgradeCandidateDriver, timeout, lastObservation)
 }
 
 func decodeGPUUpgradeSnapshot(t *testing.T, encoded string, target any) {
@@ -414,6 +428,61 @@ func nodeReady(node *corev1.Node) bool {
 	return false
 }
 
+type gpuUpgradePolicyReadiness struct {
+	PolicyCount           int
+	State                 string
+	ReadyCondition        string
+	ErrorCondition        string
+	DriverVersion         string
+	ExpectedDriverVersion string
+}
+
+func (r gpuUpgradePolicyReadiness) Ready() bool {
+	stateAccepted := r.State == "ready" || r.State == "notReady"
+	return r.PolicyCount == 1 && stateAccepted && r.ReadyCondition == "True" &&
+		r.ErrorCondition == "False" && r.DriverVersion == r.ExpectedDriverVersion
+}
+
+func (r gpuUpgradePolicyReadiness) String() string {
+	return fmt.Sprintf("count=%d state=%q Ready=%q Error=%q driver=%q expectedDriver=%q", r.PolicyCount, r.State, r.ReadyCondition, r.ErrorCondition, r.DriverVersion, r.ExpectedDriverVersion)
+}
+
+func readGPUUpgradePolicyReadiness(policy *unstructured.Unstructured, expectedDriver string) (gpuUpgradePolicyReadiness, error) {
+	readiness := gpuUpgradePolicyReadiness{PolicyCount: 1, ExpectedDriverVersion: expectedDriver}
+	var found bool
+	var err error
+	readiness.State, _, err = unstructured.NestedString(policy.Object, "status", "state")
+	if err != nil {
+		return readiness, fmt.Errorf("read status.state: %w", err)
+	}
+	readiness.DriverVersion, _, err = unstructured.NestedString(policy.Object, "spec", "driver", "version")
+	if err != nil {
+		return readiness, fmt.Errorf("read spec.driver.version: %w", err)
+	}
+	conditions, found, err := unstructured.NestedSlice(policy.Object, "status", "conditions")
+	if err != nil {
+		return readiness, fmt.Errorf("read status.conditions: %w", err)
+	}
+	if !found {
+		return readiness, nil
+	}
+	for _, raw := range conditions {
+		condition, ok := raw.(map[string]any)
+		if !ok {
+			return readiness, fmt.Errorf("status.conditions contains %T, want object", raw)
+		}
+		conditionType, _ := condition["type"].(string)
+		conditionStatus, _ := condition["status"].(string)
+		switch conditionType {
+		case "Ready":
+			readiness.ReadyCondition = conditionStatus
+		case "Error":
+			readiness.ErrorCondition = conditionStatus
+		}
+	}
+	return readiness, nil
+}
+
 func assertGPUUpgradeClusterPolicy(t *testing.T, client dynamic.Interface) {
 	t.Helper()
 	policies, err := client.Resource(schema.GroupVersionResource{
@@ -426,18 +495,18 @@ func assertGPUUpgradeClusterPolicy(t *testing.T, client dynamic.Interface) {
 		t.Fatalf("GPU upgrade fixture has %d ClusterPolicies, want 1", len(policies.Items))
 	}
 	policy := &policies.Items[0]
-	assertNestedString(t, policy, gpuUpgradeCandidateDriver, "spec", "driver", "version")
-	assertNestedString(t, policy, "ready", "status", "state")
+	readiness, err := readGPUUpgradePolicyReadiness(policy, gpuUpgradeCandidateDriver)
+	if err != nil {
+		t.Fatalf("read ClusterPolicy after GPU driver upgrade: %v", err)
+	}
+	if !readiness.Ready() {
+		t.Fatalf("ClusterPolicy did not expose accepted candidate readiness: %s", readiness)
+	}
+	if readiness.State == "notReady" {
+		t.Logf("accepted documented GPU Operator legacy-state conflict with coherent current evidence: %s", readiness)
+	}
 	assertNestedBool(t, policy, true, "spec", "driver", "upgradePolicy", "podDeletion", "deleteEmptyDir")
 	assertNestedBool(t, policy, false, "spec", "driver", "upgradePolicy", "drain", "enable")
-}
-
-func assertNestedString(t *testing.T, object *unstructured.Unstructured, want string, fields ...string) {
-	t.Helper()
-	got, found, err := unstructured.NestedString(object.Object, fields...)
-	if err != nil || !found || got != want {
-		t.Fatalf("ClusterPolicy %s = %q (found=%v err=%v), want %q", strings.Join(fields, "."), got, found, err, want)
-	}
 }
 
 func assertNestedBool(t *testing.T, object *unstructured.Unstructured, want bool, fields ...string) {
@@ -445,6 +514,40 @@ func assertNestedBool(t *testing.T, object *unstructured.Unstructured, want bool
 	got, found, err := unstructured.NestedBool(object.Object, fields...)
 	if err != nil || !found || got != want {
 		t.Fatalf("ClusterPolicy %s = %t (found=%v err=%v), want %t", strings.Join(fields, "."), got, found, err, want)
+	}
+}
+
+func TestGPUUpgradePolicyReadinessAuthority(t *testing.T) {
+	tests := []struct {
+		name           string
+		state          string
+		readyCondition string
+		errorCondition string
+		driver         string
+		wantReady      bool
+	}{
+		{name: "normal ready state", state: "ready", readyCondition: "True", errorCondition: "False", driver: gpuUpgradeCandidateDriver, wantReady: true},
+		{name: "documented legacy state conflict", state: "notReady", readyCondition: "True", errorCondition: "False", driver: gpuUpgradeCandidateDriver, wantReady: true},
+		{name: "operator reports error", state: "notReady", readyCondition: "False", errorCondition: "True", driver: gpuUpgradeCandidateDriver},
+		{name: "candidate conditions with stale driver", state: "ready", readyCondition: "True", errorCondition: "False", driver: gpuUpgradeBaselineDriver},
+		{name: "unsupported legacy state", state: "ignored", readyCondition: "True", errorCondition: "False", driver: gpuUpgradeCandidateDriver},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			policy := &unstructured.Unstructured{Object: map[string]any{
+				"spec": map[string]any{"driver": map[string]any{"version": tt.driver}},
+				"status": map[string]any{
+					"state": tt.state,
+					"conditions": []any{
+						map[string]any{"type": "Ready", "status": tt.readyCondition},
+						map[string]any{"type": "Error", "status": tt.errorCondition},
+					},
+				},
+			}}
+			readiness, err := readGPUUpgradePolicyReadiness(policy, gpuUpgradeCandidateDriver)
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantReady, readiness.Ready(), readiness.String())
+		})
 	}
 }
 

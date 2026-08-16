@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"strings"
@@ -1031,49 +1032,143 @@ func TestEnsureDriverBuildDeps_CommandShape(t *testing.T) {
 	assert.Contains(t, got, "apt-get install -y linux-headers-$(uname -r)")
 }
 
-func TestGPUReady(t *testing.T) {
-	const q = "sudo k3s kubectl get clusterpolicy -o jsonpath='{.items[0].status.state}'"
-	t.Run("ready", func(t *testing.T) {
-		addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
-			if cmd == q {
-				return "ready", 0
-			}
-			return "", 1
+func TestReadGPUReadiness(t *testing.T) {
+	const (
+		query     = "sudo k3s kubectl get clusterpolicy,nodes -o json"
+		candidate = "595.71.05"
+		baseline  = "580.126.20"
+	)
+	tests := []struct {
+		name         string
+		output       string
+		wantReady    bool
+		wantTerminal bool
+		wantState    string
+		wantReason   string
+	}{
+		{
+			name:       "coherent ready state",
+			output:     gpuReadinessSnapshot("ready", "True", "False", candidate, candidate, "upgrade-done", true, false),
+			wantReady:  true,
+			wantState:  "ready",
+			wantReason: "converged",
+		},
+		{
+			name:       "documented legacy state conflict",
+			output:     gpuReadinessSnapshot("notReady", "True", "False", candidate, candidate, "upgrade-done", true, false),
+			wantReady:  true,
+			wantState:  "notReady",
+			wantReason: "remains contradictory",
+		},
+		{
+			name:       "stale pre-transition policy driver",
+			output:     gpuReadinessSnapshot("ready", "True", "False", baseline, candidate, "upgrade-done", true, false),
+			wantState:  "ready",
+			wantReason: "has not selected the requested driver",
+		},
+		{
+			name:       "stale pre-transition node driver",
+			output:     gpuReadinessSnapshot("ready", "True", "False", candidate, baseline, "upgrade-done", true, false),
+			wantState:  "ready",
+			wantReason: "has not loaded the requested driver",
+		},
+		{
+			name:       "operator error condition",
+			output:     gpuReadinessSnapshot("notReady", "True", "True", candidate, candidate, "upgrade-done", true, false),
+			wantState:  "notReady",
+			wantReason: "Error condition is not False",
+		},
+		{
+			name:       "upgrade still progressing",
+			output:     gpuReadinessSnapshot("notReady", "True", "False", candidate, candidate, "validation-required", true, false),
+			wantState:  "notReady",
+			wantReason: "still in progress",
+		},
+		{
+			name:         "terminal upgrade failure",
+			output:       gpuReadinessSnapshot("notReady", "False", "True", candidate, baseline, "upgrade-failed", true, true),
+			wantTerminal: true,
+			wantState:    "notReady",
+			wantReason:   "upgrade-failed",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
+				if cmd == query {
+					return tt.output, 0
+				}
+				return "", 1
+			})
+			defer cleanup()
+			p := newProvisioner(t, addr, cfg)
+			defer p.Close()
+			readiness, err := p.ReadGPUReadiness(context.Background(), candidate)
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantReady, readiness.Ready)
+			assert.Equal(t, tt.wantTerminal, readiness.Terminal)
+			assert.Equal(t, tt.wantState, readiness.PolicyState)
+			assert.Contains(t, readiness.Reason, tt.wantReason)
+			assert.Equal(t, candidate, readiness.RequestedDriverVersion)
 		})
-		defer cleanup()
-		p := newProvisioner(t, addr, cfg)
-		defer p.Close()
-		ok, err := p.GPUReady(context.Background())
+	}
+
+	t.Run("chart-default driver still requires a loaded node driver", func(t *testing.T) {
+		readiness, err := parseGPUReadiness(
+			gpuReadinessSnapshot("ready", "True", "False", "", candidate, "", true, false),
+			"",
+		)
 		require.NoError(t, err)
-		assert.True(t, ok)
+		assert.True(t, readiness.Ready, readiness.String())
+		assert.Empty(t, readiness.RequestedDriverVersion)
+		assert.Equal(t, candidate, readiness.NodeDriverVersion)
 	})
-	t.Run("not ready", func(t *testing.T) {
-		addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
-			if cmd == q {
-				return "notReady", 0
-			}
-			return "", 1
-		})
-		defer cleanup()
-		p := newProvisioner(t, addr, cfg)
-		defer p.Close()
-		ok, err := p.GPUReady(context.Background())
-		require.NoError(t, err)
-		assert.False(t, ok)
-	})
+
 	t.Run("clusterpolicy absent", func(t *testing.T) {
-		// Before the operator is installed the CR doesn't exist: kubectl errors,
-		// GPUReady returns (false, nil) so the readiness poll keeps going.
-		addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
-			return "", 1
+		// Before the operator is installed the CRD may not exist. The query error
+		// is retained for lifecycle timeout diagnostics while polling continues.
+		addr, cfg, cleanup := startFakeSSH(t, func(string) (string, int) {
+			return "the server doesn't have a resource type clusterpolicy", 1
 		})
 		defer cleanup()
 		p := newProvisioner(t, addr, cfg)
 		defer p.Close()
-		ok, err := p.GPUReady(context.Background())
-		require.NoError(t, err)
-		assert.False(t, ok)
+		readiness, err := p.ReadGPUReadiness(context.Background(), candidate)
+		require.Error(t, err)
+		assert.Nil(t, readiness)
+		assert.Contains(t, err.Error(), "read GPU readiness resources")
 	})
+}
+
+func gpuReadinessSnapshot(policyState, readyCondition, errorCondition, policyDriver, nodeDriver, upgradeState string, nodeReady, unschedulable bool) string {
+	return fmt.Sprintf(`{
+		"items": [
+			{
+				"kind": "ClusterPolicy",
+				"metadata": {"name": "cluster-policy"},
+				"spec": {"driver": {"version": %q}},
+				"status": {
+					"state": %q,
+					"conditions": [
+						{"type": "Ready", "status": %q},
+						{"type": "Error", "status": %q}
+					]
+				}
+			},
+			{
+				"kind": "Node",
+				"metadata": {
+					"name": "gpu-1",
+					"labels": {
+						"nvidia.com/cuda.driver-version.full": %q,
+						"nvidia.com/gpu-driver-upgrade-state": %q
+					}
+				},
+				"spec": {"unschedulable": %t},
+				"status": {"conditions": [{"type": "Ready", "status": %q}]}
+			}
+		]
+	}`, policyDriver, policyState, readyCondition, errorCondition, nodeDriver, upgradeState, unschedulable, map[bool]string{true: "True", false: "False"}[nodeReady])
 }
 
 func TestEnsureRepo_CommandShape(t *testing.T) {

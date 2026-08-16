@@ -5,7 +5,10 @@
 // tests use fakes. Lifecycle logic must never talk to SSH directly.
 package provisioner
 
-import "context"
+import (
+	"context"
+	"fmt"
+)
 
 // HostState is the actual host-level state of k3s, read for reconcile.
 // Node-level state (labels/taints) is applied at install time via k3s flags in
@@ -30,6 +33,44 @@ type PreflightResult struct {
 	KernelHeadersInstalled bool   // linux-headers-$(uname -r) present (GPU driver build dep)
 }
 
+// GPUReadiness is one coherent observation of the GPU operator and the
+// single-node runtime it reconciles. Ready is true only when the operator's
+// conditions and live node evidence agree on the requested driver. PolicyState
+// remains evidence rather than the sole authority because GPU Operator v26.3.3
+// writes the legacy state and conditions separately; a lost state update can
+// leave state=notReady after successful reconciliation.
+type GPUReadiness struct {
+	Ready                  bool
+	Terminal               bool
+	Reason                 string
+	RequestedDriverVersion string
+	PolicyCount            int
+	PolicyName             string
+	PolicyState            string
+	ReadyCondition         string
+	ErrorCondition         string
+	PolicyDriverVersion    string
+	NodeCount              int
+	NodeName               string
+	NodeReady              bool
+	NodeSchedulable        bool
+	NodeDriverVersion      string
+	NodeUpgradeState       string
+}
+
+// String returns actionable, field-by-field readiness evidence for apply and
+// audit failures. Keep the legacy policy state visible even when stronger
+// current conditions and node evidence make the aggregate ready.
+func (r GPUReadiness) String() string {
+	return fmt.Sprintf(
+		"ready=%t terminal=%t reason=%q requestedDriver=%q policyCount=%d policyName=%q policyState=%q readyCondition=%q errorCondition=%q policyDriver=%q nodeCount=%d nodeName=%q nodeReady=%t nodeSchedulable=%t nodeDriver=%q nodeUpgradeState=%q",
+		r.Ready, r.Terminal, r.Reason, r.RequestedDriverVersion,
+		r.PolicyCount, r.PolicyName, r.PolicyState, r.ReadyCondition,
+		r.ErrorCondition, r.PolicyDriverVersion, r.NodeCount, r.NodeName,
+		r.NodeReady, r.NodeSchedulable, r.NodeDriverVersion, r.NodeUpgradeState,
+	)
+}
+
 // Provisioner abstracts host-level k3s operations. One instance is bound to a
 // single host at construction time (the SSH user/key/address).
 type Provisioner interface {
@@ -51,8 +92,9 @@ type Provisioner interface {
 	// via the GPU operator's driver container (installs matching linux-headers on
 	// Ubuntu). Idempotent. Only called when GPU is enabled.
 	EnsureDriverBuildDeps(ctx context.Context) error
-	// GPUReady reports whether the GPU operator's ClusterPolicy has reached
-	// state=ready (driver + toolkit + device plugin + runtime + CUDA validated
-	// end-to-end by the operator). Polled as the GPU readiness gate.
-	GPUReady(ctx context.Context) (bool, error)
+	// ReadGPUReadiness returns one coherent ClusterPolicy/node observation,
+	// evaluated against the requested driver. Missing resources and transitional
+	// states return Ready=false; query/parse failures return an error. Polled as
+	// the GPU readiness gate.
+	ReadGPUReadiness(ctx context.Context, requestedDriverVersion string) (*GPUReadiness, error)
 }
