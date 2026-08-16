@@ -40,6 +40,12 @@ func TestMigrations(t *testing.T) {
 	pool := waitForPool(t, ctx, connStr)
 	t.Cleanup(pool.Close)
 
+	// The bundled Postgres chart creates this dedicated role before the
+	// control-plane migration init container runs. Reproduce that ordering so
+	// migration 23 exercises its production grant path.
+	_, err = pool.Exec(ctx, `CREATE ROLE gateway NOLOGIN`)
+	require.NoError(t, err)
+
 	// Up: schemas + pgvector should exist.
 	require.NoError(t, database.MigrateUp(connStr))
 
@@ -84,11 +90,26 @@ func TestMigrations(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, viewExists, "permissions.effective_capabilities view should exist after MigrateUp")
 
+	// HOR-489: fresh installs grant only the durable workload-authorization
+	// reads. A migration-22 OPO1 database already has this exact ACL, so moving
+	// down one version intentionally preserves it and reapplying migration 23
+	// must be an idempotent metadata advance with no manual role update.
+	assertGatewayWorkloadPrivileges(t, ctx, pool)
+	require.NoError(t, database.MigrateDown(connStr, 1))
+	var migrationVersion int
+	require.NoError(t, pool.QueryRow(ctx, `SELECT version FROM schema_migrations`).Scan(&migrationVersion))
+	assert.Equal(t, 22, migrationVersion)
+	assertGatewayWorkloadPrivileges(t, ctx, pool)
+	require.NoError(t, database.MigrateUp(connStr))
+	require.NoError(t, pool.QueryRow(ctx, `SELECT version FROM schema_migrations`).Scan(&migrationVersion))
+	assert.Equal(t, 23, migrationVersion)
+	assertGatewayWorkloadPrivileges(t, ctx, pool)
+
 	// HOR-254 must migrate an existing gateway ledger without requiring an
-	// unavailable customer-safe summary backfill. Roll back the three HOR-396
-	// migrations plus HOR-425, HOR-397, HOR-399, and HOR-254, seed a
-	// pre-existing write descriptor/invocation, and apply all seven again.
-	require.NoError(t, database.MigrateDown(connStr, 7))
+	// unavailable customer-safe summary backfill. Roll back migration 23, the
+	// three HOR-396 migrations, plus HOR-425, HOR-397, HOR-399, and HOR-254;
+	// seed a pre-existing write descriptor/invocation; and apply all eight again.
+	require.NoError(t, database.MigrateDown(connStr, 8))
 	_, err = pool.Exec(ctx, `
 		INSERT INTO toolgateway.tool_versions
 		    (name,version,digest,description,input_schema,effect_class,credential_slots,artifact_capabilities,timeout_ms)
@@ -174,6 +195,43 @@ func TestMigrations(t *testing.T) {
 		).Scan(&exists)
 		require.NoError(t, err)
 		assert.False(t, exists, "schema %q should be dropped after MigrateDown", schema)
+	}
+}
+
+func assertGatewayWorkloadPrivileges(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
+	t.Helper()
+	for _, schema := range []string{"toolgateway", "runtime"} {
+		var allowed bool
+		require.NoError(t, pool.QueryRow(ctx,
+			`SELECT has_schema_privilege('gateway', $1, 'USAGE')`, schema).Scan(&allowed))
+		assert.True(t, allowed, "gateway should have USAGE on %s", schema)
+	}
+	for _, table := range []string{
+		"toolgateway.pools",
+		"runtime.turns",
+		"runtime.workflow_runs",
+		"runtime.run_pool_assignments",
+		"runtime.turn_assignments",
+	} {
+		var allowed bool
+		require.NoError(t, pool.QueryRow(ctx,
+			`SELECT has_table_privilege('gateway', $1, 'SELECT')`, table).Scan(&allowed))
+		assert.True(t, allowed, "gateway should have SELECT on %s", table)
+		for _, privilege := range []string{"INSERT", "UPDATE", "DELETE"} {
+			require.NoError(t, pool.QueryRow(ctx,
+				`SELECT has_table_privilege('gateway', $1, $2)`, table, privilege).Scan(&allowed))
+			assert.False(t, allowed, "gateway must not have %s on %s", privilege, table)
+		}
+	}
+	for _, table := range []string{
+		"toolgateway.credential_bindings",
+		"toolgateway.invocations",
+		"runtime.events",
+	} {
+		var allowed bool
+		require.NoError(t, pool.QueryRow(ctx,
+			`SELECT has_table_privilege('gateway', $1, 'SELECT')`, table).Scan(&allowed))
+		assert.False(t, allowed, "gateway must not have SELECT on %s", table)
 	}
 }
 
