@@ -255,7 +255,7 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertEqual(dependencies["inference-gateway"], "0.2.10")
         self.assertEqual(
             plan["tested_with"]["chart_metadata"]["control-plane"]["appVersion"],
-            "0.0.27",
+            "0.0.26",
         )
         self.assertEqual(
             plan["tested_with"]["chart_metadata"]["inference-gateway"]["appVersion"],
