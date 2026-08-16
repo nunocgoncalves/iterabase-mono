@@ -175,6 +175,7 @@ class ReleaseContractTests(unittest.TestCase):
                 "deployed-identity-api",
                 "deployed-work-recovery",
                 "deployed-artifact-durability",
+                "deployed-browser-journeys",
                 "deployed-execution-contracts",
                 "inference-contract",
                 "tool-runner-contract",
@@ -187,6 +188,7 @@ class ReleaseContractTests(unittest.TestCase):
             set(plan["selected_scenarios"]),
             {
                 "control-plane/deployed-artifact-durability",
+                "control-plane/deployed-browser-journeys",
                 "control-plane/deployed-execution-contracts",
                 "control-plane/deployed-identity-api",
                 "control-plane/deployed-work-recovery",
@@ -232,7 +234,7 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertEqual([item["chart"] for item in plan["chart_matrix"]], ["control-plane"])
         self.assertTrue(plan["forge"])
         self.assertTrue(plan["real_machine"])
-        self.assertEqual(len(plan["kind_matrix"]), 7)
+        self.assertEqual(len(plan["kind_matrix"]), 8)
 
     def test_single_forge_target_remains_supported(self) -> None:
         plan = self.plan("forge")
