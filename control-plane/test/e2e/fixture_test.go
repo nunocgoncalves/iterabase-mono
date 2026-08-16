@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -487,21 +486,21 @@ func assertDeploymentReadyStage(t *testing.T, state *deployedState) {
 
 func (state *deployedState) captureBootstrapKeys(t *testing.T) {
 	t.Helper()
-	pod := state.firstPod(t, "app.kubernetes.io/name=control-plane,app.kubernetes.io/component=api")
+	state.captureBootstrapKeysExcluding(t, nil)
+}
+
+func (state *deployedState) captureBootstrapKeysExcluding(t *testing.T, excludedUIDs map[string]struct{}) {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(state.ctx, 30*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "kubectl", "--kubeconfig", state.cluster.Kubeconfig, "logs", "-n", controlPlaneNamespace, pod, "-c", "bootstrap")
-	output, err := cmd.Output()
-	if err != nil {
-		t.Fatal("read bootstrap credentials from the isolated init-container boundary")
-	}
-	keys, err := parseRequiredBootstrapKeys(string(output))
+	keys, pod, err := state.readBootstrapKeys(ctx, excludedUIDs)
 	if err != nil {
 		t.Fatal(err)
 	}
 	state.redactor.Add(keys["admin"], keys["token"])
 	state.adminKey = keys["admin"]
 	state.tokenKey = keys["token"]
+	t.Logf("captured bootstrap credential scopes from %s", pod.safeSummary())
 }
 
 var (
@@ -522,7 +521,7 @@ func parseBootstrapKeys(output string) map[string]string {
 func parseRequiredBootstrapKeys(output string) (map[string]string, error) {
 	keys := parseBootstrapKeys(output)
 	if keys["admin"] == "" || keys["token"] == "" {
-		return nil, fmt.Errorf("bootstrap did not emit the required admin and token credentials")
+		return keys, fmt.Errorf("bootstrap did not emit the required admin and token credentials")
 	}
 	return keys, nil
 }
@@ -675,10 +674,21 @@ func (state *deployedState) openAPI(t *testing.T) {
 
 func (state *deployedState) restartAPI(t *testing.T) {
 	t.Helper()
+	ctx, cancel := context.WithTimeout(state.ctx, 30*time.Second)
+	pods, err := state.readBootstrapEvidencePods(ctx)
+	cancel()
+	if err != nil {
+		t.Fatal(err)
+	}
+	previousUIDs := bootstrapEvidencePodUIDs(pods)
+	if len(previousUIDs) == 0 {
+		t.Fatal("API restart requires at least one pre-restart pod identity")
+	}
+
 	state.stopAPIForward(t)
 	state.kubectl(t, 30*time.Second, "rollout", "restart", "deployment/"+controlPlaneRelease+"-control-plane-api", "-n", controlPlaneNamespace)
 	state.kubectl(t, 7*time.Minute, "rollout", "status", "deployment/"+controlPlaneRelease+"-control-plane-api", "-n", controlPlaneNamespace, "--timeout=6m")
-	state.captureBootstrapKeys(t) // register newly emitted bootstrap credentials before diagnostics can retain logs
+	state.captureBootstrapKeysExcluding(t, previousUIDs) // register the exact new pod's credentials before diagnostics can retain logs
 	state.openAPI(t)
 	status, body := state.request(t, http.MethodGet, "/readyz", "", nil, nil)
 	requireStatus(t, status, http.StatusOK, body)
@@ -790,23 +800,7 @@ func (state *deployedState) registerBootstrapSecrets() error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	podCommand := exec.CommandContext(ctx, "kubectl", "--kubeconfig", state.cluster.Kubeconfig, "get", "pods", "-n", controlPlaneNamespace,
-		"-l", "app.kubernetes.io/name=control-plane,app.kubernetes.io/component=api", "-o", "jsonpath={.items[0].metadata.name}")
-	podOutput, err := podCommand.Output()
-	if err != nil {
-		return fmt.Errorf("resolve API pod for bootstrap secret registration: %w", err)
-	}
-	pod := strings.TrimSpace(string(podOutput))
-	if pod == "" {
-		return fmt.Errorf("resolve API pod for bootstrap secret registration: no pod found")
-	}
-	logsCommand := exec.CommandContext(ctx, "kubectl", "--kubeconfig", state.cluster.Kubeconfig, "logs", "-n", controlPlaneNamespace,
-		pod, "-c", "bootstrap")
-	logs, err := logsCommand.Output()
-	if err != nil {
-		return fmt.Errorf("read bootstrap logs for secret registration: %w", err)
-	}
-	keys, err := parseRequiredBootstrapKeys(string(logs))
+	keys, _, err := state.readBootstrapKeys(ctx, nil)
 	if err != nil {
 		return err
 	}
