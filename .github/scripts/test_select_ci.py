@@ -121,8 +121,13 @@ class ChangedPathCollectionFixtures(unittest.TestCase):
             "test-e2e-artifact",
         ):
             self.assertIn(f"target: {target}", job)
+        execution_job = workflow.split("  control-plane-execution-kind:\n", 1)[1].split(
+            "\n  published-compatibility:\n", 1
+        )[0]
+        self.assertIn("run: make test-e2e-execution", execution_job)
         required = workflow.split("  required:\n", 1)[1]
         self.assertIn("- control-plane-kind", required)
+        self.assertIn("- control-plane-execution-kind", required)
 
     def test_control_plane_gates_are_fresh_and_isolation_is_required(self) -> None:
         component_makefile = (ROOT / "control-plane/Makefile").read_text()

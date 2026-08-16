@@ -19,6 +19,7 @@ func TestE2E(t *testing.T) {
 		deployedIdentityAPIScenario(),
 		deployedWorkRecoveryScenario(),
 		deployedArtifactDurabilityScenario(),
+		deployedExecutionContractsScenario(),
 	)
 	suite.Run(t)
 }
@@ -31,6 +32,46 @@ func deployedMetadata(name, description, makeTarget string, timeout int, referen
 		FixtureModes:   []sharede2e.FixtureMode{sharede2e.FixtureSource, sharede2e.FixtureCandidate},
 		MakeTarget:     makeTarget, TimeoutMinutes: timeout,
 	}
+}
+
+func deployedExecutionMetadata(name, description, makeTarget string, timeout int, references []string) sharede2e.ScenarioMetadata {
+	metadata := deployedMetadata(name, description, makeTarget, timeout, references)
+	metadata.ReleaseTargets = []string{"control-plane", "inference-gateway", "control-plane-chart", "inference-gateway-chart", "iterabase-platform-chart"}
+	return metadata
+}
+
+func deployedExecutionContractsScenario() sharede2e.Definition {
+	diagnostics, cleanup := deployedScenarioHooks()
+	return sharede2e.Define(sharede2e.Scenario[*deployedState]{
+		Metadata: deployedExecutionMetadata(
+			"deployed-execution-contracts",
+			"Proves source-built AgentPool, dispatch, disposable harness children, model/tool gateways, immutable tools and artifacts, consequences, isolation, and durable recovery on fresh Kind.",
+			"test-e2e-execution", 55,
+			[]string{"HOR-477", "HOR-438", "HOR-488", "HOR-489", "REQ-005", "REQ-009", "REQ-010", "REQ-026", "SCN-008", "SCN-009"},
+		),
+		NewState: newDeployedState,
+		Stages: []sharede2e.Stage[*deployedState]{
+			{Name: "build-source-image", Run: buildSourceImageStage},
+			{Name: "build-execution-images", DependsOn: []string{"build-source-image"}, Run: buildExecutionImagesStage},
+			{Name: "create-kind", DependsOn: []string{"build-execution-images"}, Run: createControlPlaneKindStage},
+			{Name: "load-source-image", DependsOn: []string{"create-kind"}, Run: loadSourceImageStage},
+			{Name: "load-execution-images", DependsOn: []string{"load-source-image"}, Run: loadExecutionImagesStage},
+			{Name: "install-certificate-substrate", DependsOn: []string{"load-execution-images"}, Run: installCertificateSubstrateStage},
+			{Name: "install-execution-fixtures", DependsOn: []string{"install-certificate-substrate"}, Run: installExecutionFixtureStage},
+			{Name: "install-execution-platform", DependsOn: []string{"install-execution-fixtures"}, Run: installExecutionPlatformStage},
+			{Name: "assert-execution-platform-ready", DependsOn: []string{"install-execution-platform"}, Run: assertExecutionPlatformReadyStage},
+			{Name: "setup-execution-resources", DependsOn: []string{"assert-execution-platform-ready"}, Run: setupExecutionResourcesStage},
+			{Name: "exercise-agentpool-late-secret-recovery", DependsOn: []string{"setup-execution-resources"}, Run: exerciseAgentPoolLateSecretRecoveryStage},
+			{Name: "exercise-worker-loss-cancellation", DependsOn: []string{"exercise-agentpool-late-secret-recovery"}, Run: exerciseWorkerLossCancellationStage},
+			{Name: "exercise-immutable-tool-generation", DependsOn: []string{"exercise-worker-loss-cancellation"}, Run: exerciseImmutableToolGenerationStage},
+			{Name: "exercise-representative-execution", DependsOn: []string{"exercise-immutable-tool-generation"}, Run: exerciseRepresentativeExecutionStage},
+			{Name: "exercise-idempotent-invocation-race", DependsOn: []string{"exercise-representative-execution"}, Run: exerciseIdempotentInvocationRaceStage},
+			{Name: "exercise-isolation-composition", DependsOn: []string{"exercise-idempotent-invocation-race"}, Run: exerciseIsolationCompositionStage},
+			{Name: "exercise-outcome-unknown-recovery", DependsOn: []string{"exercise-isolation-composition"}, Run: exerciseOutcomeUnknownRecoveryStage},
+			{Name: "exercise-consequence-confirmation", DependsOn: []string{"exercise-outcome-unknown-recovery"}, Run: exerciseConsequenceConfirmationStage},
+		},
+		Diagnostics: diagnostics, Cleanup: cleanup,
+	})
 }
 
 func deployedIdentityAPIScenario() sharede2e.Definition {

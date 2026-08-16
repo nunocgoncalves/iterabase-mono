@@ -38,6 +38,9 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       control_plane: ${{ steps.select.outputs.control_plane }}
+      harness: ${{ steps.select.outputs.harness }}
+      tool_runner: ${{ steps.select.outputs.tool_runner }}
+      inference_gateway: ${{ steps.select.outputs.inference_gateway }}
       forge_e2e: ${{ steps.select.outputs.forge_e2e }}
       forge_real_e2e: ${{ steps.select.outputs.forge_real_e2e }}
       charts: ${{ steps.select.outputs.charts }}
@@ -170,12 +173,6 @@ jobs:
           - name: controlplane-identity
             target: test-e2e-controlplane
             timeout: 20
-          - name: inference-contract
-            target: test-e2e-inference
-            timeout: 20
-          - name: tool-runner-contract
-            target: test-e2e-tool-runner
-            timeout: 35
     concurrency:
       group: e2e-kind-${{ matrix.name }}-${{ github.ref }}
       cancel-in-progress: true
@@ -192,23 +189,13 @@ jobs:
           cache-scope: e2e-kind-${{ matrix.name }}
       - name: Add external chart repositories
         run: .github/scripts/add_helm_repositories.sh
-      - name: Build coordinated chart dependencies
-        if: matrix.name != 'tool-runner-contract'
-        run: |
-          helm dependency build charts/charts/control-plane
-          if [ "${{ matrix.name }}" != controlplane-identity ]; then
-            helm dependency build charts/charts/cert-manager-substrate
-            helm dependency build charts/charts/iterabase-platform
-          fi
+      - name: Build control-plane chart dependencies
+        run: helm dependency build charts/charts/control-plane
       - name: Run ${{ matrix.name }} from monorepo source
         run: make ${{ matrix.target }}
         working-directory: forge
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ITERABASE_CONTROL_PLANE_ROOT: ${{ matrix.name == 'tool-runner-contract' && format('{0}/control-plane', github.workspace) || '' }}
-          ITERABASE_CHARTS_ROOT: ${{ matrix.name == 'tool-runner-contract' && format('{0}/charts', github.workspace) || '' }}
-          ITERABASE_LOCAL_CHART: ${{ format('{0}/charts/charts/iterabase-platform', github.workspace) }}
-          ITERABASE_PLATFORM_LOCAL_CHART: ${{ format('{0}/charts/charts/iterabase-platform', github.workspace) }}
           CONTROL_PLANE_LOCAL_CHART: ${{ format('{0}/charts/charts/control-plane', github.workspace) }}
           ITERABASE_E2E_FIXTURE_MODE: source
           ITERABASE_E2E_SOURCE_SHA: ${{ github.sha }}
@@ -259,6 +246,44 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  control-plane-execution-kind:
+    name: control-plane-execution-contracts
+    needs: changes
+    if: >-
+      (needs.changes.outputs.control_plane == 'true' ||
+      needs.changes.outputs.harness == 'true' ||
+      needs.changes.outputs.tool_runner == 'true' ||
+      needs.changes.outputs.inference_gateway == 'true' ||
+      needs.changes.outputs.charts == 'true') &&
+      (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    concurrency:
+      group: e2e-control-plane-execution-${{ github.ref }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: ./.github/actions/setup-go
+        with:
+          go-version: 1.26.5
+          cache-dependency-path: ${{ env.GO_CACHE_DEPENDENCIES }}
+          cache-scope: e2e-control-plane-execution
+      - uses: ./.github/actions/setup-kubernetes-tools
+      - name: Run source-built deployed execution contracts
+        working-directory: control-plane
+        env:
+          ITERABASE_E2E_FIXTURE_MODE: source
+          ITERABASE_E2E_DIAGNOSTICS: ${{ runner.temp }}/control-plane-diagnostics/test-e2e-execution
+        run: make test-e2e-execution
+      - name: Upload redacted failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: control-plane-diagnostics-test-e2e-execution
+          path: ${{ runner.temp }}/control-plane-diagnostics/test-e2e-execution
+          if-no-files-found: ignore
+          retention-days: 7
+
   published-compatibility:
     name: published-pinned-${{ matrix.name }}
     needs: [changes, harness]
@@ -272,12 +297,6 @@ jobs:
           - name: controlplane-identity
             target: test-e2e-controlplane
             timeout: 20
-          - name: inference-contract
-            target: test-e2e-inference
-            timeout: 20
-          - name: tool-runner-contract
-            target: test-e2e-tool-runner
-            timeout: 35
     concurrency:
       group: e2e-published-pinned-${{ matrix.name }}
       cancel-in-progress: true
@@ -317,6 +336,7 @@ jobs:
       - digitalocean-gpu
       - kind
       - control-plane-kind
+      - control-plane-execution-kind
       - published-compatibility
       - charts-runtime
     runs-on: ubuntu-latest

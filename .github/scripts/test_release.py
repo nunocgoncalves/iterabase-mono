@@ -97,13 +97,12 @@ class ReleaseContractTests(unittest.TestCase):
                     "deployed-identity-api",
                     "deployed-work-recovery",
                     "deployed-artifact-durability",
-                    "inference-contract",
+                    "deployed-execution-contracts",
                     "internal-tls",
-                    "tool-runner-contract",
                 },
                 set(),
             ),
-            "inference-gateway": ({"inference-contract", "internal-tls"}, set()),
+            "inference-gateway": ({"deployed-execution-contracts", "internal-tls"}, set()),
             "forge": (set(), {"cpu", "gpu"}),
             "control-plane-chart": (
                 {
@@ -111,19 +110,18 @@ class ReleaseContractTests(unittest.TestCase):
                     "deployed-identity-api",
                     "deployed-work-recovery",
                     "deployed-artifact-durability",
-                    "tool-runner-contract",
+                    "deployed-execution-contracts",
                 },
                 set(),
             ),
-            "inference-gateway-chart": ({"inference-contract"}, set()),
+            "inference-gateway-chart": ({"deployed-execution-contracts"}, set()),
             "iterabase-platform-chart": (
                 {
                     "controlplane-identity",
                     "deployed-identity-api",
                     "deployed-work-recovery",
                     "deployed-artifact-durability",
-                    "inference-contract",
-                    "tool-runner-contract",
+                    "deployed-execution-contracts",
                 },
                 {"cpu", "gpu"},
             ),
@@ -167,8 +165,7 @@ class ReleaseContractTests(unittest.TestCase):
                 "deployed-identity-api",
                 "deployed-work-recovery",
                 "deployed-artifact-durability",
-                "inference-contract",
-                "tool-runner-contract",
+                "deployed-execution-contracts",
             },
         )
         self.assertEqual(
@@ -178,13 +175,12 @@ class ReleaseContractTests(unittest.TestCase):
             set(plan["selected_scenarios"]),
             {
                 "control-plane/deployed-artifact-durability",
+                "control-plane/deployed-execution-contracts",
                 "control-plane/deployed-identity-api",
                 "control-plane/deployed-work-recovery",
                 "forge/digitalocean-cpu",
                 "forge/digitalocean-gpu",
                 "forge/kind-controlplane-identity",
-                "forge/kind-inference-contract",
-                "forge/kind-tool-runner-contract",
                 "charts/certificate-ownership-migration",
                 "charts/fresh-install",
                 "charts/feature-enable-upgrade",
@@ -222,7 +218,7 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertEqual([item["chart"] for item in plan["chart_matrix"]], ["control-plane"])
         self.assertTrue(plan["forge"])
         self.assertTrue(plan["real_machine"])
-        self.assertEqual(len(plan["kind_matrix"]), 6)
+        self.assertEqual(len(plan["kind_matrix"]), 5)
 
     def test_single_forge_target_remains_supported(self) -> None:
         plan = self.plan("forge")
@@ -302,7 +298,7 @@ class ReleaseContractTests(unittest.TestCase):
         )
         self.assertEqual(
             {item["name"] for item in forge["baseline_dependencies"]["images"]},
-            {"control-plane", "control-plane-tool-runner", "inference-gateway"},
+            {"control-plane", "control-plane-harness", "control-plane-tool-runner", "inference-gateway"},
         )
 
         control_chart = self.plan("control-plane-chart")
@@ -312,7 +308,7 @@ class ReleaseContractTests(unittest.TestCase):
         )
         self.assertEqual(
             {item["name"] for item in control_chart["baseline_dependencies"]["images"]},
-            {"control-plane", "control-plane-tool-runner", "inference-gateway"},
+            {"control-plane", "control-plane-harness", "control-plane-tool-runner", "inference-gateway"},
         )
 
         image_only = self.plan("control-plane")

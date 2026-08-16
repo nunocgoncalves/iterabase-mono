@@ -512,9 +512,9 @@ def make_plan(
     # published identity recorded here.
     selected_set = set(selected)
     scenario_names = {scenario["metadata"]["name"] for scenario in scenarios}
-    control_scenarios = {"kind-controlplane-identity", "kind-tool-runner-contract"}
+    control_scenarios = {"kind-controlplane-identity"}
     platform_scenarios = {
-        "kind-inference-contract",
+        "deployed-execution-contracts",
         "deployed-identity-api",
         "deployed-work-recovery",
         "deployed-artifact-durability",
@@ -535,7 +535,7 @@ def make_plan(
     )
     uses_control_chart = bool(control_scenarios.intersection(scenario_names))
     uses_platform_chart = bool(platform_scenarios.intersection(scenario_names)) or real_machine
-    uses_substrate_chart = uses_platform_chart or "kind-tool-runner-contract" in scenario_names
+    uses_substrate_chart = uses_platform_chart
 
     baseline_charts: list[dict[str, Any]] = []
 
@@ -605,7 +605,8 @@ def make_plan(
     )
 
     uses_control_image = bool(scenario_names) or real_machine
-    uses_tool_runner_image = "kind-tool-runner-contract" in scenario_names or real_machine
+    uses_harness_image = "deployed-execution-contracts" in scenario_names or real_machine
+    uses_tool_runner_image = "deployed-execution-contracts" in scenario_names or real_machine
     uses_inference_image = uses_platform_chart
     if "control-plane" not in selected_set and uses_control_image:
         if selected_control_chart:
@@ -627,6 +628,12 @@ def make_plan(
                 version_chart=source_chart,
                 values_path=values_path,
             )
+    if "control-plane" not in selected_set and uses_harness_image:
+        add_baseline_image(
+            "control-plane-harness",
+            "control-plane",
+            version=versions["control-plane"],
+        )
     if "control-plane" not in selected_set and uses_tool_runner_image:
         if selected_control_chart:
             add_baseline_image(
