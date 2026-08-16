@@ -173,6 +173,12 @@ jobs:
           - name: controlplane-identity
             target: test-e2e-controlplane
             timeout: 20
+          - name: inference-contract
+            target: test-e2e-inference
+            timeout: 20
+          - name: tool-runner-contract
+            target: test-e2e-tool-runner
+            timeout: 35
     concurrency:
       group: e2e-kind-${{ matrix.name }}-${{ github.ref }}
       cancel-in-progress: true
@@ -189,13 +195,23 @@ jobs:
           cache-scope: e2e-kind-${{ matrix.name }}
       - name: Add external chart repositories
         run: .github/scripts/add_helm_repositories.sh
-      - name: Build control-plane chart dependencies
-        run: helm dependency build charts/charts/control-plane
+      - name: Build coordinated chart dependencies
+        if: matrix.name != 'tool-runner-contract'
+        run: |
+          helm dependency build charts/charts/control-plane
+          if [ "${{ matrix.name }}" != controlplane-identity ]; then
+            helm dependency build charts/charts/cert-manager-substrate
+            helm dependency build charts/charts/iterabase-platform
+          fi
       - name: Run ${{ matrix.name }} from monorepo source
         run: make ${{ matrix.target }}
         working-directory: forge
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ITERABASE_CONTROL_PLANE_ROOT: ${{ matrix.name == 'tool-runner-contract' && format('{0}/control-plane', github.workspace) || '' }}
+          ITERABASE_CHARTS_ROOT: ${{ matrix.name == 'tool-runner-contract' && format('{0}/charts', github.workspace) || '' }}
+          ITERABASE_LOCAL_CHART: ${{ format('{0}/charts/charts/iterabase-platform', github.workspace) }}
+          ITERABASE_PLATFORM_LOCAL_CHART: ${{ format('{0}/charts/charts/iterabase-platform', github.workspace) }}
           CONTROL_PLANE_LOCAL_CHART: ${{ format('{0}/charts/charts/control-plane', github.workspace) }}
           ITERABASE_E2E_FIXTURE_MODE: source
           ITERABASE_E2E_SOURCE_SHA: ${{ github.sha }}
@@ -297,6 +313,12 @@ jobs:
           - name: controlplane-identity
             target: test-e2e-controlplane
             timeout: 20
+          - name: inference-contract
+            target: test-e2e-inference
+            timeout: 20
+          - name: tool-runner-contract
+            target: test-e2e-tool-runner
+            timeout: 35
     concurrency:
       group: e2e-published-pinned-${{ matrix.name }}
       cancel-in-progress: true

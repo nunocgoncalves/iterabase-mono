@@ -98,11 +98,16 @@ class ReleaseContractTests(unittest.TestCase):
                     "deployed-work-recovery",
                     "deployed-artifact-durability",
                     "deployed-execution-contracts",
+                    "inference-contract",
                     "internal-tls",
+                    "tool-runner-contract",
                 },
                 set(),
             ),
-            "inference-gateway": ({"deployed-execution-contracts", "internal-tls"}, set()),
+            "inference-gateway": (
+                {"deployed-execution-contracts", "inference-contract", "internal-tls"},
+                set(),
+            ),
             "forge": (set(), {"cpu", "gpu"}),
             "control-plane-chart": (
                 {
@@ -111,10 +116,13 @@ class ReleaseContractTests(unittest.TestCase):
                     "deployed-work-recovery",
                     "deployed-artifact-durability",
                     "deployed-execution-contracts",
+                    "tool-runner-contract",
                 },
                 set(),
             ),
-            "inference-gateway-chart": ({"deployed-execution-contracts"}, set()),
+            "inference-gateway-chart": (
+                {"deployed-execution-contracts", "inference-contract"}, set()
+            ),
             "iterabase-platform-chart": (
                 {
                     "controlplane-identity",
@@ -122,6 +130,8 @@ class ReleaseContractTests(unittest.TestCase):
                     "deployed-work-recovery",
                     "deployed-artifact-durability",
                     "deployed-execution-contracts",
+                    "inference-contract",
+                    "tool-runner-contract",
                 },
                 {"cpu", "gpu"},
             ),
@@ -166,6 +176,8 @@ class ReleaseContractTests(unittest.TestCase):
                 "deployed-work-recovery",
                 "deployed-artifact-durability",
                 "deployed-execution-contracts",
+                "inference-contract",
+                "tool-runner-contract",
             },
         )
         self.assertEqual(
@@ -181,6 +193,8 @@ class ReleaseContractTests(unittest.TestCase):
                 "forge/digitalocean-cpu",
                 "forge/digitalocean-gpu",
                 "forge/kind-controlplane-identity",
+                "forge/kind-inference-contract",
+                "forge/kind-tool-runner-contract",
                 "charts/certificate-ownership-migration",
                 "charts/fresh-install",
                 "charts/feature-enable-upgrade",
@@ -218,7 +232,7 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertEqual([item["chart"] for item in plan["chart_matrix"]], ["control-plane"])
         self.assertTrue(plan["forge"])
         self.assertTrue(plan["real_machine"])
-        self.assertEqual(len(plan["kind_matrix"]), 5)
+        self.assertEqual(len(plan["kind_matrix"]), 7)
 
     def test_single_forge_target_remains_supported(self) -> None:
         plan = self.plan("forge")

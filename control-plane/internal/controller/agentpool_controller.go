@@ -36,6 +36,20 @@ func (e *missingSecretDependencyError) Error() string {
 	return fmt.Sprintf("secret %s/%s not found", e.namespace, e.name)
 }
 
+type secretDependencyReadError struct {
+	namespace string
+	name      string
+	err       error
+}
+
+func (e *secretDependencyReadError) Error() string {
+	return fmt.Sprintf("read secret %s/%s: %v", e.namespace, e.name, e.err)
+}
+
+func (e *secretDependencyReadError) Unwrap() error {
+	return e.err
+}
+
 const (
 	agentPoolFinalizer = "platform.iterabase.com/agentpool-finalizer"
 
@@ -148,6 +162,11 @@ func (r *AgentPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		if stderrors.As(err, &dependencyErr) {
 			_ = r.patchStatus(ctx, &pool, false, 0, fmt.Sprintf("dependency: %v", err), false)
 			return ctrl.Result{RequeueAfter: healthRequeueInterval}, nil
+		}
+		var dependencyReadErr *secretDependencyReadError
+		if stderrors.As(err, &dependencyReadErr) {
+			_ = r.patchStatus(ctx, &pool, false, 0, fmt.Sprintf("dependency read: %v", err), false)
+			return ctrl.Result{}, err
 		}
 		_ = r.patchStatus(ctx, &pool, false, 0, fmt.Sprintf("validation: %v", err), true)
 		return ctrl.Result{}, nil
@@ -490,7 +509,7 @@ func (r *AgentPoolReconciler) secretExists(ctx context.Context, ns, name string)
 		if errors.IsNotFound(err) {
 			return &missingSecretDependencyError{namespace: ns, name: name}
 		}
-		return err
+		return &secretDependencyReadError{namespace: ns, name: name, err: err}
 	}
 	return nil
 }

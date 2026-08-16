@@ -65,6 +65,16 @@ func TestE2E(t *testing.T) {
 				[]string{"HOR-478"}, []string{"control-plane", "control-plane-chart", "iterabase-platform-chart"}, "test-e2e-controlplane", 20, ""),
 			"exercise-identity-contract", runControlPlaneIdentity,
 		),
+		simpleForgeScenario(
+			forgeScenarioMetadata("kind-inference-contract", "Proves deployed control-plane to inference-gateway catalogue and authentication composition on fresh Kind.", sharede2e.TierF2,
+				[]string{"HOR-477"}, []string{"control-plane", "inference-gateway", "inference-gateway-chart", "iterabase-platform-chart"}, "test-e2e-inference", 20, ""),
+			"exercise-inference-contract", runInferenceFlowContract,
+		),
+		simpleForgeScenario(
+			forgeScenarioMetadata("kind-tool-runner-contract", "Proves exact Flux artifact materialization, tool registration, pinning, drain, and retirement on fresh Kind.", sharede2e.TierF2,
+				[]string{"HOR-477"}, []string{"control-plane", "control-plane-chart", "iterabase-platform-chart"}, "test-e2e-tool-runner", 35, ""),
+			"exercise-tool-runner-contract", runToolRunnerContract,
+		),
 	)
 	suite.Run(t)
 }

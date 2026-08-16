@@ -385,6 +385,76 @@ func TestAgentPoolValidation(t *testing.T) {
 	assert.Contains(t, err.Error(), "duplicated")
 }
 
+type failOnceSecretReader struct {
+	client.Reader
+	mu     sync.Mutex
+	err    error
+	failed bool
+}
+
+func (r *failOnceSecretReader) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	r.mu.Lock()
+	if !r.failed {
+		r.failed = true
+		r.mu.Unlock()
+		return r.err
+	}
+	r.mu.Unlock()
+	return r.Reader.Get(ctx, key, obj, opts...)
+}
+
+// TestAgentPoolTransientSecretReadRecovery proves an API-server failure while
+// checking an external Secret does not get classified as observed structural
+// invalidity and gate away the later gateway materialization retry.
+func TestAgentPoolTransientSecretReadRecovery(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	require.NoError(t, clientgoscheme.AddToScheme(scheme))
+	require.NoError(t, v1alpha1.AddToScheme(scheme))
+
+	pool := validAgentPool("transient-secret-read", "default")
+	pool.UID = types.UID("transient-secret-read-uid")
+	pool.Generation = 9
+	pool.Spec.Replicas = 0
+	ca := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "platform-ca", Namespace: "default"}}
+	creds := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "graph-creds", Namespace: "default"}}
+	recorder := &recordingMaterializer{}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&v1alpha1.AgentPool{}).WithObjects(pool, ca, creds).Build()
+	injected := fmt.Errorf("injected API reader timeout")
+	reader := &failOnceSecretReader{Reader: c, err: injected}
+	r := &AgentPoolReconciler{Client: c, Scheme: scheme, APIReader: reader, Store: recorder}
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: pool.Name, Namespace: pool.Namespace}}
+
+	result, err := r.Reconcile(ctx, req)
+	require.ErrorIs(t, err, injected)
+	assert.Empty(t, result)
+	var pending v1alpha1.AgentPool
+	require.NoError(t, c.Get(ctx, req.NamespacedName, &pending))
+	assert.Zero(t, pending.Status.ObservedGeneration)
+	assert.False(t, pending.Status.Ready)
+	assert.Contains(t, pending.Status.Message, "dependency read:")
+	recorder.mu.Lock()
+	assert.Empty(t, recorder.calls)
+	recorder.mu.Unlock()
+
+	// Once the API reader recovers, the same generation installs its finalizer
+	// and then materializes exactly once rather than being skipped by the gate.
+	result, err = r.Reconcile(ctx, req)
+	require.NoError(t, err)
+	assert.True(t, result.Requeue)
+	_, err = r.Reconcile(ctx, req)
+	require.NoError(t, err)
+
+	var recovered v1alpha1.AgentPool
+	require.NoError(t, c.Get(ctx, req.NamespacedName, &recovered))
+	assert.Equal(t, int64(9), recovered.Status.ObservedGeneration)
+	assert.True(t, recovered.Status.Ready)
+	recorder.mu.Lock()
+	require.Len(t, recorder.calls, 1)
+	assert.Equal(t, "default/transient-secret-read", recorder.calls[0].key)
+	recorder.mu.Unlock()
+}
+
 // TestAgentPoolLateSecretRecovery proves HOR-438's reconciliation semantics
 // without waiting for the production 30-second cadence: a missing referenced
 // Secret is retryable external state, does not advance ObservedGeneration or
