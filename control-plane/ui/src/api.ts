@@ -196,7 +196,7 @@ export function createRevision(
 export async function uploadArtifact(
   token: string,
   file: File,
-): Promise<{ id: string }> {
+): Promise<{ artifactId: string }> {
   const response = await fetch("/v1/artifacts", {
     method: "POST",
     headers: {
@@ -211,7 +211,11 @@ export async function uploadArtifact(
       response.status,
       (await response.text()) || response.statusText,
     );
-  return response.json() as Promise<{ id: string }>;
+  const artifact = (await response.json()) as { artifactId?: unknown };
+  if (typeof artifact.artifactId !== "string" || !artifact.artifactId.trim()) {
+    throw new APIError(502, "Artifact upload response was incomplete.");
+  }
+  return { artifactId: artifact.artifactId };
 }
 
 export async function downloadArtifact(
