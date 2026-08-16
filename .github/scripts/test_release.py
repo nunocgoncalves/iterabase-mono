@@ -207,7 +207,7 @@ class ReleaseContractTests(unittest.TestCase):
         )
 
     def test_component_versions_are_local_authorities(self) -> None:
-        self.assertEqual(release.read_version(ROOT / "control-plane" / "VERSION"), "0.0.26")
+        self.assertEqual(release.read_version(ROOT / "control-plane" / "VERSION"), "0.0.27")
         self.assertEqual(release.read_version(ROOT / "inference-gateway" / "VERSION"), "0.2.6")
         self.assertEqual(release.read_version(ROOT / "forge" / "VERSION"), "0.8.2")
         self.assertFalse((ROOT / "release" / "compatibility.json").exists())
@@ -220,9 +220,9 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertEqual(
             [(item["target"], item["version"], item["production_tag"]) for item in plan["releases"]],
             [
-                ("control-plane", "0.0.26", "control-plane-v0.0.26"),
+                ("control-plane", "0.0.27", "control-plane-v0.0.27"),
                 ("forge", "0.8.2", "forge-v0.8.2"),
-                ("control-plane-chart", "0.4.8", "control-plane-0.4.8"),
+                ("control-plane-chart", "0.4.9", "control-plane-0.4.9"),
             ],
         )
         self.assertEqual(
@@ -251,17 +251,17 @@ class ReleaseContractTests(unittest.TestCase):
             item["name"]: item["version"]
             for item in plan["tested_with"]["selected_chart_dependencies"][0]["dependencies"]
         }
-        self.assertEqual(dependencies["control-plane"], "0.4.8")
+        self.assertEqual(dependencies["control-plane"], "0.4.9")
         self.assertEqual(dependencies["inference-gateway"], "0.2.10")
         self.assertEqual(
             plan["tested_with"]["chart_metadata"]["control-plane"]["appVersion"],
-            "0.0.25",
+            "0.0.27",
         )
         self.assertEqual(
             plan["tested_with"]["chart_metadata"]["inference-gateway"]["appVersion"],
             "0.2.5",
         )
-        self.assertEqual(plan["tested_with"]["repository_versions"]["control-plane"], "0.0.26")
+        self.assertEqual(plan["tested_with"]["repository_versions"]["control-plane"], "0.0.27")
         self.assertEqual(
             plan["tested_with"]["repository_versions"]["inference-gateway"], "0.2.6"
         )
@@ -462,7 +462,7 @@ class ReleaseContractTests(unittest.TestCase):
             assets = root / "assets" / "charts"
             assets.mkdir(parents=True)
             for chart, version in (
-                ("control-plane", "0.4.8"),
+                ("control-plane", "0.4.9"),
                 ("iterabase-platform", "0.3.11"),
                 ("cert-manager-substrate", "0.3.11"),
             ):
@@ -692,7 +692,7 @@ class ReleaseContractTests(unittest.TestCase):
                 "  *) printf 'unexpected --repo argument: %s\\n' \"$*\" >&2; exit 2 ;;\n"
                 "esac\n"
                 "if [ \"$2\" = view ]; then\n"
-                "  printf '%s\\n' '{\"tagName\":\"control-plane-v0.0.26\",\"assets\":[{\"name\":\"candidate-plan.json\"}]}'\n"
+                "  printf '%s\\n' '{\"tagName\":\"control-plane-v0.0.27\",\"assets\":[{\"name\":\"candidate-plan.json\"}]}'\n"
                 "elif [ \"$2\" = download ]; then\n"
                 "  destination=''\n"
                 "  while [ $# -gt 0 ]; do case \"$1\" in --dir) destination=$2; shift 2;; *) shift;; esac; done\n"
@@ -882,7 +882,7 @@ class ReleaseContractTests(unittest.TestCase):
             assets = Path(directory) / "charts"
             assets.mkdir(parents=True)
             for chart, version in (
-                ("control-plane", "0.4.8"),
+                ("control-plane", "0.4.9"),
                 ("iterabase-platform", "0.3.11"),
                 ("cert-manager-substrate", "0.3.11"),
             ):
@@ -890,7 +890,7 @@ class ReleaseContractTests(unittest.TestCase):
             for chart in ("control-plane", "iterabase-platform"):
                 (assets / f"checksums-{chart}.txt").write_text("fixture\n", encoding="utf-8")
             release.validate_candidate_assets(plan, Path(directory))
-            (assets / "control-plane-0.4.8.tgz").unlink()
+            (assets / "control-plane-0.4.9.tgz").unlink()
             with self.assertRaisesRegex(release.ReleaseError, "control-plane"):
                 release.validate_candidate_assets(plan, Path(directory))
 
