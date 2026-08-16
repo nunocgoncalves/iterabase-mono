@@ -10,6 +10,7 @@ Each F2 scenario creates and deletes its own fresh Kind cluster. The reusable `d
 - `deployed-work-recovery`: concurrent idempotent starts, list/detail/filter/timeline, blockers, feedback/revisions, immutable attempts, customer-safe projections, and ordered SSE reconnect after restart.
 - `deployed-artifact-durability`: upload/publication, work linking, download, MinIO/API restart persistence, admin deletion, and durable tombstones.
 - `deployed-execution-contracts`: exact source/candidate image composition, late-Secret AgentPool recovery with real discovery/invocation, worker SPIFFE/mTLS, in-flight cancellation and generation fencing on worker replacement, durable assignment and inference, immutable Flux tool registration and invocation attribution, concurrent duplicate idempotency, non-idempotent `outcome_unknown` without silent retry across runner recovery, artifact lineage, disposable-child/session isolation, human-gate resume, and exact consequential repetition confirmation.
+- `deployed-browser-journeys`: locked Chromium/Playwright customer journeys over a stable Go-owned proxy to the verified deployed API, covering in-memory authentication, EN/PT portfolio/search/detail, blocker feedback/uploads/downloads, loading/error/SSE reconnect, customer-safe rendering, the automated accessibility baseline, keyboard use, and critical responsive layout.
 
 The execution scenario provides green replacement evidence for Forge's `kind-inference-contract` and `kind-tool-runner-contract`. Those Forge scenarios remain registered through HOR-481's approved ownership-removal slice; Forge also retains real host/GPU substrate and serving authority. The identity scenario likewise remains duplicated until its separate replacement/removal gate.
 
@@ -21,6 +22,7 @@ make -C control-plane test-e2e-identity
 make -C control-plane test-e2e-work
 make -C control-plane test-e2e-artifact
 make -C control-plane test-e2e-execution
+make -C control-plane test-e2e-browser
 make -C control-plane test-e2e
 ```
 
@@ -28,4 +30,4 @@ Source mode is the default. Go builds the current checkout's control-plane image
 
 Candidate mode is selected by the release workflow with `ITERABASE_E2E_FIXTURE_MODE=candidate`, `ITERABASE_E2E_CANDIDATE_PLAN`, the composed `ITERABASE_PLATFORM_LOCAL_CHART`, and exact `CONTROL_PLANE`, `HARNESS`, `TOOL_RUNNER`, and `INFERENCE_GATEWAY` image repository/tag/digest values. Published mode is intentionally unsupported: the compiled release catalogue composes selected candidates with checksum/digest-verified immutable baselines.
 
-Set `ITERABASE_E2E_DIAGNOSTICS` to retain failure evidence. Shared collection includes Kubernetes resources/events, pod descriptions/current/previous logs, Helm state, migration and object-store health, and a customer-safe request ledger. Bootstrap/work credentials are registered with the shared redactor before diagnostics can retain logs; request evidence excludes authorization headers and private request bodies.
+Set `ITERABASE_E2E_DIAGNOSTICS` to retain failure evidence. Shared collection includes Kubernetes resources/events, pod descriptions/current/previous logs, Helm state, migration and object-store health, a customer-safe request ledger, and browser JSON/network evidence. Failed browser tests add synthetic screenshots and Playwright traces only after an owner sanitizer removes the ephemeral work key and Go independently rejects any retained credential literal. Bootstrap/work credentials are registered with the shared redactor before diagnostics can retain logs; request evidence excludes authorization headers and private request bodies.

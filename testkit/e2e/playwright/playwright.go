@@ -20,6 +20,7 @@ import (
 type Invocation struct {
 	Directory   string
 	Args        []string
+	Env         map[string]string
 	Timeout     time.Duration
 	Artifacts   []artifacts.Entry
 	ArtifactDir string
@@ -49,7 +50,7 @@ func (runner Runner) Run(ctx context.Context, invocation Invocation) error {
 		}
 	}
 	_, installErr := runner.Executor.Run(ctx, process.Command{
-		Name: "npm", Args: []string{"ci"}, Dir: invocation.Directory,
+		Name: "npm", Args: []string{"ci"}, Dir: invocation.Directory, Env: invocation.Env,
 		Timeout: invocation.Timeout, OutputName: "playwright-npm-ci.log",
 	})
 	var testErr error
@@ -57,7 +58,7 @@ func (runner Runner) Run(ctx context.Context, invocation Invocation) error {
 		args := []string{"--no-install", "playwright", "test", "--retries=0"}
 		args = append(args, invocation.Args...)
 		_, testErr = runner.Executor.Run(ctx, process.Command{
-			Name: "npx", Args: args, Dir: invocation.Directory,
+			Name: "npx", Args: args, Dir: invocation.Directory, Env: invocation.Env,
 			Timeout: invocation.Timeout, OutputName: "playwright-test.log",
 		})
 	}

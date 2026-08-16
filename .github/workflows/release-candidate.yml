@@ -549,6 +549,12 @@ jobs:
             charts/test/e2e/go.sum
             testkit/e2e/go.mod
           cache-scope: candidate-kind-${{ matrix.name }}
+      - uses: ./.github/actions/setup-node
+        if: matrix.target == 'test-e2e-browser'
+        with:
+          node-version: 24.19.0
+          cache-dependency-path: control-plane/test/e2e/playwright/package-lock.json
+          cache-scope: candidate-kind-browser
       - uses: ./.github/actions/setup-kubernetes-tools
       - run: .github/scripts/add_helm_repositories.sh
       - name: Resolve exact selected candidates and published baselines
@@ -563,6 +569,7 @@ jobs:
           ITERABASE_E2E_CANDIDATE_PLAN: ${{ github.workspace }}/candidate-plan.json
           ITERABASE_E2E_DIAGNOSTICS: ${{ runner.temp }}/candidate-kind-diagnostics/${{ matrix.id }}
           E2E_SKIP_BUILD_DEPS: ${{ matrix.owner == 'charts' && 'true' || 'false' }}
+          PLAYWRIGHT_INSTALL_ARGS: ${{ matrix.target == 'test-e2e-browser' && '--with-deps chromium' || 'chromium' }}
         run: make ${{ matrix.target }}
       - name: Upload redacted candidate failure diagnostics
         if: failure()

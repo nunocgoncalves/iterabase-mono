@@ -34,6 +34,9 @@ go.work
 
 # Node dependencies and build output
 node_modules/
+test/e2e/playwright/browser-artifacts/
+test/e2e/playwright/playwright-report/
+test/e2e/playwright/test-results/
 tool-runner/dist/
 ui/dist/*
 !ui/dist/placeholder.txt
