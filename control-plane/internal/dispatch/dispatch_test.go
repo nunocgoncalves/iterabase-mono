@@ -54,6 +54,11 @@ type dispatchEnv struct {
 
 func newDispatchEnv(t *testing.T) *dispatchEnv {
 	t.Helper()
+	return newDispatchEnvWithReconciler(t, true)
+}
+
+func newDispatchEnvWithReconciler(t *testing.T, startReconciler bool) *dispatchEnv {
+	t.Helper()
 	pgpool := testutil.NewPostgresPool(t)
 	rt := runtime.NewStore(pgpool)
 	store := dispatch.NewStore(pgpool, rt)
@@ -69,7 +74,7 @@ func newDispatchEnv(t *testing.T) *dispatchEnv {
 	supervisor, err := ca.Leaf(testca.LeafOpts{SPIFFEID: dispatchSupvSPI})
 	require.NoError(t, err)
 
-	srv := startDispatchServer(t, store, dispatchTD, ca, supervisor)
+	srv := startDispatchServer(t, store, dispatchTD, ca, supervisor, startReconciler)
 	return &dispatchEnv{
 		store: store, rt: rt, pgpool: pgpool, svc: srv.svc,
 		srvURL: srv.srvURL, supervisor: supervisor, ca: ca, caPool: ca.Pool, poolID: poolID, stop: srv.stop,
@@ -88,10 +93,11 @@ type dispatchServer struct {
 }
 
 // startDispatchServer builds a dispatch service + mTLS HTTP/2 server backed by
-// the given store, with the reconciler + lease monitor running, and the given
-// supervisor cert material (issued by ca). The caller seeds the pool row and
-// CA before calling.
-func startDispatchServer(t *testing.T, store *dispatch.Store, td string, ca *testca.CA, supervisor tls.Certificate) *dispatchServer {
+// the given store and supervisor cert material (issued by ca). Direct-state
+// fixtures may disable the reconciler while retaining the live Work stream,
+// lease monitor, and in-memory worker pool. The caller seeds the pool row and CA
+// before calling.
+func startDispatchServer(t *testing.T, store *dispatch.Store, td string, ca *testca.CA, supervisor tls.Certificate, startReconciler bool) *dispatchServer {
 	t.Helper()
 	serverCert, err := ca.Leaf(testca.LeafOpts{SPIFFEID: "spiffe://" + td + "/control-plane/dispatch", DNSNames: []string{"localhost", "127.0.0.1"}, IsServer: true})
 	require.NoError(t, err)
@@ -102,7 +108,9 @@ func startDispatchServer(t *testing.T, store *dispatch.Store, td string, ca *tes
 		DefaultModel:      &v1.ModelConfig{Id: "gpt-4o", Api: "openai-completions"},
 	}, nil)
 	recCtx, cancelRec := context.WithCancel(context.Background())
-	svc.StartReconciler(recCtx)
+	if startReconciler {
+		svc.StartReconciler(recCtx)
+	}
 	svc.StartLeaseMonitor(recCtx)
 
 	mux := http.NewServeMux()
@@ -393,7 +401,7 @@ func TestDispatch_FencesDurablePriorGenOnRestart(t *testing.T) {
 
 	// A fresh service (empty in-memory workerPool) accepts the worker. The
 	// reconnect hits `old == nil` and must fence the durable prior assignment.
-	restarted := startDispatchServer(t, env.store, dispatchTD, env.ca, env.supervisor)
+	restarted := startDispatchServer(t, env.store, dispatchTD, env.ca, env.supervisor, true)
 	env.svc, env.srvURL, env.stop = restarted.svc, restarted.srvURL, restarted.stop
 	w := env.connectWorker(t)
 	defer w.close()
@@ -420,7 +428,11 @@ func TestDispatch_FencesDurablePriorGenOnRestart(t *testing.T) {
 // nothing), simulating the window where a simultaneous reconnect's fence has
 // not yet completed.
 func TestDispatch_FencesDurablePriorGenOnReconnectOldPath(t *testing.T) {
-	env := newDispatchEnv(t)
+	// This fixture constructs the durable generation-5 state directly after w1
+	// connects. Keep the live Work stream, lease monitor, and worker pool active,
+	// but disable the reconciler so it cannot concurrently advance the synthetic
+	// run while seedRunTurn performs the explicit pending -> running transitions.
+	env := newDispatchEnvWithReconciler(t, false)
 	ctx := context.Background()
 
 	// w1 connects cleanly (no durable prior assignment yet).
