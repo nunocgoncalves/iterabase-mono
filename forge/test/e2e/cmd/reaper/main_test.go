@@ -12,6 +12,8 @@ import (
 	"github.com/digitalocean/godo"
 )
 
+const longestForgeWorkflowTimeout = 115 * time.Minute
+
 type fakeDropletClient struct {
 	droplets      []godo.Droplet
 	deleteErrors  map[int]error
@@ -29,16 +31,23 @@ func (client *fakeDropletClient) Delete(_ context.Context, id int) (*godo.Respon
 	return &godo.Response{}, client.deleteErrors[id]
 }
 
+func TestDefaultMaxAgeOutlivesLongestForgeWorkflow(t *testing.T) {
+	t.Parallel()
+	if defaultMaxAge <= longestForgeWorkflowTimeout {
+		t.Fatalf("default reaper age %s must exceed longest Forge workflow bound %s", defaultMaxAge, longestForgeWorkflowTimeout)
+	}
+}
+
 func TestReapDeletesOnlyExpiredTaggedOrphans(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 8, 17, 16, 0, 0, 0, time.UTC)
 	client := &fakeDropletClient{droplets: []godo.Droplet{
-		{ID: 101, Name: "failed-cpu-run", Created: now.Add(-2 * time.Hour).Format(time.RFC3339), Tags: []string{"forge-e2e"}},
-		{ID: 202, Name: "active-gpu-run", Created: now.Add(-20 * time.Minute).Format(time.RFC3339), Tags: []string{"forge-e2e"}},
+		{ID: 101, Name: "failed-cpu-run", Created: now.Add(-defaultMaxAge - time.Minute).Format(time.RFC3339), Tags: []string{"forge-e2e"}},
+		{ID: 202, Name: "active-gpu-run", Created: now.Add(-longestForgeWorkflowTimeout).Format(time.RFC3339), Tags: []string{"forge-e2e"}},
 	}}
 	var output bytes.Buffer
 
-	if err := reap(context.Background(), client, now, time.Hour, &output); err != nil {
+	if err := reap(context.Background(), client, now, defaultMaxAge, &output); err != nil {
 		t.Fatal(err)
 	}
 	if !slices.Equal(client.requestedTags, []string{"forge-e2e"}) {

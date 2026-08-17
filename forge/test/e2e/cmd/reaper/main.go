@@ -1,6 +1,7 @@
 // Command reaper deletes DigitalOcean droplets tagged "forge-e2e" older than a
-// threshold (default 60m). It is the safety net for e2e runs that crash or are
-// cancelled before tearing down their droplet. Run on a cron in CI.
+// threshold. The two-hour default exceeds the longest 115-minute Forge workflow
+// bound, so an active run cannot be reaped before its owner cleanup can finish.
+// It is the safety net for runs that crash or are cancelled. Run on a cron in CI.
 package main
 
 import (
@@ -16,13 +17,15 @@ import (
 	"github.com/digitalocean/godo"
 )
 
+const defaultMaxAge = 2 * time.Hour
+
 type dropletClient interface {
 	ListByTag(context.Context, string, *godo.ListOptions) ([]godo.Droplet, *godo.Response, error)
 	Delete(context.Context, int) (*godo.Response, error)
 }
 
 func main() {
-	maxAge := flag.Duration("max-age", 60*time.Minute, "delete droplets older than this")
+	maxAge := flag.Duration("max-age", defaultMaxAge, "delete droplets older than this")
 	flag.Parse()
 
 	token := os.Getenv("DIGITALOCEAN_TOKEN")
