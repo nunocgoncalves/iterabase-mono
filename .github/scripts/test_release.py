@@ -211,7 +211,7 @@ class ReleaseContractTests(unittest.TestCase):
     def test_component_versions_are_local_authorities(self) -> None:
         self.assertEqual(release.read_version(ROOT / "control-plane" / "VERSION"), "0.0.28")
         self.assertEqual(release.read_version(ROOT / "inference-gateway" / "VERSION"), "0.2.6")
-        self.assertEqual(release.read_version(ROOT / "forge" / "VERSION"), "0.8.2")
+        self.assertEqual(release.read_version(ROOT / "forge" / "VERSION"), "0.8.3")
         self.assertFalse((ROOT / "release" / "compatibility.json").exists())
 
     def test_candidate_accepts_and_canonicalizes_an_explicit_target_set(self) -> None:
@@ -223,7 +223,7 @@ class ReleaseContractTests(unittest.TestCase):
             [(item["target"], item["version"], item["production_tag"]) for item in plan["releases"]],
             [
                 ("control-plane", "0.0.28", "control-plane-v0.0.28"),
-                ("forge", "0.8.2", "forge-v0.8.2"),
+                ("forge", "0.8.3", "forge-v0.8.3"),
                 ("control-plane-chart", "0.4.9", "control-plane-0.4.9"),
             ],
         )
@@ -241,7 +241,7 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertEqual(plan["targets"], ["forge"])
         self.assertTrue(plan["forge"])
         self.assertTrue(plan["real_machine"])
-        self.assertEqual(plan["releases"][0]["production_tag"], "forge-v0.8.2")
+        self.assertEqual(plan["releases"][0]["production_tag"], "forge-v0.8.3")
         self.assertEqual(plan["image_matrix"], [])
         self.assertEqual(plan["chart_matrix"], [])
 
@@ -470,7 +470,7 @@ class ReleaseContractTests(unittest.TestCase):
             assets = Path(directory) / "forge"
             assets.mkdir(parents=True)
             for platform in ("linux_amd64", "linux_arm64", "darwin_amd64", "darwin_arm64"):
-                (assets / f"forge_0.8.2_{platform}.tar.gz").write_bytes(platform.encode())
+                (assets / f"forge_0.8.3_{platform}.tar.gz").write_bytes(platform.encode())
             (assets / "checksums.txt").write_text("fixture\n", encoding="utf-8")
             release.validate_candidate_assets(plan, Path(directory))
             self.assertFalse(any(path.name == "forge" for path in assets.rglob("*")))
