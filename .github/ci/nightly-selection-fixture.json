@@ -1,0 +1,157 @@
+{
+  "catalogue": {
+    "schema_version": 1,
+    "suites": [
+      {
+        "suite": {
+          "name": "charts",
+          "owner": "charts",
+          "entrypoint": "charts/test/e2e"
+        },
+        "scenarios": [
+          {
+            "id": "charts/hermetic-example",
+            "metadata": {
+              "name": "hermetic-example",
+              "tier": "F0",
+              "fixture_modes": ["source"]
+            }
+          },
+          {
+            "id": "charts/transition",
+            "metadata": {
+              "name": "transition",
+              "tier": "F2",
+              "fixture_modes": ["source", "candidate"],
+              "make_target": "test-e2e-transition",
+              "timeout_minutes": 40
+            }
+          }
+        ]
+      },
+      {
+        "suite": {
+          "name": "control-plane",
+          "owner": "control-plane",
+          "entrypoint": "control-plane/test/e2e"
+        },
+        "scenarios": [
+          {
+            "id": "control-plane/browser",
+            "metadata": {
+              "name": "browser",
+              "tier": "F2",
+              "fixture_modes": ["source", "candidate"],
+              "make_target": "test-e2e-browser",
+              "timeout_minutes": 45
+            }
+          }
+        ]
+      },
+      {
+        "suite": {
+          "name": "forge",
+          "owner": "forge",
+          "entrypoint": "forge/test/e2e"
+        },
+        "scenarios": [
+          {
+            "id": "forge/cpu",
+            "metadata": {
+              "name": "cpu",
+              "tier": "F3",
+              "fixture_modes": ["source", "candidate"],
+              "make_target": "test-e2e",
+              "timeout_minutes": 70,
+              "capacity": "cpu",
+              "mandatory_capacity": true
+            }
+          },
+          {
+            "id": "forge/gpu",
+            "metadata": {
+              "name": "gpu",
+              "tier": "F3",
+              "fixture_modes": ["source", "candidate"],
+              "make_target": "test-e2e-gpu",
+              "timeout_minutes": 110,
+              "capacity": "gpu",
+              "mandatory_capacity": true
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "expected": {
+    "fixture_mode": "source",
+    "scenario_total": 4,
+    "owner_totals": {
+      "charts": 1,
+      "control-plane": 1,
+      "forge": 2
+    },
+    "selected_scenario_ids": [
+      "charts/transition",
+      "control-plane/browser",
+      "forge/cpu",
+      "forge/gpu"
+    ],
+    "kind_matrix": [
+      {
+        "id": "charts/transition",
+        "owner": "charts",
+        "entrypoint": "charts/test/e2e",
+        "name": "transition",
+        "target": "test-e2e-transition",
+        "tier": "F2",
+        "fixture_mode": "source",
+        "scenario_timeout": 40,
+        "timeout": 45,
+        "artifact": "charts-transition"
+      },
+      {
+        "id": "control-plane/browser",
+        "owner": "control-plane",
+        "entrypoint": "control-plane/test/e2e",
+        "name": "browser",
+        "target": "test-e2e-browser",
+        "tier": "F2",
+        "fixture_mode": "source",
+        "scenario_timeout": 45,
+        "timeout": 50,
+        "artifact": "control-plane-browser"
+      }
+    ],
+    "real_machine_matrix": [
+      {
+        "id": "forge/cpu",
+        "owner": "forge",
+        "entrypoint": "forge/test/e2e",
+        "name": "cpu",
+        "target": "test-e2e",
+        "tier": "F3",
+        "fixture_mode": "source",
+        "scenario_timeout": 70,
+        "timeout": 75,
+        "artifact": "forge-cpu",
+        "capacity": "cpu",
+        "mandatory": true
+      },
+      {
+        "id": "forge/gpu",
+        "owner": "forge",
+        "entrypoint": "forge/test/e2e",
+        "name": "gpu",
+        "target": "test-e2e-gpu",
+        "tier": "F3",
+        "fixture_mode": "source",
+        "scenario_timeout": 110,
+        "timeout": 115,
+        "artifact": "forge-gpu",
+        "capacity": "gpu",
+        "mandatory": true
+      }
+    ]
+  }
+}

@@ -44,12 +44,39 @@ jobs:
       forge_e2e: ${{ steps.select.outputs.forge_e2e }}
       forge_real_e2e: ${{ steps.select.outputs.forge_real_e2e }}
       charts: ${{ steps.select.outputs.charts }}
+      nightly_kind_matrix: ${{ steps.nightly.outputs.nightly_kind_matrix }}
+      nightly_real_machine_matrix: ${{ steps.nightly.outputs.nightly_real_machine_matrix }}
+      nightly_owner_totals: ${{ steps.nightly.outputs.nightly_owner_totals }}
+      nightly_scenario_total: ${{ steps.nightly.outputs.nightly_scenario_total }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           fetch-depth: 0
-      - name: Test path-selection fixture matrix
-        run: python3 .github/scripts/test_select_ci.py
+      - uses: ./.github/actions/setup-go
+        with:
+          go-version: 1.26.5
+          cache-dependency-path: ${{ env.GO_CACHE_DEPENDENCIES }}
+          cache-scope: e2e-nightly-catalogue
+      - name: Test path and nightly selection fixtures
+        run: |
+          python3 .github/scripts/test_select_ci.py
+          python3 .github/scripts/test_nightly_e2e.py
+      - name: Select the complete compiled nightly catalogue
+        id: nightly
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+        run: >-
+          python3 .github/scripts/nightly_e2e.py plan
+          --source-sha "$SOURCE_SHA"
+          --output nightly-e2e-plan.json
+          --github-output "$GITHUB_OUTPUT"
+      - name: Retain scheduled catalogue selection evidence
+        if: github.event_name == 'schedule'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: nightly-e2e-plan
+          path: nightly-e2e-plan.json
+          retention-days: 30
       - name: Collect changed paths
         id: paths
         env:
@@ -133,9 +160,8 @@ jobs:
     name: digitalocean-gpu
     needs: [changes, harness]
     if: >-
-      github.event_name == 'schedule' ||
-      (needs.changes.outputs.forge_real_e2e == 'true' &&
-      (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'))
+      needs.changes.outputs.forge_real_e2e == 'true' &&
+      (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     timeout-minutes: 115
     env:
@@ -272,6 +298,64 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  nightly-kind:
+    name: nightly-${{ matrix.id }}
+    needs: changes
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ matrix.timeout }}
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        include: ${{ fromJSON(needs.changes.outputs.nightly_kind_matrix) }}
+    concurrency:
+      group: e2e-nightly-${{ matrix.artifact }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: ./.github/actions/setup-go
+        with:
+          go-version: 1.26.5
+          cache-dependency-path: ${{ env.GO_CACHE_DEPENDENCIES }}
+          cache-scope: e2e-nightly-${{ matrix.artifact }}
+      - uses: ./.github/actions/setup-kubernetes-tools
+      - uses: ./.github/actions/setup-node
+        if: matrix.target == 'test-e2e-browser'
+        with:
+          node-version: 24.19.0
+          cache-dependency-path: control-plane/test/e2e/playwright/package-lock.json
+          cache-scope: e2e-nightly-control-plane-browser
+      - uses: ./.github/actions/cache-helm
+        if: matrix.owner == 'charts'
+        with:
+          cache-scope: nightly-${{ matrix.artifact }}
+      - name: Add external chart repositories
+        if: matrix.owner == 'charts'
+        run: .github/scripts/add_helm_repositories.sh
+      - name: Build source chart dependencies
+        if: matrix.owner == 'charts'
+        run: make build-deps
+        working-directory: charts
+      - name: Run required source owner scenario
+        working-directory: ${{ matrix.owner }}
+        env:
+          ITERABASE_E2E_FIXTURE_MODE: ${{ matrix.fixture_mode }}
+          ITERABASE_E2E_SOURCE_SHA: ${{ github.sha }}
+          ITERABASE_E2E_SOURCE_DIRTY: "false"
+          ITERABASE_E2E_DIAGNOSTICS: ${{ runner.temp }}/nightly-kind-diagnostics/${{ matrix.artifact }}
+          E2E_SKIP_BUILD_DEPS: ${{ matrix.owner == 'charts' && 'true' || 'false' }}
+          PLAYWRIGHT_INSTALL_ARGS: ${{ matrix.target == 'test-e2e-browser' && '--with-deps chromium' || 'chromium' }}
+        run: make '${{ matrix.target }}'
+      - name: Upload redacted nightly failure diagnostics
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: nightly-kind-diagnostics-${{ matrix.artifact }}
+          path: ${{ runner.temp }}/nightly-kind-diagnostics/${{ matrix.artifact }}
+          if-no-files-found: ignore
+          retention-days: 7
+
   charts-runtime:
     name: charts-runtime
     needs: changes
@@ -283,6 +367,53 @@ jobs:
       actions: read
     uses: ./.github/workflows/charts-runtime.yml
 
+  nightly-real-machine:
+    name: nightly-${{ matrix.id }}
+    needs: [changes, harness]
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ matrix.timeout }}
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include: ${{ fromJSON(needs.changes.outputs.nightly_real_machine_matrix) }}
+    concurrency:
+      group: e2e-digitalocean-${{ matrix.capacity }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: ./.github/actions/setup-go
+        with:
+          go-version: 1.26.5
+          cache-dependency-path: ${{ env.GO_CACHE_DEPENDENCIES }}
+          cache-scope: e2e-nightly-real-${{ matrix.capacity }}
+      - uses: ./.github/actions/setup-kubernetes-tools
+      - name: Require mandatory capacity credentials
+        env:
+          DIGITALOCEAN_TOKEN: ${{ secrets.DIGITALOCEAN_TOKEN }}
+        run: test -n "$DIGITALOCEAN_TOKEN"
+      - name: Run required source real-machine scenario
+        working-directory: ${{ matrix.owner }}
+        env:
+          DIGITALOCEAN_TOKEN: ${{ secrets.DIGITALOCEAN_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FORGE_E2E_REQUIRE_CAPACITY: "true"
+          ITERABASE_E2E_FIXTURE_MODE: ${{ matrix.fixture_mode }}
+          ITERABASE_E2E_SOURCE_SHA: ${{ github.sha }}
+          ITERABASE_E2E_SOURCE_DIRTY: "false"
+          ITERABASE_E2E_SOURCE_INPUTS: ${{ github.workspace }}/forge/test/e2e/published-fixture.json
+          ITERABASE_E2E_DIAGNOSTICS: ${{ runner.temp }}/nightly-real-machine-diagnostics/${{ matrix.artifact }}
+        run: make '${{ matrix.target }}'
+      - name: Upload redacted nightly real-machine failure diagnostics
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: nightly-real-machine-diagnostics-${{ matrix.artifact }}
+          path: ${{ runner.temp }}/nightly-real-machine-diagnostics/${{ matrix.artifact }}
+          if-no-files-found: ignore
+          retention-days: 7
+
   required:
     name: E2E / required
     if: always()
@@ -293,19 +424,16 @@ jobs:
       - digitalocean-gpu
       - control-plane-kind
       - control-plane-execution-kind
+      - nightly-kind
       - charts-runtime
+      - nightly-real-machine
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - name: Require every selected E2E owner
         env:
+          EVENT_NAME: ${{ github.event_name }}
           NEEDS: ${{ toJSON(needs) }}
-        run: |
-          python3 - <<'PY'
-          import json, os, sys
-          needs = json.loads(os.environ["NEEDS"])
-          failed = {name: job["result"] for name, job in needs.items() if job["result"] not in {"success", "skipped"}}
-          print("selected E2E results:", json.dumps({name: job["result"] for name, job in needs.items()}, sort_keys=True))
-          if failed:
-              print("required E2E owners failed:", json.dumps(failed, sort_keys=True), file=sys.stderr)
-              raise SystemExit(1)
-          PY
+        run: >-
+          python3 .github/scripts/nightly_e2e.py validate-results
+          --event-name "$EVENT_NAME"
