@@ -2,6 +2,7 @@ package e2e
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -86,10 +87,10 @@ func (diagnostics *forgeDiagnostics) collectSSH(t *testing.T, ip, keyPath string
 }
 
 // registerBootstrapSecrets returns whether full pod-log collection is safe.
-// If a bootstrap pod exists, its complete init-container log must expose the
-// expected admin and token credentials in the reviewed format. Inspection is
-// deliberately broader than the shared collector's retained tail so no older
-// literal can be missed before generic pod logs are persisted.
+// If a bootstrap pod exists, every current and retained previous bootstrap log
+// must expose the expected admin and token credentials in the reviewed format.
+// Inspection reads complete logs, which is deliberately broader than the shared
+// collector's retained tail, before generic current/previous logs are persisted.
 func (diagnostics *forgeDiagnostics) registerBootstrapSecrets(t *testing.T, ip, keyPath string) bool {
 	t.Helper()
 	if ip == "" {
@@ -101,30 +102,89 @@ func (diagnostics *forgeDiagnostics) registerBootstrapSecrets(t *testing.T, ip, 
 		return false
 	}
 	defer client.Close()
-	pods, err := sshOutput(client, "sudo k3s kubectl get pods -n iterabase-system -l app.kubernetes.io/component=api -o name")
+	pods, err := sshOutput(client, bootstrapPodStatusCommand())
 	if err != nil {
 		t.Logf("skip shared pod-log diagnostics because bootstrap pod presence cannot be inspected: %v", err)
 		return false
 	}
-	if strings.TrimSpace(pods) == "" {
-		return true
-	}
-	output, err := sshOutput(client, bootstrapCredentialLogCommand())
+	requests, err := bootstrapLogRequests(pods)
 	if err != nil {
-		t.Logf("skip shared pod-log diagnostics because bootstrap credentials cannot be inspected: %v", err)
+		t.Logf("skip shared pod-log diagnostics because bootstrap pod status cannot be inspected: %v", err)
 		return false
 	}
-	secrets, err := bootstrapSecretLiterals(output)
-	if err != nil {
-		t.Logf("skip shared pod-log diagnostics because bootstrap credential evidence is incomplete: %v", err)
-		return false
+	secrets := make([]string, 0, len(requests)*2)
+	for _, request := range requests {
+		output, outputErr := sshOutput(client, bootstrapCredentialLogCommand(request))
+		if outputErr != nil {
+			t.Logf("skip shared pod-log diagnostics because %s bootstrap credentials cannot be inspected: %v", request.source(), outputErr)
+			return false
+		}
+		literals, literalErr := bootstrapSecretLiterals(output)
+		if literalErr != nil {
+			t.Logf("skip shared pod-log diagnostics because %s bootstrap credential evidence is incomplete: %v", request.source(), literalErr)
+			return false
+		}
+		secrets = append(secrets, literals...)
 	}
 	diagnostics.redactor.Add(secrets...)
 	return true
 }
 
-func bootstrapCredentialLogCommand() string {
-	return "sudo k3s kubectl logs -n iterabase-system -l app.kubernetes.io/component=api -c bootstrap --tail=-1 --max-log-requests=20"
+type bootstrapLogRequest struct {
+	pod      string
+	previous bool
+}
+
+func (request bootstrapLogRequest) source() string {
+	if request.previous {
+		return "previous"
+	}
+	return "current"
+}
+
+func bootstrapPodStatusCommand() string {
+	return "sudo k3s kubectl get pods -n iterabase-system -l app.kubernetes.io/component=api -o json"
+}
+
+func bootstrapLogRequests(output string) ([]bootstrapLogRequest, error) {
+	var pods struct {
+		Items []struct {
+			Metadata struct {
+				Name string `json:"name"`
+			} `json:"metadata"`
+			Status struct {
+				InitContainerStatuses []struct {
+					Name         string `json:"name"`
+					RestartCount int32  `json:"restartCount"`
+				} `json:"initContainerStatuses"`
+			} `json:"status"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal([]byte(output), &pods); err != nil {
+		return nil, fmt.Errorf("decode bootstrap pod status: %w", err)
+	}
+	requests := make([]bootstrapLogRequest, 0, len(pods.Items)*2)
+	for _, pod := range pods.Items {
+		if pod.Metadata.Name == "" {
+			return nil, fmt.Errorf("bootstrap pod status has no name")
+		}
+		requests = append(requests, bootstrapLogRequest{pod: pod.Metadata.Name})
+		for _, status := range pod.Status.InitContainerStatuses {
+			if status.Name == "bootstrap" && status.RestartCount > 0 {
+				requests = append(requests, bootstrapLogRequest{pod: pod.Metadata.Name, previous: true})
+				break
+			}
+		}
+	}
+	return requests, nil
+}
+
+func bootstrapCredentialLogCommand(request bootstrapLogRequest) string {
+	previous := ""
+	if request.previous {
+		previous = " --previous"
+	}
+	return fmt.Sprintf("sudo k3s kubectl logs -n iterabase-system %q -c bootstrap%s --tail=-1", request.pod, previous)
 }
 
 func bootstrapSecretLiterals(output string) ([]string, error) {
@@ -264,19 +324,74 @@ func TestBootstrapSecretLiteralsRequireExpectedCredentialShapes(t *testing.T) {
 	}
 }
 
-func TestBootstrapCredentialInspectionCoversCollectorLogRange(t *testing.T) {
+func TestBootstrapCredentialInspectionCoversCurrentAndPreviousCollectorLogs(t *testing.T) {
 	t.Parallel()
-	if !strings.Contains(bootstrapCredentialLogCommand(), "--tail=-1") {
-		t.Fatalf("bootstrap inspection must read the complete log: %s", bootstrapCredentialLogCommand())
-	}
-	output := "Admin API key (scope=admin): old-admin-secret\n" +
-		"Service account API key (scope=token): old-token-secret\n" +
-		strings.Repeat("later log line\n", shareddiagnostics.PodLogTailLines+50)
-	secrets, err := bootstrapSecretLiterals(output)
+	requests, err := bootstrapLogRequests(`{
+		"items": [{
+			"metadata": {"name": "api-0"},
+			"status": {"initContainerStatuses": [{"name": "bootstrap", "restartCount": 1}]}
+		}]
+	}`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(secrets) != 2 {
-		t.Fatalf("bootstrap secrets outside retained tail were not registered: %v", secrets)
+	if len(requests) != 2 || requests[0].previous || !requests[1].previous {
+		t.Fatalf("bootstrap log requests = %+v, want current and previous", requests)
+	}
+
+	outputs := []string{
+		"Admin API key (scope=admin): current-admin-secret\n" +
+			"Service account API key (scope=token): current-token-secret\n" +
+			strings.Repeat("later current log line\n", shareddiagnostics.PodLogTailLines+50),
+		"Admin API key (scope=admin): previous-admin-secret\n" +
+			"Service account API key (scope=token): previous-token-secret\n" +
+			strings.Repeat("later previous log line\n", shareddiagnostics.PodLogTailLines+50),
+	}
+	var secrets []string
+	for index, request := range requests {
+		command := bootstrapCredentialLogCommand(request)
+		if !strings.Contains(command, "--tail=-1") {
+			t.Fatalf("bootstrap inspection must read the complete log: %s", command)
+		}
+		if request.previous != strings.Contains(command, "--previous") {
+			t.Fatalf("bootstrap previous-log command mismatch: request=%+v command=%s", request, command)
+		}
+		literals, literalErr := bootstrapSecretLiterals(outputs[index])
+		if literalErr != nil {
+			t.Fatal(literalErr)
+		}
+		secrets = append(secrets, literals...)
+	}
+	if strings.Join(secrets, ",") != "current-admin-secret,current-token-secret,previous-admin-secret,previous-token-secret" {
+		t.Fatalf("current/previous bootstrap secrets were not all registered: %v", secrets)
+	}
+}
+
+func TestBootstrapCredentialInspectionRejectsChangedPreviousFormat(t *testing.T) {
+	t.Parallel()
+	previous := "Admin bootstrap credential (scope=admin) => previous-admin-secret\n" +
+		"Service account API key (scope=token): previous-token-secret\n"
+	secrets, err := bootstrapSecretLiterals(previous)
+	if err == nil || secrets != nil {
+		t.Fatalf("changed previous bootstrap credential format accepted: secrets=%v err=%v", secrets, err)
+	}
+	if strings.Contains(err.Error(), "previous-admin-secret") {
+		t.Fatalf("bootstrap parse error leaked previous credential: %v", err)
+	}
+}
+
+func TestBootstrapCredentialInspectionOmitsPreviousWithoutRestart(t *testing.T) {
+	t.Parallel()
+	requests, err := bootstrapLogRequests(`{
+		"items": [{
+			"metadata": {"name": "api-0"},
+			"status": {"initContainerStatuses": [{"name": "bootstrap", "restartCount": 0}]}
+		}]
+	}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(requests) != 1 || requests[0].previous {
+		t.Fatalf("bootstrap log requests = %+v, want current only", requests)
 	}
 }
