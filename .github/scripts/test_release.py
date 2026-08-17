@@ -943,7 +943,7 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertNotIn("FORGE_E2E_USE_LATEST_RELEASE", workflow)
         self.assertNotIn("published-latest", workflow)
         self.assertIn("ITERABASE_E2E_FIXTURE_MODE: source", workflow)
-        self.assertEqual(workflow.count("ITERABASE_E2E_SOURCE_INPUTS:"), 2)
+        self.assertEqual(workflow.count("ITERABASE_E2E_SOURCE_INPUTS:"), 3)
         self.assertNotIn("ITERABASE_E2E_FIXTURE_MODE: published", workflow)
         self.assertIn("forge/test/e2e/published-fixture.json", workflow)
         candidate = (ROOT / ".github" / "workflows" / "release-candidate.yml").read_text()
