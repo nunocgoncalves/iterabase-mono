@@ -142,7 +142,6 @@ jobs:
       ITERABASE_E2E_FIXTURE_MODE: source
       ITERABASE_E2E_SOURCE_SHA: ${{ github.sha }}
       ITERABASE_E2E_SOURCE_INPUTS: ${{ github.workspace }}/forge/test/e2e/published-fixture.json
-      ITERABASE_E2E_DIAGNOSTICS: ${{ runner.temp }}/forge-diagnostics
     concurrency:
       group: e2e-digitalocean-gpu
       cancel-in-progress: false
@@ -160,6 +159,7 @@ jobs:
         env:
           DIGITALOCEAN_TOKEN: ${{ secrets.DIGITALOCEAN_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ITERABASE_E2E_DIAGNOSTICS: ${{ runner.temp }}/forge-diagnostics
       - name: Intentional HOR-411 broken-policy red proof
         if: inputs.gpu_policy_red_proof == true
         run: make test-e2e-gpu-broken-policy
@@ -167,6 +167,7 @@ jobs:
         env:
           DIGITALOCEAN_TOKEN: ${{ secrets.DIGITALOCEAN_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ITERABASE_E2E_DIAGNOSTICS: ${{ runner.temp }}/forge-diagnostics
       - name: Upload redacted GPU failure diagnostics
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
