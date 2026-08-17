@@ -606,6 +606,16 @@ func mustSessionUID(t *testing.T, env *dispatchEnv, sessionID string) uint32 {
 	return uid
 }
 
+func markSessionUIDGraceElapsed(t *testing.T, env *dispatchEnv, sessionID string) {
+	t.Helper()
+	tag, err := env.pgpool.Exec(context.Background(), `
+		UPDATE runtime.session_uid_allocations
+		   SET freed_at = now() - interval '48 hours'
+		 WHERE session_id = $1 AND state = 'freed'`, sessionID)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), tag.RowsAffected(), "expected one freed session UID allocation")
+}
+
 // TestDispatch_SessionUIDRecyclesAfterGrace: a freed UID becomes recyclable
 // only after the non-recycling reap grace elapses, and a new session then
 // reclaims the expired freed row (UPSERT on uid, not a rejected insert). This
@@ -615,46 +625,47 @@ func TestDispatch_SessionUIDRecyclesAfterGrace(t *testing.T) {
 	env := newDispatchEnv(t)
 	ctx := context.Background()
 
-	const tinyGrace = 50 * time.Millisecond
+	// Keep the before-grace state far from the boundary, then move freed_at to
+	// the after-grace side directly. The former 50ms grace plus sleeps allowed
+	// database work and runner scheduling to cross the boundary before the
+	// exhaustion assertion.
+	const grace = 24 * time.Hour
 	const base, n uint32 = 10000, 4 // small range so recycling is observable
 
-	uidA, err := env.store.AllocateSessionUID(ctx, "sess-A", base, n, tinyGrace)
+	uidA, err := env.store.AllocateSessionUID(ctx, "sess-A", base, n, grace)
 	require.NoError(t, err)
-	// Within grace: a new session must NOT recycle sess-A's freed UID.
 	require.NoError(t, env.store.ReleaseSessionUID(ctx, "sess-A"))
-	uidB, err := env.store.AllocateSessionUID(ctx, "sess-B", base, n, tinyGrace)
+
+	// Within grace, neither the owning session nor a new session can reclaim
+	// sess-A's UID while its prior sandbox may still be reaping.
+	_, err = env.store.AllocateSessionUID(ctx, "sess-A", base, n, grace)
+	require.ErrorIs(t, err, dispatch.ErrUIDExhausted, "freed UID within grace must not be reactivated by its owning session")
+	uidB, err := env.store.AllocateSessionUID(ctx, "sess-B", base, n, grace)
 	require.NoError(t, err)
-	assert.NotEqual(t, uidA, uidB, "freed UID within grace must not be recycled")
+	assert.NotEqual(t, uidA, uidB, "freed UID within grace must not be recycled to another session")
 
 	// Exhaust the remaining range so recycling is the only way to satisfy a
 	// new allocation once the grace elapses.
-	_, err = env.store.AllocateSessionUID(ctx, "sess-C", base, n, tinyGrace)
+	_, err = env.store.AllocateSessionUID(ctx, "sess-C", base, n, grace)
 	require.NoError(t, err)
-	_, err = env.store.AllocateSessionUID(ctx, "sess-D", base, n, tinyGrace)
+	_, err = env.store.AllocateSessionUID(ctx, "sess-D", base, n, grace)
 	require.NoError(t, err)
-	// Range is now fully allocated (4 UIDs); a new session must fail closed.
-	_, err = env.store.AllocateSessionUID(ctx, "sess-E", base, n, tinyGrace)
-	require.ErrorIs(t, err, dispatch.ErrUIDExhausted)
+	_, err = env.store.AllocateSessionUID(ctx, "sess-E", base, n, grace)
+	require.ErrorIs(t, err, dispatch.ErrUIDExhausted, "within-grace UID must remain unavailable when the range is exhausted")
 
-	// Release sess-A and wait past the grace; its UID must now recycle to a
-	// new session (the allocator reclaims the expired freed row).
-	require.NoError(t, env.store.ReleaseSessionUID(ctx, "sess-A"))
-	time.Sleep(2 * tinyGrace)
-	uidE, err := env.store.AllocateSessionUID(ctx, "sess-E", base, n, tinyGrace)
+	// Move sess-A's release timestamp past grace without sleeping. A new
+	// session must reclaim that exact UID from the otherwise exhausted range.
+	markSessionUIDGraceElapsed(t, env, "sess-A")
+	uidE, err := env.store.AllocateSessionUID(ctx, "sess-E", base, n, grace)
 	require.NoError(t, err)
 	assert.Equal(t, uidA, uidE, "freed UID past grace must be recycled to a new session")
 
-	// A freed UID is non-recyclable even for the owning session until the grace
-	// elapses (HOR-245: the (sandbox_id, uid, gid) triple is non-recyclable until
-	// reaping is confirmed; re-provisioning the same UID while the prior sandbox
-	// may still be reaping would let a new child collide with the live sandbox).
+	// The same before/after boundary applies to the owning session.
 	require.NoError(t, env.store.ReleaseSessionUID(ctx, "sess-E"))
-	_, err = env.store.AllocateSessionUID(ctx, "sess-E", base, n, tinyGrace)
+	_, err = env.store.AllocateSessionUID(ctx, "sess-E", base, n, grace)
 	require.ErrorIs(t, err, dispatch.ErrUIDExhausted, "freed UID within grace must not be reactivated, even for the same session")
-
-	// Past grace, the same session reclaims its freed UID (reap complete).
-	time.Sleep(2 * tinyGrace)
-	uidE2, err := env.store.AllocateSessionUID(ctx, "sess-E", base, n, tinyGrace)
+	markSessionUIDGraceElapsed(t, env, "sess-E")
+	uidE2, err := env.store.AllocateSessionUID(ctx, "sess-E", base, n, grace)
 	require.NoError(t, err)
 	assert.Equal(t, uidE, uidE2, "freed UID past grace is reclaimed by the same session")
 }
