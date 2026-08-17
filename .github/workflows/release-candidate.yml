@@ -658,7 +658,16 @@ jobs:
           FORGE_E2E_REQUIRE_CAPACITY: "true"
           ITERABASE_E2E_FIXTURE_MODE: candidate
           ITERABASE_E2E_CANDIDATE_PLAN: ${{ github.workspace }}/candidate-plan.json
+          ITERABASE_E2E_DIAGNOSTICS: ${{ runner.temp }}/candidate-forge-diagnostics
         run: make ${{ matrix.target }}
+      - name: Upload redacted real-machine failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: candidate-forge-diagnostics-${{ matrix.name }}
+          path: ${{ runner.temp }}/candidate-forge-diagnostics/digitalocean-${{ matrix.name }}
+          if-no-files-found: ignore
+          retention-days: 7
 
   validation:
     name: Candidate validation / required

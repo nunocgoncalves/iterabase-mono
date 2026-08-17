@@ -1,4 +1,4 @@
-.PHONY: build test test-unit test-e2e test-e2e-overlay test-e2e-secrets test-e2e-flux test-e2e-controlplane test-e2e-gpu test-e2e-gpu-broken-policy test-e2e-inference test-e2e-inference-gpu test-e2e-tool-runner test-e2e-unit lint fmt fmt-check install-hooks clean
+.PHONY: build test test-unit test-e2e test-e2e-overlay test-e2e-secrets test-e2e-flux test-e2e-gpu test-e2e-gpu-broken-policy test-e2e-inference-gpu test-e2e-unit lint fmt fmt-check install-hooks clean
 
 # Load .env if present (e.g. DIGITALOCEAN_TOKEN for e2e). .env is gitignored.
 -include .env
@@ -63,21 +63,12 @@ test-e2e-gpu-broken-policy:
 # Compatibility alias: real inference now follows GPU smoke on the same VM.
 test-e2e-inference-gpu: test-e2e-gpu
 
-test-e2e-controlplane:
-	cd test/e2e && go test -v -race -count=1 -timeout 15m -run '^TestE2E$$/^kind-controlplane-identity$$' .
-
-test-e2e-tool-runner:
-	cd test/e2e && go test -v -race -count=1 -timeout 30m -run '^TestE2E$$/^kind-tool-runner-contract$$' .
-
-test-e2e-inference:
-	cd test/e2e && go test -v -race -count=1 -timeout 15m -run '^TestE2E$$/^kind-inference-contract$$' .
-
-# Run the hermetic shared-runner scenario, package-level pure tests excluding
-# infrastructure scenarios, and pure Kind/chart helper tests.
+# Run the hermetic shared-runner scenario and Forge-specific fixture,
+# diagnostics, GPU-transition, and candidate-composition tests. Direct chart
+# install/product Kind scenarios live only in their authoritative owner suites.
 test-e2e-unit:
 	cd test/e2e && go test -race -count=1 -run '^TestE2E$$/^hermetic-example$$' .
 	cd test/e2e && go test -race -count=1 -skip '^TestE2E$$' .
-	cd test/e2e && go test -race -count=1 ./internal/...
 
 lint:
 	golangci-lint run ./...

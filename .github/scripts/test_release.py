@@ -93,45 +93,35 @@ class ReleaseContractTests(unittest.TestCase):
         expected = {
             "control-plane": (
                 {
-                    "controlplane-identity",
                     "deployed-identity-api",
                     "deployed-work-recovery",
                     "deployed-artifact-durability",
                     "deployed-execution-contracts",
-                    "inference-contract",
                     "internal-tls",
-                    "tool-runner-contract",
                 },
                 set(),
             ),
             "inference-gateway": (
-                {"deployed-execution-contracts", "inference-contract", "internal-tls"},
+                {"deployed-execution-contracts", "internal-tls"},
                 set(),
             ),
             "forge": (set(), {"cpu", "gpu"}),
             "control-plane-chart": (
                 {
-                    "controlplane-identity",
                     "deployed-identity-api",
                     "deployed-work-recovery",
                     "deployed-artifact-durability",
                     "deployed-execution-contracts",
-                    "tool-runner-contract",
                 },
                 set(),
             ),
-            "inference-gateway-chart": (
-                {"deployed-execution-contracts", "inference-contract"}, set()
-            ),
+            "inference-gateway-chart": ({"deployed-execution-contracts"}, set()),
             "iterabase-platform-chart": (
                 {
-                    "controlplane-identity",
                     "deployed-identity-api",
                     "deployed-work-recovery",
                     "deployed-artifact-durability",
                     "deployed-execution-contracts",
-                    "inference-contract",
-                    "tool-runner-contract",
                 },
                 {"cpu", "gpu"},
             ),
@@ -171,14 +161,11 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertEqual(
             {item["name"] for item in plan["kind_matrix"]},
             {
-                "controlplane-identity",
                 "deployed-identity-api",
                 "deployed-work-recovery",
                 "deployed-artifact-durability",
                 "deployed-browser-journeys",
                 "deployed-execution-contracts",
-                "inference-contract",
-                "tool-runner-contract",
             },
         )
         self.assertEqual(
@@ -194,9 +181,6 @@ class ReleaseContractTests(unittest.TestCase):
                 "control-plane/deployed-work-recovery",
                 "forge/digitalocean-cpu",
                 "forge/digitalocean-gpu",
-                "forge/kind-controlplane-identity",
-                "forge/kind-inference-contract",
-                "forge/kind-tool-runner-contract",
                 "charts/certificate-ownership-migration",
                 "charts/fresh-install",
                 "charts/feature-enable-upgrade",
@@ -234,7 +218,7 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertEqual([item["chart"] for item in plan["chart_matrix"]], ["control-plane"])
         self.assertTrue(plan["forge"])
         self.assertTrue(plan["real_machine"])
-        self.assertEqual(len(plan["kind_matrix"]), 8)
+        self.assertEqual(len(plan["kind_matrix"]), 5)
 
     def test_single_forge_target_remains_supported(self) -> None:
         plan = self.plan("forge")
@@ -341,7 +325,6 @@ class ReleaseContractTests(unittest.TestCase):
                 for item in plan["baseline_dependencies"]["charts"]
             },
             {
-                "control-plane": "0.4.9",
                 "iterabase-platform": "0.3.11",
                 "cert-manager-substrate": "0.3.11",
             },
@@ -961,7 +944,8 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertNotIn("published-latest", workflow)
         self.assertIn("ITERABASE_E2E_FIXTURE_MODE: source", workflow)
         self.assertEqual(workflow.count("ITERABASE_E2E_SOURCE_INPUTS:"), 2)
-        self.assertIn("ITERABASE_E2E_FIXTURE_MODE: published", workflow)
+        self.assertNotIn("ITERABASE_E2E_FIXTURE_MODE: published", workflow)
+        self.assertIn("forge/test/e2e/published-fixture.json", workflow)
         candidate = (ROOT / ".github" / "workflows" / "release-candidate.yml").read_text()
         self.assertIn("real_machine_matrix", candidate)
         self.assertIn("include: ${{ fromJSON(needs.preflight.outputs.real_machine_matrix) }}", candidate)

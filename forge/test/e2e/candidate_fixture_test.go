@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/nunocgoncalves/iterabase-mono/forge/test/e2e/internal/kindtest"
+	"github.com/nunocgoncalves/iterabase-mono/forge/test/e2e/internal/remotecluster"
 )
 
 const (
@@ -14,24 +14,6 @@ const (
 	inferenceGatewayDigestEnv = "INFERENCE_GATEWAY_IMAGE_DIGEST"
 	toolRunnerDigestEnv       = "TOOL_RUNNER_IMAGE_DIGEST"
 )
-
-// applyCandidateImageOverrides keeps release validation on the normal chart
-// surface while replacing only explicitly selected component artifacts. An
-// unset value remains manifest/chart pinned; there is no floating fallback.
-func applyCandidateImageOverrides(values map[string]string) {
-	if repository := os.Getenv("CONTROL_PLANE_IMAGE_REPO"); repository != "" {
-		values["control-plane.image.repository"] = repository
-	}
-	if tag := os.Getenv("CONTROL_PLANE_IMAGE_TAG"); tag != "" {
-		values["control-plane.image.tag"] = tag
-	}
-	if repository := os.Getenv("INFERENCE_GATEWAY_IMAGE_REPO"); repository != "" {
-		values["inference-gateway.image.repository"] = repository
-	}
-	if tag := os.Getenv("INFERENCE_GATEWAY_IMAGE_TAG"); tag != "" {
-		values["inference-gateway.image.tag"] = tag
-	}
-}
 
 type candidateContainerSpec struct {
 	Name  string `json:"name"`
@@ -47,7 +29,7 @@ type candidateContainerStatus struct {
 // Pod requested the selected index digest, and CRI reported an immutable image
 // ID for that container. For multi-platform images the runtime ID may be the
 // selected child-manifest digest rather than the parent index digest.
-func assertCandidateImageDigests(t *testing.T, cluster *kindtest.Cluster, namespace string, digestEnvs ...string) {
+func assertCandidateImageDigests(t *testing.T, cluster *remotecluster.Cluster, namespace string, digestEnvs ...string) {
 	t.Helper()
 	var pods struct {
 		Items []struct {

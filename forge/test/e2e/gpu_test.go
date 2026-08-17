@@ -142,6 +142,7 @@ type digitalOceanGPUState struct {
 	forgeHome       string
 	chartVersion    string
 	upgradeEvidence *gpuUpgradeEvidence
+	diagnostics     forgeDiagnostics
 }
 
 func newDigitalOceanGPUState(t *testing.T) *digitalOceanGPUState {
@@ -166,8 +167,8 @@ func newDigitalOceanGPUState(t *testing.T) *digitalOceanGPUState {
 		forgeBin:     buildForge(t),
 		forgeHome:    t.TempDir(),
 		chartVersion: platformChartVersion(t, ""),
+		diagnostics:  newForgeDiagnostics(t, "digitalocean-gpu"),
 	}
-	t.Cleanup(func() { state.cleanup(t) })
 	return state
 }
 
@@ -200,15 +201,13 @@ func (state *digitalOceanGPUState) cleanup(t *testing.T) {
 	if state.vm == nil {
 		return
 	}
-	if t.Failed() {
-		dumpGPUDiagnostics(t, state.vm.IP, state.privKeyPath)
-	}
 	if state.keep {
 		t.Logf("keeping GPU VM %d (run %s) for debugging", state.vm.ID, state.runID)
 		return
 	}
+	state.diagnostics.setDomain(failureDomainCleanup)
 	if err := state.provisioner.Destroy(state.ctx, state.vm.ID); err != nil {
-		t.Logf("destroy GPU VM %d: %v", state.vm.ID, err)
+		t.Errorf("destroy GPU VM %d: %v (tagged reaper remains the crash-safety fallback)", state.vm.ID, err)
 	}
 }
 

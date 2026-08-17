@@ -52,7 +52,7 @@ func newRouter(logger *slog.Logger, m *metrics.Metrics, deps *Deps) http.Handler
 		})
 
 		// Admin/debug endpoints — the legacy admin CRUD API is gone; this is a
-		// read-only view of the consumed snapshot (ops + the forge kindtest).
+		// read-only view of the consumed snapshot for ops and owner E2E smoke.
 		r.Route("/admin/v1", func(r chi.Router) {
 			if deps.AdminKey != "" {
 				r.Use(gatewaymw.AdminAuth(deps.AdminKey, logger))
@@ -127,8 +127,8 @@ func readinessHandler(cache snapshot.Reader, staleness time.Duration) http.Handl
 }
 
 // snapshotHandler exposes the gateway's consumed catalog snapshot (read-only,
-// for ops + the forge kindtest HOR-324). No secrets — API key hashes are not
-// exposed, only counts.
+// for ops and owner E2E smoke). No secrets — API key hashes are not exposed,
+// only counts.
 func snapshotHandler(cache snapshot.Reader, staleness time.Duration) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

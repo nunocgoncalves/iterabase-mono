@@ -49,6 +49,7 @@ type digitalOceanCPUState struct {
 	forgeBin     string
 	forgeHome    string
 	chartVersion string
+	diagnostics  forgeDiagnostics
 }
 
 func newDigitalOceanCPUState(t *testing.T) *digitalOceanCPUState {
@@ -61,17 +62,17 @@ func newDigitalOceanCPUState(t *testing.T) *digitalOceanCPUState {
 	}
 
 	state := &digitalOceanCPUState{
-		ctx:       context.Background(),
-		client:    godo.NewFromToken(token),
-		runID:     fmt.Sprintf("forge-e2e-%d", time.Now().Unix()),
-		keep:      os.Getenv("FORGE_E2E_KEEP") != "",
-		forgeHome: t.TempDir(),
+		ctx:         context.Background(),
+		client:      godo.NewFromToken(token),
+		runID:       fmt.Sprintf("forge-e2e-%d", time.Now().Unix()),
+		keep:        os.Getenv("FORGE_E2E_KEEP") != "",
+		forgeHome:   t.TempDir(),
+		diagnostics: newForgeDiagnostics(t, "digitalocean-cpu"),
 	}
 	state.pubKey, state.privKeyPath = generateKey(t)
 	state.forgeBin = buildForge(t)
 	state.chartVersion = platformChartVersion(t, "")
 	t.Logf("run %s (keep=%v)", state.runID, state.keep)
-	t.Cleanup(func() { state.cleanup(t) })
 	return state
 }
 
@@ -81,16 +82,17 @@ func provisionCPUStage(t *testing.T, state *digitalOceanCPUState) {
 	if err != nil {
 		t.Fatalf("create droplet: %v", err)
 	}
+	// Retain the resource identity immediately so shared scenario cleanup owns
+	// every failure after the cloud API accepts creation.
+	state.droplet = d
 	ip, err := waitForIP(state.ctx, state.client, d.ID)
 	if err != nil {
-		deleteDroplet(state.ctx, state.client, d.ID)
 		t.Fatalf("wait for droplet IP: %v", err)
 	}
+	state.ip = ip
 	if err := waitForHostReady(state.ctx, ip, state.privKeyPath); err != nil {
-		deleteDroplet(state.ctx, state.client, d.ID)
 		t.Fatalf("wait for host readiness: %v", err)
 	}
-	state.droplet, state.ip = d, ip
 	t.Logf("droplet ip %s", ip)
 }
 
@@ -123,6 +125,10 @@ func assertBaselineStage(t *testing.T, state *digitalOceanCPUState) {
 	checkGatewayHealth(t, state.ip)
 }
 
+// assertCurrentPlatformStage proves Forge handed the exact desired releases and
+// source artifact to a minimally healthy dependent layer. Chart ownership,
+// rollout, certificate, gateway, and tool-runner correctness remains in the
+// chart/control-plane owner suites.
 func assertCurrentPlatformStage(t *testing.T, state *digitalOceanCPUState) {
 	t.Helper()
 	sc, err := sshDial(state.ip, state.privKeyPath)
@@ -194,34 +200,14 @@ func (state *digitalOceanCPUState) cleanup(t *testing.T) {
 	if state.droplet == nil {
 		return
 	}
-	if t.Failed() {
-		state.dumpDiagnostics(t)
-	}
 	if state.keep {
 		t.Logf("keeping droplet %d (run %s) for debugging", state.droplet.ID, state.runID)
 		return
 	}
-	deleteDroplet(state.ctx, state.client, state.droplet.ID)
-}
-
-func (state *digitalOceanCPUState) dumpDiagnostics(t *testing.T) {
-	t.Helper()
-	sc, err := sshDial(state.ip, state.privKeyPath)
-	if err != nil {
-		t.Logf("debug pod dump: ssh dial %s failed: %v", state.ip, err)
-		return
+	state.diagnostics.setDomain(failureDomainCleanup)
+	if _, err := state.client.Droplets.Delete(state.ctx, state.droplet.ID); err != nil {
+		t.Errorf("destroy CPU droplet %d: %v (tagged reaper remains the crash-safety fallback)", state.droplet.ID, err)
 	}
-	defer sc.Close()
-	out, _ := sshOutput(sc, "sudo kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml get pods -A 2>&1")
-	t.Logf("debug pod dump (on failure):\n%s", out)
-	events, _ := sshOutput(sc, "sudo kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml get events -A --sort-by=.lastTimestamp 2>&1 | tail -30")
-	t.Logf("debug events (tail):\n%s", events)
-	runnerState, _ := sshOutput(sc, "sudo kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml get pods -n iterabase-system -l app.kubernetes.io/component=tool-runner -o yaml 2>&1")
-	t.Logf("debug tool-runner state:\n%s", runnerState)
-	runnerLogs, _ := sshOutput(sc, "sudo kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml logs -n iterabase-system -l app.kubernetes.io/component=tool-runner --all-containers --prefix --tail=200 2>&1")
-	t.Logf("debug tool-runner logs:\n%s", runnerLogs)
-	runnerPrevious, _ := sshOutput(sc, "for c in materializer runner; do echo --- $c previous; sudo kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml logs -n iterabase-system -l app.kubernetes.io/component=tool-runner -c $c --previous --tail=200 2>&1 || true; done")
-	t.Logf("debug tool-runner previous logs:\n%s", runnerPrevious)
 }
 
 func generateKey(t *testing.T) (pubKeyStr, privKeyPath string) {
@@ -273,12 +259,6 @@ func createDroplet(ctx context.Context, client *godo.Client, name, pubKeyStr str
 	}
 	d, _, err := client.Droplets.Create(ctx, req)
 	return d, err
-}
-
-// deleteDroplet best-effort deletes a droplet. Failures are swallowed: the
-// root monorepo reaper workflow cleans up any orphaned forge-e2e droplets.
-func deleteDroplet(ctx context.Context, client *godo.Client, id int) {
-	_, _ = client.Droplets.Delete(ctx, id)
 }
 
 func waitForIP(ctx context.Context, client *godo.Client, id int) (string, error) {
