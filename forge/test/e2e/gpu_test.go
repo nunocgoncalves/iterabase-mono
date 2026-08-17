@@ -37,6 +37,7 @@ type GPUVM struct {
 	ID          int
 	IP          string
 	PrivKeyPath string
+	Tags        []string
 }
 
 // ErrNoGPUCapacity signals no GPU instance could be created in any region;
@@ -57,18 +58,24 @@ func (p *doGPUVMProvisioner) Provision(ctx context.Context, runID, pubKeyStr, pr
 			lastErr = err
 			continue // capacity/availability -> try next cheapest candidate
 		}
+		vm := &GPUVM{ID: d.ID, PrivKeyPath: privKeyPath, Tags: []string{"forge-e2e", "forge-gpu-e2e", runID}}
 		ip, err := waitForIP(ctx, p.client, d.ID)
 		if err != nil {
-			_, _ = p.client.Droplets.Delete(ctx, d.ID)
+			if _, cleanupErr := p.client.Droplets.Delete(ctx, d.ID); cleanupErr != nil {
+				return vm, fmt.Errorf("wait for GPU VM %d IP: %v; immediate cleanup failed: %w", d.ID, err, cleanupErr)
+			}
 			lastErr = err
 			continue
 		}
+		vm.IP = ip
 		if err := waitForHostReady(ctx, ip, privKeyPath); err != nil {
-			_, _ = p.client.Droplets.Delete(ctx, d.ID)
+			if _, cleanupErr := p.client.Droplets.Delete(ctx, d.ID); cleanupErr != nil {
+				return vm, fmt.Errorf("wait for GPU VM %d readiness: %v; immediate cleanup failed: %w", d.ID, err, cleanupErr)
+			}
 			lastErr = err
 			continue
 		}
-		return &GPUVM{ID: d.ID, IP: ip, PrivKeyPath: privKeyPath}, nil
+		return vm, nil
 	}
 	if lastErr == nil {
 		lastErr = errors.New("no candidates")
@@ -173,7 +180,7 @@ func newDigitalOceanGPUState(t *testing.T) *digitalOceanGPUState {
 }
 
 func provisionGPUStage(t *testing.T, state *digitalOceanGPUState) {
-	vm, err := state.provisioner.Provision(state.ctx, state.runID, state.pubKey, state.privKeyPath)
+	err := provisionGPUHost(state)
 	if errors.Is(err, ErrNoGPUCapacity) {
 		if os.Getenv("FORGE_E2E_REQUIRE_CAPACITY") == "true" {
 			t.Fatalf("mandatory GPU release validation incomplete — no capacity: %v", err)
@@ -181,8 +188,16 @@ func provisionGPUStage(t *testing.T, state *digitalOceanGPUState) {
 		t.Skipf("GPU e2e skipped — no GPU capacity (try later or add Verda): %v", err)
 	}
 	require.NoError(t, err)
+	t.Logf("gpu vm ip %s (keep=%v)", state.vm.IP, state.keep)
+}
+
+func provisionGPUHost(state *digitalOceanGPUState) error {
+	vm, err := state.provisioner.Provision(state.ctx, state.runID, state.pubKey, state.privKeyPath)
+	// A provisioner can return a resource identity together with a later-stage
+	// provisioning error. Retain it so scenario cleanup, then the tagged reaper,
+	// continue to own the accepted cloud resource.
 	state.vm = vm
-	t.Logf("gpu vm ip %s (keep=%v)", vm.IP, state.keep)
+	return err
 }
 
 func applyGPUSubstrateStage(t *testing.T, state *digitalOceanGPUState) {
@@ -205,10 +220,14 @@ func (state *digitalOceanGPUState) cleanup(t *testing.T) {
 		t.Logf("keeping GPU VM %d (run %s) for debugging", state.vm.ID, state.runID)
 		return
 	}
-	state.diagnostics.setDomain(failureDomainCleanup)
-	if err := state.provisioner.Destroy(state.ctx, state.vm.ID); err != nil {
+	if err := state.destroyGPUHost(); err != nil {
 		t.Errorf("destroy GPU VM %d: %v (tagged reaper remains the crash-safety fallback)", state.vm.ID, err)
 	}
+}
+
+func (state *digitalOceanGPUState) destroyGPUHost() error {
+	state.diagnostics.setDomain(failureDomainCleanup)
+	return state.provisioner.Destroy(state.ctx, state.vm.ID)
 }
 
 // checkGPUSmoke schedules a one-off pod requesting nvidia.com/gpu that runs

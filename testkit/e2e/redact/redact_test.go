@@ -21,11 +21,12 @@ func TestRedactorRemovesRegisteredStructuredAndPEMSecrets(t *testing.T) {
 	input := `{"token":"json-secret","safe":"literal-secret","dsn":"postgres://user:pass@example/db"}
 Authorization: Bearer abc.def.ghi
 password: yaml-secret
+tls.key: quoted-base64-private-key
 -----BEGIN PRIVATE KEY-----
 private-material
 -----END PRIVATE KEY-----`
 	output := redactor.String(input)
-	for _, secret := range []string{"literal-secret", "json-secret", "pass@example", "abc.def.ghi", "yaml-secret", "private-material"} {
+	for _, secret := range []string{"literal-secret", "json-secret", "pass@example", "abc.def.ghi", "yaml-secret", "quoted-base64-private-key", "private-material"} {
 		if strings.Contains(output, secret) {
 			t.Fatalf("redacted output retains %q:\n%s", secret, output)
 		}

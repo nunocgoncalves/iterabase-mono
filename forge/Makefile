@@ -68,7 +68,7 @@ test-e2e-inference-gpu: test-e2e-gpu
 # install/product Kind scenarios live only in their authoritative owner suites.
 test-e2e-unit:
 	cd test/e2e && go test -race -count=1 -run '^TestE2E$$/^hermetic-example$$' .
-	cd test/e2e && go test -race -count=1 -skip '^TestE2E$$' .
+	cd test/e2e && go test -race -count=1 -skip '^TestE2E$$' ./...
 
 lint:
 	golangci-lint run ./...

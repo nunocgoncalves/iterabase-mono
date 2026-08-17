@@ -21,6 +21,34 @@ func (executor *fixtureExecutor) Run(_ context.Context, command process.Command)
 		return process.Result{Output: "iterabase-system\tapi-0\n"}, nil
 	case command.Name == "helm" && strings.Contains(joined, "list -A -o json"):
 		return process.Result{Output: `[{"name":"platform","namespace":"iterabase-system"}]`}, nil
+	case command.Name == "helm" && strings.Contains(joined, "get all"):
+		return process.Result{Output: `MANIFEST:
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: generated-tls
+type: kubernetes.io/tls
+data:
+  tls.crt: "public-certificate"
+  tls.key: "generated-tls-private-key-base64"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: generated-database
+stringData:
+  password: "generated-database-password"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: safe-config
+data:
+  safe: retained
+`}, nil
+	case command.Name == "helm" && strings.Contains(joined, "get values"):
+		return process.Result{Output: "tls.key: values-private-key\n"}, nil
 	default:
 		return process.Result{Output: "token: diagnostic-secret\n"}, nil
 	}
@@ -47,6 +75,16 @@ func TestCollectorCapturesRedactedKubernetesHelmAndPodEvidence(t *testing.T) {
 			t.Fatalf("missing diagnostic %s: %v", name, err)
 		}
 	}
+	helmEvidence, err := os.ReadFile(filepath.Join(output, "helm-get-iterabase-system-platform.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(helmEvidence), "safe: retained") {
+		t.Fatalf("non-Secret Helm evidence was stripped:\n%s", helmEvidence)
+	}
+	if strings.Count(string(helmEvidence), "<redacted>") < 2 {
+		t.Fatalf("generated TLS/password Secret maps were not redacted:\n%s", helmEvidence)
+	}
 	if err := filepath.Walk(output, func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() {
 			return err
@@ -55,8 +93,12 @@ func TestCollectorCapturesRedactedKubernetesHelmAndPodEvidence(t *testing.T) {
 		if readErr != nil {
 			return readErr
 		}
-		if strings.Contains(string(data), "diagnostic-secret") {
-			t.Fatalf("secret retained in %s", path)
+		for _, secret := range []string{
+			"diagnostic-secret", "generated-tls-private-key-base64", "generated-database-password", "values-private-key",
+		} {
+			if strings.Contains(string(data), secret) {
+				t.Fatalf("secret %q retained in %s", secret, path)
+			}
 		}
 		return nil
 	}); err != nil {

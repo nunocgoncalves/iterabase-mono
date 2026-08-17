@@ -37,9 +37,31 @@ const (
 	k3sPort = 6443
 )
 
+type cpuVMProvisioner interface {
+	Create(context.Context, string, string) (*godo.Droplet, error)
+	PublicIP(context.Context, int) (string, error)
+	Destroy(context.Context, int) error
+}
+
+type doCPUVMProvisioner struct{ client *godo.Client }
+
+func (provisioner *doCPUVMProvisioner) Create(ctx context.Context, runID, pubKey string) (*godo.Droplet, error) {
+	return createDroplet(ctx, provisioner.client, runID, pubKey)
+}
+
+func (provisioner *doCPUVMProvisioner) PublicIP(ctx context.Context, id int) (string, error) {
+	return waitForIP(ctx, provisioner.client, id)
+}
+
+func (provisioner *doCPUVMProvisioner) Destroy(ctx context.Context, id int) error {
+	_, err := provisioner.client.Droplets.Delete(ctx, id)
+	return err
+}
+
 type digitalOceanCPUState struct {
 	ctx          context.Context
-	client       *godo.Client
+	provisioner  cpuVMProvisioner
+	ready        func(context.Context, string, string) error
 	runID        string
 	keep         bool
 	pubKey       string
@@ -63,7 +85,8 @@ func newDigitalOceanCPUState(t *testing.T) *digitalOceanCPUState {
 
 	state := &digitalOceanCPUState{
 		ctx:         context.Background(),
-		client:      godo.NewFromToken(token),
+		provisioner: &doCPUVMProvisioner{client: godo.NewFromToken(token)},
+		ready:       waitForHostReady,
 		runID:       fmt.Sprintf("forge-e2e-%d", time.Now().Unix()),
 		keep:        os.Getenv("FORGE_E2E_KEEP") != "",
 		forgeHome:   t.TempDir(),
@@ -78,22 +101,29 @@ func newDigitalOceanCPUState(t *testing.T) *digitalOceanCPUState {
 
 func provisionCPUStage(t *testing.T, state *digitalOceanCPUState) {
 	t.Helper()
-	d, err := createDroplet(state.ctx, state.client, state.runID, state.pubKey)
+	if err := provisionCPUHost(state); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("droplet ip %s", state.ip)
+}
+
+func provisionCPUHost(state *digitalOceanCPUState) error {
+	droplet, err := state.provisioner.Create(state.ctx, state.runID, state.pubKey)
 	if err != nil {
-		t.Fatalf("create droplet: %v", err)
+		return fmt.Errorf("create droplet: %w", err)
 	}
 	// Retain the resource identity immediately so shared scenario cleanup owns
 	// every failure after the cloud API accepts creation.
-	state.droplet = d
-	ip, err := waitForIP(state.ctx, state.client, d.ID)
+	state.droplet = droplet
+	ip, err := state.provisioner.PublicIP(state.ctx, droplet.ID)
 	if err != nil {
-		t.Fatalf("wait for droplet IP: %v", err)
+		return fmt.Errorf("wait for droplet IP: %w", err)
 	}
 	state.ip = ip
-	if err := waitForHostReady(state.ctx, ip, state.privKeyPath); err != nil {
-		t.Fatalf("wait for host readiness: %v", err)
+	if err := state.ready(state.ctx, ip, state.privKeyPath); err != nil {
+		return fmt.Errorf("wait for host readiness: %w", err)
 	}
-	t.Logf("droplet ip %s", ip)
+	return nil
 }
 
 func rejectGPUOnCPUStage(t *testing.T, state *digitalOceanCPUState) {
@@ -204,10 +234,14 @@ func (state *digitalOceanCPUState) cleanup(t *testing.T) {
 		t.Logf("keeping droplet %d (run %s) for debugging", state.droplet.ID, state.runID)
 		return
 	}
-	state.diagnostics.setDomain(failureDomainCleanup)
-	if _, err := state.client.Droplets.Delete(state.ctx, state.droplet.ID); err != nil {
+	if err := state.destroyCPUHost(); err != nil {
 		t.Errorf("destroy CPU droplet %d: %v (tagged reaper remains the crash-safety fallback)", state.droplet.ID, err)
 	}
+}
+
+func (state *digitalOceanCPUState) destroyCPUHost() error {
+	state.diagnostics.setDomain(failureDomainCleanup)
+	return state.provisioner.Destroy(state.ctx, state.droplet.ID)
 }
 
 func generateKey(t *testing.T) (pubKeyStr, privKeyPath string) {

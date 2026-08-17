@@ -86,8 +86,10 @@ func (diagnostics *forgeDiagnostics) collectSSH(t *testing.T, ip, keyPath string
 }
 
 // registerBootstrapSecrets returns whether full pod-log collection is safe.
-// If bootstrap logs cannot be inspected or their credential shape changes, the
-// shared collector is skipped rather than risking retention of an unknown key.
+// If a bootstrap pod exists, its complete init-container log must expose the
+// expected admin and token credentials in the reviewed format. Inspection is
+// deliberately broader than the shared collector's retained tail so no older
+// literal can be missed before generic pod logs are persisted.
 func (diagnostics *forgeDiagnostics) registerBootstrapSecrets(t *testing.T, ip, keyPath string) bool {
 	t.Helper()
 	if ip == "" {
@@ -99,22 +101,53 @@ func (diagnostics *forgeDiagnostics) registerBootstrapSecrets(t *testing.T, ip, 
 		return false
 	}
 	defer client.Close()
-	output, err := sshOutput(client, "sudo k3s kubectl logs -n iterabase-system -l app.kubernetes.io/component=api -c bootstrap --tail=200")
+	pods, err := sshOutput(client, "sudo k3s kubectl get pods -n iterabase-system -l app.kubernetes.io/component=api -o name")
+	if err != nil {
+		t.Logf("skip shared pod-log diagnostics because bootstrap pod presence cannot be inspected: %v", err)
+		return false
+	}
+	if strings.TrimSpace(pods) == "" {
+		return true
+	}
+	output, err := sshOutput(client, bootstrapCredentialLogCommand())
 	if err != nil {
 		t.Logf("skip shared pod-log diagnostics because bootstrap credentials cannot be inspected: %v", err)
 		return false
 	}
-	matches := keyRe.FindAllStringSubmatch(output, -1)
-	if strings.Contains(strings.ToLower(output), "api key") && len(matches) == 0 {
-		t.Log("skip shared pod-log diagnostics because bootstrap credential format is unrecognized")
+	secrets, err := bootstrapSecretLiterals(output)
+	if err != nil {
+		t.Logf("skip shared pod-log diagnostics because bootstrap credential evidence is incomplete: %v", err)
 		return false
 	}
+	diagnostics.redactor.Add(secrets...)
+	return true
+}
+
+func bootstrapCredentialLogCommand() string {
+	return "sudo k3s kubectl logs -n iterabase-system -l app.kubernetes.io/component=api -c bootstrap --tail=-1 --max-log-requests=20"
+}
+
+func bootstrapSecretLiterals(output string) ([]string, error) {
+	matches := keyRe.FindAllStringSubmatch(output, -1)
+	found := make(map[string]bool)
+	secrets := make([]string, 0, len(matches))
 	for _, match := range matches {
-		if len(match) > 2 {
-			diagnostics.redactor.Add(match[2])
+		if len(match) <= 2 {
+			continue
+		}
+		found[match[1]] = true
+		secrets = append(secrets, match[2])
+	}
+	missing := make([]string, 0, 2)
+	for _, scope := range []string{"scope=admin", "scope=token"} {
+		if !found[scope] {
+			missing = append(missing, scope)
 		}
 	}
-	return true
+	if len(missing) > 0 {
+		return nil, fmt.Errorf("missing expected bootstrap credential scopes %s", strings.Join(missing, ", "))
+	}
+	return secrets, nil
 }
 
 func (diagnostics *forgeDiagnostics) collectSharedCluster(t *testing.T, kubeconfig string) {
@@ -207,5 +240,43 @@ func TestForgeDiagnosticsRecordsFailureDomain(t *testing.T) {
 	}
 	if strings.TrimSpace(string(contents)) != failureDomainDependentSmoke {
 		t.Fatalf("failure domain evidence = %q", contents)
+	}
+}
+
+func TestBootstrapSecretLiteralsRequireExpectedCredentialShapes(t *testing.T) {
+	t.Parallel()
+	valid := "Admin API key (scope=admin): admin-secret\n" +
+		"Service account API key (scope=token): token-secret\n"
+	secrets, err := bootstrapSecretLiterals(valid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(secrets, ",") != "admin-secret,token-secret" {
+		t.Fatalf("bootstrap secrets = %v", secrets)
+	}
+
+	changed := "Admin bootstrap credential (scope=admin) => changed-admin-secret\n" +
+		"Service account API key (scope=token): token-secret\n"
+	if secrets, err = bootstrapSecretLiterals(changed); err == nil || secrets != nil {
+		t.Fatalf("changed bootstrap credential format accepted: secrets=%v err=%v", secrets, err)
+	} else if strings.Contains(err.Error(), "changed-admin-secret") {
+		t.Fatalf("bootstrap parse error leaked credential: %v", err)
+	}
+}
+
+func TestBootstrapCredentialInspectionCoversCollectorLogRange(t *testing.T) {
+	t.Parallel()
+	if !strings.Contains(bootstrapCredentialLogCommand(), "--tail=-1") {
+		t.Fatalf("bootstrap inspection must read the complete log: %s", bootstrapCredentialLogCommand())
+	}
+	output := "Admin API key (scope=admin): old-admin-secret\n" +
+		"Service account API key (scope=token): old-token-secret\n" +
+		strings.Repeat("later log line\n", shareddiagnostics.PodLogTailLines+50)
+	secrets, err := bootstrapSecretLiterals(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(secrets) != 2 {
+		t.Fatalf("bootstrap secrets outside retained tail were not registered: %v", secrets)
 	}
 }

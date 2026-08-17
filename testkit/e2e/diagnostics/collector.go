@@ -16,6 +16,11 @@ import (
 	"github.com/nunocgoncalves/iterabase-mono/testkit/e2e/redact"
 )
 
+// PodLogTailLines is the maximum log range retained for each container. Owners
+// that register runtime credentials before collection must inspect at least this
+// range (or the complete log) so the redactor cannot miss an older literal.
+const PodLogTailLines = 500
+
 // Collector gathers actionable failure evidence without querying Kubernetes Secrets.
 type Collector struct {
 	Executor   process.Executor
@@ -34,9 +39,13 @@ func (collector Collector) Collect(ctx context.Context) error {
 		return err
 	}
 	var collected []error
-	run := func(name, command string, args ...string) string {
+	collect := func(name, command string, args []string, transform func(string) string) string {
 		result, err := collector.Executor.Run(ctx, process.Command{Name: command, Args: args, Timeout: 2 * time.Minute})
-		output := collector.Redactor.String(result.Output)
+		output := result.Output
+		if transform != nil {
+			output = transform(output)
+		}
+		output = collector.Redactor.String(output)
 		if writeErr := os.WriteFile(filepath.Join(collector.OutputDir, name+".log"), []byte(output), 0o600); writeErr != nil {
 			collected = append(collected, writeErr)
 		}
@@ -46,10 +55,10 @@ func (collector Collector) Collect(ctx context.Context) error {
 		return output
 	}
 	kube := func(name string, args ...string) string {
-		return run(name, "kubectl", append([]string{"--kubeconfig", collector.Kubeconfig}, args...)...)
+		return collect(name, "kubectl", append([]string{"--kubeconfig", collector.Kubeconfig}, args...), nil)
 	}
 	helm := func(name string, args ...string) string {
-		return run(name, "helm", append([]string{"--kubeconfig", collector.Kubeconfig}, args...)...)
+		return collect(name, "helm", append([]string{"--kubeconfig", collector.Kubeconfig}, args...), redactHelmSecretData)
 	}
 
 	kube("kubernetes-resources", "get",
@@ -75,8 +84,9 @@ func (collector Collector) Collect(ctx context.Context) error {
 		namespace, name := fields[0], fields[1]
 		base := safeName(namespace + "-" + name)
 		kube("describe-"+base, "describe", "pod", name, "-n", namespace)
-		kube("logs-"+base, "logs", name, "-n", namespace, "--all-containers", "--prefix", "--tail=500")
-		kube("logs-previous-"+base, "logs", name, "-n", namespace, "--all-containers", "--prefix", "--previous", "--tail=500")
+		tail := fmt.Sprintf("--tail=%d", PodLogTailLines)
+		kube("logs-"+base, "logs", name, "-n", namespace, "--all-containers", "--prefix", tail)
+		kube("logs-previous-"+base, "logs", name, "-n", namespace, "--all-containers", "--prefix", "--previous", tail)
 	}
 
 	var releases []struct {
@@ -108,4 +118,64 @@ func safeName(value string) string {
 		value = value[:150]
 	}
 	return value
+}
+
+// redactHelmSecretData removes generated and user-supplied Kubernetes Secret
+// payloads before Helm evidence is persisted. Exact literals cannot cover
+// generated base64 values such as tls.key, and "helm get all" includes rendered
+// Secret manifests even though generic Kubernetes collection excludes Secrets.
+func redactHelmSecretData(value string) string {
+	lines := strings.Split(value, "\n")
+	start := 0
+	for index := 0; index <= len(lines); index++ {
+		if index != len(lines) && strings.TrimSpace(lines[index]) != "---" {
+			continue
+		}
+		redactSecretDocument(lines[start:index])
+		start = index + 1
+	}
+	return strings.Join(lines, "\n")
+}
+
+func redactSecretDocument(lines []string) {
+	secret := false
+	for _, line := range lines {
+		if kind, found := topLevelYAMLField(line, "kind"); found && kind == "Secret" {
+			secret = true
+			break
+		}
+	}
+	if !secret {
+		return
+	}
+	for index := 0; index < len(lines); index++ {
+		_, data := topLevelYAMLField(lines[index], "data")
+		_, stringData := topLevelYAMLField(lines[index], "stringData")
+		if !data && !stringData {
+			continue
+		}
+		key, _, _ := strings.Cut(strings.TrimSpace(lines[index]), ":")
+		lines[index] = key + ": <redacted>"
+		for nested := index + 1; nested < len(lines); nested++ {
+			if strings.TrimSpace(lines[nested]) == "" {
+				continue
+			}
+			if strings.TrimLeft(lines[nested], " \t") == lines[nested] {
+				break
+			}
+			lines[nested] = ""
+			index = nested
+		}
+	}
+}
+
+func topLevelYAMLField(line, want string) (string, bool) {
+	if strings.TrimLeft(line, " \t") != line {
+		return "", false
+	}
+	key, value, found := strings.Cut(line, ":")
+	if !found || strings.TrimSpace(key) != want {
+		return "", false
+	}
+	return strings.TrimSpace(value), true
 }
