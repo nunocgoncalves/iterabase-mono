@@ -16,23 +16,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nunocgoncalves/iterabase-mono/forge/test/e2e/internal/kindtest"
+	"github.com/nunocgoncalves/iterabase-mono/forge/test/e2e/internal/remotecluster"
+	"github.com/nunocgoncalves/iterabase-mono/testkit/e2e/httpx"
 	"github.com/stretchr/testify/require"
 )
 
-// The GPU scenario's platform and inference stages run the full happy path on
-// the same cheapest-creatable GPU droplet used by the substrate smoke:
-//
-//	forge apply (k3s + GPU operator + iterabase-platform umbrella chart)
-//	  -> apply ModelBackend(kind: vLLM, Qwen/Qwen3.5-0.8B) + Model (alias)
-//	  -> the control-plane deploys vLLM (downloads the model, serves on /health)
-//	  -> apply IdentityMapping CR (identity) + POST /v1/api-keys (gateway key)
-//	  -> wait for the gateway snapshot to mark the model available (vLLM ready)
-//	  -> curl /v1/chat/completions with the gateway key -> a real completion
-//
-// Skips loudly when no GPU capacity is available so DO scarcity doesn't block
-// PRs. The contract-propagation layer is covered by the isolated Kind scenario;
-// this stage proves real serving.
+// The GPU scenario's dependent-layer smoke uses the smallest public product
+// path that proves the Forge-readied GPU can serve after exact chart/image
+// handoff. Portable ModelBackend rendering, identity, catalogue, authorization,
+// and inference correctness remain authoritative in control-plane E2E.
 func applyInferencePlatformStage(t *testing.T, state *digitalOceanGPUState) {
 	prepareCandidateChart(t, state.vm.IP, state.privKeyPath)
 	loginCandidateRegistry(t, state.vm.IP, state.privKeyPath)
@@ -46,7 +38,7 @@ func applyInferencePlatformStage(t *testing.T, state *digitalOceanGPUState) {
 	assertApplyMarkers(t, out, "action:     skip", "node ready: true", "certificate substrate applied: true",
 		"chart applied: true", "overlay applied: true", "flux installed: true", "gitrepository: ready=True")
 	t.Logf("apply output:\n%s", out)
-	candidateCluster := kindtest.UseCluster(t, state.runID, filepath.Join(state.forgeHome, state.runID, "kubeconfig.yaml"))
+	candidateCluster := remotecluster.Use(t, filepath.Join(state.forgeHome, state.runID, "kubeconfig.yaml"))
 	assertCandidateImageDigests(t, candidateCluster, "iterabase-system",
 		controlPlaneDigestEnv, inferenceGatewayDigestEnv, toolRunnerDigestEnv)
 }
@@ -55,10 +47,10 @@ func runInferenceGPUStage(t *testing.T, state *digitalOceanGPUState) {
 	runID := state.runID
 	forgeHome := state.forgeHome
 
-	// Wrap the fetched kubeconfig with the kindtest helpers (kubectl +
-	//    port-forward against the remote k3s cluster, no Kind cluster created).
+	// Bind every Kubernetes operation to the kubeconfig fetched by Forge; this
+	// helper never creates a Kind cluster or installs a chart directly.
 	kcPath := filepath.Join(forgeHome, runID, "kubeconfig.yaml")
-	c := kindtest.UseCluster(t, runID, kcPath)
+	c := remotecluster.Use(t, kcPath)
 	namespace := "iterabase-system"
 	const (
 		alias       = "qwen35"
@@ -80,12 +72,6 @@ metadata:
 spec:
   kind: vLLM
   model: Qwen/Qwen3.5-0.8B
-  # extraArgs (HOR-370): a safe serving flag appended after the
-  # controller-managed --model/--port/--host. --max-model-len caps context
-  # (well within Qwen3.5-0.8B's limit); asserted on the rendered pod below.
-  extraArgs:
-    - --max-model-len
-    - "8192"
 ---
 apiVersion: platform.iterabase.com/v1alpha1
 kind: Model
@@ -108,6 +94,7 @@ spec:
 	apiPod := c.FirstPodName(t, namespace, apiSelector)
 	logs := c.PodLogs(t, namespace, apiPod, "bootstrap")
 	adminKey := mustFindKey(t, logs, "scope=admin")
+	state.diagnostics.redactor.Add(adminKey)
 	t.Logf("captured control-plane admin key (prefix=%s)", keyPrefix(adminKey))
 
 	imManifest := fmt.Sprintf(`apiVersion: platform.iterabase.com/v1alpha1
@@ -136,8 +123,10 @@ spec:
 
 	// 6. port-forward the control-plane API + issue a gateway-scoped API key.
 	apiBase, _ := c.PortForward(t, namespace, apiService, svcPort, 18080)
-	apiClient := kindtest.HTTPClient()
+	apiClient, err := httpx.Client(10 * time.Second)
+	require.NoError(t, err)
 	gatewayKey := createAPIKey(t, apiClient, apiBase+"/v1/api-keys", adminKey, identityID, "gateway")
+	state.diagnostics.redactor.Add(gatewayKey)
 	t.Logf("issued gateway-scoped API key (prefix=%s)", keyPrefix(gatewayKey))
 
 	// 7. get the gateway's admin key + port-forward the gateway. Port-forward
@@ -145,6 +134,7 @@ spec:
 	//    request depend only on the gateway pod being up — not on ingress-nginx
 	//    scheduling on the GPU node (which can lag or be tainted differently).
 	gatewayAdminKey := getSecretKey(t, c, namespace, release+"-gateway-admin", "adminApiKey")
+	state.diagnostics.redactor.Add(gatewayAdminKey)
 	gwBase, _ := c.PortForward(t, namespace, "svc/"+release+"-gateway", svcPort, 18081)
 	gwClient := &http.Client{Timeout: 300 * time.Second} // long timeout for inference
 
@@ -158,17 +148,8 @@ spec:
 	}
 	t.Logf("model available: alias=%s backend=%s", entry.ModelID, entry.BackendURL)
 
-	// HOR-375: assert spec.extraArgs are appended to the vLLM container args
-	// (the control-plane renders them after --model/--port/--host). Validates
-	// the extraArgs field end-to-end on the real vLLM serving path.
-	renderedArgs := strings.TrimSpace(c.Kubectl(t, "get", "deployment", mbName, "-n", namespace,
-		"-o", "jsonpath={.spec.template.spec.containers[0].args}"))
-	require.Contains(t, renderedArgs, "--max-model-len",
-		"HOR-370: spec.extraArgs (--max-model-len) must be appended to the vLLM container args")
-	require.Contains(t, renderedArgs, "8192",
-		"HOR-370: spec.extraArgs value must be appended to the vLLM container args")
-
-	// 9. curl /v1/chat/completions with the gateway key -> a real completion.
+	// One completion is dependent smoke proving usable infrastructure. Product
+	// request, transform, and response correctness remain control-plane-owned.
 	status, body := chatCompletionsStatus(t, gwClient, gwBase, gatewayKey, alias)
 	if status != http.StatusOK {
 		dumpVLLMDiagnostics(t, c.Kubeconfig, namespace, mbName)

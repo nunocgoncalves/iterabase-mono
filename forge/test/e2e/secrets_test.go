@@ -30,6 +30,7 @@ func runSecretsStage(t *testing.T, state *digitalOceanCPUState) {
 		overlayDir  = "/tmp/forge-secrets-overlay"
 	)
 	t.Setenv(envVar, secretValue)
+	state.diagnostics.redactor.Add(secretValue)
 
 	// Seed a minimal overlay on the existing forge host. Secret-sync only needs
 	// a ready k3s substrate; provisioning another VM would not add a boundary.

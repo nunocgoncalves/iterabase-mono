@@ -19,62 +19,49 @@ func TestE2E(t *testing.T) {
 		sharede2e.Define(sharede2e.Scenario[*digitalOceanCPUState]{
 			Metadata: forgeScenarioMetadata(
 				"digitalocean-cpu",
-				"Provisions a fresh CPU host and proves Forge substrate, exact source handoff, reconciliation, and cleanup.",
+				"Provisions a fresh CPU host and proves Forge bootstrap, migration, exact source/Flux handoff, secret transport, idempotent reconciliation, diagnostics, and cleanup with dependent health smoke only.",
 				sharede2e.TierF3,
-				[]string{"HOR-481"},
+				[]string{"HOR-406", "HOR-481"},
 				[]string{"forge", "iterabase-platform-chart"},
 				"test-e2e", 70, "cpu",
 			),
 			NewState: newDigitalOceanCPUState,
 			Stages: []sharede2e.Stage[*digitalOceanCPUState]{
-				{Name: "provision-host", Run: provisionCPUStage},
-				{Name: "reject-gpu-on-cpu-host", DependsOn: []string{"provision-host"}, Run: rejectGPUOnCPUStage},
-				{Name: "install-migration-source", DependsOn: []string{"reject-gpu-on-cpu-host"}, Run: applyBaselineStage},
-				{Name: "assert-migration-source-edge", DependsOn: []string{"install-migration-source"}, Run: assertBaselineStage},
-				{Name: "upgrade-current-with-exact-flux", DependsOn: []string{"assert-migration-source-edge"}, Run: runOverlayStage},
-				{Name: "assert-current-platform", DependsOn: []string{"upgrade-current-with-exact-flux"}, Run: assertCurrentPlatformStage},
-				{Name: "reapply-current-idempotently", DependsOn: []string{"assert-current-platform"}, Run: reapplyCurrentPlatformStage},
-				{Name: "sync-secrets", DependsOn: []string{"reapply-current-idempotently"}, Run: runSecretsStage},
-				{Name: "reconcile-flux", DependsOn: []string{"sync-secrets"}, Run: runFluxStage},
+				{Name: "provision-host", Run: cpuDiagnosticStage(failureDomainProvisioning, provisionCPUStage)},
+				{Name: "reject-gpu-on-cpu-host", DependsOn: []string{"provision-host"}, Run: cpuDiagnosticStage(failureDomainSubstrate, rejectGPUOnCPUStage)},
+				{Name: "install-migration-source", DependsOn: []string{"reject-gpu-on-cpu-host"}, Run: cpuDiagnosticStage(failureDomainForgeReconcile, applyBaselineStage)},
+				{Name: "assert-migration-source-edge", DependsOn: []string{"install-migration-source"}, Run: cpuDiagnosticStage(failureDomainForgeReconcile, assertBaselineStage)},
+				{Name: "upgrade-current-with-exact-flux", DependsOn: []string{"assert-migration-source-edge"}, Run: cpuDiagnosticStage(failureDomainForgeHandoff, runOverlayStage)},
+				{Name: "assert-dependent-health-smoke", DependsOn: []string{"upgrade-current-with-exact-flux"}, Run: cpuDiagnosticStage(failureDomainDependentSmoke, assertCurrentPlatformStage)},
+				{Name: "reapply-current-idempotently", DependsOn: []string{"assert-dependent-health-smoke"}, Run: cpuDiagnosticStage(failureDomainForgeReconcile, reapplyCurrentPlatformStage)},
+				{Name: "sync-secrets", DependsOn: []string{"reapply-current-idempotently"}, Run: cpuDiagnosticStage(failureDomainForgeHandoff, runSecretsStage)},
+				{Name: "reconcile-flux", DependsOn: []string{"sync-secrets"}, Run: cpuDiagnosticStage(failureDomainForgeHandoff, runFluxStage)},
 			},
+			Diagnostics: cpuScenarioDiagnostics(), Cleanup: cpuScenarioCleanup(),
 		}),
 		sharede2e.Define(sharede2e.Scenario[*digitalOceanGPUState]{
 			Metadata: forgeScenarioMetadata(
 				"digitalocean-gpu",
-				"Provisions a fresh GPU host and proves an emptyDir-safe driver transition, GPU substrate, and minimal real serving composition.",
+				"Provisions a fresh GPU host and proves Forge GPU readiness, an emptyDir-safe driver transition, exact artifact handoff, diagnostics, cleanup, and one non-authoritative real-serving smoke request.",
 				sharede2e.TierF3,
-				[]string{"HOR-411", "HOR-481", "HOR-485", "HOR-494"},
+				[]string{"HOR-411", "HOR-406", "HOR-481", "HOR-485", "HOR-494"},
 				[]string{"forge", "iterabase-platform-chart"},
 				"test-e2e-gpu", 110, "gpu",
 			),
 			NewState: newDigitalOceanGPUState,
 			Stages: []sharede2e.Stage[*digitalOceanGPUState]{
-				{Name: "record-driver-inputs", Run: recordGPUUpgradeInputsStage},
-				{Name: "provision-host", DependsOn: []string{"record-driver-inputs"}, Run: provisionGPUStage},
-				{Name: "apply-gpu-substrate", DependsOn: []string{"provision-host"}, Run: applyGPUSubstrateStage},
-				{Name: "assert-gpu-smoke", DependsOn: []string{"apply-gpu-substrate"}, Run: assertGPUSmokeStage},
-				{Name: "start-emptydir-workload", DependsOn: []string{"assert-gpu-smoke"}, Run: startGPUUpgradeWorkloadStage},
-				{Name: "apply-driver-upgrade", DependsOn: []string{"start-emptydir-workload"}, Run: applyGPUDriverUpgradeStage},
-				{Name: "assert-driver-upgrade", DependsOn: []string{"apply-driver-upgrade"}, Run: assertGPUDriverUpgradeStage},
-				{Name: "apply-platform", DependsOn: []string{"assert-driver-upgrade"}, Run: applyInferencePlatformStage},
-				{Name: "run-real-inference", DependsOn: []string{"apply-platform"}, Run: runInferenceGPUStage},
+				{Name: "record-driver-inputs", Run: gpuDiagnosticStage(failureDomainSubstrate, recordGPUUpgradeInputsStage)},
+				{Name: "provision-host", DependsOn: []string{"record-driver-inputs"}, Run: gpuDiagnosticStage(failureDomainProvisioning, provisionGPUStage)},
+				{Name: "apply-gpu-substrate", DependsOn: []string{"provision-host"}, Run: gpuDiagnosticStage(failureDomainSubstrate, applyGPUSubstrateStage)},
+				{Name: "assert-gpu-smoke", DependsOn: []string{"apply-gpu-substrate"}, Run: gpuDiagnosticStage(failureDomainSubstrate, assertGPUSmokeStage)},
+				{Name: "start-emptydir-workload", DependsOn: []string{"assert-gpu-smoke"}, Run: gpuDiagnosticStage(failureDomainSubstrate, startGPUUpgradeWorkloadStage)},
+				{Name: "apply-driver-upgrade", DependsOn: []string{"start-emptydir-workload"}, Run: gpuDiagnosticStage(failureDomainSubstrate, applyGPUDriverUpgradeStage)},
+				{Name: "assert-driver-upgrade", DependsOn: []string{"apply-driver-upgrade"}, Run: gpuDiagnosticStage(failureDomainSubstrate, assertGPUDriverUpgradeStage)},
+				{Name: "apply-dependent-platform-smoke", DependsOn: []string{"assert-driver-upgrade"}, Run: gpuDiagnosticStage(failureDomainForgeHandoff, applyInferencePlatformStage)},
+				{Name: "run-real-serving-smoke", DependsOn: []string{"apply-dependent-platform-smoke"}, Run: gpuDiagnosticStage(failureDomainDependentSmoke, runInferenceGPUStage)},
 			},
+			Diagnostics: gpuScenarioDiagnostics(), Cleanup: gpuScenarioCleanup(),
 		}),
-		simpleForgeScenario(
-			forgeScenarioMetadata("kind-controlplane-identity", "Proves the deployed control-plane identity and JWT contract on fresh Kind.", sharede2e.TierF2,
-				[]string{"HOR-478"}, []string{"control-plane", "control-plane-chart", "iterabase-platform-chart"}, "test-e2e-controlplane", 20, ""),
-			"exercise-identity-contract", runControlPlaneIdentity,
-		),
-		simpleForgeScenario(
-			forgeScenarioMetadata("kind-inference-contract", "Proves deployed control-plane to inference-gateway catalogue and authentication composition on fresh Kind.", sharede2e.TierF2,
-				[]string{"HOR-477"}, []string{"control-plane", "inference-gateway", "inference-gateway-chart", "iterabase-platform-chart"}, "test-e2e-inference", 20, ""),
-			"exercise-inference-contract", runInferenceFlowContract,
-		),
-		simpleForgeScenario(
-			forgeScenarioMetadata("kind-tool-runner-contract", "Proves exact Flux artifact materialization, tool registration, pinning, drain, and retirement on fresh Kind.", sharede2e.TierF2,
-				[]string{"HOR-477"}, []string{"control-plane", "control-plane-chart", "iterabase-platform-chart"}, "test-e2e-tool-runner", 35, ""),
-			"exercise-tool-runner-contract", runToolRunnerContract,
-		),
 	)
 	suite.Run(t)
 }
@@ -83,16 +70,9 @@ func forgeScenarioMetadata(name, description string, tier sharede2e.Tier, refere
 	return sharede2e.ScenarioMetadata{
 		Name: name, Description: description, Tier: tier,
 		References: references, ReleaseTargets: targets,
-		FixtureModes: []sharede2e.FixtureMode{sharede2e.FixtureSource, sharede2e.FixtureCandidate, sharede2e.FixturePublished},
+		FixtureModes: []sharede2e.FixtureMode{sharede2e.FixtureSource, sharede2e.FixtureCandidate},
 		MakeTarget:   makeTarget, TimeoutMinutes: timeout, Capacity: capacity, Mandatory: capacity != "",
 	}
-}
-
-func simpleForgeScenario(metadata sharede2e.ScenarioMetadata, stageName string, run func(*testing.T)) sharede2e.Definition {
-	return sharede2e.Define(sharede2e.Scenario[struct{}]{
-		Metadata: metadata,
-		Stages:   []sharede2e.Stage[struct{}]{{Name: stageName, Run: func(t *testing.T, _ struct{}) { run(t) }}},
-	})
 }
 
 type hermeticExampleState struct{ events []string }

@@ -11,7 +11,7 @@ const (
 	// select a published chart. Baseline upgrades are intentional changes to this
 	// file, not an unrelated release silently changing another PR's test matrix.
 	pinnedPlatformChartVersion     = "0.3.11"
-	pinnedControlPlaneChartVersion = "0.4.9"
+	pinnedControlPlaneChartVersion = "0.4.9" // release fixture authority; Forge no longer installs this chart directly
 
 	// The CPU cloud scenario starts here only to prove the real ownership handoff
 	// into pinnedPlatformChartVersion. It is not the scenario's desired version.
@@ -27,15 +27,4 @@ func platformChartVersion(t *testing.T, localChart string) string {
 		return ""
 	}
 	return pinnedPlatformChartVersion
-}
-
-func controlPlaneChartVersion(t *testing.T, localChart string) string {
-	t.Helper()
-	if version := os.Getenv("CONTROL_PLANE_CHART_VERSION"); version != "" {
-		return version
-	}
-	if localChart != "" {
-		return ""
-	}
-	return pinnedControlPlaneChartVersion
 }

@@ -24,8 +24,8 @@ Branch protection therefore does not depend on a changing matrix job name.
 | Forge `e2e / harness-unit` | `E2E / harness-unit` | Ported |
 | Forge `e2e / digitalocean-cpu` | `E2E / digitalocean-cpu` | Ported; Forge source PRs/manual runs |
 | Forge `e2e / digitalocean-gpu` | `E2E / digitalocean-gpu` | Ported; Forge source PRs/manual/nightly |
-| Forge five source-composed Kind jobs | `E2E / kind-*` | Ported; Forge and chart contract paths |
-| Forge five nightly published-compatibility jobs | `E2E / published-pinned-*` | Ported; exact fixture record, no floating latest |
+| Forge source-composed product/chart Kind jobs | control-plane and charts owner jobs | Retired under HOR-481 after green owner replacements; Forge registers no direct-chart Kind scenario |
+| Forge nightly product compatibility jobs | complete owner catalogue (HOR-486) | Retired under HOR-481; immutable published inputs remain on Forge real-machine fixtures |
 | charts `ci / lint` | `CI / charts-static` | Ported |
 | charts `ci / certificate-ownership-migration` | `E2E / charts-runtime / certificate-ownership-migration` | Ported |
 | charts `ci / install` | `E2E / charts-runtime / install` | Ported |
@@ -64,8 +64,9 @@ single-component, shared-contract, and cross-component changes.
   fail rather than skip. `control-plane/Makefile` selects both control-plane and
   harness gates so edits to the required target cannot bypass execution.
   Protobuf changes fan out to both generated Node consumers.
-- Forge source/E2E changes retain the existing Forge unit, real-machine, and
-  deterministic Kind gates.
+- Forge source/E2E changes retain Forge unit, compiled-catalogue, and CPU/GPU
+  real-machine gates. Forge has no direct-chart-only Kind gate; any future Kind
+  scenario must exercise Forge-owned behavior.
 - Chart changes run chart static/runtime checks and the current local-chart Kind
   scenarios. This is source composition from one checkout; no matching-branch
   lookup or cross-repository checkout exists.

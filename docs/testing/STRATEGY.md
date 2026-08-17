@@ -56,7 +56,7 @@ Current entrypoints are:
 - `control-plane/test/e2e`
 - `forge/test/e2e`
 
-Each has an F0 hermetic example so registration and shared execution remain testable without infrastructure. Examples are mechanics evidence, not product coverage. The control-plane owner also registers fresh-Kind identity/API, `manual_api` work/recovery, artifact-durability, execution, and locked-Chromium browser journeys; chart and Forge owners register their own authoritative scenarios.
+Each has an F0 hermetic example so registration and shared execution remain testable without infrastructure. Examples are mechanics evidence, not product coverage. The control-plane owner registers fresh-Kind identity/API, `manual_api` work/recovery, artifact-durability, execution, and locked-Chromium browser journeys; charts owns its rollout Kind matrix. Forge registers only CPU/GPU F3 scenarios after HOR-481 because its former Kind scenarios installed charts directly without exercising Forge.
 
 Local commands:
 
@@ -122,7 +122,7 @@ Component artifacts are fail-closed:
 
 That declaration is required for Playwright screenshots/traces and is part of the reviewable scenario code. The control-plane fixture is wholly synthetic; its owner sanitizes trace archive entries before declaration, deletes raw evidence, and independently rejects retained work-key literals before shared collection. Customer/production browser artifacts do not qualify.
 
-A normal F2 failure bundle includes cluster resources, events, pod describes, current/previous logs, Helm list/state, revision history, effective values, hooks, status, process output, and declared component evidence. Diagnostics are best effort and do not suppress teardown.
+A normal F2 failure bundle includes cluster resources, events, pod describes, current/previous logs, Helm list/state, revision history, effective values, hooks, status, process output, and declared component evidence. Forge F3 uses the same collector against its fetched kubeconfig, adds SSH/cloud-init and GPU-operator evidence, and records whether the failure belongs to provisioning, Forge substrate/reconciliation/handoff, dependent smoke, or cleanup. Diagnostics are best effort and do not suppress teardown.
 
 ## CI and release gates
 

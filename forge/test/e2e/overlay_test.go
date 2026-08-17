@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/nunocgoncalves/iterabase-mono/forge/test/e2e/internal/kindtest"
+	"github.com/nunocgoncalves/iterabase-mono/forge/test/e2e/internal/remotecluster"
 )
 
 // runOverlayStage upgrades the composed CPU fixture from the migration source
@@ -34,7 +34,7 @@ func runOverlayStage(t *testing.T, state *digitalOceanCPUState) {
 	assertApplyMarkers(t, out, "action:     skip", "node ready: true", "certificate substrate applied: true",
 		"chart applied: true", "overlay applied: true", "overlay commit:", "flux installed: true", "gitrepository: ready=True")
 	t.Logf("apply output:\n%s", out)
-	candidateCluster := kindtest.UseCluster(t, state.runID, filepath.Join(state.forgeHome, state.runID, "kubeconfig.yaml"))
+	candidateCluster := remotecluster.Use(t, filepath.Join(state.forgeHome, state.runID, "kubeconfig.yaml"))
 	assertCandidateImageDigests(t, candidateCluster, "iterabase-system",
 		controlPlaneDigestEnv, inferenceGatewayDigestEnv, toolRunnerDigestEnv)
 
