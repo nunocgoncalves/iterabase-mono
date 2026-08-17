@@ -537,6 +537,8 @@ func joinArgs(args []string) string {
 
 const (
 	helmInstallScript      = "https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-4"
+	helmInstallerTempCmd   = "mktemp /tmp/forge-helm-installer.XXXXXX"
+	helmVerifyCommand      = "sudo helm version --short"
 	k3sKubeconfigPath      = "/etc/rancher/k3s/k3s.yaml"
 	helmRegistryConfigPath = "/etc/forge/helm-registry.json"
 )
@@ -549,13 +551,41 @@ func helmCmd(args ...string) string {
 	return joinArgs(append(base, args...))
 }
 
-// ensureHelm installs helm on the host if it is not already present.
+// ensureHelm installs Helm on the host when it is not usable through the same
+// privileged PATH used by all subsequent chart operations. The installer is
+// downloaded and validated before execution so curl, empty-input, and installer
+// failures cannot be hidden by a successful shell at the end of a pipeline.
 func (p *SSHProvisioner) ensureHelm(ctx context.Context) error {
-	if _, err := p.run(ctx, "command -v helm"); err == nil {
+	if _, err := p.run(ctx, helmVerifyCommand); err == nil {
 		return nil
 	}
-	if _, err := p.run(ctx, fmt.Sprintf("curl -fsSL %s | sudo bash", helmInstallScript)); err != nil {
-		return fmt.Errorf("install helm: %w", err)
+
+	installerPath, err := p.run(ctx, helmInstallerTempCmd)
+	if err != nil {
+		return fmt.Errorf("prepare helm installer download: %w", err)
+	}
+	installerPath = strings.TrimSpace(installerPath)
+	if installerPath == "" {
+		return errors.New("prepare helm installer download: mktemp returned an empty path")
+	}
+	defer func() {
+		_, _ = p.run(ctx, "rm -f "+shellQuote(installerPath))
+	}()
+
+	if _, err := p.run(ctx, fmt.Sprintf("curl -fsSL -o %s %s", shellQuote(installerPath), shellQuote(helmInstallScript))); err != nil {
+		return fmt.Errorf("download helm installer: %w", err)
+	}
+	if _, err := p.run(ctx, "test -s "+shellQuote(installerPath)); err != nil {
+		return fmt.Errorf("download helm installer: downloaded installer is empty: %w", err)
+	}
+	if out, err := p.run(ctx, "sudo bash "+shellQuote(installerPath)); err != nil {
+		if out = strings.TrimSpace(out); out != "" {
+			return fmt.Errorf("execute helm installer: %w; stdout: %s", err, out)
+		}
+		return fmt.Errorf("execute helm installer: %w", err)
+	}
+	if _, err := p.run(ctx, helmVerifyCommand); err != nil {
+		return fmt.Errorf("verify helm installation through privileged PATH: %w", err)
 	}
 	return nil
 }

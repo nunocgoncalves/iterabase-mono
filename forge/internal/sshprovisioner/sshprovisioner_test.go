@@ -27,6 +27,14 @@ import (
 // handler returns canned stdout + exit code for a given remote command.
 type handler func(cmd string) (string, int)
 
+type sshCommandResult struct {
+	stdout string
+	stderr string
+	code   int
+}
+
+type resultHandler func(cmd string) sshCommandResult
+
 func TestHelmCmdUsesRootOwnedRegistryConfig(t *testing.T) {
 	command := helmCmd("show", "chart", "oci://ghcr.io/example/private/chart", "--version", "1.2.3")
 	assert.Contains(t, command, "'sudo' 'helm'")
@@ -38,6 +46,14 @@ func TestHelmCmdUsesRootOwnedRegistryConfig(t *testing.T) {
 // It returns the server address, a client config usable to connect, and a
 // cleanup func. The handler is invoked for each "exec" request.
 func startFakeSSH(t *testing.T, h handler) (string, *ssh.ClientConfig, func()) {
+	t.Helper()
+	return startFakeSSHWithResult(t, func(cmd string) sshCommandResult {
+		stdout, code := h(cmd)
+		return sshCommandResult{stdout: stdout, code: code}
+	})
+}
+
+func startFakeSSHWithResult(t *testing.T, h resultHandler) (string, *ssh.ClientConfig, func()) {
 	t.Helper()
 	hostPub, hostPriv, err := ed25519.GenerateKey(rand.Reader)
 	require.NoError(t, err)
@@ -92,7 +108,7 @@ func startFakeSSH(t *testing.T, h handler) (string, *ssh.ClientConfig, func()) {
 	return ln.Addr().String(), clientCfg, cleanup
 }
 
-func serveConn(conn net.Conn, srvCfg *ssh.ServerConfig, h handler) {
+func serveConn(conn net.Conn, srvCfg *ssh.ServerConfig, h resultHandler) {
 	sconn, chans, reqs, err := ssh.NewServerConn(conn, srvCfg)
 	if err != nil {
 		return
@@ -108,7 +124,7 @@ func serveConn(conn net.Conn, srvCfg *ssh.ServerConfig, h handler) {
 	}
 }
 
-func serveSession(ch ssh.NewChannel, h handler) {
+func serveSession(ch ssh.NewChannel, h resultHandler) {
 	sch, reqs, err := ch.Accept()
 	if err != nil {
 		return
@@ -120,7 +136,7 @@ func serveSession(ch ssh.NewChannel, h handler) {
 			continue
 		}
 		cmd := parseExecPayload(req.Payload)
-		out, code := h(cmd)
+		result := h(cmd)
 		_ = req.Reply(true, nil)
 		// Commands that read stdin (runStdin) must drain stdin before exit-status
 		// so the client's write completes cleanly: "cat > file" (overlay git cred)
@@ -128,11 +144,14 @@ func serveSession(ch ssh.NewChannel, h handler) {
 		if strings.Contains(cmd, "cat >") || strings.Contains(cmd, "'-'") {
 			_, _ = io.Copy(io.Discard, sch)
 		}
-		if out != "" {
-			_, _ = sch.Write([]byte(out))
+		if result.stdout != "" {
+			_, _ = sch.Write([]byte(result.stdout))
+		}
+		if result.stderr != "" {
+			_, _ = sch.Stderr().Write([]byte(result.stderr))
 		}
 		exit := make([]byte, 4)
-		binary.BigEndian.PutUint32(exit, uint32(code))
+		binary.BigEndian.PutUint32(exit, uint32(result.code))
 		_, _ = sch.SendRequest("exit-status", false, exit)
 		_ = sch.Close()
 		return
@@ -536,7 +555,7 @@ func TestDeployer_Apply(t *testing.T) {
 	var kubectlCalled bool
 	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
 		switch {
-		case cmd == "command -v helm":
+		case cmd == helmVerifyCommand:
 			return "/usr/local/bin/helm\n", 0
 		case strings.Contains(cmd, "'show' 'crds'"):
 			return "", 0 // charts without CRDs are a no-op
@@ -569,7 +588,7 @@ func TestDeployer_Apply_NoWait(t *testing.T) {
 	var got string
 	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
 		switch {
-		case cmd == "command -v helm":
+		case cmd == helmVerifyCommand:
 			return "/usr/local/bin/helm\n", 0
 		case strings.Contains(cmd, "'show' 'crds'"):
 			return "", 0
@@ -597,7 +616,7 @@ func TestDeployer_Apply_ReconcilesCRDsBeforeUpgrade(t *testing.T) {
 	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
 		commands = append(commands, cmd)
 		switch {
-		case cmd == "command -v helm":
+		case cmd == helmVerifyCommand:
 			return "/usr/local/bin/helm\n", 0
 		case strings.Contains(cmd, "'show' 'crds'"):
 			return crds, 0
@@ -620,7 +639,7 @@ func TestDeployer_Apply_ReconcilesCRDsBeforeUpgrade(t *testing.T) {
 	}))
 
 	require.Len(t, commands, 5)
-	assert.Equal(t, "command -v helm", commands[0])
+	assert.Equal(t, helmVerifyCommand, commands[0])
 	assert.Contains(t, commands[1], "'show' 'crds' 'oci://ghcr.io/nunocgoncalves/iterabase-platform' '--version' '0.1.27'")
 	assert.Contains(t, commands[2], "'kubectl' 'apply' '--server-side' '--force-conflicts' '-f' '-'")
 	assert.Contains(t, commands[3], "'kubectl' 'wait' '--for=condition=Established' '--timeout=2m' '-f' '-'")
@@ -644,7 +663,7 @@ func TestDeployer_Apply_CRDFailuresStopBeforeUpgrade(t *testing.T) {
 			upgradeCalled := false
 			addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
 				switch {
-				case cmd == "command -v helm":
+				case cmd == helmVerifyCommand:
 					return "/usr/local/bin/helm\n", 0
 				case strings.Contains(cmd, "'show' 'crds'"):
 					if tt.failAt == "show" {
@@ -681,16 +700,99 @@ func TestDeployer_Apply_CRDFailuresStopBeforeUpgrade(t *testing.T) {
 	}
 }
 
+func TestDeployer_Apply_HelmBootstrapFailuresStopBeforeChart(t *testing.T) {
+	const installerPath = "/tmp/forge-helm-installer.test"
+	tests := []struct {
+		name    string
+		failAt  string
+		wantErr string
+	}{
+		{name: "download failure", failAt: "download", wantErr: "download helm installer: ssh run"},
+		{name: "empty installer input", failAt: "empty", wantErr: "downloaded installer is empty"},
+		{name: "installer failure", failAt: "installer", wantErr: "execute helm installer: ssh run"},
+		{name: "privileged PATH mismatch", failAt: "verify", wantErr: "verify helm installation through privileged PATH"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var chartCalled, installerCalled bool
+			addr, cfg, cleanup := startFakeSSHWithResult(t, func(cmd string) sshCommandResult {
+				switch {
+				case cmd == helmVerifyCommand:
+					return sshCommandResult{stderr: "sudo: helm: command not found\n", code: 1}
+				case cmd == helmInstallerTempCmd:
+					return sshCommandResult{stdout: installerPath + "\n"}
+				case strings.HasPrefix(cmd, "curl -fsSL"):
+					if tt.failAt == "download" {
+						return sshCommandResult{stderr: "curl: (22) The requested URL returned error: 503\n", code: 22}
+					}
+					return sshCommandResult{}
+				case cmd == "test -s "+shellQuote(installerPath):
+					if tt.failAt == "empty" {
+						return sshCommandResult{code: 1}
+					}
+					return sshCommandResult{}
+				case cmd == "sudo bash "+shellQuote(installerPath):
+					installerCalled = true
+					if tt.failAt == "installer" {
+						return sshCommandResult{stdout: "get_helm.sh: unsupported architecture\n", code: 1}
+					}
+					return sshCommandResult{}
+				case cmd == "rm -f "+shellQuote(installerPath):
+					return sshCommandResult{}
+				case strings.Contains(cmd, "'show' 'crds'"), strings.Contains(cmd, "'upgrade' '--install'"):
+					chartCalled = true
+					return sshCommandResult{}
+				default:
+					return sshCommandResult{code: 1}
+				}
+			})
+			defer cleanup()
+			p := newProvisioner(t, addr, cfg)
+			defer p.Close()
+			err := p.Apply(context.Background(), deployer.ApplyOpts{
+				Release: "opo1", Repository: "oci://ghcr.io/nunocgoncalves/iterabase-platform",
+				Version: "0.1.0", Namespace: "iterabase-system",
+			})
+			require.ErrorContains(t, err, tt.wantErr)
+			switch tt.failAt {
+			case "download":
+				require.ErrorContains(t, err, "curl: (22) The requested URL returned error: 503")
+			case "installer":
+				require.ErrorContains(t, err, "get_helm.sh: unsupported architecture")
+			case "verify":
+				require.ErrorContains(t, err, "sudo: helm: command not found")
+			}
+			if tt.failAt == "download" || tt.failAt == "empty" {
+				assert.False(t, installerCalled)
+			}
+			assert.False(t, chartCalled, "chart discovery/apply must not run after Helm bootstrap fails")
+		})
+	}
+}
+
 func TestDeployer_Apply_EnsuresHelm(t *testing.T) {
+	const installerPath = "/tmp/forge-helm-installer.test"
+	var commands []string
+	helmChecks := 0
 	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
+		commands = append(commands, cmd)
 		switch {
-		case cmd == "command -v helm":
-			return "", 1 // absent
-		case strings.Contains(cmd, "get-helm-4"):
-			return "", 0 // install script
+		case cmd == helmVerifyCommand:
+			helmChecks++
+			if helmChecks == 1 {
+				return "", 1
+			}
+			return "v4.0.0+gabcdef\n", 0
+		case cmd == helmInstallerTempCmd:
+			return installerPath + "\n", 0
+		case strings.HasPrefix(cmd, "curl -fsSL"),
+			cmd == "test -s "+shellQuote(installerPath),
+			cmd == "sudo bash "+shellQuote(installerPath),
+			cmd == "rm -f "+shellQuote(installerPath):
+			return "", 0
 		case strings.Contains(cmd, "'show' 'crds'"):
 			return "", 0
-		case strings.Contains(cmd, "upgrade"):
+		case strings.Contains(cmd, "'upgrade' '--install'"):
 			return "", 0
 		default:
 			return "", 1
@@ -703,12 +805,25 @@ func TestDeployer_Apply_EnsuresHelm(t *testing.T) {
 		Release: "opo1", Repository: "oci://ghcr.io/nunocgoncalves/iterabase-platform",
 		Version: "0.1.0", Namespace: "iterabase-system",
 	}))
+
+	require.Len(t, commands, 9)
+	assert.Equal(t, helmVerifyCommand, commands[0])
+	assert.Equal(t, helmInstallerTempCmd, commands[1])
+	assert.Contains(t, commands[2], "curl -fsSL -o '"+installerPath+"'")
+	assert.Contains(t, commands[2], shellQuote(helmInstallScript))
+	assert.NotContains(t, commands[2], "|")
+	assert.Equal(t, "test -s "+shellQuote(installerPath), commands[3])
+	assert.Equal(t, "sudo bash "+shellQuote(installerPath), commands[4])
+	assert.Equal(t, helmVerifyCommand, commands[5])
+	assert.Equal(t, "rm -f "+shellQuote(installerPath), commands[6])
+	assert.Contains(t, commands[7], "'show' 'crds'")
+	assert.Contains(t, commands[8], "'upgrade' '--install'")
 }
 
 func TestDeployer_Status(t *testing.T) {
 	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
 		switch {
-		case cmd == "command -v helm":
+		case cmd == helmVerifyCommand:
 			return "/usr/local/bin/helm\n", 0
 		case strings.Contains(cmd, "status"):
 			return `{"info":{"status":"deployed"},"chart":{"metadata":{"version":"0.1.0"}}}`, 0
@@ -729,7 +844,7 @@ func TestDeployer_Status(t *testing.T) {
 func TestDeployer_Status_Helm4UsesMetadataVersion(t *testing.T) {
 	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
 		switch {
-		case cmd == "command -v helm":
+		case cmd == helmVerifyCommand:
 			return "/usr/local/bin/helm\n", 0
 		case strings.Contains(cmd, "'status'"):
 			return `{"name":"opo1","version":19,"info":{"status":"deployed"}}`, 0
@@ -752,7 +867,7 @@ func TestDeployer_Status_Helm4UsesMetadataVersion(t *testing.T) {
 func TestDeployer_Status_Helm4RejectsMissingMetadataVersion(t *testing.T) {
 	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
 		switch {
-		case cmd == "command -v helm":
+		case cmd == helmVerifyCommand:
 			return "/usr/local/bin/helm\n", 0
 		case strings.Contains(cmd, "'status'"):
 			return `{"name":"opo1","version":19,"info":{"status":"deployed"}}`, 0
@@ -772,7 +887,7 @@ func TestDeployer_Status_Helm4RejectsMissingMetadataVersion(t *testing.T) {
 func TestDeployer_Status_NotInstalled(t *testing.T) {
 	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
 		switch {
-		case cmd == "command -v helm":
+		case cmd == helmVerifyCommand:
 			return "/usr/local/bin/helm\n", 0
 		case strings.Contains(cmd, "status"):
 			return "", 1 // release not found
@@ -1175,7 +1290,7 @@ func TestEnsureRepo_CommandShape(t *testing.T) {
 	var got string
 	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
 		switch {
-		case cmd == "command -v helm":
+		case cmd == helmVerifyCommand:
 			return "/usr/local/bin/helm\n", 0
 		case strings.Contains(cmd, "--force-update"):
 			got = cmd
@@ -1418,8 +1533,8 @@ func TestOverlayer_ReadFile(t *testing.T) {
 	})
 	t.Run("missing", func(t *testing.T) {
 		// A missing file makes cat exit non-zero; the real host's stderr carries
-		// "No such file" (asserted via the lifecycle fake). Here we only assert
-		// the error surfaces — the fake SSH server can't emit stderr.
+		// "No such file" (asserted via the lifecycle fake). This legacy handler
+		// injects only stdout, so this case asserts only that the error surfaces.
 		addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
 			if strings.HasPrefix(cmd, "cat ") {
 				return "", 1
