@@ -124,7 +124,12 @@ func gpuCandidates(ctx context.Context, client *godo.Client) ([]gpuCandidate, er
 // createDropletIn creates a droplet in an explicit region/size (generalized
 // createDroplet for the CPU preflight-fail and GPU provisioner paths).
 func createDropletIn(ctx context.Context, client *godo.Client, name, pubKeyStr, region, sizeSlug string) (*godo.Droplet, error) {
-	req := &godo.DropletCreateRequest{
+	d, _, err := client.Droplets.Create(ctx, newGPUDropletRequest(name, pubKeyStr, region, sizeSlug))
+	return d, err
+}
+
+func newGPUDropletRequest(name, pubKeyStr, region, sizeSlug string) *godo.DropletCreateRequest {
+	return &godo.DropletCreateRequest{
 		Name:     name,
 		Region:   region,
 		Size:     sizeSlug,
@@ -133,8 +138,6 @@ func createDropletIn(ctx context.Context, client *godo.Client, name, pubKeyStr, 
 		Tags:     []string{"forge-e2e", "forge-gpu-e2e", name},
 		Image:    godo.DropletCreateImage{Slug: "ubuntu-24-04-x64"},
 	}
-	d, _, err := client.Droplets.Create(ctx, req)
-	return d, err
 }
 
 type digitalOceanGPUState struct {

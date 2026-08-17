@@ -282,7 +282,12 @@ users:
 }
 
 func createDroplet(ctx context.Context, client *godo.Client, name, pubKeyStr string) (*godo.Droplet, error) {
-	req := &godo.DropletCreateRequest{
+	d, _, err := client.Droplets.Create(ctx, newCPUDropletRequest(name, pubKeyStr))
+	return d, err
+}
+
+func newCPUDropletRequest(name, pubKeyStr string) *godo.DropletCreateRequest {
+	return &godo.DropletCreateRequest{
 		Name:     name,
 		Region:   region,
 		Size:     size,
@@ -291,8 +296,6 @@ func createDroplet(ctx context.Context, client *godo.Client, name, pubKeyStr str
 		Tags:     []string{"forge-e2e", name},
 		Image:    godo.DropletCreateImage{Slug: image},
 	}
-	d, _, err := client.Droplets.Create(ctx, req)
-	return d, err
 }
 
 func waitForIP(ctx context.Context, client *godo.Client, id int) (string, error) {
