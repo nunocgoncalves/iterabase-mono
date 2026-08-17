@@ -13,7 +13,7 @@ const replacement = "<redacted>"
 var structuralPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?is)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----`),
 	regexp.MustCompile(`(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+`),
-	regexp.MustCompile(`(?i)(["']?(?:authorization|password|passwd|token|api[_-]?key|client[_-]?secret|cookie|private[_-]?key)["']?\s*[:=]\s*)(?:["'][^"']*["']|[^\s,}\]]+)`),
+	regexp.MustCompile(`(?i)(["']?(?:authorization|password|passwd|token|api[_-]?key|client[_-]?secret|cookie|private[._-]?key|tls[._-]?key)["']?\s*[:=]\s*)(?:["'][^"']*["']|[^\s,}\]]+)`),
 	regexp.MustCompile(`(?i)(://[^:/@\s]+:)[^@/\s]+(@)`),
 }
 

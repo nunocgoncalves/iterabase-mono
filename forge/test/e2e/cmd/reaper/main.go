@@ -5,14 +5,21 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"time"
 
 	"github.com/digitalocean/godo"
 )
+
+type dropletClient interface {
+	ListByTag(context.Context, string, *godo.ListOptions) ([]godo.Droplet, *godo.Response, error)
+	Delete(context.Context, int) (*godo.Response, error)
+}
 
 func main() {
 	maxAge := flag.Duration("max-age", 60*time.Minute, "delete droplets older than this")
@@ -23,34 +30,43 @@ func main() {
 		log.Fatal("DIGITALOCEAN_TOKEN not set")
 	}
 	client := godo.NewFromToken(token)
-	ctx := context.Background()
+	if err := reap(context.Background(), client.Droplets, time.Now(), *maxAge, os.Stdout); err != nil {
+		log.Fatal(err)
+	}
+}
 
+// reap deletes every expired resource returned by the forge-e2e tag query. It
+// keeps processing after malformed resources or delete failures, then returns a
+// joined error so the scheduled safety net cannot report a false success.
+func reap(ctx context.Context, client dropletClient, now time.Time, maxAge time.Duration, output io.Writer) error {
 	opts := &godo.ListOptions{PerPage: 200}
+	var failures []error
 	for {
-		droplets, resp, err := client.Droplets.ListByTag(ctx, "forge-e2e", opts)
+		droplets, resp, err := client.ListByTag(ctx, "forge-e2e", opts)
 		if err != nil {
-			log.Fatalf("list droplets: %v", err)
+			return fmt.Errorf("list droplets tagged forge-e2e: %w", err)
 		}
-		for _, d := range droplets {
-			created, err := time.Parse(time.RFC3339, d.Created)
+		for _, droplet := range droplets {
+			created, err := time.Parse(time.RFC3339, droplet.Created)
 			if err != nil {
-				log.Printf("warning: droplet %d bad created time %q: %v", d.ID, d.Created, err)
+				failures = append(failures, fmt.Errorf("droplet %d bad created time %q: %w", droplet.ID, droplet.Created, err))
 				continue
 			}
-			age := time.Since(created)
-			if age < *maxAge {
+			age := now.Sub(created)
+			if age < maxAge {
 				continue
 			}
-			if _, err := client.Droplets.Delete(ctx, d.ID); err != nil {
-				log.Printf("warning: delete droplet %d (%s): %v", d.ID, d.Name, err)
+			if _, err := client.Delete(ctx, droplet.ID); err != nil {
+				failures = append(failures, fmt.Errorf("delete droplet %d (%s): %w", droplet.ID, droplet.Name, err))
 				continue
 			}
-			fmt.Printf("deleted droplet %d (%s, age %s)\n", d.ID, d.Name, age.Truncate(time.Minute))
+			fmt.Fprintf(output, "deleted droplet %d (%s, age %s)\n", droplet.ID, droplet.Name, age.Truncate(time.Minute))
 		}
-		if resp.Links == nil || resp.Links.IsLastPage() {
+		if resp == nil || resp.Links == nil || resp.Links.IsLastPage() {
 			break
 		}
 		opts.Page, _ = resp.Links.CurrentPage()
 		opts.Page++
 	}
+	return errors.Join(failures...)
 }

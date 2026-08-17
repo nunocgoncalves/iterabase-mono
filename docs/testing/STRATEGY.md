@@ -112,7 +112,7 @@ Playwright/TypeScript owns browser assertions. Go owns fixture/runtime orchestra
 
 ## Failure evidence and secret handling
 
-Process output and all text evidence pass through a shared redactor before persistence. Owners register exact runtime secret literals; structural rules also redact authorization/bearer values, credential-shaped keys, URL passwords, and private-key PEM blocks. Generic Kubernetes collection deliberately excludes Secret objects.
+Process output and all text evidence pass through a shared redactor before persistence. Owners register exact runtime secret literals; structural rules also redact authorization/bearer values, credential-shaped keys, URL passwords, and private-key PEM blocks. Generic Kubernetes collection deliberately excludes Secret objects, and rendered Helm evidence strips every Secret `data`/`stringData` payload before shared redaction and persistence.
 
 Component artifacts are fail-closed:
 
