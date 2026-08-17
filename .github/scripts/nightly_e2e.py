@@ -183,7 +183,9 @@ def make_plan(catalogue: dict[str, Any], source_sha: str) -> dict[str, Any]:
     }
 
 
-def validate_results(event_name: str, needs: dict[str, Any]) -> None:
+def validate_results(
+    event_name: str, needs: dict[str, Any], complete_catalogue: bool = False
+) -> None:
     if not isinstance(needs, dict):
         raise NightlyError("E2E aggregate needs must be an object")
     results: dict[str, str] = {}
@@ -197,7 +199,7 @@ def validate_results(event_name: str, needs: dict[str, Any]) -> None:
         for name, result in results.items()
         if result not in {"success", "skipped"}
     }
-    if event_name == "schedule":
+    if event_name == "schedule" or complete_catalogue:
         for name in SCHEDULE_REQUIRED_JOBS:
             result = results.get(name, "missing")
             if result != "success":
@@ -247,7 +249,9 @@ def command_validate_results(args: argparse.Namespace) -> None:
         raise NightlyError(
             f"{args.needs_env} must contain the E2E needs object: {exc}"
         ) from exc
-    validate_results(args.event_name, needs)
+    validate_results(
+        args.event_name, needs, complete_catalogue=args.complete_catalogue == "true"
+    )
     print("required E2E results:", compact(needs))
 
 
@@ -266,6 +270,9 @@ def parser() -> argparse.ArgumentParser:
         "validate-results", help="require the event-specific E2E aggregate"
     )
     validate.add_argument("--event-name", required=True)
+    validate.add_argument(
+        "--complete-catalogue", choices=("true", "false"), default="false"
+    )
     validate.add_argument("--needs-env", default="NEEDS")
     validate.set_defaults(handler=command_validate_results)
     return value
