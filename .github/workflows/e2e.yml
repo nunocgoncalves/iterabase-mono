@@ -8,6 +8,11 @@ on:
     - cron: "0 3 * * *"
   workflow_dispatch:
     inputs:
+      complete_catalogue:
+        description: "Rehearse the exact complete scheduled catalogue and fail on any incomplete required job"
+        required: false
+        type: boolean
+        default: false
       gpu_policy_red_proof:
         description: "Run the intentional HOR-411 deleteEmptyDir=false GPU mutation instead of the green GPU scenario"
         required: false
@@ -52,6 +57,12 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           fetch-depth: 0
+      - name: Reject conflicting manual E2E intents
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          COMPLETE_CATALOGUE: ${{ inputs.complete_catalogue }}
+          GPU_POLICY_RED_PROOF: ${{ inputs.gpu_policy_red_proof }}
+        run: test "$COMPLETE_CATALOGUE:$GPU_POLICY_RED_PROOF" != "true:true"
       - uses: ./.github/actions/setup-go
         with:
           go-version: 1.26.5
@@ -70,8 +81,8 @@ jobs:
           --source-sha "$SOURCE_SHA"
           --output nightly-e2e-plan.json
           --github-output "$GITHUB_OUTPUT"
-      - name: Retain scheduled catalogue selection evidence
-        if: github.event_name == 'schedule'
+      - name: Retain complete catalogue selection evidence
+        if: github.event_name == 'schedule' || inputs.complete_catalogue == true
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: nightly-e2e-plan
@@ -124,7 +135,8 @@ jobs:
     needs: [changes, harness]
     if: >-
       needs.changes.outputs.forge_real_e2e == 'true' &&
-      (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch')
+      (github.event_name == 'pull_request' ||
+      (github.event_name == 'workflow_dispatch' && inputs.complete_catalogue != true))
     runs-on: ubuntu-latest
     timeout-minutes: 65
     concurrency:
@@ -161,7 +173,8 @@ jobs:
     needs: [changes, harness]
     if: >-
       needs.changes.outputs.forge_real_e2e == 'true' &&
-      (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch')
+      (github.event_name == 'pull_request' ||
+      (github.event_name == 'workflow_dispatch' && inputs.complete_catalogue != true))
     runs-on: ubuntu-latest
     timeout-minutes: 115
     env:
@@ -208,7 +221,8 @@ jobs:
     needs: changes
     if: >-
       (needs.changes.outputs.control_plane == 'true' || needs.changes.outputs.charts == 'true') &&
-      (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch')
+      (github.event_name == 'pull_request' ||
+      (github.event_name == 'workflow_dispatch' && inputs.complete_catalogue != true))
     runs-on: ubuntu-latest
     timeout-minutes: ${{ matrix.timeout }}
     strategy:
@@ -269,7 +283,8 @@ jobs:
       needs.changes.outputs.tool_runner == 'true' ||
       needs.changes.outputs.inference_gateway == 'true' ||
       needs.changes.outputs.charts == 'true') &&
-      (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch')
+      (github.event_name == 'pull_request' ||
+      (github.event_name == 'workflow_dispatch' && inputs.complete_catalogue != true))
     runs-on: ubuntu-latest
     timeout-minutes: 60
     concurrency:
@@ -301,7 +316,7 @@ jobs:
   nightly-kind:
     name: nightly-${{ matrix.id }}
     needs: changes
-    if: github.event_name == 'schedule'
+    if: github.event_name == 'schedule' || inputs.complete_catalogue == true
     runs-on: ubuntu-latest
     timeout-minutes: ${{ matrix.timeout }}
     strategy:
@@ -361,7 +376,8 @@ jobs:
     needs: changes
     if: >-
       needs.changes.outputs.charts == 'true' &&
-      github.event_name != 'schedule'
+      github.event_name != 'schedule' &&
+      inputs.complete_catalogue != true
     permissions:
       contents: read
       actions: read
@@ -370,7 +386,7 @@ jobs:
   nightly-real-machine:
     name: nightly-${{ matrix.id }}
     needs: [changes, harness]
-    if: github.event_name == 'schedule'
+    if: github.event_name == 'schedule' || inputs.complete_catalogue == true
     runs-on: ubuntu-latest
     timeout-minutes: ${{ matrix.timeout }}
     strategy:
@@ -432,8 +448,10 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - name: Require every selected E2E owner
         env:
+          COMPLETE_CATALOGUE: ${{ inputs.complete_catalogue == true }}
           EVENT_NAME: ${{ github.event_name }}
           NEEDS: ${{ toJSON(needs) }}
         run: >-
           python3 .github/scripts/nightly_e2e.py validate-results
           --event-name "$EVENT_NAME"
+          --complete-catalogue "$COMPLETE_CATALOGUE"

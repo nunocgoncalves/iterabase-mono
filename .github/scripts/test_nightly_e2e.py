@@ -140,6 +140,13 @@ class NightlyAggregateTests(unittest.TestCase):
         needs["nightly-real-machine"]["result"] = "skipped"
         validate_results("pull_request", needs)
 
+    def test_complete_manual_rehearsal_uses_schedule_requirements(self) -> None:
+        needs = successful_needs()
+        validate_results("workflow_dispatch", needs, complete_catalogue=True)
+        needs["nightly-kind"]["result"] = "skipped"
+        with self.assertRaisesRegex(NightlyError, '"nightly-kind":"skipped"'):
+            validate_results("workflow_dispatch", needs, complete_catalogue=True)
+
 
 class NightlyWorkflowContractTests(unittest.TestCase):
     @classmethod
@@ -149,6 +156,7 @@ class NightlyWorkflowContractTests(unittest.TestCase):
         )
 
     def test_schedule_uses_compiled_dynamic_matrices(self) -> None:
+        self.assertIn("complete_catalogue:", self.workflow)
         self.assertIn("python3 .github/scripts/nightly_e2e.py plan", self.workflow)
         self.assertIn(
             "fromJSON(needs.changes.outputs.nightly_kind_matrix)", self.workflow
@@ -158,6 +166,7 @@ class NightlyWorkflowContractTests(unittest.TestCase):
             self.workflow,
         )
         self.assertIn("name: nightly-e2e-plan", self.workflow)
+        self.assertIn("inputs.complete_catalogue == true", self.workflow)
 
     def test_mandatory_capacity_and_aggregate_are_fail_closed(self) -> None:
         real_machine = self.workflow.split("  nightly-real-machine:\n", 1)[1].split(
