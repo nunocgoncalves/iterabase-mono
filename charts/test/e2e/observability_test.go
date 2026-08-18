@@ -283,7 +283,10 @@ func assertMonitorDiscoveryStage(t *testing.T, state *chartState) {
 			t.Fatalf("%s did not become 1: %v", metric, err)
 		}
 	}
-	assertPlatformMetrics(t, state, client, forward.URL)
+	assertPlatformMetrics(t, state, client, forward.URL,
+		os.Getenv("HARNESS_IMAGE_REPO") != "" && os.Getenv("HARNESS_IMAGE_TAG") != "",
+		os.Getenv("TOOL_RUNNER_IMAGE_REPO") != "" && os.Getenv("TOOL_RUNNER_IMAGE_TAG") != "",
+	)
 	body := requireHTTP(t, client, http.MethodGet, forward.URL+"/api/v1/targets?state=active", nil, http.StatusOK)
 	targets := []string{"postgresql", "redis"}
 	if os.Getenv("CONTROL_PLANE_IMAGE_REPO") != "" && os.Getenv("CONTROL_PLANE_IMAGE_TAG") != "" {
@@ -368,8 +371,16 @@ func assertLokiPersistenceStage(t *testing.T, state *chartState) {
 	state.stopForward(t, forward)
 }
 
-func assertPlatformMetrics(t *testing.T, state *chartState, client *http.Client, prometheusURL string) {
+func assertPlatformMetrics(t *testing.T, state *chartState, client *http.Client, prometheusURL string, includeHarness, includeToolRunner bool) {
 	t.Helper()
+	for _, query := range platformMetricQueries(includeHarness, includeToolRunner) {
+		if err := waitPrometheusValue(state.ctx, client, prometheusURL, query, "1", 5*time.Minute); err != nil {
+			t.Fatalf("representative platform metric %s did not become queryable: %v", query, err)
+		}
+	}
+}
+
+func platformMetricQueries(includeHarness, includeToolRunner bool) []string {
 	queries := []string{}
 	if os.Getenv("CONTROL_PLANE_IMAGE_REPO") != "" && os.Getenv("CONTROL_PLANE_IMAGE_TAG") != "" {
 		queries = append(queries,
@@ -387,37 +398,51 @@ func assertPlatformMetrics(t *testing.T, state *chartState, client *http.Client,
 			`count(inference_gateway_build_info)`,
 		)
 	}
-	if os.Getenv("HARNESS_IMAGE_REPO") != "" && os.Getenv("HARNESS_IMAGE_TAG") != "" {
+	if includeHarness {
 		queries = append(queries,
 			`count(up{job="control-plane",component="dispatch"} == 1)`,
 			`count(up{job="control-plane",component="harness"} == 1)`,
 			`count(control_plane_harness_build_info)`,
 		)
 	}
-	if os.Getenv("TOOL_RUNNER_IMAGE_REPO") != "" && os.Getenv("TOOL_RUNNER_IMAGE_TAG") != "" {
+	if includeToolRunner {
 		queries = append(queries,
 			`count(up{job="control-plane",component="tool-runner"} == 1)`,
 			`count(up{job="control-plane",component="tool-materializer"} == 1)`,
 		)
 	}
-	for _, query := range queries {
-		if err := waitPrometheusValue(state.ctx, client, prometheusURL, query, "1", 5*time.Minute); err != nil {
-			t.Fatalf("representative platform metric %s did not become queryable: %v", query, err)
-		}
-	}
+	return queries
 }
 
-func TestUnitFeatureReadinessMatchesDisabledRuntimeComponents(t *testing.T) {
+func TestUnitFeatureRuntimeAssertionsMatchDisabledComponents(t *testing.T) {
+	t.Setenv("HARNESS_IMAGE_REPO", "example.invalid/harness")
+	t.Setenv("HARNESS_IMAGE_TAG", "candidate")
+	t.Setenv("TOOL_RUNNER_IMAGE_REPO", "example.invalid/tool-runner")
+	t.Setenv("TOOL_RUNNER_IMAGE_TAG", "candidate")
+
 	selectors := strings.Join(stackReadinessSelectors(false, false), "\n")
 	for _, component := range []string{"component=dispatch", "component=harness", "component=tool-runner"} {
 		if strings.Contains(selectors, component) {
 			t.Fatalf("disabled component %q remained in readiness selectors: %s", component, selectors)
 		}
 	}
+	queries := strings.Join(platformMetricQueries(false, false), "\n")
+	for _, component := range []string{`component="dispatch"`, `component="harness"`, `component="tool-runner"`, `component="tool-materializer"`} {
+		if strings.Contains(queries, component) {
+			t.Fatalf("disabled component %q remained in metric queries: %s", component, queries)
+		}
+	}
+
 	candidateSelectors := strings.Join(stackReadinessSelectors(true, true), "\n")
 	for _, component := range []string{"component=dispatch", "component=harness", "component=tool-runner"} {
 		if !strings.Contains(candidateSelectors, component) {
 			t.Fatalf("enabled component %q missing from readiness selectors: %s", component, candidateSelectors)
+		}
+	}
+	candidateQueries := strings.Join(platformMetricQueries(true, true), "\n")
+	for _, component := range []string{`component="dispatch"`, `component="harness"`, `component="tool-runner"`, `component="tool-materializer"`} {
+		if !strings.Contains(candidateQueries, component) {
+			t.Fatalf("enabled component %q missing from metric queries: %s", component, candidateQueries)
 		}
 	}
 }
