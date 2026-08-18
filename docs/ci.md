@@ -81,14 +81,18 @@ python3 .github/scripts/test_select_ci.py
 
 ## Cache and setup contract
 
-All third-party actions use immutable commit SHAs. Go and Node are exact patch
-versions. Helm, Kind, kubectl, and kubeconform archives are pinned in
-`.github/tools/checksums.txt`; archives are checksum-verified after both download
-and cache restore.
+All third-party actions use immutable commit SHAs. Repository-pinned first-party
+JavaScript actions use reviewed Node 24 metadata; the offline cache contract test
+records every approved first-party action runtime so a new pin requires explicit
+review. Go and Node are exact patch versions. Helm, Kind, kubectl, and kubeconform
+archives are pinned in `.github/tools/checksums.txt`; archives are
+checksum-verified after both download and cache restore.
 
 - Go module/build caches use OS, architecture, exact Go version, and all workspace module manifests/checksum files, including shared testkit and owner E2E modules. There are no fallback restore keys.
 - npm caches contain downloads only and use exact Node version plus the owning
-  `package-lock.json`. `node_modules` is always rebuilt by `npm ci`.
+  `package-lock.json`. `setup-node` automatic package-manager caching is disabled
+  so only the repository's content-addressed cache is active. `node_modules` is
+  always rebuilt by `npm ci`.
 - Helm caches contain only `~/.cache/helm` downloads and use exact Helm version
   plus every `Chart.lock` and `Chart.yaml`. Vendored chart directories are
   rebuilt and never cached.

@@ -10,6 +10,17 @@ from content_digest import content_digest
 
 ROOT = Path(__file__).resolve().parents[2]
 
+# Upstream action.yml runtimes for these immutable refs, reviewed 2026-08-18.
+REVIEWED_FIRST_PARTY_ACTION_RUNTIMES = {
+    "actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a": "composite",
+    "actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9": "node24",
+    "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1": "node24",
+    "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c": "node24",
+    "actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417": "node24",
+    "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020": "node24",
+    "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a": "node24",
+}
+
 
 class CacheContractTests(unittest.TestCase):
     def test_lock_mutation_changes_content_key(self) -> None:
@@ -70,6 +81,17 @@ class CacheContractTests(unittest.TestCase):
         for reference in external:
             with self.subTest(reference=reference):
                 self.assertRegex(reference, r"^[^@]+@[0-9a-f]{40}$")
+
+    def test_first_party_action_runtimes_are_reviewed(self) -> None:
+        workflow_files = list((ROOT / ".github").glob("**/*.yml"))
+        references = {
+            reference
+            for workflow_file in workflow_files
+            for reference in re.findall(r"uses:\s+([^\s]+)", workflow_file.read_text())
+            if reference.startswith("actions/")
+        }
+        self.assertEqual(references, set(REVIEWED_FIRST_PARTY_ACTION_RUNTIMES))
+        self.assertNotIn("node20", REVIEWED_FIRST_PARTY_ACTION_RUNTIMES.values())
 
     def test_forbidden_mutable_state_is_not_cached(self) -> None:
         cache_actions = "\n".join(
