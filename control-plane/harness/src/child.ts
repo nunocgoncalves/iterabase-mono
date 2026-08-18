@@ -728,8 +728,9 @@ export async function createSession(
   if (!SESSION_ID_RE.test(a.sessionId)) throw new Error(`invalid session id: ${JSON.stringify(a.sessionId)}`);
 
   // ModelRuntime is the canonical auth/model boundary in Pi 0.84+. Keep its
-  // credential file scoped to this durable session, disable models.json, and
-  // forbid create-time provider refresh: this child has no direct network path.
+  // credential file scoped to this durable session and disable models.json.
+  // The supervisor injects PI_OFFLINE so later refreshes also fail closed;
+  // these options independently prevent network work during creation.
   const modelRuntime = await ModelRuntime.create({
     authPath: join(sessionDir, "auth.json"),
     modelsPath: null,
