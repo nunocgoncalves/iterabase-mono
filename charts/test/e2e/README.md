@@ -9,7 +9,7 @@ This directory owns the compiled runtime contracts for declarative chart behavio
 | `n-minus-one-upgrade` | `test-e2e-upgrade` | Checksum-pinned supported predecessor → exact current pair, schema ownership, state, Secret/PVC retention, hooks/Jobs, and rollout health |
 | `feature-enable-upgrade` | `test-e2e-feature-enable` | Internal-TLS predecessor without observability → authoritative operator CRD pre-apply/Established gate → combined current observability/TLS client paths |
 | `reapply-rollback-recovery` | `test-e2e-reapply-rollback` | No-rollout current reapply, supported inverse rollback to the declared predecessor, and forward recovery with retained state |
-| `observability` | `test-e2e-observability` | Stack readiness, disjoint datastore/exporter endpoints, monitor discovery, and bounded Prometheus/Loki persistence |
+| `observability` | `test-e2e-observability` | Stack readiness, exact candidate process targets over a valid synthetic Flux tool generation, disjoint datastore/exporter endpoints, monitor discovery, and bounded Prometheus/Loki persistence |
 | `observability-tls` | `test-e2e-observability-tls` | Internal-CA/DNS verification for stack servers, self-monitors, Grafana datasources/sidecars, Loki gateway, Promtail, and Alertmanager delivery |
 | `internal-tls` | `test-e2e-internal-tls` | Platform identities, control-plane HTTPS, gateway clients, and rejected plaintext Redis/PostgreSQL transport |
 
@@ -23,8 +23,10 @@ Set `ITERABASE_E2E_FIXTURE_MODE` explicitly:
 - `candidate` uses the exact release candidate plan and composed local candidate chart supplied by release CI;
 - `published` uses `published-fixture.json` and exact OCI versions.
 
+The observability scenarios always publish a deterministic in-cluster `GitRepository` artifact fixture through the same source-controller hostname contract used by the materializer, so source-mode CI exercises the fixture plumbing. When a candidate tool-runner image is selected, Helm readiness additionally proves that the exact candidate can verify, load, and register that valid generation instead of waiting on an intentionally absent source.
+
 `transition-baselines.json` is the chart owner's explicit supported-predecessor authority. It currently pins the published platform/substrate `0.3.10` archives by OCI version and SHA-256. Candidate planning copies these inputs into `transition_baselines`, verifies the published bytes, and supplies those exact packages beside the selected current archives; it does not use a compatibility manifest or floating lookup. The N-1, feature-enable, and reapply/rollback scenarios accept only source or candidate current charts and fail unless both current charts are newer than their predecessors; published mode remains excluded while its pinned current pair is `0.3.1`.
 
 The certificate migration source is always recorded as the immutable platform `0.2.2` chart. Published execution of the new observability verified-HTTPS contract requires a semantic chart publication containing the HOR-416/HOR-420 source changes; that publication and deployment authorization are deferred to product release review.
 
-`make test-e2e-unit` runs the compiled hermetic scenario and intentional break fixtures for mutable/mismatched or non-newer transition inputs, ambiguous duplicate or unestablished CRDs, Secret/PVC/all-stable-workload retention, incorrect rollback revision/status/chart history, endpoint leakage, ambiguous persistence, and plaintext self-monitoring without provisioning infrastructure.
+`make test-e2e-unit` runs the compiled hermetic scenario and intentional break fixtures for mutable/mismatched or non-newer transition inputs, ambiguous duplicate or unestablished CRDs, Secret/PVC/all-stable-workload retention, incorrect rollback revision/status/chart history, candidate tool-artifact integrity, disabled-component readiness, endpoint leakage, ambiguous persistence, and plaintext self-monitoring without provisioning infrastructure.

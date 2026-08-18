@@ -19,6 +19,11 @@ import (
 	"github.com/nunocgoncalves/iterabase-mono/testkit/e2e/poll"
 )
 
+const (
+	observabilityToolSourceName      = "observability-e2e"
+	observabilityToolServerNamespace = "flux-system"
+)
+
 func observabilityScenario() sharede2e.Definition {
 	diagnostics, cleanup := scenarioHooks()
 	return sharede2e.Define(sharede2e.Scenario[*chartState]{
@@ -33,7 +38,8 @@ func observabilityScenario() sharede2e.Definition {
 		Stages: []sharede2e.Stage[*chartState]{
 			{Name: "create-kind", Run: createKindStage},
 			{Name: "install-certificate-substrate", DependsOn: []string{"create-kind"}, Run: installCertificateSubstrateStage},
-			{Name: "install-observability", DependsOn: []string{"install-certificate-substrate"}, Run: installObservabilityStage},
+			{Name: "install-tool-source", DependsOn: []string{"install-certificate-substrate"}, Run: installObservabilityToolSourceStage},
+			{Name: "install-observability", DependsOn: []string{"install-tool-source"}, Run: installObservabilityStage},
 			{Name: "install-harness-worker", DependsOn: []string{"install-observability"}, Run: installObservabilityHarnessStage},
 			{Name: "assert-stack-readiness", DependsOn: []string{"install-harness-worker"}, Run: assertStackReadinessStage},
 			{Name: "assert-grafana-dashboards", DependsOn: []string{"assert-stack-readiness"}, Run: assertGrafanaDashboardsStage},
@@ -70,7 +76,7 @@ func observabilityPlatformValues() map[string]any {
 		controlPlane["toolRunner"] = map[string]any{
 			"enabled": true,
 			"image":   map[string]any{"repository": repository, "tag": tag},
-			"flux":    map[string]any{"namespace": testNamespace, "sourceName": "missing-e2e-source"},
+			"flux":    map[string]any{"namespace": testNamespace, "sourceName": observabilityToolSourceName},
 		}
 	}
 	inference, _ := values["inference-gateway"].(map[string]any)
@@ -139,7 +145,29 @@ func filepathFromCharts(state *chartState, name string) string {
 
 func assertStackReadinessStage(t *testing.T, state *chartState) {
 	t.Helper()
-	for _, selector := range []string{
+	assertStackReadiness(t, state,
+		os.Getenv("HARNESS_IMAGE_REPO") != "" && os.Getenv("HARNESS_IMAGE_TAG") != "",
+		os.Getenv("TOOL_RUNNER_IMAGE_REPO") != "" && os.Getenv("TOOL_RUNNER_IMAGE_TAG") != "",
+	)
+}
+
+func assertFeatureStackReadinessStage(t *testing.T, state *chartState) {
+	t.Helper()
+	// The feature-enable fixture deliberately keeps dispatch, harness, and the
+	// tool runner disabled. Candidate image availability must not turn absent
+	// workloads into readiness requirements for this transition scenario.
+	assertStackReadiness(t, state, false, false)
+}
+
+func assertStackReadiness(t *testing.T, state *chartState, includeHarness, includeToolRunner bool) {
+	t.Helper()
+	for _, selector := range stackReadinessSelectors(includeHarness, includeToolRunner) {
+		state.waitForPods(t, selector, 7*time.Minute)
+	}
+}
+
+func stackReadinessSelectors(includeHarness, includeToolRunner bool) []string {
+	selectors := []string{
 		"app.kubernetes.io/name=prometheus",
 		"app.kubernetes.io/name=grafana",
 		"app.kubernetes.io/name=loki,app.kubernetes.io/component=single-binary",
@@ -151,16 +179,17 @@ func assertStackReadinessStage(t *testing.T, state *chartState) {
 		"app.kubernetes.io/name=control-plane,app.kubernetes.io/component=manager",
 		"app.kubernetes.io/name=control-plane,app.kubernetes.io/component=gateway",
 		"app.kubernetes.io/name=inference-gateway",
-	} {
-		state.waitForPods(t, selector, 7*time.Minute)
 	}
-	if os.Getenv("HARNESS_IMAGE_REPO") != "" && os.Getenv("HARNESS_IMAGE_TAG") != "" {
-		state.waitForPods(t, "app.kubernetes.io/name=control-plane,app.kubernetes.io/component=dispatch", 7*time.Minute)
-		state.waitForPods(t, "app.kubernetes.io/name=control-plane,app.kubernetes.io/component=harness", 7*time.Minute)
+	if includeHarness {
+		selectors = append(selectors,
+			"app.kubernetes.io/name=control-plane,app.kubernetes.io/component=dispatch",
+			"app.kubernetes.io/name=control-plane,app.kubernetes.io/component=harness",
+		)
 	}
-	if os.Getenv("TOOL_RUNNER_IMAGE_REPO") != "" && os.Getenv("TOOL_RUNNER_IMAGE_TAG") != "" {
-		state.waitForPods(t, "app.kubernetes.io/name=control-plane,app.kubernetes.io/component=tool-runner", 7*time.Minute)
+	if includeToolRunner {
+		selectors = append(selectors, "app.kubernetes.io/name=control-plane,app.kubernetes.io/component=tool-runner")
 	}
+	return selectors
 }
 
 func assertGrafanaDashboardsStage(t *testing.T, state *chartState) {
@@ -374,6 +403,21 @@ func assertPlatformMetrics(t *testing.T, state *chartState, client *http.Client,
 	for _, query := range queries {
 		if err := waitPrometheusValue(state.ctx, client, prometheusURL, query, "1", 5*time.Minute); err != nil {
 			t.Fatalf("representative platform metric %s did not become queryable: %v", query, err)
+		}
+	}
+}
+
+func TestUnitFeatureReadinessMatchesDisabledRuntimeComponents(t *testing.T) {
+	selectors := strings.Join(stackReadinessSelectors(false, false), "\n")
+	for _, component := range []string{"component=dispatch", "component=harness", "component=tool-runner"} {
+		if strings.Contains(selectors, component) {
+			t.Fatalf("disabled component %q remained in readiness selectors: %s", component, selectors)
+		}
+	}
+	candidateSelectors := strings.Join(stackReadinessSelectors(true, true), "\n")
+	for _, component := range []string{"component=dispatch", "component=harness", "component=tool-runner"} {
+		if !strings.Contains(candidateSelectors, component) {
+			t.Fatalf("enabled component %q missing from readiness selectors: %s", component, candidateSelectors)
 		}
 	}
 }

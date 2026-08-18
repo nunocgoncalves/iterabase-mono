@@ -27,7 +27,8 @@ func observabilityTLSScenario() sharede2e.Definition {
 		Stages: []sharede2e.Stage[*chartState]{
 			{Name: "create-kind", Run: createKindStage},
 			{Name: "install-certificate-substrate", DependsOn: []string{"create-kind"}, Run: installCertificateSubstrateStage},
-			{Name: "install-observability-tls", DependsOn: []string{"install-certificate-substrate"}, Run: installObservabilityTLSStage},
+			{Name: "install-tool-source", DependsOn: []string{"install-certificate-substrate"}, Run: installObservabilityToolSourceStage},
+			{Name: "install-observability-tls", DependsOn: []string{"install-tool-source"}, Run: installObservabilityTLSStage},
 			{Name: "install-harness-worker", DependsOn: []string{"install-observability-tls"}, Run: installObservabilityHarnessStage},
 			{Name: "assert-stack-readiness", DependsOn: []string{"install-harness-worker"}, Run: assertStackReadinessStage},
 			{Name: "assert-issued-identities", DependsOn: []string{"assert-stack-readiness"}, Run: assertObservabilityIdentitiesStage},
