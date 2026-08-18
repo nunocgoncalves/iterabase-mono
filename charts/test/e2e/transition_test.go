@@ -120,7 +120,7 @@ func featureEnableUpgradeScenario() sharede2e.Definition {
 			{Name: "assert-operator-crds-absent", DependsOn: []string{"install-predecessor-with-feature-disabled"}, Run: assertOperatorCRDsAbsentStage},
 			{Name: "preapply-current-operator-crds", DependsOn: []string{"assert-operator-crds-absent"}, Run: preapplyCurrentOperatorCRDsStage},
 			{Name: "enable-observability-tls", DependsOn: []string{"preapply-current-operator-crds"}, Run: enableObservabilityTLSStage},
-			{Name: "assert-feature-stack-readiness", DependsOn: []string{"enable-observability-tls"}, Run: assertStackReadinessStage},
+			{Name: "assert-feature-stack-readiness", DependsOn: []string{"enable-observability-tls"}, Run: assertFeatureStackReadinessStage},
 			{Name: "assert-feature-identities", DependsOn: []string{"assert-feature-stack-readiness"}, Run: assertObservabilityIdentitiesStage},
 			{Name: "assert-feature-endpoint-separation", DependsOn: []string{"assert-feature-stack-readiness"}, Run: assertEndpointSeparationStage},
 			{Name: "assert-feature-verified-stack", DependsOn: []string{"assert-feature-identities"}, Run: assertVerifiedStackHTTPSStage},
