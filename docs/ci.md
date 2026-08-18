@@ -81,9 +81,9 @@ python3 .github/scripts/test_select_ci.py
 
 ## Cache and setup contract
 
-All third-party actions use immutable commit SHAs. Repository-pinned first-party
-JavaScript actions use reviewed Node 24 metadata; the offline cache contract test
-records every approved first-party action runtime so a new pin requires explicit
+All third-party actions use immutable commit SHAs. Every repository-pinned
+JavaScript action uses reviewed Node 24 metadata; the offline cache contract test
+records every approved external action runtime so a new pin requires explicit
 review. Go and Node are exact patch versions. Helm, Kind, kubectl, and kubeconform
 archives are pinned in `.github/tools/checksums.txt`; archives are
 checksum-verified after both download and cache restore.

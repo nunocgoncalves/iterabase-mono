@@ -11,7 +11,7 @@ from content_digest import content_digest
 ROOT = Path(__file__).resolve().parents[2]
 
 # Upstream action.yml runtimes for these immutable refs, reviewed 2026-08-18.
-REVIEWED_FIRST_PARTY_ACTION_RUNTIMES = {
+REVIEWED_EXTERNAL_ACTION_RUNTIMES = {
     "actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a": "composite",
     "actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9": "node24",
     "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1": "node24",
@@ -19,6 +19,12 @@ REVIEWED_FIRST_PARTY_ACTION_RUNTIMES = {
     "actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417": "node24",
     "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020": "node24",
     "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a": "node24",
+    "anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610": "node24",
+    "anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610": "node24",
+    "docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a": "node24",
+    "docker/login-action@dbcb813823bdd20940b903addbd779551569679f": "node24",
+    "docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c": "node24",
+    "goreleaser/goreleaser-action@ec59f474b9834571250b370d4735c50f8e2d1e29": "node24",
 }
 
 
@@ -82,16 +88,16 @@ class CacheContractTests(unittest.TestCase):
             with self.subTest(reference=reference):
                 self.assertRegex(reference, r"^[^@]+@[0-9a-f]{40}$")
 
-    def test_first_party_action_runtimes_are_reviewed(self) -> None:
+    def test_external_action_runtimes_are_reviewed(self) -> None:
         workflow_files = list((ROOT / ".github").glob("**/*.yml"))
         references = {
             reference
             for workflow_file in workflow_files
             for reference in re.findall(r"uses:\s+([^\s]+)", workflow_file.read_text())
-            if reference.startswith("actions/")
+            if not reference.startswith("./")
         }
-        self.assertEqual(references, set(REVIEWED_FIRST_PARTY_ACTION_RUNTIMES))
-        self.assertNotIn("node20", REVIEWED_FIRST_PARTY_ACTION_RUNTIMES.values())
+        self.assertEqual(references, set(REVIEWED_EXTERNAL_ACTION_RUNTIMES))
+        self.assertNotIn("node20", REVIEWED_EXTERNAL_ACTION_RUNTIMES.values())
 
     def test_forbidden_mutable_state_is_not_cached(self) -> None:
         cache_actions = "\n".join(
