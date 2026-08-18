@@ -25,8 +25,7 @@ import { fileURLToPath } from "node:url";
 import { toJson, create } from "@bufbuild/protobuf";
 import { Type } from "typebox";
 import {
-  AuthStorage,
-  ModelRegistry,
+  ModelRuntime,
   SessionManager,
   SettingsManager,
   createAgentSessionFromServices,
@@ -728,9 +727,16 @@ export async function createSession(
 ): Promise<AgentSessionRuntime> {
   if (!SESSION_ID_RE.test(a.sessionId)) throw new Error(`invalid session id: ${JSON.stringify(a.sessionId)}`);
 
-  const authStorage = AuthStorage.create(join(sessionDir, "auth.json"));
+  // ModelRuntime is the canonical auth/model boundary in Pi 0.84+. Keep its
+  // credential file scoped to this durable session, disable models.json, and
+  // forbid create-time provider refresh: this child has no direct network path.
+  const modelRuntime = await ModelRuntime.create({
+    authPath: join(sessionDir, "auth.json"),
+    modelsPath: null,
+    allowModelNetwork: false,
+    refreshOnCreate: false,
+  });
   const skillPaths = resolveSkillPaths(a.skills ?? [], piDirs);
-  const modelRegistry = ModelRegistry.create(authStorage);
 
   const providerFactory: ExtensionFactory = (pi) => {
     const provider: ProviderConfig = {
@@ -817,9 +823,8 @@ export async function createSession(
     const services: AgentSessionServices = await createAgentSessionServices({
       cwd: rtCwd,
       agentDir: sessionDir, // scope discovery to the session (no global ~/.pi)
-      authStorage,
       settingsManager,
-      modelRegistry,
+      modelRuntime,
       resourceLoaderOptions: {
         additionalExtensionPaths: piDirs,
         additionalSkillPaths: skillPaths,

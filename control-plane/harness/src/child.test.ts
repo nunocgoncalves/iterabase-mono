@@ -421,7 +421,7 @@ describe("createSession credentialless custom provider (HOR-395)", { timeout: 30
       expect(model).toBeDefined();
       // Regression gate: before the placeholder apiKey this was false, so every
       // model call threw "No API key found" and the turn aborted on OPO1.
-      expect(runtime.session.modelRegistry.hasConfiguredAuth(model!)).toBe(true);
+      expect(runtime.services.modelRuntime.hasConfiguredAuth(model!.provider)).toBe(true);
       await runtime.dispose();
     } finally {
       rmSync(tmp, { recursive: true, force: true });
