@@ -20,7 +20,15 @@ spec:
     - port: mat-metrics
       path: /metrics
       interval: {{ .Values.metrics.scrapeInterval | default "30s" }}
+      relabelings:
+        - action: replace
+          replacement: tool-materializer
+          targetLabel: component
     - port: run-metrics
       path: /metrics
       interval: {{ .Values.metrics.scrapeInterval | default "30s" }}
+      relabelings:
+        - action: replace
+          replacement: tool-runner
+          targetLabel: component
 {{- end }}

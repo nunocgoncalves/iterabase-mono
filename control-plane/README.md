@@ -105,10 +105,14 @@ make install-hooks      # use .githooks/pre-commit
 ```
 
 The API reads `control-plane.example.yaml` (copy to `control-plane.yaml`) or
-env vars (`DATABASE_URL`, `API_ADDR`, `LOG_LEVEL`, `LOG_FORMAT`,
+env vars (`DATABASE_URL`, `API_ADDR`, `METRICS_ADDR`, `LOG_LEVEL`, `LOG_FORMAT`,
 `JWT_SIGNING_KEY_PATH`, `JWT_KEY_ID`, `IDENTITY_MODE`, and `ARTIFACT_*`). The
-manager reads only
-`DATABASE_URL` from the environment.
+manager reads only `DATABASE_URL` from the environment. When configured,
+API/gateway/dispatch serve bounded Prometheus telemetry on a dedicated
+plaintext in-cluster `METRICS_ADDR`; application ingress and mandatory-mTLS RPC
+listeners never serve metrics. Manager uses controller-runtime metrics,
+AgentPool supervisors serve supervisor-derived metrics on their probe port, and
+disposable pi children expose no listener.
 
 ## Database
 

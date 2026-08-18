@@ -17,6 +17,7 @@ import (
 
 	artifactstore "github.com/nunocgoncalves/iterabase-mono/control-plane/internal/artifact"
 	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/identity"
+	cpmetrics "github.com/nunocgoncalves/iterabase-mono/control-plane/internal/metrics"
 	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/permissions"
 	workstore "github.com/nunocgoncalves/iterabase-mono/control-plane/internal/work"
 	dashboardui "github.com/nunocgoncalves/iterabase-mono/control-plane/ui"
@@ -31,6 +32,7 @@ type Services struct {
 	Mode        string // enrolled | open
 	Work        *workstore.Store
 	Artifacts   *artifactstore.Service
+	Metrics     *cpmetrics.Metrics
 }
 
 type contextKey string
@@ -67,6 +69,9 @@ func New(svc Services) http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
 	r.Use(middleware.Recoverer)
+	if svc.Metrics != nil {
+		r.Use(svc.Metrics.HTTPMiddleware("api"))
+	}
 	r.Use(func(next http.Handler) http.Handler {
 		// SSE is a long-lived resumable stream; normal API requests retain the
 		// bounded request timeout.

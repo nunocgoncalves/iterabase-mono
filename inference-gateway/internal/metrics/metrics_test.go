@@ -27,8 +27,8 @@ func TestNew_RegistersAllMetrics(t *testing.T) {
 	// and then gathering.
 
 	// Increment/observe all metrics with sample label values.
-	m.RequestsTotal.WithLabelValues("test-model", "200", "false").Inc()
-	m.RequestDuration.WithLabelValues("test-model", "false").Observe(0.5)
+	m.RequestsTotal.WithLabelValues("api", "/v1/chat/completions", "test-model", "2xx", "false").Inc()
+	m.RequestDuration.WithLabelValues("api", "/v1/chat/completions", "test-model", "false").Observe(0.5)
 	m.TimeToFirstToken.WithLabelValues("test-model").Observe(0.1)
 	m.InterTokenLatency.WithLabelValues("test-model").Observe(0.01)
 	m.TokensPerSecond.WithLabelValues("test-model", "completion").Observe(50)
@@ -37,9 +37,9 @@ func TestNew_RegistersAllMetrics(t *testing.T) {
 	m.PromptTokensTotal.WithLabelValues("test-model").Add(100)
 	m.CompletionTokensTotal.WithLabelValues("test-model").Add(200)
 	m.ActiveStreams.WithLabelValues("test-model").Inc()
-	m.BackendHealth.WithLabelValues("test-model", "http://localhost:8000").Set(1)
-	m.RateLimitHitsTotal.WithLabelValues("ml-abc123", "rpm").Inc()
-	m.BackendRequestDuration.WithLabelValues("test-model", "http://localhost:8000").Observe(0.3)
+	m.BackendHealth.WithLabelValues("test-model", "backend-a").Set(1)
+	m.RateLimitHitsTotal.WithLabelValues("rpm").Inc()
+	m.BackendRequestDuration.WithLabelValues("test-model", "backend-a").Observe(0.3)
 
 	families, err = reg.Gather()
 	require.NoError(t, err)
@@ -76,7 +76,7 @@ func TestNew_NilRegistry(t *testing.T) {
 	require.NotNil(t, m.Registry)
 
 	// Verify metrics work with the auto-created registry.
-	m.RequestsTotal.WithLabelValues("m", "200", "false").Inc()
+	m.RequestsTotal.WithLabelValues("api", "/v1/models", "m", "2xx", "false").Inc()
 	families, err := m.Registry.Gather()
 	require.NoError(t, err)
 	assert.NotEmpty(t, families)
@@ -87,9 +87,9 @@ func TestCounterIncrements(t *testing.T) {
 	m := New(reg)
 
 	// Increment requests counter.
-	m.RequestsTotal.WithLabelValues("gpt-4", "200", "true").Inc()
-	m.RequestsTotal.WithLabelValues("gpt-4", "200", "true").Inc()
-	m.RequestsTotal.WithLabelValues("gpt-4", "500", "false").Inc()
+	m.RequestsTotal.WithLabelValues("api", "/v1/chat/completions", "gpt-4", "2xx", "true").Inc()
+	m.RequestsTotal.WithLabelValues("api", "/v1/chat/completions", "gpt-4", "2xx", "true").Inc()
+	m.RequestsTotal.WithLabelValues("api", "/v1/chat/completions", "gpt-4", "5xx", "false").Inc()
 
 	families, err := reg.Gather()
 	require.NoError(t, err)
@@ -103,10 +103,10 @@ func TestCounterIncrements(t *testing.T) {
 	// Find the 200/true series.
 	for _, metric := range fam.GetMetric() {
 		labels := labelMap(metric)
-		if labels["status_code"] == "200" && labels["streaming"] == "true" {
+		if labels["status_class"] == "2xx" && labels["streaming"] == "true" {
 			assert.Equal(t, 2.0, metric.GetCounter().GetValue())
 		}
-		if labels["status_code"] == "500" {
+		if labels["status_class"] == "5xx" {
 			assert.Equal(t, 1.0, metric.GetCounter().GetValue())
 		}
 	}
@@ -116,8 +116,8 @@ func TestHistogramObservations(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	m := New(reg)
 
-	m.RequestDuration.WithLabelValues("llama", "false").Observe(1.5)
-	m.RequestDuration.WithLabelValues("llama", "false").Observe(2.5)
+	m.RequestDuration.WithLabelValues("api", "/v1/chat/completions", "llama", "false").Observe(1.5)
+	m.RequestDuration.WithLabelValues("api", "/v1/chat/completions", "llama", "false").Observe(2.5)
 
 	families, err := reg.Gather()
 	require.NoError(t, err)
@@ -135,8 +135,8 @@ func TestGaugeSetAndGet(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	m := New(reg)
 
-	m.BackendHealth.WithLabelValues("gpt-4", "http://backend1:8000").Set(1)
-	m.BackendHealth.WithLabelValues("gpt-4", "http://backend2:8000").Set(0)
+	m.BackendHealth.WithLabelValues("gpt-4", "backend-1").Set(1)
+	m.BackendHealth.WithLabelValues("gpt-4", "backend-2").Set(0)
 
 	families, err := reg.Gather()
 	require.NoError(t, err)
@@ -147,7 +147,7 @@ func TestGaugeSetAndGet(t *testing.T) {
 
 	for _, metric := range fam.GetMetric() {
 		labels := labelMap(metric)
-		if labels["backend_url"] == "http://backend1:8000" {
+		if labels["backend_ref"] == "backend-1" {
 			assert.Equal(t, 1.0, metric.GetGauge().GetValue())
 		} else {
 			assert.Equal(t, 0.0, metric.GetGauge().GetValue())
@@ -200,6 +200,23 @@ func TestTokensPerRequestLabels(t *testing.T) {
 	fam := findFamily(families, "gateway_tokens_per_request")
 	require.NotNil(t, fam)
 	assert.Len(t, fam.GetMetric(), 2)
+}
+
+func TestBoundedLabelsExcludeCredentialsAndURLs(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := New(reg)
+	m.RateLimitHitsTotal.WithLabelValues("rpm").Inc()
+	m.BackendHealth.WithLabelValues("model-a", "backend-a").Set(1)
+	families, err := reg.Gather()
+	require.NoError(t, err)
+	for _, family := range families {
+		for _, metric := range family.GetMetric() {
+			for name, value := range labelMap(metric) {
+				assert.NotContains(t, []string{"key_prefix", "identity_id", "backend_url", "error"}, name)
+				assert.NotContains(t, value, "http://")
+			}
+		}
+	}
 }
 
 func TestCompletionTokensPerSecondByPromptBucketLabels(t *testing.T) {

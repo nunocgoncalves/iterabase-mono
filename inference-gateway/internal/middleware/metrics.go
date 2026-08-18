@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/go-chi/chi/v5"
+
 	"github.com/nunocgoncalves/iterabase-mono/inference-gateway/internal/metrics"
 )
 
@@ -17,7 +19,8 @@ type metricsContextKey struct{}
 type MetricsData struct {
 	Model      string
 	Streaming  bool
-	BackendURL string // Set by the proxy handler after backend selection.
+	BackendURL string // Logging only; never exported as a metric label.
+	BackendRef string // Stable, bounded catalog reference used by metrics.
 }
 
 // Metrics returns middleware that records gateway_requests_total and
@@ -26,7 +29,11 @@ type MetricsData struct {
 // The model and streaming labels are populated from MetricsData stored
 // in the request context by the proxy handler. If no MetricsData is
 // present (e.g. /v1/models, error responses), model defaults to "unknown".
-func Metrics(m *metrics.Metrics) func(http.Handler) http.Handler {
+func Metrics(m *metrics.Metrics, listeners ...string) func(http.Handler) http.Handler {
+	listener := "api"
+	if len(listeners) > 0 && listeners[0] != "" {
+		listener = listeners[0]
+	}
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			start := time.Now()
@@ -50,10 +57,14 @@ func Metrics(m *metrics.Metrics) func(http.Handler) http.Handler {
 				}
 			}
 
-			statusCode := fmt.Sprintf("%d", sw.statusCode)
+			statusClass := fmt.Sprintf("%dxx", sw.statusCode/100)
+			route := chi.RouteContext(r.Context()).RoutePattern()
+			if route == "" {
+				route = "unmatched"
+			}
 
-			m.RequestsTotal.WithLabelValues(model, statusCode, streaming).Inc()
-			m.RequestDuration.WithLabelValues(model, streaming).Observe(duration)
+			m.RequestsTotal.WithLabelValues(listener, route, model, statusClass, streaming).Inc()
+			m.RequestDuration.WithLabelValues(listener, route, model, streaming).Observe(duration)
 		})
 	}
 }

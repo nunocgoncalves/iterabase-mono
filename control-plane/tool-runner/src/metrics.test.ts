@@ -11,6 +11,8 @@ describe("Prometheus metrics", () => {
     const materialized = await materializer.registry.metrics();
     expect(materialized).toContain('tool_runner_materializations_total{result="failure"} 1');
     expect(materialized).toContain("tool_runner_materialized_generation_bytes 42");
+    expect(materialized).not.toContain("main@sha1:abc");
+    expect(materialized).not.toContain(`sha256:${"a".repeat(64)}`);
 
     const runner = new RunnerMetrics();
     runner.generationActivations.labels("failure").inc();

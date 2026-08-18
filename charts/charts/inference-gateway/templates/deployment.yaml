@@ -52,6 +52,10 @@ spec:
           ports:
             - name: http
               containerPort: {{ .Values.service.port }}
+            {{- if .Values.metrics.enabled }}
+            - name: http-metrics
+              containerPort: {{ .Values.metrics.port }}
+            {{- end }}
             {{- if .Values.workload.enabled }}
             - name: workload
               containerPort: {{ .Values.workload.port }}
@@ -79,6 +83,12 @@ spec:
             # Points the gateway's redisOptions at the internal CA for rediss:// verify.
             - name: REDIS_TLS_CA_FILE
               value: {{ .Values.tls.caMountPath | quote }}
+            {{- end }}
+            {{- if .Values.metrics.enabled }}
+            - name: METRICS_ENABLED
+              value: "true"
+            - name: METRICS_PORT
+              value: {{ .Values.metrics.port | quote }}
             {{- end }}
             - name: ADMIN_API_KEY
               valueFrom:

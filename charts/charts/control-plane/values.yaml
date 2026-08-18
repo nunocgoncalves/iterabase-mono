@@ -185,23 +185,17 @@ tls:
 resources: {}
 
 # Metrics (opt-in; flip on with observability — see values-observability.yaml).
-# ServiceMonitors/PodMonitors for the control-plane. The tool runner ships live
-# materializer + runner /metrics endpoints. The api endpoint and manager
-# controller-runtime metrics port remain service-repo concerns (HOR-408 tracked
-# gap); those monitors scrape once the endpoints ship. The api monitor scrapes
-# over HTTPS with the internal CA when
-# internalTLS is on (the api serves HTTPS from a cert-manager leaf). The
-# ServiceMonitors/PodMonitors are Prometheus Operator CRDs — rendered regardless
-# but only reconciled when the operator (from the observability chart) is
-# installed.
+# Application and mandatory-mTLS listeners remain isolated: api/gateway/dispatch
+# expose a dedicated plaintext in-cluster metrics-only listener, manager uses
+# controller-runtime metrics, harness workers reuse their probe listener, and
+# tool-runner/materializer retain separate metrics-only listeners.
 metrics:
   enabled: false
   # scrapeInterval: 30s
-  # The manager's controller-runtime metrics port (name). DORMANT until the
-  # control-plane service repo binds --metrics-bind-address to a port named
-  # http-metrics (HOR-408 tracked gap). Override the port name here once shipped.
+  port: 9090
   manager:
     port: http-metrics
+    containerPort: 8080
   # vLLM / model-backend pods (managed by this chart's operator over the
   # modelbackends CRD). vLLM exposes /metrics natively on its serving port. The
   # pods are operator-created with the label

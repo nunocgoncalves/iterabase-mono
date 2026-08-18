@@ -161,7 +161,7 @@ try {
       const child = factory(assignment(), sandbox, sandbox.home);
       const result = await child.result;
 
-      expect(result.outcome).toBe(Outcome.COMPLETED);
+      expect(result.outcome, result.message).toBe(Outcome.COMPLETED);
       expect(catalogRequests).toBe(0);
     } finally {
       await new Promise<void>((resolve, reject) => {

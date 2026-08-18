@@ -2,14 +2,17 @@
 // health (200 unless fatal); /readyz is 200 only after Welcome while registered
 // and not draining/fatal — busy capacity (a turn in flight) is represented by
 // the absence of a Ready credit, NOT by failing Kubernetes readiness. Loopback
-// only; no RPC.
+// plus bounded supervisor /metrics on the same in-cluster listener; no RPC.
 
 import { createServer, type Server } from "node:http";
+import type { Registry } from "prom-client";
 
 export class Probes {
   private healthy = true;
   private ready = false;
   private server: Server | null = null;
+
+  constructor(private readonly metrics?: Registry) {}
 
   setHealthy(v: boolean): void {
     this.healthy = v;
@@ -20,11 +23,19 @@ export class Probes {
 
   /** Start the probe server. Resolves when listening (port=0 => OS-assigned). */
   start(port: number): Promise<Server> {
-    const server = createServer((req, res) => {
-      if (req.url === "/healthz") {
+    const server = createServer(async (req, res) => {
+      const path = req.url?.split("?", 1)[0];
+      if (path === "/healthz") {
         res.writeHead(this.healthy ? 200 : 503).end(this.healthy ? "ok" : "unhealthy");
-      } else if (req.url === "/readyz") {
+      } else if (path === "/readyz") {
         res.writeHead(this.ready ? 200 : 503).end(this.ready ? "ok" : "not ready");
+      } else if (path === "/metrics" && this.metrics) {
+        try {
+          res.writeHead(200, { "Content-Type": this.metrics.contentType });
+          res.end(await this.metrics.metrics());
+        } catch {
+          res.writeHead(500).end();
+        }
       } else {
         res.writeHead(404).end();
       }

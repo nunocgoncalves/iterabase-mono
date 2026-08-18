@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -25,7 +26,7 @@ func observabilityScenario() sharede2e.Definition {
 			"observability",
 			"Installs only the chart-owned observability composition and proves stack readiness, monitor discovery, disjoint endpoints, client paths, and unambiguous Prometheus/Loki persistence.",
 			"test-e2e-observability", 40,
-			[]string{"HOR-408", "HOR-418", "HOR-416"},
+			[]string{"HOR-408", "HOR-414", "HOR-418", "HOR-416"},
 			[]string{"control-plane-chart", "inference-gateway-chart", "iterabase-platform-chart"},
 		),
 		NewState: newChartState,
@@ -33,7 +34,9 @@ func observabilityScenario() sharede2e.Definition {
 			{Name: "create-kind", Run: createKindStage},
 			{Name: "install-certificate-substrate", DependsOn: []string{"create-kind"}, Run: installCertificateSubstrateStage},
 			{Name: "install-observability", DependsOn: []string{"install-certificate-substrate"}, Run: installObservabilityStage},
-			{Name: "assert-stack-readiness", DependsOn: []string{"install-observability"}, Run: assertStackReadinessStage},
+			{Name: "install-harness-worker", DependsOn: []string{"install-observability"}, Run: installObservabilityHarnessStage},
+			{Name: "assert-stack-readiness", DependsOn: []string{"install-harness-worker"}, Run: assertStackReadinessStage},
+			{Name: "assert-grafana-dashboards", DependsOn: []string{"assert-stack-readiness"}, Run: assertGrafanaDashboardsStage},
 			{Name: "assert-endpoint-separation", DependsOn: []string{"assert-stack-readiness"}, Run: assertEndpointSeparationStage},
 			{Name: "assert-monitor-discovery", DependsOn: []string{"assert-stack-readiness"}, Run: assertMonitorDiscoveryStage},
 			{Name: "assert-prometheus-persistence", DependsOn: []string{"assert-monitor-discovery"}, Run: assertPrometheusPersistenceStage},
@@ -46,12 +49,88 @@ func observabilityScenario() sharede2e.Definition {
 
 func installObservabilityStage(t *testing.T, state *chartState) {
 	t.Helper()
-	values := runtimePlatformValues()
+	values := observabilityPlatformValues()
 	state.installPlatform(t, 20*time.Minute,
 		filepathFromCharts(state, "values-observability.yaml"),
 		state.writeValues(t, "observability-runtime", values),
 	)
 	assertCandidateImages(t, state)
+}
+
+func observabilityPlatformValues() map[string]any {
+	values := runtimePlatformValues()
+	controlPlane := values["control-plane"].(map[string]any)
+	if os.Getenv("HARNESS_IMAGE_REPO") != "" && os.Getenv("HARNESS_IMAGE_TAG") != "" {
+		controlPlane["dispatch"] = map[string]any{
+			"enabled":      true,
+			"defaultModel": map[string]any{"id": "e2e-model", "api": "openai"},
+		}
+	}
+	if repository, tag := os.Getenv("TOOL_RUNNER_IMAGE_REPO"), os.Getenv("TOOL_RUNNER_IMAGE_TAG"); repository != "" && tag != "" {
+		controlPlane["toolRunner"] = map[string]any{
+			"enabled": true,
+			"image":   map[string]any{"repository": repository, "tag": tag},
+			"flux":    map[string]any{"namespace": testNamespace, "sourceName": "missing-e2e-source"},
+		}
+	}
+	inference, _ := values["inference-gateway"].(map[string]any)
+	if inference == nil {
+		inference = map[string]any{}
+		values["inference-gateway"] = inference
+	}
+	if os.Getenv("HARNESS_IMAGE_REPO") != "" && os.Getenv("HARNESS_IMAGE_TAG") != "" {
+		inference["workload"] = map[string]any{"enabled": true}
+	}
+	return values
+}
+
+func installObservabilityHarnessStage(t *testing.T, state *chartState) {
+	t.Helper()
+	repository, tag := os.Getenv("HARNESS_IMAGE_REPO"), os.Getenv("HARNESS_IMAGE_TAG")
+	if repository == "" || tag == "" {
+		t.Log("HARNESS_IMAGE_REPO/TAG absent; candidate harness target is not part of this local fixture")
+		return
+	}
+	manifest := fmt.Sprintf(`apiVersion: platform.iterabase.com/v1alpha1
+kind: AgentPool
+metadata:
+  name: observability-e2e
+  namespace: %s
+spec:
+  replicas: 1
+  workerImage: %s:%s
+  podSecurity: baseline
+  identity:
+    trustDomain: iterabase.local
+    caSecretRef: {name: %s-control-plane-gateway-ca}
+    certMountPath: /etc/harness/tls
+  sandbox:
+    storageClassName: standard
+    accessMode: ReadWriteOnce
+    size: 1Gi
+    mountPath: /data/sandboxes
+  gateways:
+    controlPlane:
+      url: https://%s-control-plane-dispatch:8091
+      serverName: %s-control-plane-dispatch.%s.svc
+      selector: {podSelector: {matchLabels: {app.kubernetes.io/name: control-plane, app.kubernetes.io/component: dispatch}}}
+    toolGateway:
+      url: https://%s-control-plane-gateway:8090
+      serverName: %s-control-plane-gateway.%s.svc
+      selector: {podSelector: {matchLabels: {app.kubernetes.io/name: control-plane, app.kubernetes.io/component: gateway}}}
+    inferenceGateway:
+      url: https://%s-inference-gateway:8443
+      serverName: %s-inference-gateway.%s.svc
+      selector: {podSelector: {matchLabels: {app.kubernetes.io/name: inference-gateway}}}
+  networkPolicy: {egress: denied}
+  workspaceTools: false
+  piDirs: [/pi/product, /pi/client]
+  walDir: /var/harness/wal
+  probe: {port: 8081}
+`, testNamespace, repository, tag, testRelease, testRelease, testRelease, testNamespace,
+		testRelease, testRelease, testNamespace, testRelease, testRelease, testNamespace)
+	state.kubectl(t, 30*time.Second, "apply", "-f", state.writeManifest(t, "observability-agentpool.yaml", manifest))
+	state.waitForPods(t, "app.kubernetes.io/name=control-plane,app.kubernetes.io/component=harness", 7*time.Minute)
 }
 
 func filepathFromCharts(state *chartState, name string) string {
@@ -68,8 +147,76 @@ func assertStackReadinessStage(t *testing.T, state *chartState) {
 		"app.kubernetes.io/name=promtail",
 		"app.kubernetes.io/name=postgresql,app.kubernetes.io/component=exporter",
 		"app.kubernetes.io/name=redis,app.kubernetes.io/component=exporter",
+		"app.kubernetes.io/name=control-plane,app.kubernetes.io/component=api",
+		"app.kubernetes.io/name=control-plane,app.kubernetes.io/component=manager",
+		"app.kubernetes.io/name=control-plane,app.kubernetes.io/component=gateway",
+		"app.kubernetes.io/name=inference-gateway",
 	} {
 		state.waitForPods(t, selector, 7*time.Minute)
+	}
+	if os.Getenv("HARNESS_IMAGE_REPO") != "" && os.Getenv("HARNESS_IMAGE_TAG") != "" {
+		state.waitForPods(t, "app.kubernetes.io/name=control-plane,app.kubernetes.io/component=dispatch", 7*time.Minute)
+		state.waitForPods(t, "app.kubernetes.io/name=control-plane,app.kubernetes.io/component=harness", 7*time.Minute)
+	}
+	if os.Getenv("TOOL_RUNNER_IMAGE_REPO") != "" && os.Getenv("TOOL_RUNNER_IMAGE_TAG") != "" {
+		state.waitForPods(t, "app.kubernetes.io/name=control-plane,app.kubernetes.io/component=tool-runner", 7*time.Minute)
+	}
+}
+
+func assertGrafanaDashboardsStage(t *testing.T, state *chartState) {
+	t.Helper()
+	username := string(decodeSecretValue(t, state, testRelease+"-grafana", "admin-user"))
+	password := string(decodeSecretValue(t, state, testRelease+"-grafana", "admin-password"))
+	state.redactor.Add(username, password)
+	forward := state.forward(t, "svc/"+testRelease+"-grafana", 80, "http")
+	client := &http.Client{Timeout: 15 * time.Second}
+	assertGrafanaDashboardSuite(t, client, forward.URL, username, password)
+	state.stopForward(t, forward)
+}
+
+func assertGrafanaDashboardSuite(t *testing.T, client *http.Client, baseURL, username, password string) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, baseURL+"/api/search?type=dash-db&limit=500", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.SetBasicAuth(username, password)
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("Grafana dashboard search status=%d", resp.StatusCode)
+	}
+	var found []struct {
+		UID         string `json:"uid"`
+		Title       string `json:"title"`
+		FolderTitle string `json:"folderTitle"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&found); err != nil {
+		t.Fatal(err)
+	}
+	type dashboardContract struct{ title, folder string }
+	want := map[string]dashboardContract{
+		"iterabase-platform-overview":         {"00 — Platform Overview", "Iterabase"},
+		"iterabase-control-plane":             {"10 — Control Plane", "Iterabase"},
+		"iterabase-execution-runtime":         {"20 — Execution Runtime", "Iterabase"},
+		"iterabase-tool-runtime":              {"30 — Tool Runtime", "Iterabase"},
+		"iterabase-inference-model-serving":   {"40 — Inference and Model Serving", "Iterabase"},
+		"iterabase-data-storage":              {"50 — Data and Storage", "Iterabase"},
+		"iterabase-platform-infrastructure":   {"60 — Platform Infrastructure", "Iterabase"},
+		"iterabase-infrastructure-components": {"Infrastructure — Data, Edge and GPU", "Infrastructure"},
+		"iterabase-observability-stack":       {"Observability — Metrics, Logs and Alerts", "Observability"},
+	}
+	for _, dashboard := range found {
+		contract, ok := want[dashboard.UID]
+		if ok && dashboard.Title == contract.title && dashboard.FolderTitle == contract.folder {
+			delete(want, dashboard.UID)
+		}
+	}
+	if len(want) != 0 {
+		t.Fatalf("Grafana missing organized platform dashboards: %v", want)
 	}
 }
 
@@ -107,9 +254,23 @@ func assertMonitorDiscoveryStage(t *testing.T, state *chartState) {
 			t.Fatalf("%s did not become 1: %v", metric, err)
 		}
 	}
+	assertPlatformMetrics(t, state, client, forward.URL)
 	body := requireHTTP(t, client, http.MethodGet, forward.URL+"/api/v1/targets?state=active", nil, http.StatusOK)
-	if err := assertDiscoveredTargets(body, []string{"postgresql", "redis"}, false); err != nil {
+	targets := []string{"postgresql", "redis"}
+	if os.Getenv("CONTROL_PLANE_IMAGE_REPO") != "" && os.Getenv("CONTROL_PLANE_IMAGE_TAG") != "" {
+		targets = append(targets, "control-plane")
+	}
+	if os.Getenv("INFERENCE_GATEWAY_IMAGE_REPO") != "" && os.Getenv("INFERENCE_GATEWAY_IMAGE_TAG") != "" {
+		targets = append(targets, "inference-gateway")
+	}
+	if err := assertDiscoveredTargets(body, targets, false); err != nil {
 		t.Fatal(err)
+	}
+	rules := string(requireHTTP(t, client, http.MethodGet, forward.URL+"/api/v1/rules", nil, http.StatusOK))
+	for _, alert := range []string{"IterabasePlatformTargetDown", "IterabaseGatewayOutcomeUnknown", "IterabaseDispatchWithoutWorkers", "IterabaseInferenceGatewayHighErrorRate"} {
+		if !strings.Contains(rules, alert) {
+			t.Fatalf("Prometheus did not load shipped alert %s", alert)
+		}
 	}
 	state.stopForward(t, forward)
 }
@@ -176,6 +337,45 @@ func assertLokiPersistenceStage(t *testing.T, state *chartState) {
 		t.Fatalf("pre-restart Loki marker missing from fixed historical interval: %s", stateSafeBody(body))
 	}
 	state.stopForward(t, forward)
+}
+
+func assertPlatformMetrics(t *testing.T, state *chartState, client *http.Client, prometheusURL string) {
+	t.Helper()
+	queries := []string{}
+	if os.Getenv("CONTROL_PLANE_IMAGE_REPO") != "" && os.Getenv("CONTROL_PLANE_IMAGE_TAG") != "" {
+		queries = append(queries,
+			`count(up{job="control-plane",component="api"} == 1)`,
+			`count(up{job="control-plane",component="manager"} == 1)`,
+			`count(up{job="control-plane",component="gateway"} == 1)`,
+			`count(control_plane_build_info{component="api"})`,
+			`count(control_plane_build_info{component="gateway"})`,
+			`count(go_goroutines{job="control-plane",component="manager"})`,
+		)
+	}
+	if os.Getenv("INFERENCE_GATEWAY_IMAGE_REPO") != "" && os.Getenv("INFERENCE_GATEWAY_IMAGE_TAG") != "" {
+		queries = append(queries,
+			`count(up{job="inference-gateway",component="inference-gateway"} == 1)`,
+			`count(inference_gateway_build_info)`,
+		)
+	}
+	if os.Getenv("HARNESS_IMAGE_REPO") != "" && os.Getenv("HARNESS_IMAGE_TAG") != "" {
+		queries = append(queries,
+			`count(up{job="control-plane",component="dispatch"} == 1)`,
+			`count(up{job="control-plane",component="harness"} == 1)`,
+			`count(control_plane_harness_build_info)`,
+		)
+	}
+	if os.Getenv("TOOL_RUNNER_IMAGE_REPO") != "" && os.Getenv("TOOL_RUNNER_IMAGE_TAG") != "" {
+		queries = append(queries,
+			`count(up{job="control-plane",component="tool-runner"} == 1)`,
+			`count(up{job="control-plane",component="tool-materializer"} == 1)`,
+		)
+	}
+	for _, query := range queries {
+		if err := waitPrometheusValue(state.ctx, client, prometheusURL, query, "1", 5*time.Minute); err != nil {
+			t.Fatalf("representative platform metric %s did not become queryable: %v", query, err)
+		}
+	}
 }
 
 func waitPrometheusValue(ctx context.Context, client *http.Client, baseURL, query, want string, timeout time.Duration) error {

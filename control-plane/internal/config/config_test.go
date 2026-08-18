@@ -149,6 +149,14 @@ func TestLoad_DoesNotRequireServeFields(t *testing.T) {
 	assert.Contains(t, err.Error(), "jwt.signing_key_path")
 }
 
+func TestLoad_MetricsAddressOverride(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://localhost:5432/cp")
+	t.Setenv("METRICS_ADDR", ":9090")
+	cfg, err := config.Load("")
+	require.NoError(t, err)
+	assert.Equal(t, ":9090", cfg.Metrics.Addr)
+}
+
 func TestValidateServe_OK(t *testing.T) {
 	t.Setenv("DATABASE_URL", "postgres://localhost:5432/cp")
 	t.Setenv("JWT_SIGNING_KEY_PATH", "/etc/jwt/key.pem")

@@ -42,7 +42,7 @@ func RateLimit(cache snapshot.Reader, limiter ratelimit.Limiter, m *metrics.Metr
 			setRateLimitHeaders(w, "Requests", rpmResult)
 			if !rpmResult.Allowed {
 				if m != nil {
-					m.RateLimitHitsTotal.WithLabelValues(identityID, "rpm").Inc()
+					m.RateLimitHitsTotal.WithLabelValues("rpm").Inc()
 				}
 				writeRateLimitError(w, rpmResult.ResetAt)
 				return
@@ -57,7 +57,7 @@ func RateLimit(cache snapshot.Reader, limiter ratelimit.Limiter, m *metrics.Metr
 			setRateLimitHeaders(w, "Tokens", tpmResult)
 			if !tpmResult.Allowed {
 				if m != nil {
-					m.RateLimitHitsTotal.WithLabelValues(identityID, "tpm").Inc()
+					m.RateLimitHitsTotal.WithLabelValues("tpm").Inc()
 				}
 				writeRateLimitError(w, tpmResult.ResetAt)
 				return

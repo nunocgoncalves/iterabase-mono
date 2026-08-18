@@ -13,6 +13,11 @@ spec:
     - name: http
       port: {{ .Values.service.port }}
       targetPort: http
+    {{- if .Values.metrics.enabled }}
+    - name: http-metrics
+      port: {{ .Values.metrics.port }}
+      targetPort: http-metrics
+    {{- end }}
     {{- if .Values.workload.enabled }}
     - name: workload
       port: {{ .Values.workload.servicePort }}

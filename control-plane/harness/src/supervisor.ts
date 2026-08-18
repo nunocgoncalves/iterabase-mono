@@ -52,6 +52,7 @@ import { streamModel } from "./model-bridge.js";
 import { InvokeState } from "./gen/iterabase/gateway/v1/gateway_pb.js";
 import type { ArtifactInputRefFrame, GatewayToolDescriptor } from "./ipc.js";
 import { materializeArtifacts, publishWorkspaceArtifact } from "./artifact-files.js";
+import type { HarnessMetrics } from "./metrics.js";
 
 /** A durable TurnEvent payload (the oneof) the supervisor sequences + sends. */
 export type TurnEventPayload = TurnEvent["kind"];
@@ -122,6 +123,8 @@ export interface SupervisorDeps {
   modelStream?: typeof streamModel;
   /** Test hook: invoked each time the supervisor advertises a Ready credit. */
   onCreditAdvertised?: () => void;
+  /** Optional bounded supervisor metrics; disposable children expose no listener. */
+  metrics?: HarnessMetrics;
 }
 
 export class Supervisor {
@@ -152,6 +155,7 @@ export class Supervisor {
       lastSeq: r.events.length ? Number(r.events.at(-1)!.sequence) : 0,
       walPath: join(d.cfg.walDir, `${r.turnId}.wal`),
     }));
+    this.d.metrics?.pendingReplays.set(this.pendingReplay.length);
   }
 
   async run(): Promise<void> {
@@ -165,6 +169,7 @@ export class Supervisor {
         await this.connectAndServe();
         return; // clean exit (drained)
       } catch (err) {
+        this.d.metrics?.dispatchReconnects.labels("stream_error").inc();
         if ((this.state.phase as string) === "fatal") return;
         await this.failClosed(err);
         const after = this.state.phase as string;
@@ -180,6 +185,7 @@ export class Supervisor {
     this.running = false;
     this.state.beginDrain();
     this.d.probes.setReady(false);
+    this.d.metrics?.dispatchConnected.set(0);
     this.abortActiveTurn();
     await this.awaitChildTermination();
     this.stream?.close();
@@ -196,6 +202,8 @@ export class Supervisor {
     this.welcome = conn.welcome;
     this.state.onWelcome();
     this.d.probes.setReady(true);
+    this.d.metrics?.dispatchConnected.set(1);
+    this.d.metrics?.dispatchReconnects.labels("connected").inc();
     this.replayPending(); // re-send staged unacked events (after_terminal); WAL retained until ACK
     this.tokens.flush(); // flush deltas buffered during the outage (ephemeral; best-effort)
     this.maybeAdvertiseCredit(); // Ready only when no replay is outstanding
@@ -249,6 +257,7 @@ export class Supervisor {
       if (through >= r.lastSeq) {
         // Replay committed — delete the retained WAL, clear the replay, then Ready.
         this.pendingReplay.splice(replayIdx, 1);
+        this.d.metrics?.pendingReplays.set(this.pendingReplay.length);
         try {
           unlinkSync(r.walPath);
         } catch {
@@ -283,6 +292,9 @@ export class Supervisor {
   }
 
   private async handleAssignTurn(at: AssignTurn): Promise<void> {
+    const observedAt = Date.now();
+    let observedResult = "failed";
+    this.d.metrics?.activeTurns.inc();
     // Route through the state machine first: a second AssignTurn before the
     // next Ready is a protocol violation → fail-close (never silently ignored).
     try {
@@ -344,6 +356,7 @@ export class Supervisor {
       }
       if (this.turn?.aborted) throw new SandboxError("aborted during discovery");
       const child = this.d.childFactory(at, sandbox, cwd);
+      this.d.metrics?.childProcesses.labels("started").inc();
       this.currentChild = child;
       child.rpcSend({ type: "gatewayTools", descriptors });
       // Drain the child's model/tool RPC requests (fd 4) concurrently with the
@@ -358,12 +371,19 @@ export class Supervisor {
       }
       const result = await child.result;
       await rpcDone;
+      observedResult = outcomeMetric(result.outcome);
+      this.d.metrics?.childProcesses.labels(observedResult).inc();
       this.emitOutcome(result.outcome, result.message);
     } catch (err) {
+      observedResult = this.turn?.aborted ? "aborted" : "failed";
+      if (this.currentChild) this.d.metrics?.childProcesses.labels("runtime_error").inc();
       this.failTurn(err);
     } finally {
       this.stopHeartbeat();
       this.currentChild = null;
+      this.d.metrics?.activeTurns.dec();
+      this.d.metrics?.turns.labels(observedResult).inc();
+      this.d.metrics?.turnDuration.labels(observedResult).observe((Date.now() - observedAt) / 1000);
     }
     await this.turn.acked;
     if ((this.state.phase as string) === "cleaning") {
@@ -409,6 +429,7 @@ export class Supervisor {
 
     for await (const req of child.rpcRequests) {
       if (this.turn?.aborted) break;
+      this.d.metrics?.childRPC.labels(req.type).inc();
       if (req.type === "cancel") {
         const ac = controllers.get(req.requestId);
         if (ac) ac.abort();
@@ -768,6 +789,7 @@ export class Supervisor {
    * fencing (HOR-249).
    */
   private async failClosed(err: unknown): Promise<void> {
+    this.d.metrics?.dispatchConnected.set(0);
     this.abortActiveTurn();
     this.stopHeartbeat();
     await this.awaitChildTermination(); // bounded: SIGTERM → SIGKILL before reconnecting
@@ -873,6 +895,19 @@ function canonicalToolArtifactInputs(at: AssignTurn, requested: ArtifactInputRef
 /** Wrap a TurnEvent in a WorkerMessage (no re-sequencing — preserves the WAL'd sequence for dedup). */
 function turnEventMessage(te: TurnEvent): WorkerMessage {
   return create(WorkerMessageSchema, { kind: { case: "turnEvent", value: te } });
+}
+
+function outcomeMetric(outcome: Outcome): string {
+  switch (outcome) {
+    case Outcome.COMPLETED:
+      return "completed";
+    case Outcome.ABORTED:
+      return "aborted";
+    case Outcome.FAILED:
+      return "failed";
+    default:
+      return "unspecified";
+  }
 }
 
 function sleep(ms: number): Promise<void> {

@@ -1,5 +1,5 @@
 # control-plane example configuration. Copy to control-plane.yaml and edit.
-# Environment variables (DATABASE_URL, API_ADDR, LOG_LEVEL, LOG_FORMAT,
+# Environment variables (DATABASE_URL, API_ADDR, METRICS_ADDR, LOG_LEVEL, LOG_FORMAT,
 # JWT_SIGNING_KEY_PATH, JWT_KEY_ID, IDENTITY_MODE, TLS_CERT_FILE, TLS_KEY_FILE)
 # override these values and are the preferred way to inject secrets in
 # Kubernetes.
@@ -14,6 +14,12 @@ api:
   # leave both unset for plain HTTP (kind/E2E/dev). Both or neither — not one.
   tls_cert_file: "${TLS_CERT_FILE}"   # e.g. /etc/control-plane/tls/tls.crt
   tls_key_file: "${TLS_KEY_FILE}"     # e.g. /etc/control-plane/tls/tls.key
+
+# Optional plaintext, metrics-only in-cluster listener shared by whichever
+# serving binary loads this config. Empty disables it. Never expose through an
+# Ingress or merge it with the gateway/dispatch workload mTLS listener.
+metrics:
+  addr: "${METRICS_ADDR}"              # e.g. :9090
 
 # Tool gateway (cmd/gateway, HOR-392). mTLS is REQUIRED (the workload
 # boundary, not the dev HTTP API). The gateway serves the

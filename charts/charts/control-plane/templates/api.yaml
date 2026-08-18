@@ -106,6 +106,10 @@ spec:
           ports:
             - name: http
               containerPort: {{ .Values.service.port }}
+            {{- if .Values.metrics.enabled }}
+            - name: http-metrics
+              containerPort: {{ .Values.metrics.port }}
+            {{- end }}
           env:
             - name: PGPASSWORD
               valueFrom:
@@ -116,6 +120,10 @@ spec:
               value: {{ include "control-plane.databaseURL" . | quote }}
             - name: API_ADDR
               value: {{ .Values.api.addr | quote }}
+            {{- if .Values.metrics.enabled }}
+            - name: METRICS_ADDR
+              value: {{ printf ":%v" .Values.metrics.port | quote }}
+            {{- end }}
             - name: JWT_SIGNING_KEY_PATH
               value: {{ .Values.jwt.signingKeyPath | quote }}
             - name: JWT_KEY_ID

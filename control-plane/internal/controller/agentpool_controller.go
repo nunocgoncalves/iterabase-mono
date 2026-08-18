@@ -956,6 +956,8 @@ func renderHarnessConfig(pool *v1alpha1.AgentPool, workerName string) string {
 // NetworkPolicy + list selector).
 func poolLabels(pool *v1alpha1.AgentPool) map[string]string {
 	return map[string]string{
+		"app.kubernetes.io/name":           "control-plane",
+		"app.kubernetes.io/component":      "harness",
 		"app.kubernetes.io/managed-by":     "control-plane",
 		"platform.iterabase.com/agentpool": pool.Name,
 	}

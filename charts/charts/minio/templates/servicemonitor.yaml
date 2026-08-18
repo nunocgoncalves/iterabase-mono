@@ -19,5 +19,9 @@ spec:
     - port: s3
       path: /minio/v2/metrics/cluster
       interval: {{ .Values.metrics.scrapeInterval | default "30s" }}
+      relabelings:
+        - action: replace
+          replacement: minio
+          targetLabel: component
 {{- end }}
 {{- end }}

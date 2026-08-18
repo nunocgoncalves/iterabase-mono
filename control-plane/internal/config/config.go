@@ -22,6 +22,7 @@ type Config struct {
 	API      APIConfig      `yaml:"api"`
 	Gateway  GatewayConfig  `yaml:"gateway"`
 	Dispatch DispatchConfig `yaml:"dispatch"`
+	Metrics  MetricsConfig  `yaml:"metrics"`
 	Database DatabaseConfig `yaml:"database"`
 	Logging  LoggingConfig  `yaml:"logging"`
 	JWT      JWTConfig      `yaml:"jwt"`
@@ -71,6 +72,13 @@ type ApprovedRunnerConfig struct {
 // fencing. mTLS is REQUIRED: the server cert + key serve HTTP/2, and
 // ClientCAFile is the SPIFFE/workload-identity CA bundle that verifies warm
 // worker (supervisor) caller certs.
+type MetricsConfig struct {
+	// Addr is an optional plaintext, metrics-only in-cluster listener. Empty
+	// disables the listener. It never shares the customer or workload mTLS
+	// serving boundary.
+	Addr string `yaml:"addr"`
+}
+
 type DispatchConfig struct {
 	Addr         string `yaml:"addr"`
 	TLSCertFile  string `yaml:"tls_cert_file"`
@@ -204,6 +212,9 @@ func applyEnvOverrides(cfg *Config) {
 	}
 	if v := os.Getenv("TLS_KEY_FILE"); v != "" {
 		cfg.API.TLSKeyFile = v
+	}
+	if v := os.Getenv("METRICS_ADDR"); v != "" {
+		cfg.Metrics.Addr = v
 	}
 	if v := os.Getenv("LOG_LEVEL"); v != "" {
 		cfg.Logging.Level = v

@@ -30,7 +30,7 @@ else
 E2E_BUILD_DEPS := build-deps
 endif
 
-.PHONY: build-deps lint template kubeconform template-controlplane kubeconform-controlplane template-tls kubeconform-tls template-observability kubeconform-observability template-observability-tls kubeconform-observability-tls check-certificate-substrate check-service-selectors check-redis-exporter-auth check-artifact-config check-tool-runner check-manager-contract check-workload-ca check-observability-tls check check-tls check-observability test-e2e test-e2e-unit test-e2e-certificate-migration test-e2e-install test-e2e-upgrade test-e2e-feature-enable test-e2e-reapply-rollback test-e2e-observability test-e2e-observability-tls test-e2e-internal-tls clean
+.PHONY: build-deps lint template kubeconform template-controlplane kubeconform-controlplane template-tls kubeconform-tls template-observability kubeconform-observability template-observability-tls kubeconform-observability-tls check-certificate-substrate check-service-selectors check-redis-exporter-auth check-artifact-config check-tool-runner check-manager-contract check-workload-ca check-metrics-contract check-alerts test-alert-rules check-dashboards check-observability-tls check check-tls check-observability test-e2e test-e2e-unit test-e2e-certificate-migration test-e2e-install test-e2e-upgrade test-e2e-feature-enable test-e2e-reapply-rollback test-e2e-observability test-e2e-observability-tls test-e2e-internal-tls clean
 
 # Compile the owner entrypoint and run hermetic mechanics plus intentional break
 # fixtures without provisioning infrastructure.
@@ -130,7 +130,19 @@ check-manager-contract:
 check-workload-ca:
 	./scripts/check-workload-ca.sh
 
-check: lint kubeconform kubeconform-controlplane kubeconform-observability check-certificate-substrate check-service-selectors check-redis-exporter-auth check-artifact-config check-tool-runner check-manager-contract check-workload-ca
+check-metrics-contract:
+	./scripts/check-metrics-contract.sh
+
+check-alerts: build-deps
+	./scripts/check-alerts.sh
+
+test-alert-rules: build-deps
+	./scripts/test-alert-rules.sh
+
+check-dashboards: build-deps
+	./scripts/check-dashboards.sh
+
+check: lint kubeconform kubeconform-controlplane kubeconform-observability check-certificate-substrate check-service-selectors check-redis-exporter-auth check-artifact-config check-tool-runner check-manager-contract check-workload-ca check-metrics-contract check-alerts check-dashboards
 
 check-tls: kubeconform-tls kubeconform-observability-tls check-redis-exporter-auth check-observability-tls
 

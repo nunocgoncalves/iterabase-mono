@@ -17,11 +17,13 @@ import (
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
 	"github.com/go-logr/logr"
+	"github.com/prometheus/client_golang/prometheus"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
+	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
@@ -98,6 +100,13 @@ func run() int {
 
 	setupLog.Info("starting control-plane manager",
 		"version", version.Version(), "commit", version.Commit(), "date", version.Date())
+	buildInfo := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name:        "control_plane_build_info",
+		Help:        "Immutable control-plane build information.",
+		ConstLabels: prometheus.Labels{"component": "manager"},
+	}, []string{"version", "commit"})
+	ctrlmetrics.Registry.MustRegister(buildInfo)
+	buildInfo.WithLabelValues(version.Version(), version.Commit()).Set(1)
 
 	// if the enable-http2 flag is false (the default), http/2 should be disabled
 	// due to its vulnerabilities. More specifically, disabling http/2 will
@@ -208,6 +217,13 @@ func run() int {
 		return 1
 	}
 	defer pool.Close()
+	componentLabels := prometheus.Labels{"component": "manager"}
+	connectionLabels := prometheus.Labels{"component": "manager", "state": "total"}
+	ctrlmetrics.Registry.MustRegister(
+		prometheus.NewGaugeFunc(prometheus.GaugeOpts{Name: "control_plane_database_pool_connections", Help: "Current manager pgx pool connections.", ConstLabels: connectionLabels}, func() float64 { return float64(pool.Stat().TotalConns()) }),
+		prometheus.NewGaugeFunc(prometheus.GaugeOpts{Name: "control_plane_database_pool_connections_in_use", Help: "Acquired manager pgx pool connections.", ConstLabels: componentLabels}, func() float64 { return float64(pool.Stat().AcquiredConns()) }),
+		prometheus.NewGaugeFunc(prometheus.GaugeOpts{Name: "control_plane_database_pool_max_connections", Help: "Configured maximum manager pgx pool connections.", ConstLabels: componentLabels}, func() float64 { return float64(pool.Stat().MaxConns()) }),
+	)
 
 	store := identity.NewStore(pool)
 

@@ -123,5 +123,9 @@ spec:
     - port: http-metrics
       path: /metrics
       interval: {{ .Values.metrics.scrapeInterval | default "30s" }}
+      relabelings:
+        - action: replace
+          replacement: redis
+          targetLabel: component
 {{- end }}
 {{- end }}

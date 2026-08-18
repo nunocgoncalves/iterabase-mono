@@ -8,7 +8,6 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	chimiddleware "github.com/go-chi/chi/v5/middleware"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/nunocgoncalves/iterabase-mono/inference-gateway/internal/metrics"
 	gatewaymw "github.com/nunocgoncalves/iterabase-mono/inference-gateway/internal/middleware"
@@ -27,25 +26,20 @@ func newRouter(logger *slog.Logger, m *metrics.Metrics, deps *Deps) http.Handler
 	// Liveness — no auth required.
 	r.Get("/health", healthHandler)
 
-	// Prometheus metrics endpoint.
-	if m != nil {
-		r.Handle("/metrics", promhttp.HandlerFor(m.Registry, promhttp.HandlerOpts{}))
-	}
-
 	if deps != nil {
 		// Readiness — snapshot freshness gate (a stale pod drops from the LB).
-		r.Get("/readyz", readinessHandler(deps.Cache, deps.ReadinessStaleness))
+		r.Get("/readyz", readinessHandler(deps.Cache, deps.ReadinessStaleness, m))
 
 		// OpenAI-compatible endpoints — fully wired.
 		r.Route("/v1", func(r chi.Router) {
+			if m != nil {
+				r.Use(gatewaymw.Metrics(m, "api"))
+			}
 			if deps.Cache != nil {
 				r.Use(gatewaymw.Auth(deps.Cache, logger))
 			}
 			if deps.Limiter != nil {
 				r.Use(gatewaymw.RateLimit(deps.Cache, deps.Limiter, m, logger))
-			}
-			if m != nil {
-				r.Use(gatewaymw.Metrics(m))
 			}
 			r.Get("/models", deps.ProxyHandler.ListModels)
 			r.Post("/chat/completions", deps.ProxyHandler.ChatCompletions)
@@ -87,12 +81,12 @@ func newWorkloadRouter(logger *slog.Logger, m *metrics.Metrics, deps *Deps) http
 	r.Use(chimiddleware.RealIP) //nolint:staticcheck // Preserve existing proxy-header behavior during source migration.
 	r.Use(gatewaymw.RequestID)
 	r.Use(gatewaymw.Logging(logger))
+	if m != nil {
+		r.Use(gatewaymw.Metrics(m, "workload"))
+	}
 	r.Use(gatewaymw.WorkloadAuth(deps.WorkloadStore, deps.TrustDomain, logger))
 	if deps.Limiter != nil {
 		r.Use(gatewaymw.RateLimit(deps.Cache, deps.Limiter, m, logger))
-	}
-	if m != nil {
-		r.Use(gatewaymw.Metrics(m))
 	}
 	r.Get("/v1/models", deps.ProxyHandler.ListModels)
 	r.Post("/v1/chat/completions", deps.ProxyHandler.ChatCompletions)
@@ -109,9 +103,27 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 
 // readinessHandler reports 200 if the snapshot is fresh, 503 otherwise — so a
 // pod with a dead LISTEN (stale beyond ReadinessStaleness) drops from the LB.
-func readinessHandler(cache snapshot.Reader, staleness time.Duration) http.HandlerFunc {
+func readinessHandler(cache snapshot.Reader, staleness time.Duration, m *metrics.Metrics) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		fresh := cache != nil && cache.Fresh(staleness)
+		if m != nil {
+			if fresh {
+				m.SnapshotFresh.Set(1)
+			} else {
+				m.SnapshotFresh.Set(0)
+			}
+			m.BackendHealth.Reset()
+			if cache != nil {
+				m.SnapshotLastRefresh.Set(float64(cache.LastRefresh().Unix()))
+				for _, entry := range cache.ListCatalog() {
+					available := float64(0)
+					if entry.Available {
+						available = 1
+					}
+					m.BackendHealth.WithLabelValues(entry.ModelID, entry.BackendRef).Set(available)
+				}
+			}
+		}
 		status := http.StatusOK
 		if !fresh {
 			status = http.StatusServiceUnavailable

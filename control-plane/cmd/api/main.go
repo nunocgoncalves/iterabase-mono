@@ -28,6 +28,7 @@ import (
 	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/database"
 	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/identity"
 	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/logging"
+	cpmetrics "github.com/nunocgoncalves/iterabase-mono/control-plane/internal/metrics"
 	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/permissions"
 	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/server"
 	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/version"
@@ -92,6 +93,8 @@ func runServeCmd(cfg *config.Config, logger *slog.Logger) error {
 // a test context in tests). It serves HTTPS when cfg.API.TLSCertFile +
 // TLSKeyFile are both set (cert-manager leaf, internal issuer), else plain
 // HTTP — tls opt-in (cert-manager leaf, internal issuer).
+//
+//nolint:gocyclo // Startup validates optional artifacts, TLS, metrics, and graceful shutdown explicitly.
 func runServe(ctx context.Context, cfg *config.Config, logger *slog.Logger) error {
 	pool, err := database.Connect(ctx, cfg.Database)
 	if err != nil {
@@ -122,6 +125,8 @@ func runServe(ctx context.Context, cfg *config.Config, logger *slog.Logger) erro
 		return fmt.Errorf("loading jwt issuer: %w", err)
 	}
 
+	m := cpmetrics.New("api", version.Version(), version.Commit())
+	m.RegisterDatabasePool(pool)
 	httpSrv := &http.Server{
 		Addr: cfg.API.Addr,
 		Handler: server.New(server.Services{
@@ -132,12 +137,13 @@ func runServe(ctx context.Context, cfg *config.Config, logger *slog.Logger) erro
 			Mode:        cfg.Identity.Mode,
 			Work:        workstore.NewStore(pool),
 			Artifacts:   artifacts,
+			Metrics:     m,
 		}),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
 	tlsEnabled := cfg.API.TLSCertFile != "" && cfg.API.TLSKeyFile != ""
-	errCh := make(chan error, 1)
+	errCh := make(chan error, 2)
 	go func() {
 		if tlsEnabled {
 			errCh <- httpSrv.ListenAndServeTLS(cfg.API.TLSCertFile, cfg.API.TLSKeyFile)
@@ -147,11 +153,21 @@ func runServe(ctx context.Context, cfg *config.Config, logger *slog.Logger) erro
 	}()
 	logger.Info("listening", "addr", cfg.API.Addr, "tls", tlsEnabled)
 
+	var metricsSrv *http.Server
+	if cfg.Metrics.Addr != "" {
+		metricsSrv = &http.Server{Addr: cfg.Metrics.Addr, Handler: m.Handler(), ReadHeaderTimeout: 5 * time.Second}
+		go func() { errCh <- metricsSrv.ListenAndServe() }()
+		logger.Info("metrics listening", "addr", cfg.Metrics.Addr)
+	}
+
 	select {
 	case <-ctx.Done():
 		logger.Info("shutting down")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
+		if metricsSrv != nil {
+			_ = metricsSrv.Shutdown(shutdownCtx)
+		}
 		return httpSrv.Shutdown(shutdownCtx)
 	case err := <-errCh:
 		if err != nil && err != http.ErrServerClosed {

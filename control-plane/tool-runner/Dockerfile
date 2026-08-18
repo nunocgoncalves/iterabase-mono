@@ -8,6 +8,8 @@ COPY src ./src
 RUN npm run build
 
 FROM node:24-bookworm-slim
+ARG VERSION=dev
+ENV TOOL_RUNNER_BUILD_VERSION=${VERSION}
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY package.json package-lock.json ./

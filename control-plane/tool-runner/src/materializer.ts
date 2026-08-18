@@ -36,15 +36,16 @@ export class FluxMaterializer {
     await mkdir(join(this.cfg.artifactsRoot, "generations"), { recursive: true });
     await mkdir(this.cfg.controlRoot, { recursive: true });
     while (!signal.aborted) {
+      const observedAt = Date.now();
       try {
         const artifact = await this.currentArtifact();
         if (artifact && artifact.digest !== this.lastDigest) {
           const bytes = await this.materialize(artifact);
           this.lastDigest = artifact.digest;
-          this.metrics?.success(artifact.revision, artifact.digest, bytes);
+          this.metrics?.success(artifact.revision, artifact.digest, bytes, (Date.now() - observedAt) / 1000);
         }
       } catch (error) {
-        this.metrics?.failure();
+        this.metrics?.failure((Date.now() - observedAt) / 1000);
         console.error(JSON.stringify({ event: "materialization_failed", message: error instanceof Error ? error.message : String(error) }));
       }
       await sleep(this.cfg.pollMs, signal);

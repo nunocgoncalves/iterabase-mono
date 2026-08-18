@@ -16,6 +16,7 @@ import (
 	connect "connectrpc.com/connect"
 	artifactstore "github.com/nunocgoncalves/iterabase-mono/control-plane/internal/artifact"
 	v1 "github.com/nunocgoncalves/iterabase-mono/control-plane/internal/gatewayrpc/iterabase/gateway/v1"
+	cpmetrics "github.com/nunocgoncalves/iterabase-mono/control-plane/internal/metrics"
 	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/spiffe"
 )
 
@@ -81,6 +82,7 @@ type Service struct {
 	gen       atomic.Uint64 // fencing generation counter
 	log       *slog.Logger
 	artifacts *artifactstore.Service
+	metrics   *cpmetrics.Metrics
 }
 
 // NewService builds a gateway Service. store/secrets/oauth are required; cfg is
@@ -104,6 +106,10 @@ func NewService(store *Store, secrets SecretResolver, oauth OAuthAcquirer, cfg C
 // the constructor used by tool-gateway-only tests.
 func (s *Service) SetArtifactService(artifacts *artifactstore.Service) { s.artifacts = artifacts }
 
+// SetMetrics attaches bounded process-local instrumentation. It is optional so
+// isolated service tests do not need a Prometheus registry.
+func (s *Service) SetMetrics(metrics *cpmetrics.Metrics) { s.metrics = metrics }
+
 // StartReconciler runs the crash-recovery sweep once at start, then on a ticker
 // until ctx is done (SCN-008/ARCH-014). It classifies orphaned in-flight
 // invocations (read_only -> failed, writes -> outcome_unknown). Call once per
@@ -111,8 +117,14 @@ func (s *Service) SetArtifactService(artifacts *artifactstore.Service) { s.artif
 func (s *Service) StartReconciler(ctx context.Context) {
 	recovered, err := s.store.RecoverOrphanedInvocations(ctx)
 	if err != nil {
+		if s.metrics != nil {
+			s.metrics.GatewayRecoveries.WithLabelValues("error").Inc()
+		}
 		s.log.Error("initial orphan recovery failed", "error", err)
 	} else if recovered > 0 {
+		if s.metrics != nil {
+			s.metrics.GatewayRecoveries.WithLabelValues("recovered").Add(float64(recovered))
+		}
 		s.log.Info("recovered orphaned invocations", "count", recovered)
 	}
 	ticker := time.NewTicker(s.cfg.DispatchLease / 2)
@@ -124,9 +136,17 @@ func (s *Service) StartReconciler(ctx context.Context) {
 				return
 			case <-ticker.C:
 				if n, err := s.store.RecoverOrphanedInvocations(ctx); err != nil {
+					if s.metrics != nil {
+						s.metrics.GatewayRecoveries.WithLabelValues("error").Inc()
+					}
 					s.log.Warn("orphan recovery sweep failed", "error", err)
 				} else if n > 0 {
+					if s.metrics != nil {
+						s.metrics.GatewayRecoveries.WithLabelValues("recovered").Add(float64(n))
+					}
 					s.log.Info("recovered orphaned invocations", "count", n)
+				} else if s.metrics != nil {
+					s.metrics.GatewayRecoveries.WithLabelValues("clean").Inc()
 				}
 			}
 		}
@@ -198,7 +218,34 @@ func (s *Service) DiscoverEffectiveTools(ctx context.Context, req *connect.Reque
 // BEFORE the side-effect boundary; the ledger row is committed before dispatch.
 //
 //nolint:gocyclo // the pre-effect gate is naturally branchy; kept flat for readability (cf. RegisterRunner).
-func (s *Service) InvokeTool(ctx context.Context, req *connect.Request[v1.InvokeRequest]) (*connect.Response[v1.InvokeResponse], error) {
+func (s *Service) InvokeTool(ctx context.Context, req *connect.Request[v1.InvokeRequest]) (response *connect.Response[v1.InvokeResponse], responseErr error) {
+	started := time.Now()
+	effectClass := "unknown"
+	defer func() {
+		if s.metrics == nil {
+			return
+		}
+		result := "unknown"
+		if responseErr != nil {
+			result = "rpc_error"
+		} else if response != nil && response.Msg != nil {
+			switch response.Msg.State {
+			case v1.InvokeState_INVOKE_STATE_SUCCEEDED:
+				result = "succeeded"
+			case v1.InvokeState_INVOKE_STATE_FAILED:
+				result = "failed"
+			case v1.InvokeState_INVOKE_STATE_OUTCOME_UNKNOWN:
+				result = "outcome_unknown"
+			case v1.InvokeState_INVOKE_STATE_RUNNING:
+				result = "running"
+			default:
+				result = "unspecified"
+			}
+		}
+		s.metrics.GatewayInvocations.WithLabelValues(effectClass, result).Inc()
+		s.metrics.GatewayInvocationDuration.WithLabelValues(effectClass, result).Observe(time.Since(started).Seconds())
+	}()
+
 	id, ok := identityFromContext(ctx)
 	if !ok {
 		return nil, connect.NewError(connect.CodeUnauthenticated, errors.New("no caller identity"))
@@ -240,6 +287,11 @@ func (s *Service) InvokeTool(ctx context.Context, req *connect.Request[v1.Invoke
 				fmt.Errorf("pinned tool %s@%s unavailable; no substitution (ARCH-007)", msg.ToolName, pinDigest))
 		}
 		return nil, connect.NewError(connect.CodeInternal, err)
+	}
+	effectClass = string(tv.EffectClass)
+	if s.metrics != nil {
+		s.metrics.GatewayInvocationsInFlight.WithLabelValues(effectClass).Inc()
+		defer s.metrics.GatewayInvocationsInFlight.WithLabelValues(effectClass).Dec()
 	}
 
 	// 3. Authorization (ARCH-008/016/018): workflow-permitted intersection +
@@ -677,7 +729,14 @@ func (s *Service) RegisterRunner(ctx context.Context, st *connect.BidiStream[v1.
 		stream: st, pending: make(map[string]chan dispatchResult), tools: make(map[string]struct{}),
 	}
 	s.pool.add(rc)
+	if s.metrics != nil {
+		s.metrics.GatewayRunnerConnections.WithLabelValues().Inc()
+	}
 	defer func() {
+		if s.metrics != nil {
+			s.metrics.GatewayRunnerConnections.WithLabelValues().Dec()
+			s.metrics.GatewayRunnerStreams.WithLabelValues("disconnected").Inc()
+		}
 		// Mark closed and drain in-flight sends BEFORE the handler returns so
 		// no stream.Send is in progress when Connect closes the HTTP/2 response
 		// writer. send() refuses to enter stream.Send once closed is set; waiting

@@ -1,0 +1,45 @@
+schemaVersion: 1
+folder: Iterabase
+provisioning: immutable
+source: charts/scripts/render-iterabase-dashboards.py
+dashboards:
+  - uid: iterabase-platform-overview
+    title: 00 — Platform Overview
+    owner: platform
+  - uid: iterabase-control-plane
+    title: 10 — Control Plane
+    owner: control-plane
+  - uid: iterabase-execution-runtime
+    title: 20 — Execution Runtime
+    owner: control-plane
+  - uid: iterabase-tool-runtime
+    title: 30 — Tool Runtime
+    owner: control-plane
+  - uid: iterabase-inference-model-serving
+    title: 40 — Inference and Model Serving
+    owner: inference-gateway
+  - uid: iterabase-data-storage
+    title: 50 — Data and Storage
+    owner: platform
+  - uid: iterabase-platform-infrastructure
+    title: 60 — Platform Infrastructure
+    owner: platform
+auxiliaryDashboards:
+  - uid: iterabase-infrastructure-components
+    title: Infrastructure — Data, Edge and GPU
+    folder: Infrastructure
+    owner: platform
+  - uid: iterabase-observability-stack
+    title: Observability — Metrics, Logs and Alerts
+    folder: Observability
+    owner: platform
+upstreamPolicy:
+  runtimeImports: forbidden
+  bundledDashboards:
+    source: kube-prometheus-stack
+    version: 88.1.3
+    folder: Kubernetes
+    license: Apache-2.0
+  vendoredDashboards:
+    policy: require source URL, immutable upstream version, license, and SHA-256 checksum
+    current: []

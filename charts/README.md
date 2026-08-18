@@ -258,20 +258,28 @@ helm install iterabase charts/iterabase-platform -n iterabase-system --create-na
 ```
 
 The preset flips the stack on **and** every component's `metrics.enabled` knob,
-so Prometheus scrapes the gateway, control-plane (api/manager), vLLM
-(model-backend pods), Postgres/Redis (via dedicated exporters), MinIO (native),
-and the upstream substrate (ingress-nginx/cert-manager/external-dns/reloader).
+so Prometheus scrapes inference-gateway; control-plane API, manager, gateway,
+dispatch, harness workers, tool runner, and materializer; vLLM model-backend
+pods; Postgres/Redis exporters; MinIO; and enabled upstream substrate targets.
+Dedicated metrics listeners keep customer ingress and mandatory-mTLS workload
+listeners isolated.
 GPU metrics: set `observability.dcgmExporter.enabled=true` (gpu-operator must be
 installed out-of-band). Alertmanager **email routing is overlay-owned** — the
 chart ships a null-receiver default; set
 `observability.kube-prometheus-stack.alertmanager.config` in the prod overlay
 (HOR-408: the OPO1 overlay carries the email receiver).
 
-Caveats (HOR-408 tracked gaps): the inference-gateway / control-plane `/metrics`
-endpoints and the manager's controller-runtime metrics port are service-repo
-concerns — the `ServiceMonitor`s are wired here and scrape once those endpoints
-ship. The vLLM `PodMonitor` target labels/port depend on the operator's pod
-template; match them in the overlay or via a service-repo ticket.
+Grafana provisions the immutable seven-dashboard Iterabase production suite
+under `Iterabase`, focused component dashboards under `Infrastructure` and
+`Observability`, and bundled kube-prometheus-stack dashboards under `Kubernetes`.
+Dashboard source, stable UIDs, ordering, and provenance live
+under `charts/observability/dashboards`; runtime Internet imports are forbidden.
+The chart also ships bounded recording rules, invariant production alerts, and
+runbook links. Workload-specific performance alerts remain off until an overlay
+sets accepted thresholds under `observability.alerts.performance`.
+
+The vLLM `PodMonitor` selects operator-created model-backend pods by their stable
+label and named serving port. GPU panels require the optional DCGM target.
 
 ## Release
 

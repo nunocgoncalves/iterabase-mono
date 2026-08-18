@@ -31,6 +31,7 @@ import (
 	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/gateway"
 	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/gatewayrpc/iterabase/gateway/v1/gatewayv1connect"
 	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/logging"
+	cpmetrics "github.com/nunocgoncalves/iterabase-mono/control-plane/internal/metrics"
 	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/version"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -111,6 +112,9 @@ func runServe(ctx context.Context, cfg *config.Config, logger *slog.Logger) erro
 		artifacts.StartSweeper(ctx)
 	}
 
+	m := cpmetrics.New("gateway", version.Version(), version.Commit())
+	m.RegisterDatabasePool(pool)
+
 	store := gateway.NewStore(pool)
 	approved := make([]gateway.ApprovedRunner, 0, len(cfg.Gateway.ApprovedRunners))
 	for _, a := range cfg.Gateway.ApprovedRunners {
@@ -136,6 +140,7 @@ func runServe(ctx context.Context, cfg *config.Config, logger *slog.Logger) erro
 	if artifacts != nil {
 		svc.SetArtifactService(artifacts)
 	}
+	svc.SetMetrics(m)
 
 	// Crash-recovery reconciliation (SCN-008/ARCH-014): classify orphaned
 	// in-flight invocations before accepting traffic, then on a ticker.
@@ -148,9 +153,9 @@ func runServe(ctx context.Context, cfg *config.Config, logger *slog.Logger) erro
 	runnerPath, runnerHandler := gatewayv1connect.NewRunnerServiceHandler(svc)
 	gwPath, gwHandler := gatewayv1connect.NewGatewayServiceHandler(svc)
 	artifactPath, artifactHandler := gatewayv1connect.NewArtifactServiceHandler(svc)
-	mux.Handle(runnerPath, idmw(runnerHandler))
-	mux.Handle(gwPath, idmw(gwHandler))
-	mux.Handle(artifactPath, idmw(artifactHandler))
+	mux.Handle(runnerPath, m.ProcedureMiddleware("gateway-rpc")(idmw(runnerHandler)))
+	mux.Handle(gwPath, m.ProcedureMiddleware("gateway-rpc")(idmw(gwHandler)))
+	mux.Handle(artifactPath, m.ProcedureMiddleware("gateway-rpc")(idmw(artifactHandler)))
 
 	tlsCfg, err := buildTLSConfig(cfg.Gateway)
 	if err != nil {
@@ -163,15 +168,25 @@ func runServe(ctx context.Context, cfg *config.Config, logger *slog.Logger) erro
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
-	errCh := make(chan error, 1)
+	errCh := make(chan error, 2)
 	go func() { errCh <- srv.ListenAndServeTLS("", "") }() // cert/key from tls.Config
 	logger.Info("tool gateway listening", "addr", cfg.Gateway.Addr, "trust_domain", cfg.Gateway.TrustDomain)
+
+	var metricsSrv *http.Server
+	if cfg.Metrics.Addr != "" {
+		metricsSrv = &http.Server{Addr: cfg.Metrics.Addr, Handler: m.Handler(), ReadHeaderTimeout: 5 * time.Second}
+		go func() { errCh <- metricsSrv.ListenAndServe() }()
+		logger.Info("metrics listening", "addr", cfg.Metrics.Addr)
+	}
 
 	select {
 	case <-ctx.Done():
 		logger.Info("shutting down")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
+		if metricsSrv != nil {
+			_ = metricsSrv.Shutdown(shutdownCtx)
+		}
 		return srv.Shutdown(shutdownCtx)
 	case err := <-errCh:
 		if err != nil && err != http.ErrServerClosed {
