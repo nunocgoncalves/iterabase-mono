@@ -14,10 +14,11 @@ runs:
   using: composite
   steps:
     - name: Install Node ${{ inputs.node-version }}
-      uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
       with:
         node-version: ${{ inputs.node-version }}
         check-latest: false
+        package-manager-cache: false
     - name: Compute content-addressed npm cache key
       id: cache-key
       shell: bash
@@ -41,7 +42,7 @@ runs:
         printf 'npm cache inputs:\n%s\n' "$DEPENDENCY_PATHS"
     - name: Restore exact npm download cache
       id: cache
-      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ${{ steps.cache-key.outputs.path }}
         key: ${{ steps.cache-key.outputs.key }}
