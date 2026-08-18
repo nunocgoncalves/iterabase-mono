@@ -67,7 +67,7 @@ source SHA remains unchanged.
 For each import-record row, substitute the recorded values below:
 
 ```sh
-target=HEAD
+tip=HEAD
 destination=control-plane
 source_head=c63eea9d21c367a3e5fd91431bedc853fb15a16b
 relocation=cbed62e1596aeee913e00afe4b46a5b3d4ead874
@@ -76,21 +76,23 @@ sample=c63eea9d21c367a3e5fd91431bedc853fb15a16b
 follow=e3a87548d8813b835a0a00fce7ceb0c5674f43ab
 blame=160d25d0a2a8c1a81d65444891afe867f2d10337
 
-# Unchanged objects, ancestry, relocation, merge shape, and exact tree identity.
+# Unchanged objects, current ancestry, relocation, merge shape, and the exact
+# imported tree before later monorepo changes modified the destination.
 git cat-file -e "${source_head}^{commit}"
 git cat-file -e "${sample}^{commit}"
-git merge-base --is-ancestor "$source_head" "$target"
+git merge-base --is-ancestor "$source_head" "$tip"
 git merge-base --is-ancestor "$sample" "$source_head"
 test "$(git rev-parse "${relocation}^")" = "$source_head"
 test "$(git rev-list --parents -n 1 "$merge" | wc -w | tr -d ' ')" = 3
 test "$(git rev-parse "${merge}^2")" = "$relocation"
 test "$(git rev-parse "${source_head}^{tree}")" = \
-  "$(git rev-parse "${target}:${destination}")"
+  "$(git rev-parse "${relocation}:${destination}")"
 
-# Representative history and attribution cross the relocation.
-git log --follow --format='%H' "$target" -- "${destination}/README.md" \
+# Representative history and attribution still cross the relocation at the
+# current tip.
+git log --follow --format='%H' "$tip" -- "${destination}/README.md" \
   | grep -Fx "$follow"
-git blame --line-porcelain "$target" -- "${destination}/README.md" \
+git blame --line-porcelain "$tip" -- "${destination}/README.md" \
   | grep -E "^${blame} "
 ```
 
@@ -98,10 +100,16 @@ A Git commit SHA identifies the complete commit object, so resolving a sampled S
 unchanged also proves its original metadata, message, tree, and parents. Display it
 with `git show --no-patch --format=fuller <sample-sha>`.
 
-The root tree must contain only `.gitleaks.toml`, `README.md`, `docs/`, and the four
-component destinations. Scan all reachable history with:
+At the accepted HOR-472 import fixed point, the root tree contained only
+`.gitleaks.toml`, `README.md`, `docs/`, and the four component destinations.
+Later project slices deliberately added root workspace, automation, testkit, and
+release files. Verify the historical boundary and scan all currently reachable
+history with:
 
 ```sh
+import_acceptance=f54994e3936bb2162966365ae23138565b201dbb
+test "$(git ls-tree --name-only "$import_acceptance" | sort)" = \
+"$(printf '%s\n' .gitleaks.toml README.md charts control-plane docs forge inference-gateway | sort)"
 git fsck --full --no-dangling
 test -z "$(git tag --list 'v*')"
 gitleaks git --config .gitleaks.toml .

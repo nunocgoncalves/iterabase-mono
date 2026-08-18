@@ -4,7 +4,8 @@
 - **Product source:** *Atomic Platform Delivery and Pre-Production Confidence — Engineering Plan*
 - **Baseline source:** `7c6f835deb01e5d265eb7f9bd2bdcac70d2f62bf` (`master` after HOR-486)
 - **Remediated source:** `2ddf8cc300d6687e881651e706d00180edd53408` (HOR-497 on the HOR-480 branch)
-- **Decision:** deterministic source validation is green; the pre-demo release decision remains **blocked only on HOR-497's merge, exact control-plane candidate, protected publication, and acceptance**.
+- **Decision at HOR-480 review:** deterministic source validation is green; the pre-demo release decision remains **blocked only on HOR-497's merge, exact control-plane candidate, protected publication, and acceptance**.
+- **Final disposition:** HOR-497 subsequently completed; [`FOUNDATION-ACCEPTANCE-2026-08.md`](FOUNDATION-ACCEPTANCE-2026-08.md) records the final HOR-482 foundation decision while this report preserves the earlier quality-gate evidence.
 
 ## Executive result
 
