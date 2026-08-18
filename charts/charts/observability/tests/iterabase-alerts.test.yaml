@@ -1,9 +1,34 @@
 rule_files:
   - rules.yaml
+  - dashboard-rules.json
 
 evaluation_interval: 1m
 
 tests:
+  - name: dashboard unknown outcomes preserves invocation-only results
+    interval: 1m
+    input_series:
+      - series: 'control_plane_gateway_invocations_total{namespace="iterabase-system",effect_class="non_idempotent_write",result="outcome_unknown"}'
+        values: '0 0 1 1 1 1'
+    promql_expr_test:
+      - expr: iterabase:dashboard_tool_runtime_unknown_outcomes
+        eval_time: 4m
+        exp_samples:
+          - labels: '{__name__="iterabase:dashboard_tool_runtime_unknown_outcomes"}'
+            value: 1
+
+  - name: dashboard unknown outcomes includes the first recovery sample
+    interval: 1m
+    input_series:
+      - series: 'control_plane_gateway_recoveries_total{namespace="iterabase-system",result="outcome_unknown"}'
+        values: '1x6'
+    promql_expr_test:
+      - expr: iterabase:dashboard_tool_runtime_unknown_outcomes
+        eval_time: 2m
+        exp_samples:
+          - labels: '{__name__="iterabase:dashboard_tool_runtime_unknown_outcomes"}'
+            value: 1
+
   - name: critical expected target absence fires when the component series disappears completely
     interval: 1m
     input_series:

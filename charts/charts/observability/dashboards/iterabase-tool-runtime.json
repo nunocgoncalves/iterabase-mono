@@ -159,7 +159,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(increase(control_plane_gateway_invocations_total{namespace=~\"$namespace\",result=\"outcome_unknown\"}[$__rate_interval])) + sum(increase(control_plane_gateway_recoveries_total{namespace=~\"$namespace\",result=\"outcome_unknown\"}[$__rate_interval]))",
+          "expr": "(sum(increase(control_plane_gateway_invocations_total{namespace=~\"$namespace\",result=\"outcome_unknown\"}[$__rate_interval])) or vector(0)) + (sum(control_plane_gateway_recoveries_total{namespace=~\"$namespace\",result=\"outcome_unknown\"}) or vector(0))",
           "legendFormat": "{{component}} {{model}} {{route}} {{result}} {{pod}}",
           "range": false,
           "instant": true
