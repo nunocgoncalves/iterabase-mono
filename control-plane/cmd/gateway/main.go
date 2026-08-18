@@ -153,9 +153,19 @@ func runServe(ctx context.Context, cfg *config.Config, logger *slog.Logger) erro
 	runnerPath, runnerHandler := gatewayv1connect.NewRunnerServiceHandler(svc)
 	gwPath, gwHandler := gatewayv1connect.NewGatewayServiceHandler(svc)
 	artifactPath, artifactHandler := gatewayv1connect.NewArtifactServiceHandler(svc)
-	mux.Handle(runnerPath, m.ProcedureMiddleware("gateway-rpc")(idmw(runnerHandler)))
-	mux.Handle(gwPath, m.ProcedureMiddleware("gateway-rpc")(idmw(gwHandler)))
-	mux.Handle(artifactPath, m.ProcedureMiddleware("gateway-rpc")(idmw(artifactHandler)))
+	mux.Handle(runnerPath, m.ProcedureMiddleware("gateway-rpc",
+		gatewayv1connect.RunnerServiceRegisterRunnerProcedure,
+	)(idmw(runnerHandler)))
+	mux.Handle(gwPath, m.ProcedureMiddleware("gateway-rpc",
+		gatewayv1connect.GatewayServiceDiscoverEffectiveToolsProcedure,
+		gatewayv1connect.GatewayServiceInvokeToolProcedure,
+		gatewayv1connect.GatewayServiceCancelInvocationProcedure,
+	)(idmw(gwHandler)))
+	mux.Handle(artifactPath, m.ProcedureMiddleware("gateway-rpc",
+		gatewayv1connect.ArtifactServicePutArtifactProcedure,
+		gatewayv1connect.ArtifactServiceGetArtifactProcedure,
+		gatewayv1connect.ArtifactServiceStatArtifactProcedure,
+	)(idmw(artifactHandler)))
 
 	tlsCfg, err := buildTLSConfig(cfg.Gateway)
 	if err != nil {

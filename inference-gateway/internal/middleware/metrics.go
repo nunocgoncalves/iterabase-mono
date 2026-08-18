@@ -20,7 +20,6 @@ type MetricsData struct {
 	Model      string
 	Streaming  bool
 	BackendURL string // Logging only; never exported as a metric label.
-	BackendRef string // Stable, bounded catalog reference used by metrics.
 }
 
 // Metrics returns middleware that records gateway_requests_total and

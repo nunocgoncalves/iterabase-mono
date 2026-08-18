@@ -994,7 +994,9 @@ func TestGateway_RestartRecovery(t *testing.T) {
 
 	recovered, err := env.store.RecoverOrphanedInvocations(ctx)
 	require.NoError(t, err)
-	assert.GreaterOrEqual(t, recovered, 2)
+	assert.GreaterOrEqual(t, recovered.Failed, 1)
+	assert.GreaterOrEqual(t, recovered.OutcomeUnknown, 1)
+	assert.GreaterOrEqual(t, recovered.Total(), 2)
 
 	wInv, err := env.store.GetInvocation(ctx, writeInv)
 	require.NoError(t, err)

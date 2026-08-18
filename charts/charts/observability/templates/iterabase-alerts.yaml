@@ -1,5 +1,12 @@
 {{- if and .Values.enabled .Values.alerts.enabled (index .Values "kube-prometheus-stack" "enabled") }}
 {{- $runbook := "https://github.com/nunocgoncalves/iterabase-mono/blob/master/docs/runbooks/platform-alerts.md" }}
+{{- $root := . }}
+{{- $targetAbsenceExprs := list }}
+{{- range $target := .Values.alerts.expectedTargets }}
+{{- if $target.enabled }}
+{{- $targetAbsenceExprs = append $targetAbsenceExprs (printf "absent(up{namespace=%q,job=%q,component=%q})" $root.Release.Namespace $target.job $target.component) }}
+{{- end }}
+{{- end }}
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
@@ -40,6 +47,19 @@ spec:
             description: "Prometheus cannot scrape this configured platform target. The process, Service, port, or monitor may be unavailable."
             first_action: "Check pod readiness, Service endpoints, and the matching ServiceMonitor/PodMonitor."
             runbook_url: {{ printf "%s#iterabaseplatformtargetdown" $runbook | quote }}
+{{ if gt (len $targetAbsenceExprs) 0 }}
+        - alert: IterabasePlatformTargetAbsent
+          expr: {{ join " or " $targetAbsenceExprs | quote }}
+          for: 5m
+          labels:
+            severity: critical
+            component: "{{`{{ $labels.component }}`}}"
+          annotations:
+            summary: "Expected {{`{{ $labels.component }}`}} metrics target is absent"
+            description: "Prometheus has no target series for this enabled platform component. Its process, Service endpoint, or monitor may have disappeared completely."
+            first_action: "Check the expected workload, Service endpoints, and ServiceMonitor/PodMonitor discovery."
+            runbook_url: {{ printf "%s#iterabaseplatformtargetabsent" $runbook | quote }}
+{{ end }}
         - alert: IterabasePostgreSQLUnavailable
           expr: pg_up == 0
           for: 3m
@@ -89,7 +109,7 @@ spec:
             first_action: "Inspect manager logs and the affected CR status, RBAC, and Kubernetes events."
             runbook_url: {{ printf "%s#iterabasemanagerreconciliationfailures" $runbook | quote }}
         - alert: IterabaseGatewayOutcomeUnknown
-          expr: increase(control_plane_gateway_invocations_total{result="outcome_unknown"}[5m]) > 0
+          expr: increase(control_plane_gateway_invocations_total{result="outcome_unknown"}[5m]) > 0 or control_plane_gateway_recoveries_total{result="outcome_unknown"} > 0
           for: 1m
           labels: {severity: critical, component: gateway}
           annotations:

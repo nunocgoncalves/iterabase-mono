@@ -43,6 +43,35 @@ func TestMetricsIsolatedRegistryAndBoundedHTTPLabels(t *testing.T) {
 	assert.NotContains(t, all, "00000000-0000-0000-0000-000000000001")
 }
 
+func TestProcedureMiddlewareUsesFixedProcedureAndMethodLabels(t *testing.T) {
+	m := cpmetrics.New("gateway", "1.2.3", "abc123")
+	const procedure = "/iterabase.gateway.v1.GatewayService/InvokeTool"
+	handler := m.ProcedureMiddleware("gateway-rpc", procedure)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, procedure, nil))
+	privateSuffix := "/iterabase.gateway.v1.GatewayService/customer-private-value"
+	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("CUSTOM-VERB", privateSuffix, nil))
+
+	assert.Equal(t, float64(1), testutil.ToFloat64(
+		m.HTTPRequests.WithLabelValues("gateway-rpc", http.MethodPost, procedure, "2xx"),
+	))
+	assert.Equal(t, float64(1), testutil.ToFloat64(
+		m.HTTPRequests.WithLabelValues("gateway-rpc", "other", "unmatched", "2xx"),
+	))
+
+	families, err := m.Registry.Gather()
+	require.NoError(t, err)
+	var rendered []string
+	for _, family := range families {
+		rendered = append(rendered, family.String())
+	}
+	all := strings.Join(rendered, "\n")
+	assert.NotContains(t, all, "CUSTOM-VERB")
+	assert.NotContains(t, all, "customer-private-value")
+}
+
 func TestStatusClass(t *testing.T) {
 	assert.Equal(t, "2xx", cpmetrics.StatusClass(http.StatusNoContent))
 	assert.Equal(t, "unknown", cpmetrics.StatusClass(0))

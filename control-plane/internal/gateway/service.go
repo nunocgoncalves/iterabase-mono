@@ -116,16 +116,11 @@ func (s *Service) SetMetrics(metrics *cpmetrics.Metrics) { s.metrics = metrics }
 // process, before accepting traffic.
 func (s *Service) StartReconciler(ctx context.Context) {
 	recovered, err := s.store.RecoverOrphanedInvocations(ctx)
+	s.observeRecovery(recovered, err)
 	if err != nil {
-		if s.metrics != nil {
-			s.metrics.GatewayRecoveries.WithLabelValues("error").Inc()
-		}
 		s.log.Error("initial orphan recovery failed", "error", err)
-	} else if recovered > 0 {
-		if s.metrics != nil {
-			s.metrics.GatewayRecoveries.WithLabelValues("recovered").Add(float64(recovered))
-		}
-		s.log.Info("recovered orphaned invocations", "count", recovered)
+	} else if recovered.Total() > 0 {
+		s.log.Info("recovered orphaned invocations", "failed", recovered.Failed, "outcome_unknown", recovered.OutcomeUnknown)
 	}
 	ticker := time.NewTicker(s.cfg.DispatchLease / 2)
 	go func() {
@@ -135,22 +130,33 @@ func (s *Service) StartReconciler(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				if n, err := s.store.RecoverOrphanedInvocations(ctx); err != nil {
-					if s.metrics != nil {
-						s.metrics.GatewayRecoveries.WithLabelValues("error").Inc()
-					}
+				recovered, err := s.store.RecoverOrphanedInvocations(ctx)
+				s.observeRecovery(recovered, err)
+				if err != nil {
 					s.log.Warn("orphan recovery sweep failed", "error", err)
-				} else if n > 0 {
-					if s.metrics != nil {
-						s.metrics.GatewayRecoveries.WithLabelValues("recovered").Add(float64(n))
-					}
-					s.log.Info("recovered orphaned invocations", "count", n)
-				} else if s.metrics != nil {
-					s.metrics.GatewayRecoveries.WithLabelValues("clean").Inc()
+				} else if recovered.Total() > 0 {
+					s.log.Info("recovered orphaned invocations", "failed", recovered.Failed, "outcome_unknown", recovered.OutcomeUnknown)
 				}
 			}
 		}
 	}()
+}
+
+func (s *Service) observeRecovery(recovered RecoveryCounts, err error) {
+	if s.metrics == nil {
+		return
+	}
+	if recovered.Failed > 0 {
+		s.metrics.GatewayRecoveries.WithLabelValues("failed").Add(float64(recovered.Failed))
+	}
+	if recovered.OutcomeUnknown > 0 {
+		s.metrics.GatewayRecoveries.WithLabelValues("outcome_unknown").Add(float64(recovered.OutcomeUnknown))
+	}
+	if err != nil {
+		s.metrics.GatewayRecoveries.WithLabelValues("error").Inc()
+	} else if recovered.Total() == 0 {
+		s.metrics.GatewayRecoveries.WithLabelValues("clean").Inc()
+	}
 }
 
 // --- identity middleware (stamps the mTLS-verified SPIFFE identity into context) ---

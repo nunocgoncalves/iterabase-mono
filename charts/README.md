@@ -275,8 +275,13 @@ under `Iterabase`, focused component dashboards under `Infrastructure` and
 Dashboard source, stable UIDs, ordering, and provenance live
 under `charts/observability/dashboards`; runtime Internet imports are forbidden.
 The chart also ships bounded recording rules, invariant production alerts, and
-runbook links. Workload-specific performance alerts remain off until an overlay
-sets accepted thresholds under `observability.alerts.performance`.
+runbook links. `up == 0` coverage is paired with explicit per-component absence
+checks under `observability.alerts.expectedTargets`, so a vanished Pod, Service
+endpoint, or monitor still alerts. Disable expectations for intentionally omitted
+core components, and enable the `harness` / `modelBackend` expectations when an
+overlay creates those operator-managed workloads. Workload-specific performance
+alerts remain off until an overlay sets accepted thresholds under
+`observability.alerts.performance`.
 
 The vLLM `PodMonitor` selects operator-created model-backend pods by their stable
 label and named serving port. GPU panels require the optional DCGM target.

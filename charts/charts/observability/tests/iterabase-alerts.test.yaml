@@ -4,6 +4,62 @@ rule_files:
 evaluation_interval: 1m
 
 tests:
+  - name: critical expected target absence fires when the component series disappears completely
+    interval: 1m
+    input_series:
+      - series: 'up{namespace="default",job="control-plane",component="manager"}'
+        values: '1x8'
+      - series: 'up{namespace="default",job="control-plane",component="gateway"}'
+        values: '1x8'
+      - series: 'up{namespace="default",job="control-plane",component="dispatch"}'
+        values: '1x8'
+      - series: 'up{namespace="default",job="control-plane",component="tool-materializer"}'
+        values: '1x8'
+      - series: 'up{namespace="default",job="control-plane",component="tool-runner"}'
+        values: '1x8'
+      - series: 'up{namespace="default",job="inference-gateway",component="inference-gateway"}'
+        values: '1x8'
+      - series: 'up{namespace="default",job="postgresql",component="postgresql"}'
+        values: '1x8'
+      - series: 'up{namespace="default",job="redis",component="redis"}'
+        values: '1x8'
+      - series: 'up{namespace="default",job="minio",component="minio"}'
+        values: '1x8'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: IterabasePlatformTargetAbsent
+        exp_alerts:
+          - exp_labels:
+              namespace: default
+              job: control-plane
+              component: api
+              severity: critical
+            exp_annotations:
+              summary: Expected api metrics target is absent
+              description: Prometheus has no target series for this enabled platform component. Its process, Service endpoint, or monitor may have disappeared completely.
+              first_action: Check the expected workload, Service endpoints, and ServiceMonitor/PodMonitor discovery.
+              runbook_url: https://github.com/nunocgoncalves/iterabase-mono/blob/master/docs/runbooks/platform-alerts.md#iterabaseplatformtargetabsent
+
+  - name: critical recovered unknown outcome fires from the first scraped counter value
+    interval: 1m
+    input_series:
+      - series: 'control_plane_gateway_recoveries_total{namespace="iterabase-system",result="outcome_unknown"}'
+        values: '1x4'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: IterabaseGatewayOutcomeUnknown
+        exp_alerts:
+          - exp_labels:
+              namespace: iterabase-system
+              result: outcome_unknown
+              severity: critical
+              component: gateway
+            exp_annotations:
+              summary: A tool invocation has an unknown external outcome
+              description: A possible external effect lacks a committed result and must not be automatically repeated.
+              first_action: Reconcile the durable invocation against the external system before any retry.
+              runbook_url: https://github.com/nunocgoncalves/iterabase-mono/blob/master/docs/runbooks/platform-alerts.md#iterabasegatewayoutcomeunknown
+
   - name: critical harness disconnect fires after five minutes
     interval: 1m
     input_series:
