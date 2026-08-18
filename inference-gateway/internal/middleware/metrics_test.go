@@ -39,7 +39,9 @@ func TestMetrics_RecordsRequestsTotal(t *testing.T) {
 	metric := fam.GetMetric()[0]
 	labels := labelMap(metric)
 	assert.Equal(t, "unknown", labels["model"])
-	assert.Equal(t, "200", labels["status_code"])
+	assert.Equal(t, "2xx", labels["status_class"])
+	assert.Equal(t, "api", labels["listener"])
+	assert.Equal(t, "unmatched", labels["route"])
 	assert.Equal(t, "false", labels["streaming"])
 	assert.Equal(t, 1.0, metric.GetCounter().GetValue())
 }
@@ -71,7 +73,7 @@ func TestMetrics_RecordsWithMetricsData(t *testing.T) {
 
 	labels := labelMap(fam.GetMetric()[0])
 	assert.Equal(t, "gpt-4", labels["model"])
-	assert.Equal(t, "200", labels["status_code"])
+	assert.Equal(t, "2xx", labels["status_class"])
 	assert.Equal(t, "true", labels["streaming"])
 }
 
@@ -121,7 +123,7 @@ func TestMetrics_Captures4xxStatusCode(t *testing.T) {
 	fam := findFamily(families, "gateway_requests_total")
 	require.NotNil(t, fam)
 	labels := labelMap(fam.GetMetric()[0])
-	assert.Equal(t, "404", labels["status_code"])
+	assert.Equal(t, "4xx", labels["status_class"])
 }
 
 func TestMetrics_Captures5xxStatusCode(t *testing.T) {
@@ -144,7 +146,7 @@ func TestMetrics_Captures5xxStatusCode(t *testing.T) {
 	fam := findFamily(families, "gateway_requests_total")
 	require.NotNil(t, fam)
 	labels := labelMap(fam.GetMetric()[0])
-	assert.Equal(t, "502", labels["status_code"])
+	assert.Equal(t, "5xx", labels["status_class"])
 }
 
 func TestMetrics_FlusherDelegation(t *testing.T) {

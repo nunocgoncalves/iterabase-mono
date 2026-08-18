@@ -17,6 +17,7 @@ type Config struct {
 	Snapshot SnapshotConfig `yaml:"snapshot"`
 	Logging  LoggingConfig  `yaml:"logging"`
 	Workload WorkloadConfig `yaml:"workload"`
+	Metrics  MetricsConfig  `yaml:"metrics"`
 }
 
 type ServerConfig struct {
@@ -52,6 +53,13 @@ type SnapshotConfig struct {
 type LoggingConfig struct {
 	Level  string `yaml:"level"`
 	Format string `yaml:"format"`
+}
+
+// MetricsConfig is a dedicated plaintext in-cluster listener. It stays
+// separate from the ingress-facing API and mandatory-mTLS workload listeners.
+type MetricsConfig struct {
+	Enabled bool `yaml:"enabled"`
+	Port    int  `yaml:"port"`
 }
 
 // WorkloadConfig configures the supervisor mTLS workload listener (HOR-398;
@@ -119,6 +127,7 @@ func defaults() *Config {
 			Level:  "info",
 			Format: "json",
 		},
+		Metrics: MetricsConfig{Port: 9090},
 		Workload: WorkloadConfig{
 			Port:         8443,
 			TrustDomain:  "iterabase.local",
@@ -148,6 +157,15 @@ func applyEnvOverrides(cfg *Config) {
 		var port int
 		if _, err := fmt.Sscanf(v, "%d", &port); err == nil {
 			cfg.Server.Port = port
+		}
+	}
+	if v := os.Getenv("METRICS_ENABLED"); v != "" {
+		cfg.Metrics.Enabled = v == "true" || v == "1"
+	}
+	if v := os.Getenv("METRICS_PORT"); v != "" {
+		var port int
+		if _, err := fmt.Sscanf(v, "%d", &port); err == nil {
+			cfg.Metrics.Port = port
 		}
 	}
 	if v := os.Getenv("LOG_LEVEL"); v != "" {
@@ -196,6 +214,9 @@ func validate(cfg *Config) error {
 	if cfg.Server.Port < 1 || cfg.Server.Port > 65535 {
 		return fmt.Errorf("server.port must be between 1 and 65535")
 	}
+	if err := validateMetrics(cfg); err != nil {
+		return err
+	}
 	if cfg.Workload.Enabled {
 		if cfg.Workload.Port < 1 || cfg.Workload.Port > 65535 {
 			return fmt.Errorf("workload.port must be between 1 and 65535")
@@ -206,6 +227,19 @@ func validate(cfg *Config) error {
 		if cfg.Workload.Port == cfg.Server.Port {
 			return fmt.Errorf("workload.port must differ from server.port")
 		}
+	}
+	return nil
+}
+
+func validateMetrics(cfg *Config) error {
+	if !cfg.Metrics.Enabled {
+		return nil
+	}
+	if cfg.Metrics.Port < 1 || cfg.Metrics.Port > 65535 {
+		return fmt.Errorf("metrics.port must be between 1 and 65535")
+	}
+	if cfg.Metrics.Port == cfg.Server.Port || (cfg.Workload.Enabled && cfg.Metrics.Port == cfg.Workload.Port) {
+		return fmt.Errorf("metrics.port must differ from application listener ports")
 	}
 	return nil
 }

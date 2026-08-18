@@ -65,6 +65,10 @@ spec:
           command: ["/manager"]
           args:
             {{- toYaml .Values.manager.args | nindent 12 }}
+            {{- if .Values.metrics.enabled }}
+            - {{ printf "--metrics-bind-address=:%v" .Values.metrics.manager.containerPort | quote }}
+            - --metrics-secure=false
+            {{- end }}
           env:
             - name: PGPASSWORD
               valueFrom:
@@ -80,6 +84,10 @@ spec:
           ports:
             - name: health
               containerPort: 8081
+            {{- if .Values.metrics.enabled }}
+            - name: {{ .Values.metrics.manager.port }}
+              containerPort: {{ .Values.metrics.manager.containerPort }}
+            {{- end }}
           {{- if (or .Values.tls.enabled (dig "internalTLS" "enabled" false (.Values.global | default (dict)))) }}
           volumeMounts:
             - name: internal-ca

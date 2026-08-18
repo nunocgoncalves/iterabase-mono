@@ -345,6 +345,8 @@ export class ToolRunner {
   }
 
   private async execute(invoke: Invoke): Promise<void> {
+    const observedAt = Date.now();
+    let observedResult = "internal";
     this.metrics?.invocationsInFlight.inc();
     const abort = new AbortController();
     this.invocationAborts.set(invoke.invocationId, abort);
@@ -370,7 +372,8 @@ export class ToolRunner {
       });
       const output = await active.tool.module.invoke(context, argumentsValue);
       const resultJSON = new TextEncoder().encode(JSON.stringify(output.result ?? null));
-      this.metrics?.invocations.labels("succeeded").inc();
+      observedResult = "succeeded";
+      this.metrics?.invocations.labels(observedResult).inc();
       this.send(create(RunnerMessageSchema, { kind: { case: "invokeResult", value: {
         invocationId: invoke.invocationId, state: InvokeState.SUCCEEDED, resultJson: resultJSON,
         artifactOutputRefs: output.artifactRefs ?? [], timestampMs: BigInt(Date.now()),
@@ -379,7 +382,8 @@ export class ToolRunner {
       const typed = typedToolError(error);
       const detail = typed ?? (timedOut ? { code: "timeout", message: "tool invocation timed out" } :
         { code: abort.signal.aborted ? "canceled" : "internal", message: abort.signal.aborted ? "tool invocation canceled" : "trusted tool failed" });
-      this.metrics?.invocations.labels(typed ? "tool_error" : timedOut ? "timeout" : abort.signal.aborted ? "canceled" : "internal").inc();
+      observedResult = typed ? "tool_error" : timedOut ? "timeout" : abort.signal.aborted ? "canceled" : "internal";
+      this.metrics?.invocations.labels(observedResult).inc();
       this.send(create(RunnerMessageSchema, { kind: { case: "invokeResult", value: {
         invocationId: invoke.invocationId, state: InvokeState.FAILED, resultJson: new Uint8Array(), artifactOutputRefs: [],
         error: { code: detail.code, message: detail.message, retryability: detail.retryable ? Retryability.RETRYABLE : Retryability.NON_RETRYABLE,
@@ -390,6 +394,7 @@ export class ToolRunner {
       this.invocationAborts.delete(invoke.invocationId);
       release?.();
       this.metrics?.invocationsInFlight.dec();
+      this.metrics?.invocationDuration.labels(observedResult).observe((Date.now() - observedAt) / 1000);
     }
   }
 

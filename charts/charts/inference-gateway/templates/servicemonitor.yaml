@@ -1,11 +1,6 @@
-{{- if .Values.enabled }}
-{{- if .Values.metrics.enabled }}
-# ServiceMonitor scraping the inference-gateway's /metrics endpoint on its http
-# port. The gateway's in-cluster Service is plaintext (it is a TLS client only —
-# its public edge is via ingress-shim), so no scrape TLS config is needed. The
-# /metrics endpoint ships in the inference-gateway service repo
-# (internal/server/routes.go registers `r.Handle("/metrics", promhttp...)`),
-# so this monitor is a live scrape.
+{{- if and .Values.enabled .Values.metrics.enabled }}
+# Dedicated plaintext in-cluster metrics listener. The public API ingress and
+# supervisor mTLS workload listener never serve /metrics.
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
@@ -19,8 +14,11 @@ spec:
       app.kubernetes.io/name: inference-gateway
       app.kubernetes.io/instance: {{ .Release.Name }}
   endpoints:
-    - port: http
+    - port: http-metrics
       path: /metrics
       interval: {{ .Values.metrics.scrapeInterval | default "30s" }}
-{{- end }}
+      relabelings:
+        - action: replace
+          replacement: inference-gateway
+          targetLabel: component
 {{- end }}

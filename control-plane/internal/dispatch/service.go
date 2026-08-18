@@ -12,6 +12,7 @@ import (
 
 	connect "connectrpc.com/connect"
 	v1 "github.com/nunocgoncalves/iterabase-mono/control-plane/internal/harnessrpc/iterabase/harness/v1"
+	cpmetrics "github.com/nunocgoncalves/iterabase-mono/control-plane/internal/metrics"
 	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/runtime"
 	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/spiffe"
 	workstore "github.com/nunocgoncalves/iterabase-mono/control-plane/internal/work"
@@ -84,6 +85,7 @@ type Service struct {
 	gen         atomic.Uint64 // global monotonic fencing-generation counter
 	log         *slog.Logger
 	reconcileCh chan struct{}
+	metrics     *cpmetrics.Metrics
 }
 
 // NewService builds a dispatch Service. cfg is defaulted.
@@ -93,6 +95,10 @@ func NewService(store *Store, cfg Config, log *slog.Logger) *Service {
 	}
 	return &Service{store: store, work: workstore.NewStore(store.pool), cfg: cfg.defaults(), pool: newWorkerPool(), log: log, reconcileCh: make(chan struct{}, 1)}
 }
+
+// SetMetrics attaches bounded process-local instrumentation. It is optional so
+// isolated dispatch tests do not need a Prometheus registry.
+func (s *Service) SetMetrics(metrics *cpmetrics.Metrics) { s.metrics = metrics }
 
 // SeedGeneration initializes the in-memory fencing-generation counter from the
 // durable high-water mark in runtime.turn_assignments so a restarted control
@@ -196,8 +202,17 @@ func (s *Service) Work(ctx context.Context, st *connect.BidiStream[v1.WorkerMess
 	// which two conns are both selectable. The prior conn is fenced below using
 	// a generation-qualified CAS (HOR-249).
 	old := s.pool.add(w)
+	if s.metrics != nil {
+		s.metrics.DispatchWorkerConnections.WithLabelValues().Inc()
+		s.metrics.DispatchWorkers.WithLabelValues("connected").Inc()
+	}
 	w.startReader()
 	defer func() {
+		if s.metrics != nil {
+			s.metrics.DispatchWorkerConnections.WithLabelValues().Dec()
+			s.metrics.DispatchWorkers.WithLabelValues("connected").Dec()
+			s.metrics.DispatchWorkerStreams.WithLabelValues("disconnected").Inc()
+		}
 		w.markClosed()
 		// Drain in-flight sends so no stream.Send is in progress when this
 		// handler returns and Connect closes the HTTP/2 response writer. send()
@@ -446,6 +461,9 @@ func (s *Service) handleTurnEvent(ctx context.Context, te *v1.TurnEvent, w *work
 
 	applied, err := s.store.AppendTurnEvent(ctx, turnID, seq, kind, payload)
 	if err != nil {
+		if s.metrics != nil {
+			s.metrics.DispatchEvents.WithLabelValues(kind, "error").Inc()
+		}
 		if errors.Is(err, ErrAssignmentNotActive) {
 			// Terminalized concurrently between Resolve and Append: the event was
 			// not committed. Persist it as after-terminal audit (HOR-381 durable
@@ -458,6 +476,13 @@ func (s *Service) handleTurnEvent(ctx context.Context, te *v1.TurnEvent, w *work
 			return s.ack(ctx, w, turnID, seq)
 		}
 		return err
+	}
+	if s.metrics != nil {
+		result := "applied"
+		if !applied {
+			result = "deduplicated"
+		}
+		s.metrics.DispatchEvents.WithLabelValues(kind, result).Inc()
 	}
 	if isCompletion {
 		report := te.GetStepCompletion()
@@ -623,6 +648,16 @@ func (s *Service) commitTurnTerminal(ctx context.Context, a Assignment, reason s
 	if tErr := s.store.TerminalizeAssignment(ctx, a.TurnID); tErr != nil {
 		return runState, fmt.Errorf("terminalize assignment %s: %w", a.TurnID, tErr)
 	}
+	if s.metrics != nil && stErr == nil {
+		outcome := "failed"
+		switch reason {
+		case "completed":
+			outcome = "completed"
+		case "aborted":
+			outcome = "aborted"
+		}
+		s.metrics.DispatchTurns.WithLabelValues(outcome, reason).Inc()
+	}
 	return runState, nil
 }
 
@@ -676,6 +711,9 @@ func (s *Service) handleWorkerLoss(ctx context.Context, w *workerConn) {
 		return
 	}
 	if a, err := s.store.FenceWorkerGenerationIf(ctx, w.poolID, w.workerID, w.gen); err == nil {
+		if s.metrics != nil {
+			s.metrics.DispatchWorkerLosses.WithLabelValues("stream_lost").Inc()
+		}
 		s.log.Info("worker loss: terminalize turn", "pool", w.poolID, "worker", w.workerID, "turn", a.TurnID, "gen", w.gen)
 		if tErr := s.terminalizeTurnLoss(ctx, a); tErr != nil {
 			s.log.Warn("worker loss: terminalize turn", "turn", a.TurnID, "error", tErr)
@@ -769,6 +807,9 @@ func (s *Service) expireLeases(ctx context.Context) {
 			continue // idle workers are not terminalized; the conn is simply stale.
 		}
 		if a, err := s.store.FenceWorkerGenerationIf(ctx, w.poolID, w.workerID, w.gen); err == nil {
+			if s.metrics != nil {
+				s.metrics.DispatchWorkerLosses.WithLabelValues("lease_expired").Inc()
+			}
 			s.log.Info("lease expired: terminalize turn", "pool", w.poolID, "worker", w.workerID,
 				"turn", a.TurnID, "gen", w.gen, "last_seen", last)
 			// Lease expiry is worker loss; terminalize as aborted. The
@@ -785,9 +826,21 @@ func (s *Service) expireLeases(ctx context.Context) {
 // reconcileOnce drives one dispatch pass: start pending runs, then assign
 // turns to idle workers.
 func (s *Service) reconcileOnce(ctx context.Context) {
+	started := time.Now()
+	result := "success"
+	if s.metrics != nil {
+		s.metrics.DispatchPendingWork.WithLabelValues().Set(0)
+	}
+	defer func() {
+		if s.metrics != nil {
+			s.metrics.DispatchReconciles.WithLabelValues(result).Inc()
+			s.metrics.DispatchReconcileDuration.WithLabelValues(result).Observe(time.Since(started).Seconds())
+		}
+	}()
 	// Start pending runs (pending -> running + start first step).
 	pending, err := s.store.Runtime().ListRunsByState(ctx, runtime.RunPending)
 	if err != nil {
+		result = "error"
 		s.log.Warn("list pending runs", "error", err)
 		return
 	}
@@ -813,6 +866,7 @@ func (s *Service) reconcileOnce(ctx context.Context) {
 	// Assign turns for running runs with a running step and no active turn.
 	running, err := s.store.Runtime().ListRunsByState(ctx, runtime.RunRunning)
 	if err != nil {
+		result = "error"
 		s.log.Warn("list running runs", "error", err)
 		return
 	}
@@ -873,10 +927,15 @@ func (s *Service) dispatchGraphRun(ctx context.Context, run runtime.Run) {
 	}
 	w := s.pool.pickIdle(poolID, turn.ID)
 	if w == nil {
+		if s.metrics != nil {
+			s.metrics.DispatchPendingWork.WithLabelValues().Inc()
+		}
 		return
 	}
-	if err := s.assignGraph(ctx, turn, run, node, poolID, w); err != nil {
-		s.log.Warn("assign graph turn", "turn", turn.ID, "error", err)
+	assignErr := s.assignGraph(ctx, turn, run, node, poolID, w)
+	s.observeAssignment(assignErr)
+	if assignErr != nil {
+		s.log.Warn("assign graph turn", "turn", turn.ID, "error", assignErr)
 		w.releaseTurn()
 		s.kickReconciler()
 	}
@@ -971,6 +1030,8 @@ func (s *Service) assignGraph(ctx context.Context, turn runtime.Turn, run runtim
 // a running step but no active turn, it starts one and assigns it to an idle
 // worker in the run's pool. If no idle worker is available, the turn waits
 // (retried on the next tick / a Ready).
+//
+//nolint:gocyclo // Legacy linear dispatch validates each durable state transition explicitly.
 func (s *Service) dispatchRun(ctx context.Context, run runtime.Run) {
 	rt := s.store.Runtime()
 
@@ -1030,13 +1091,29 @@ func (s *Service) dispatchRun(ctx context.Context, run runtime.Run) {
 	}
 	w := s.pool.pickIdle(poolID, turn.ID)
 	if w == nil {
+		if s.metrics != nil {
+			s.metrics.DispatchPendingWork.WithLabelValues().Inc()
+		}
 		return // no idle worker; retry on next tick / Ready.
 	}
-	if err := s.assign(ctx, turn, run, poolID, w); err != nil {
-		s.log.Warn("assign turn", "turn", turn.ID, "error", err)
+	assignErr := s.assign(ctx, turn, run, poolID, w)
+	s.observeAssignment(assignErr)
+	if assignErr != nil {
+		s.log.Warn("assign turn", "turn", turn.ID, "error", assignErr)
 		w.releaseTurn()
 		s.kickReconciler()
 	}
+}
+
+func (s *Service) observeAssignment(err error) {
+	if s.metrics == nil {
+		return
+	}
+	result := "assigned"
+	if err != nil {
+		result = "error"
+	}
+	s.metrics.DispatchAssignments.WithLabelValues(result).Inc()
 }
 
 // runningStepID returns the id of the run's currently-running step, if any.

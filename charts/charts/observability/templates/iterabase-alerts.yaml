@@ -1,12 +1,5 @@
-{{- if .Values.enabled }}
-{{- if (index .Values "kube-prometheus-stack" "enabled") }}
-# Iterabase-platform alert rules ( supplement to kube-prometheus-stack's
-# kubernetes-mixin defaultRules). These cover platform-specific signals the
-# upstream mixin does not: scrape-target health for iterabase services, PV
-# pressure on the platform's stateful volumes, cert-manager cert expiry on the
-# edge/internal-CA certs, and (dormant until the service repos ship /metrics)
-# gateway error rate. Alertmanager routing/receivers are overlay-owned
-# (HOR-408); these rules only set severity + summary.
+{{- if and .Values.enabled .Values.alerts.enabled (index .Values "kube-prometheus-stack" "enabled") }}
+{{- $runbook := "https://github.com/nunocgoncalves/iterabase-mono/blob/master/docs/runbooks/platform-alerts.md" }}
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
@@ -15,67 +8,317 @@ metadata:
     {{- include "observability.labels" . | nindent 4 }}
 spec:
   groups:
-    - name: iterabase-targets
+    - name: iterabase-recording
       rules:
-        # Any platform scrape target down for 5m. `up` exists for every scraped
-        # target regardless of whether the service exposes /metrics, so this
-        # fires immediately (a 404 still reports up=0... actually up=1 on 4xx;
-        # up=0 only on connection failure). Catches unreachable/mis-scraped
-        # services.
-        - alert: IterabaseTargetDown
-          expr: up{job=~"inference-gateway|control-plane.*|postgresql|redis|minio"} == 0
+        - record: iterabase:control_plane_api_request_rate5m
+          expr: sum by (namespace) (rate(control_plane_http_requests_total{component="api"}[5m]))
+        - record: iterabase:control_plane_api_error_ratio5m
+          expr: sum by (namespace) (rate(control_plane_http_requests_total{component="api",status_class="5xx"}[5m])) / clamp_min(sum by (namespace) (rate(control_plane_http_requests_total{component="api"}[5m])), 0.001)
+        - record: iterabase:control_plane_api_latency_p95_5m
+          expr: histogram_quantile(0.95, sum by (namespace,le) (rate(control_plane_http_request_duration_seconds_bucket{component="api"}[5m])))
+        - record: iterabase:inference_request_rate5m
+          expr: sum by (namespace) (rate(gateway_requests_total[5m]))
+        - record: iterabase:inference_error_ratio5m
+          expr: sum by (namespace) (rate(gateway_requests_total{status_class="5xx"}[5m])) / clamp_min(sum by (namespace) (rate(gateway_requests_total[5m])), 0.001)
+        - record: iterabase:inference_latency_p95_5m
+          expr: histogram_quantile(0.95, sum by (namespace,le) (rate(gateway_request_duration_seconds_bucket[5m])))
+        - record: iterabase:inference_ttft_p95_5m
+          expr: histogram_quantile(0.95, sum by (namespace,le) (rate(gateway_time_to_first_token_seconds_bucket[5m])))
+        - record: iterabase:harness_turn_latency_p95_5m
+          expr: histogram_quantile(0.95, sum by (namespace,le) (rate(control_plane_harness_turn_duration_seconds_bucket[5m])))
+
+    - name: iterabase-availability
+      rules:
+        - alert: IterabasePlatformTargetDown
+          expr: up{job=~"control-plane|inference-gateway|postgresql|redis|minio"} == 0
           for: 5m
           labels:
-            severity: warning
+            severity: critical
+            component: "{{`{{ $labels.component }}`}}"
           annotations:
-            summary: "{{`{{ $labels.instance }}`}} (job {{`{{ $labels.job }}`}}) is down"
-            description: "Prometheus has been unable to scrape this iterabase target for 5m."
+            summary: "{{`{{ $labels.component }}`}} metrics target is down"
+            description: "Prometheus cannot scrape this configured platform target. The process, Service, port, or monitor may be unavailable."
+            first_action: "Check pod readiness, Service endpoints, and the matching ServiceMonitor/PodMonitor."
+            runbook_url: {{ printf "%s#iterabaseplatformtargetdown" $runbook | quote }}
+        - alert: IterabasePostgreSQLUnavailable
+          expr: pg_up == 0
+          for: 3m
+          labels: {severity: critical, component: postgresql}
+          annotations:
+            summary: "PostgreSQL exporter reports the database unavailable"
+            description: "The durable system of record is not reachable from its exporter."
+            first_action: "Check the PostgreSQL pod, Service, TLS, credentials, and volume."
+            runbook_url: {{ printf "%s#iterabasepostgresqlunavailable" $runbook | quote }}
+        - alert: IterabaseRedisUnavailable
+          expr: redis_up == 0
+          for: 5m
+          labels: {severity: warning, component: redis}
+          annotations:
+            summary: "Redis exporter reports the cache unavailable"
+            description: "Inference rate-limit state cannot use the shared Redis cache."
+            first_action: "Check the Redis pod, Service, AUTH/TLS, and exporter logs."
+            runbook_url: {{ printf "%s#iterabaseredisunavailable" $runbook | quote }}
 
-    - name: iterabase-storage
+    - name: iterabase-control-plane
       rules:
-        # PV almost full on any platform volume (Postgres/Loki/Prometheus/MinIO/
-        # Grafana). kubelet_volume_stats_* come from kubelet (always available).
+        - alert: IterabaseControlPlaneAPIHighErrorRate
+          expr: iterabase:control_plane_api_error_ratio5m > 0.05 and sum by (namespace) (increase(control_plane_http_requests_total{component="api"}[10m])) >= 20
+          for: 10m
+          labels: {severity: critical, component: api}
+          annotations:
+            summary: "Control-plane API 5xx ratio is above 5%"
+            description: "A sustained server-error ratio is affecting control-plane API operations."
+            first_action: "Inspect API logs by normalized route and verify Postgres/MinIO readiness."
+            runbook_url: {{ printf "%s#iterabasecontrolplaneapihigherrorrate" $runbook | quote }}
+        - alert: IterabaseArtifactOperationsFailing
+          expr: sum by (namespace) (increase(control_plane_http_requests_total{route=~"/v1/artifacts.*|.*/ArtifactService/.*",status_class="5xx"}[10m])) >= 3
+          for: 5m
+          labels: {severity: critical, component: artifact}
+          annotations:
+            summary: "Artifact operations are repeatedly failing"
+            description: "Customer/API or workload artifact reads/writes are returning sustained server errors."
+            first_action: "Check MinIO readiness, credentials, metadata state, object integrity, and API/gateway logs."
+            runbook_url: {{ printf "%s#iterabaseartifactoperationsfailing" $runbook | quote }}
+        - alert: IterabaseManagerReconciliationFailures
+          expr: sum by (namespace,controller) (increase(controller_runtime_reconcile_total{result="error"}[10m])) >= 3
+          for: 5m
+          labels: {severity: warning, component: manager}
+          annotations:
+            summary: "Controller reconciliation is repeatedly failing"
+            description: "A control-plane controller recorded at least three reconciliation errors in ten minutes."
+            first_action: "Inspect manager logs and the affected CR status, RBAC, and Kubernetes events."
+            runbook_url: {{ printf "%s#iterabasemanagerreconciliationfailures" $runbook | quote }}
+        - alert: IterabaseGatewayOutcomeUnknown
+          expr: increase(control_plane_gateway_invocations_total{result="outcome_unknown"}[5m]) > 0
+          for: 1m
+          labels: {severity: critical, component: gateway}
+          annotations:
+            summary: "A tool invocation has an unknown external outcome"
+            description: "A possible external effect lacks a committed result and must not be automatically repeated."
+            first_action: "Reconcile the durable invocation against the external system before any retry."
+            runbook_url: {{ printf "%s#iterabasegatewayoutcomeunknown" $runbook | quote }}
+        - alert: IterabaseToolRunnerDisconnected
+          expr: tool_runner_generation_ready == 1 and tool_runner_gateway_connected == 0
+          for: 5m
+          labels: {severity: critical, component: tool-runner}
+          annotations:
+            summary: "A ready tool generation is disconnected from the gateway"
+            description: "Trusted tools are loaded but unavailable to new gateway invocations."
+            first_action: "Check runner/gateway mTLS, registration, Service, and stream logs."
+            runbook_url: {{ printf "%s#iterabasetoolrunnerdisconnected" $runbook | quote }}
+        - alert: IterabaseToolGenerationUnavailable
+          expr: tool_runner_generation_ready == 0
+          for: 10m
+          labels: {severity: critical, component: tool-runner}
+          annotations:
+            summary: "No valid trusted-tool generation is ready"
+            description: "The runner has not activated a complete reviewed tool generation."
+            first_action: "Inspect Flux artifact status and materializer validation errors."
+            runbook_url: {{ printf "%s#iterabasetoolgenerationunavailable" $runbook | quote }}
+        - alert: IterabaseToolMaterializationFailures
+          expr: increase(tool_runner_materializations_total{result="failure"}[15m]) >= 3
+          for: 5m
+          labels: {severity: warning, component: tool-materializer}
+          annotations:
+            summary: "Trusted-tool materialization is repeatedly failing"
+            description: "Three or more Flux artifact materialization attempts failed in fifteen minutes."
+            first_action: "Inspect artifact digest, archive bounds, manifests, and materializer logs."
+            runbook_url: {{ printf "%s#iterabasetoolmaterializationfailures" $runbook | quote }}
+
+    - name: iterabase-execution
+      rules:
+        - alert: IterabaseDispatchWithoutWorkers
+          expr: control_plane_dispatch_pending_work > 0 and control_plane_dispatch_worker_connections == 0
+          for: 5m
+          labels: {severity: critical, component: dispatch}
+          annotations:
+            summary: "Durable work is pending with no connected workers"
+            description: "Dispatch observes pending/running work but has no harness stream capable of receiving it."
+            first_action: "Check AgentPool replicas, pod readiness, CSI certificates, and dispatch mTLS."
+            runbook_url: {{ printf "%s#iterabasedispatchwithoutworkers" $runbook | quote }}
+        - alert: IterabaseDispatchWorkerLosses
+          expr: sum by (namespace,reason) (increase(control_plane_dispatch_worker_losses_total[15m])) >= 3
+          for: 5m
+          labels: {severity: warning, component: dispatch}
+          annotations:
+            summary: "Dispatch is repeatedly losing worker ownership"
+            description: "Repeated stream loss or lease expiry is aborting or fencing worker assignments."
+            first_action: "Inspect worker restarts, network health, heartbeats, and fencing logs."
+            runbook_url: {{ printf "%s#iterabasedispatchworkerlosses" $runbook | quote }}
+        - alert: IterabaseHarnessDisconnected
+          expr: control_plane_harness_dispatch_connected == 0
+          for: 5m
+          labels: {severity: critical, component: harness}
+          annotations:
+            summary: "A harness supervisor is disconnected from dispatch"
+            description: "The warm worker cannot receive durable assignments."
+            first_action: "Check the worker pod, dispatch Service, certificate validity, and reconnect logs."
+            runbook_url: {{ printf "%s#iterabaseharnessdisconnected" $runbook | quote }}
+        - alert: IterabaseHarnessReplayBacklog
+          expr: control_plane_harness_pending_replays > 0
+          for: 10m
+          labels: {severity: warning, component: harness}
+          annotations:
+            summary: "Harness durable event replay is not clearing"
+            description: "Recovered or stream-loss WAL events remain unacknowledged."
+            first_action: "Inspect dispatch persistence, cumulative ACKs, and harness WAL/reconnect logs."
+            runbook_url: {{ printf "%s#iterabaseharnessreplaybacklog" $runbook | quote }}
+
+    - name: iterabase-inference
+      rules:
+        - alert: IterabaseInferenceGatewayHighErrorRate
+          expr: iterabase:inference_error_ratio5m > 0.05 and sum by (namespace) (increase(gateway_requests_total[10m])) >= 20
+          for: 10m
+          labels: {severity: critical, component: inference-gateway}
+          annotations:
+            summary: "Inference-gateway 5xx ratio is above 5%"
+            description: "A sustained server-error ratio is affecting inference requests."
+            first_action: "Inspect gateway logs, snapshot freshness, backend availability, and Redis/Postgres health."
+            runbook_url: {{ printf "%s#iterabaseinferencegatewayhigherrorrate" $runbook | quote }}
+        - alert: IterabaseInferenceSnapshotStale
+          expr: inference_gateway_snapshot_fresh == 0
+          for: 5m
+          labels: {severity: critical, component: inference-gateway}
+          annotations:
+            summary: "Inference control-plane snapshot is stale"
+            description: "The gateway no longer trusts its consumed catalog/auth snapshot and readiness is degraded."
+            first_action: "Check Postgres connectivity and snapshot LISTEN/refresh logs."
+            runbook_url: {{ printf "%s#iterabaseinferencesnapshotstale" $runbook | quote }}
+        - alert: IterabaseModelBackendUnavailable
+          expr: gateway_backend_health == 0
+          for: 5m
+          labels: {severity: critical, component: model-backend}
+          annotations:
+            summary: "An installed model backend is unavailable"
+            description: "The inference snapshot marks a configured model/backend pair unavailable."
+            first_action: "Check ModelBackend status, serving pod readiness, GPU health, and gateway snapshot refresh."
+            runbook_url: {{ printf "%s#iterabasemodelbackendunavailable" $runbook | quote }}
+
+    - name: iterabase-storage-security
+      rules:
         - alert: IterabasePersistentVolumeAlmostFull
           expr: (1 - kubelet_volume_stats_available_bytes{namespace="{{ .Release.Namespace }}"} / kubelet_volume_stats_capacity_bytes{namespace="{{ .Release.Namespace }}"}) > 0.90
           for: 15m
-          labels:
-            severity: warning
+          labels: {severity: warning, component: storage}
           annotations:
-            summary: "PV {{`{{ $labels.persistentvolumeclaim }}`}} is >90% full"
-            description: "The persistent volume backing {{`{{ $labels.persistentvolumeclaim }}`}} in {{ .Release.Namespace }} has been >90% full for 15m."
-
-    - name: iterabase-certificates
-      rules:
-        # cert-manager certificate expiring within 14d. Covers the edge TLS cert
-        # and the internal-CA leaves (when internalTLS is on). The kubernetes-mixin
-        # does not alert on cert-manager certs.
+            summary: "Persistent volume {{`{{ $labels.persistentvolumeclaim }}`}} is above 90%"
+            description: "A platform persistent volume is approaching exhaustion."
+            first_action: "Identify growth, confirm retention/backup, and expand or clean the volume safely."
+            runbook_url: {{ printf "%s#iterabasepersistentvolumealmostfull" $runbook | quote }}
+        - alert: IterabaseControlPlaneDatabasePoolSaturated
+          expr: control_plane_database_pool_connections{state="total"} / clamp_min(control_plane_database_pool_max_connections, 1) > 0.90
+          for: 10m
+          labels: {severity: warning, component: postgresql-client}
+          annotations:
+            summary: "A control-plane database pool is above 90% utilization"
+            description: "A serving component is close to exhausting its configured Postgres pool."
+            first_action: "Correlate request/reconcile load, acquire wait, slow queries, and Postgres capacity before changing limits."
+            runbook_url: {{ printf "%s#iterabasecontrolplanedatabasepoolsaturated" $runbook | quote }}
+        - alert: IterabaseInferenceDatabasePoolSaturated
+          expr: inference_gateway_database_pool_connections / clamp_min(inference_gateway_database_pool_max_connections, 1) > 0.90
+          for: 10m
+          labels: {severity: warning, component: inference-gateway}
+          annotations:
+            summary: "Inference-gateway database pool is above 90% utilization"
+            description: "The snapshot/workload authorization reader is close to exhausting its Postgres pool."
+            first_action: "Inspect request concurrency, snapshot refresh, active queries, and Postgres capacity."
+            runbook_url: {{ printf "%s#iterabaseinferencedatabasepoolsaturated" $runbook | quote }}
+        - alert: IterabaseInferenceRedisPoolTimeouts
+          expr: increase(inference_gateway_redis_pool_timeouts_total[10m]) > 0
+          for: 5m
+          labels: {severity: warning, component: inference-gateway}
+          annotations:
+            summary: "Inference-gateway Redis pool acquisition is timing out"
+            description: "Rate-limit operations are waiting beyond the Redis client pool bound."
+            first_action: "Inspect Redis health, request concurrency, client pool size, network latency, and blocked operations."
+            runbook_url: {{ printf "%s#iterabaseinferenceredispooltimeouts" $runbook | quote }}
         - alert: IterabaseCertificateExpiringSoon
           expr: certmanager_certificate_expiration_timestamp_seconds - time() < 86400 * 14
           for: 10m
-          labels:
-            severity: warning
+          labels: {severity: warning, component: certificates}
           annotations:
-            summary: "Certificate {{`{{ $labels.name }}`}} expires in <14d"
-            description: "cert-manager certificate {{`{{ $labels.name }}`}} (issuer {{`{{ $labels.issuer_name }}`}}) expires within 14 days — check renewal."
+            summary: "Certificate {{`{{ $labels.name }}`}} expires within 14 days"
+            description: "A cert-manager leaf is approaching expiry without a confirmed renewal."
+            first_action: "Inspect Certificate/CertificateRequest conditions, issuer health, and DNS/API reachability."
+            runbook_url: {{ printf "%s#iterabasecertificateexpiringsoon" $runbook | quote }}
+        - alert: IterabasePrometheusRuleEvaluationFailures
+          expr: increase(prometheus_rule_evaluation_failures_total[10m]) > 0
+          for: 5m
+          labels: {severity: warning, component: prometheus}
+          annotations:
+            summary: "Prometheus is failing to evaluate recording or alert rules"
+            description: "Production dashboards or alerts may be incomplete."
+            first_action: "Inspect Prometheus rule status and logs for the failing group/expression."
+            runbook_url: {{ printf "%s#iterabaseprometheusruleevaluationfailures" $runbook | quote }}
 
-    - name: iterabase-gateway
+    {{- if or (gt (float64 .Values.alerts.performance.apiP95Seconds) 0.0) (gt (float64 .Values.alerts.performance.inferenceP95Seconds) 0.0) (gt (float64 .Values.alerts.performance.inferenceTTFTP95Seconds) 0.0) (gt (float64 .Values.alerts.performance.harnessTurnP95Seconds) 0.0) (gt (float64 .Values.alerts.performance.modelQueueDepth) 0.0) (gt (float64 .Values.alerts.performance.gpuUtilizationPercent) 0.0) }}
+    - name: iterabase-performance-configurable
       rules:
-        # Gateway 5xx error rate. DORMANT until the inference-gateway service repo
-        # ships a /metrics endpoint exposing http_requests_total (HOR-408 tracked
-        # gap — the ServiceMonitor is wired in this chart; the endpoint is not).
-        # With no http_requests_total series, this expression evaluates to empty
-        # and never fires.
-        - alert: IterabaseGatewayHighErrorRate
-          expr: |
-            sum(rate(http_requests_total{job="inference-gateway",code=~"5.."}[5m]))
-              /
-            clamp_min(sum(rate(http_requests_total{job="inference-gateway"}[5m])), 1)
-              > 0.05
+        {{- if gt (float64 .Values.alerts.performance.apiP95Seconds) 0.0 }}
+        - alert: IterabaseControlPlaneAPILatencyHigh
+          expr: iterabase:control_plane_api_latency_p95_5m > {{ .Values.alerts.performance.apiP95Seconds }}
           for: 10m
-          labels:
-            severity: critical
+          labels: {severity: warning, component: api}
           annotations:
-            summary: "inference-gateway 5xx error rate >5%"
-            description: "The inference gateway has returned >5% 5xx responses for 10m. (Requires the gateway /metrics endpoint — HOR-408 tracked gap.)"
-{{- end }}
+            summary: "Control-plane API P95 latency exceeds the accepted threshold"
+            description: "The overlay-configured API latency objective is not being met."
+            first_action: "Break down latency by normalized route and inspect dependency/pool saturation."
+            runbook_url: {{ printf "%s#iterabasecontrolplaneapilatencyhigh" $runbook | quote }}
+        {{- end }}
+        {{- if gt (float64 .Values.alerts.performance.inferenceP95Seconds) 0.0 }}
+        - alert: IterabaseInferenceLatencyHigh
+          expr: iterabase:inference_latency_p95_5m > {{ .Values.alerts.performance.inferenceP95Seconds }}
+          for: 10m
+          labels: {severity: warning, component: inference-gateway}
+          annotations:
+            summary: "Inference P95 latency exceeds the accepted threshold"
+            description: "The overlay-configured model-serving latency objective is not being met."
+            first_action: "Inspect model queue, GPU, backend latency, and request/token shape."
+            runbook_url: {{ printf "%s#iterabaseinferencelatencyhigh" $runbook | quote }}
+        {{- end }}
+        {{- if gt (float64 .Values.alerts.performance.inferenceTTFTP95Seconds) 0.0 }}
+        - alert: IterabaseInferenceTTFTHigh
+          expr: iterabase:inference_ttft_p95_5m > {{ .Values.alerts.performance.inferenceTTFTP95Seconds }}
+          for: 10m
+          labels: {severity: warning, component: inference-gateway}
+          annotations:
+            summary: "Inference P95 time-to-first-token exceeds the accepted threshold"
+            description: "The overlay-configured interactive inference objective is not being met."
+            first_action: "Inspect model queue, prompt size, GPU saturation, and backend health."
+            runbook_url: {{ printf "%s#iterabaseinferencettfthigh" $runbook | quote }}
+        {{- end }}
+        {{- if gt (float64 .Values.alerts.performance.harnessTurnP95Seconds) 0.0 }}
+        - alert: IterabaseHarnessTurnLatencyHigh
+          expr: iterabase:harness_turn_latency_p95_5m > {{ .Values.alerts.performance.harnessTurnP95Seconds }}
+          for: 10m
+          labels: {severity: warning, component: harness}
+          annotations:
+            summary: "Harness P95 turn duration exceeds the accepted threshold"
+            description: "The overlay-configured workflow execution duration objective is not being met."
+            first_action: "Inspect model/tool/artifact latency, child failures, replay, and resource saturation."
+            runbook_url: {{ printf "%s#iterabaseharnessturnlatencyhigh" $runbook | quote }}
+        {{- end }}
+        {{- if gt (float64 .Values.alerts.performance.modelQueueDepth) 0.0 }}
+        - alert: IterabaseModelQueueHigh
+          expr: sum by (namespace) ({__name__="vllm:num_requests_waiting"}) > {{ .Values.alerts.performance.modelQueueDepth }}
+          for: 10m
+          labels: {severity: warning, component: model-backend}
+          annotations:
+            summary: "Model-serving queue depth exceeds the accepted threshold"
+            description: "The configured backend queue capacity objective is not being met."
+            first_action: "Inspect request arrival rate, active requests, GPU memory/cache, and model capacity."
+            runbook_url: {{ printf "%s#iterabasemodelqueuehigh" $runbook | quote }}
+        {{- end }}
+        {{- if gt (float64 .Values.alerts.performance.gpuUtilizationPercent) 0.0 }}
+        - alert: IterabaseGPUUtilizationHigh
+          expr: avg by (namespace) (DCGM_FI_DEV_GPU_UTIL) > {{ .Values.alerts.performance.gpuUtilizationPercent }}
+          for: 15m
+          labels: {severity: warning, component: gpu}
+          annotations:
+            summary: "GPU utilization exceeds the accepted sustained threshold"
+            description: "The overlay-configured GPU capacity threshold is being exceeded."
+            first_action: "Correlate queue depth, model throughput, memory, temperature, and power before scaling or tuning."
+            runbook_url: {{ printf "%s#iterabasegpuutilizationhigh" $runbook | quote }}
+        {{- end }}
+    {{- end }}
 {{- end }}

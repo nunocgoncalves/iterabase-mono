@@ -50,6 +50,14 @@ func TestHealthz(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rr.Code)
 }
 
+func TestMetricsNotExposedOnApplicationListener(t *testing.T) {
+	router := server.New(server.Services{})
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	router.ServeHTTP(rr, req)
+	assert.Equal(t, http.StatusNotFound, rr.Code)
+}
+
 func TestReadyz_NoDatabase(t *testing.T) {
 	router := server.New(server.Services{})
 

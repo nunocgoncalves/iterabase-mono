@@ -56,7 +56,7 @@ func (h *Handler) handleStreaming(
 	defer resp.Body.Close()
 
 	if h.metrics != nil {
-		h.metrics.BackendRequestDuration.WithLabelValues(entry.ModelID, entry.BackendURL).
+		h.metrics.BackendRequestDuration.WithLabelValues(entry.ModelID, entry.BackendRef).
 			Observe(time.Since(backendStart).Seconds())
 	}
 

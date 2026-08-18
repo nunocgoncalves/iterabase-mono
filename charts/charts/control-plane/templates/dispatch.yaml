@@ -15,6 +15,11 @@ spec:
     - name: grpc
       port: {{ .Values.dispatch.service.port }}
       targetPort: grpc
+    {{- if .Values.metrics.enabled }}
+    - name: http-metrics
+      port: {{ .Values.metrics.port }}
+      targetPort: http-metrics
+    {{- end }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -86,6 +91,10 @@ spec:
               value: {{ include "control-plane.databaseURL" . | quote }}
             - name: DISPATCH_ADDR
               value: {{ .Values.dispatch.addr | quote }}
+            {{- if .Values.metrics.enabled }}
+            - name: METRICS_ADDR
+              value: {{ printf ":%v" .Values.metrics.port | quote }}
+            {{- end }}
             - name: DISPATCH_TLS_CERT_FILE
               value: /etc/control-plane/dispatch-tls/tls.crt
             - name: DISPATCH_TLS_KEY_FILE
@@ -114,6 +123,10 @@ spec:
           ports:
             - name: grpc
               containerPort: {{ .Values.dispatch.service.port }}
+            {{- if .Values.metrics.enabled }}
+            - name: http-metrics
+              containerPort: {{ .Values.metrics.port }}
+            {{- end }}
           volumeMounts:
             - name: dispatch-tls
               mountPath: /etc/control-plane/dispatch-tls

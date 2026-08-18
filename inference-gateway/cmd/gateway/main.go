@@ -22,6 +22,7 @@ import (
 	"github.com/nunocgoncalves/iterabase-mono/inference-gateway/internal/server"
 	"github.com/nunocgoncalves/iterabase-mono/inference-gateway/internal/snapshot"
 	"github.com/nunocgoncalves/iterabase-mono/inference-gateway/internal/spiffe"
+	"github.com/nunocgoncalves/iterabase-mono/inference-gateway/internal/version"
 	"github.com/nunocgoncalves/iterabase-mono/inference-gateway/internal/workload"
 )
 
@@ -69,6 +70,7 @@ func runServe() error {
 	}
 
 	logger := newLogger(cfg.Logging)
+	logger.Info("starting inference gateway", "version", version.Version(), "commit", version.Commit(), "date", version.Date())
 	ctx := context.Background()
 
 	// --- Connect to PostgreSQL ---
@@ -103,7 +105,9 @@ func runServe() error {
 	logger.Info("snapshot cache started")
 
 	// --- Create metrics ---
-	m := metrics.New(prometheus.NewRegistry())
+	m := metrics.NewWithBuild(prometheus.NewRegistry(), version.Version(), version.Commit())
+	m.RegisterDatabasePool(pool)
+	m.RegisterRedisPool(rdb)
 
 	// --- Create handlers ---
 	proxyHandler := proxy.NewHandler(cache, limiter, m, logger)

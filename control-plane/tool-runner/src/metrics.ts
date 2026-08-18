@@ -1,8 +1,14 @@
 import { createServer, type Server } from "node:http";
-import { Counter, Gauge, Registry } from "prom-client";
+import { collectDefaultMetrics, Counter, Gauge, Histogram, Registry } from "prom-client";
 
 export class MaterializerMetrics {
   readonly registry = new Registry();
+  readonly buildInfo = new Gauge({
+    name: "tool_runner_build_info",
+    help: "Immutable tool-runtime build information.",
+    labelNames: ["version"] as const,
+    registers: [this.registry],
+  });
   readonly materializations = new Counter({
     name: "tool_runner_materializations_total",
     help: "Flux artifact materialization attempts by result.",
@@ -19,26 +25,49 @@ export class MaterializerMetrics {
     help: "Expanded tool bytes in the most recently materialized generation.",
     registers: [this.registry],
   });
+  readonly duration = new Histogram({
+    name: "tool_runner_materialization_duration_seconds",
+    help: "Flux artifact materialization duration by bounded result.",
+    labelNames: ["result"] as const,
+    buckets: [0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60],
+    registers: [this.registry],
+  });
   readonly currentArtifact = new Gauge({
-    name: "tool_runner_materialized_artifact_info",
-    help: "The current exact Flux artifact revision and digest.",
-    labelNames: ["revision", "digest"] as const,
+    name: "tool_runner_materialized_artifact_current",
+    help: "Whether a current validated Flux artifact generation has been published.",
     registers: [this.registry],
   });
 
-  success(revision: string, digest: string, bytes?: number): void {
-    this.materializations.labels("success").inc();
-    this.lastSuccess.set(Date.now() / 1000);
-    if (bytes !== undefined) this.generationBytes.set(bytes);
-    this.currentArtifact.reset();
-    this.currentArtifact.labels(revision, digest).set(1);
+  constructor() {
+    collectDefaultMetrics({ register: this.registry, labels: { component: "tool-materializer" } });
+    this.buildInfo.labels(process.env.TOOL_RUNNER_BUILD_VERSION || "dev").set(1);
+    this.currentArtifact.set(0);
   }
 
-  failure(): void { this.materializations.labels("failure").inc(); }
+  success(revision: string, digest: string, bytes?: number, durationSeconds?: number): void {
+    this.materializations.labels("success").inc();
+    if (durationSeconds !== undefined) this.duration.labels("success").observe(durationSeconds);
+    this.lastSuccess.set(Date.now() / 1000);
+    if (bytes !== undefined) this.generationBytes.set(bytes);
+    this.currentArtifact.set(1);
+    void revision;
+    void digest;
+  }
+
+  failure(durationSeconds?: number): void {
+    this.materializations.labels("failure").inc();
+    if (durationSeconds !== undefined) this.duration.labels("failure").observe(durationSeconds);
+  }
 }
 
 export class RunnerMetrics {
   readonly registry = new Registry();
+  readonly buildInfo = new Gauge({
+    name: "tool_runner_build_info",
+    help: "Immutable tool-runtime build information.",
+    labelNames: ["version"] as const,
+    registers: [this.registry],
+  });
   readonly generationActivations = new Counter({
     name: "tool_runner_generation_activations_total",
     help: "Complete generation activation attempts by result.",
@@ -86,11 +115,26 @@ export class RunnerMetrics {
     labelNames: ["result"] as const,
     registers: [this.registry],
   });
+  readonly invocationDuration = new Histogram({
+    name: "tool_runner_invocation_duration_seconds",
+    help: "Trusted tool invocation duration by bounded result.",
+    labelNames: ["result"] as const,
+    buckets: [0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300],
+    registers: [this.registry],
+  });
   readonly invocationsInFlight = new Gauge({
     name: "tool_runner_invocations_in_flight",
     help: "Trusted tool invocations executing or waiting for the global concurrency bound.",
     registers: [this.registry],
   });
+
+  constructor() {
+    collectDefaultMetrics({ register: this.registry, labels: { component: "tool-runner" } });
+    this.buildInfo.labels(process.env.TOOL_RUNNER_BUILD_VERSION || "dev").set(1);
+    this.generationReady.set(0);
+    this.gatewayConnected.set(0);
+    this.invocationsInFlight.set(0);
+  }
 }
 
 export async function startMetricsServer(registry: Registry, port: number, signal: AbortSignal): Promise<Server> {

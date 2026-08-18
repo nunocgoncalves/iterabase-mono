@@ -31,6 +31,7 @@ import (
 	v1 "github.com/nunocgoncalves/iterabase-mono/control-plane/internal/harnessrpc/iterabase/harness/v1"
 	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/harnessrpc/iterabase/harness/v1/harnessv1connect"
 	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/logging"
+	cpmetrics "github.com/nunocgoncalves/iterabase-mono/control-plane/internal/metrics"
 	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/runtime"
 	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/version"
 )
@@ -92,10 +93,13 @@ func runServe(ctx context.Context, cfg *config.Config, logger *slog.Logger) erro
 	if cfg.Dispatch.DefaultModelID != "" {
 		defaultModel = &v1.ModelConfig{Id: cfg.Dispatch.DefaultModelID, Api: cfg.Dispatch.DefaultModelAPI}
 	}
+	m := cpmetrics.New("dispatch", version.Version(), version.Commit())
+	m.RegisterDatabasePool(pool)
 	svc := dispatch.NewService(store, dispatch.Config{
 		TrustDomain:  cfg.Dispatch.TrustDomain,
 		DefaultModel: defaultModel,
 	}, logger)
+	svc.SetMetrics(m)
 
 	// Seed the in-memory fencing-generation counter from the durable
 	// high-water mark so a restarted control plane never reuses a prior
@@ -114,7 +118,7 @@ func runServe(ctx context.Context, cfg *config.Config, logger *slog.Logger) erro
 	mux := http.NewServeMux()
 	idmw := dispatch.IdentityMiddleware(cfg.Dispatch.TrustDomain)
 	path, handler := harnessv1connect.NewHarnessHandler(svc)
-	mux.Handle(path, idmw(handler))
+	mux.Handle(path, m.ProcedureMiddleware("dispatch-rpc")(idmw(handler)))
 
 	tlsCfg, err := buildTLSConfig(cfg.Dispatch)
 	if err != nil {
@@ -127,15 +131,25 @@ func runServe(ctx context.Context, cfg *config.Config, logger *slog.Logger) erro
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
-	errCh := make(chan error, 1)
+	errCh := make(chan error, 2)
 	go func() { errCh <- srv.ListenAndServeTLS("", "") }() // cert/key from tls.Config
 	logger.Info("dispatch Work server listening", "addr", cfg.Dispatch.Addr, "trust_domain", cfg.Dispatch.TrustDomain)
+
+	var metricsSrv *http.Server
+	if cfg.Metrics.Addr != "" {
+		metricsSrv = &http.Server{Addr: cfg.Metrics.Addr, Handler: m.Handler(), ReadHeaderTimeout: 5 * time.Second}
+		go func() { errCh <- metricsSrv.ListenAndServe() }()
+		logger.Info("metrics listening", "addr", cfg.Metrics.Addr)
+	}
 
 	select {
 	case <-ctx.Done():
 		logger.Info("shutting down")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
+		if metricsSrv != nil {
+			_ = metricsSrv.Shutdown(shutdownCtx)
+		}
 		return srv.Shutdown(shutdownCtx)
 	case err := <-errCh:
 		if err != nil && err != http.ErrServerClosed {

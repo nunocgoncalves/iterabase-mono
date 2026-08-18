@@ -7,6 +7,19 @@ enabled: true
 tls:
   issuerName: internal-ca
 
+# Platform-owned rule policy. Invariant correctness/availability alerts ship
+# enabled; workload-dependent performance alerts require explicit overlay
+# thresholds because model, GPU, workflow, and customer workloads differ.
+alerts:
+  enabled: true
+  performance:
+    apiP95Seconds: 0
+    inferenceP95Seconds: 0
+    inferenceTTFTP95Seconds: 0
+    harnessTurnP95Seconds: 0
+    modelQueueDepth: 0
+    gpuUtilizationPercent: 0
+
 # Cross-release scrape contract for the companion cert-manager substrate. The
 # release defaults to <platform-release>-cert-manager in the same namespace.
 certManager:
@@ -67,6 +80,19 @@ kube-prometheus-stack:
     # (kind/E2E) or flip grafana.ingress in the overlay for prod.
     ingress:
       enabled: false
+    # Curated folder policy: upstream kube-prometheus-stack dashboards are
+    # placed under Kubernetes; Iterabase ConfigMaps carry grafana_folder
+    # annotations and are provisioned under Iterabase. Provisioned dashboards
+    # are immutable in the UI so Git remains authoritative.
+    sidecar:
+      dashboards:
+        folderAnnotation: grafana_folder
+        defaultFolderName: Kubernetes
+        annotations:
+          grafana_folder: Kubernetes
+        provider:
+          allowUiUpdates: false
+          foldersFromFilesStructure: true
 
   # --- Prometheus (PV-backed; discovers all monitors/rules cluster-wide) ---
   prometheus:

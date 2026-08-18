@@ -90,13 +90,9 @@ workload:
 resources: {}
 
 # Metrics (opt-in; flip on with observability — see values-observability.yaml).
-# A ServiceMonitor scraping the gateway's /metrics endpoint on its http port.
-# The gateway is a TLS client only (its public edge is via ingress-shim), so its
-# in-cluster Service is plaintext http — no scrape TLS config needed. The
-# /metrics endpoint itself is a service-repo concern (HOR-408 tracked gap);
-# this ServiceMonitor scrapes once the endpoint ships. The ServiceMonitor is a
-# Prometheus Operator CRD — rendered regardless but only reconciled when the
-# operator (from the observability chart) is installed.
+# A dedicated plaintext in-cluster listener keeps telemetry off both the public
+# API ingress and supervisor mTLS listener.
 metrics:
   enabled: false
+  port: 9090
   # scrapeInterval: 30s

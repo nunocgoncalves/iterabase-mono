@@ -108,6 +108,22 @@ func TestLoad_RedisTLSEnvOverride(t *testing.T) {
 	assert.Equal(t, "rediss://redis:6379/0", cfg.Redis.URL)
 }
 
+func TestLoad_MetricsDedicatedPort(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://localhost:5432/test")
+	t.Setenv("REDIS_URL", "redis://localhost:6379/0")
+	t.Setenv("METRICS_ENABLED", "true")
+	t.Setenv("METRICS_PORT", "9090")
+	cfg, err := Load("")
+	require.NoError(t, err)
+	assert.True(t, cfg.Metrics.Enabled)
+	assert.Equal(t, 9090, cfg.Metrics.Port)
+
+	t.Setenv("METRICS_PORT", "8080")
+	_, err = Load("")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "metrics.port must differ")
+}
+
 func TestDefaults_Workload(t *testing.T) {
 	cfg := defaults()
 	assert.False(t, cfg.Workload.Enabled) // disabled by default

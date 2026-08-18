@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/nunocgoncalves/iterabase-mono/inference-gateway/internal/config"
 	"github.com/nunocgoncalves/iterabase-mono/inference-gateway/internal/metrics"
@@ -39,6 +40,7 @@ type Deps struct {
 type Server struct {
 	httpServer     *http.Server
 	workloadServer *http.Server // nil when the workload path is disabled
+	metricsServer  *http.Server // nil when the in-cluster metrics path is disabled
 	logger         *slog.Logger
 	metrics        *metrics.Metrics
 }
@@ -53,7 +55,7 @@ func New(cfg *config.Config, logger *slog.Logger, deps *Deps, m *metrics.Metrics
 	}
 	router := newRouter(logger, m, deps)
 
-	return &Server{
+	s := &Server{
 		httpServer: &http.Server{
 			Addr:         fmt.Sprintf(":%d", cfg.Server.Port),
 			Handler:      router,
@@ -64,6 +66,13 @@ func New(cfg *config.Config, logger *slog.Logger, deps *Deps, m *metrics.Metrics
 		logger:  logger,
 		metrics: m,
 	}
+	if cfg.Metrics.Enabled {
+		s.metricsServer = &http.Server{
+			Addr: fmt.Sprintf(":%d", cfg.Metrics.Port), Handler: promhttp.HandlerFor(m.Registry, promhttp.HandlerOpts{}),
+			ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second,
+		}
+	}
+	return s
 }
 
 // AttachWorkload wires the supervisor mTLS workload listener (HOR-398). The
@@ -102,8 +111,21 @@ func (s *Server) Metrics() *metrics.Metrics {
 // shut down or encounters a fatal error. If the workload mTLS listener is
 // attached, it is started in a goroutine; an error on either listener is
 // surfaced to the caller.
+//
+//nolint:gocyclo // Three optional listeners share one fail-fast lifecycle and coordinated shutdown.
 func (s *Server) Start() error {
-	errCh := make(chan error, 2)
+	errCh := make(chan error, 3)
+	if s.metricsServer != nil {
+		s.logger.Info("starting metrics server", "addr", s.metricsServer.Addr)
+		go func() {
+			err := s.metricsServer.ListenAndServe()
+			if err != nil && err != http.ErrServerClosed {
+				errCh <- fmt.Errorf("metrics server listen: %w", err)
+				return
+			}
+			errCh <- nil
+		}()
+	}
 	if s.workloadServer != nil {
 		s.logger.Info("starting workload mTLS server", "addr", s.workloadServer.Addr)
 		go func() {
@@ -131,7 +153,10 @@ func (s *Server) Start() error {
 	// the first non-nil error; on clean shutdown both send nil.
 	listeners := 1
 	if s.workloadServer != nil {
-		listeners = 2
+		listeners++
+	}
+	if s.metricsServer != nil {
+		listeners++
 	}
 	var firstErr error
 	for i := 0; i < listeners; i++ {
@@ -141,6 +166,9 @@ func (s *Server) Start() error {
 			_ = s.httpServer.Close()
 			if s.workloadServer != nil {
 				_ = s.workloadServer.Close()
+			}
+			if s.metricsServer != nil {
+				_ = s.metricsServer.Close()
 			}
 		}
 	}
@@ -155,6 +183,12 @@ func (s *Server) Shutdown(timeout time.Duration) error {
 	var err error
 	if err = s.httpServer.Shutdown(ctx); err == nil && s.workloadServer != nil {
 		err = s.workloadServer.Shutdown(ctx)
+	}
+	if s.metricsServer != nil {
+		metricsErr := s.metricsServer.Shutdown(ctx)
+		if err == nil {
+			err = metricsErr
+		}
 	}
 	return err
 }

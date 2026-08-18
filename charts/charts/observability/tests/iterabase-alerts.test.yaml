@@ -1,0 +1,58 @@
+rule_files:
+  - rules.yaml
+
+evaluation_interval: 1m
+
+tests:
+  - name: critical harness disconnect fires after five minutes
+    interval: 1m
+    input_series:
+      - series: 'control_plane_harness_dispatch_connected{namespace="iterabase-system",pod="worker-0"}'
+        values: '0x8'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: IterabaseHarnessDisconnected
+        exp_alerts:
+          - exp_labels:
+              namespace: iterabase-system
+              pod: worker-0
+              severity: critical
+              component: harness
+            exp_annotations:
+              summary: A harness supervisor is disconnected from dispatch
+              description: The warm worker cannot receive durable assignments.
+              first_action: Check the worker pod, dispatch Service, certificate validity, and reconnect logs.
+              runbook_url: https://github.com/nunocgoncalves/iterabase-mono/blob/master/docs/runbooks/platform-alerts.md#iterabaseharnessdisconnected
+
+  - name: critical harness disconnect resolves after reconnection
+    interval: 1m
+    input_series:
+      - series: 'control_plane_harness_dispatch_connected{namespace="iterabase-system",pod="worker-0"}'
+        values: '0x6 1x4'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: IterabaseHarnessDisconnected
+        exp_alerts: []
+
+  - name: warning materialization failure threshold fires and resolves
+    interval: 1m
+    input_series:
+      - series: 'tool_runner_materializations_total{namespace="iterabase-system",result="failure"}'
+        values: '0 1 2 3 3 3 3 3 3 3 3 3'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: IterabaseToolMaterializationFailures
+        exp_alerts:
+          - exp_labels:
+              namespace: iterabase-system
+              result: failure
+              severity: warning
+              component: tool-materializer
+            exp_annotations:
+              summary: Trusted-tool materialization is repeatedly failing
+              description: Three or more Flux artifact materialization attempts failed in fifteen minutes.
+              first_action: Inspect artifact digest, archive bounds, manifests, and materializer logs.
+              runbook_url: https://github.com/nunocgoncalves/iterabase-mono/blob/master/docs/runbooks/platform-alerts.md#iterabasetoolmaterializationfailures
+      - eval_time: 20m
+        alertname: IterabaseToolMaterializationFailures
+        exp_alerts: []

@@ -20,7 +20,7 @@ func observabilityTLSScenario() sharede2e.Definition {
 			"observability-tls",
 			"Proves the observability stack, exporters, self-monitors, Grafana datasources/sidecars, Loki gateway, Promtail, and Alertmanager use verified internal-CA HTTPS identities.",
 			"test-e2e-observability-tls", 45,
-			[]string{"HOR-408", "HOR-418", "HOR-420", "HOR-416"},
+			[]string{"HOR-408", "HOR-414", "HOR-418", "HOR-420", "HOR-416"},
 			[]string{"control-plane-chart", "inference-gateway-chart", "iterabase-platform-chart"},
 		),
 		NewState: newChartState,
@@ -28,7 +28,8 @@ func observabilityTLSScenario() sharede2e.Definition {
 			{Name: "create-kind", Run: createKindStage},
 			{Name: "install-certificate-substrate", DependsOn: []string{"create-kind"}, Run: installCertificateSubstrateStage},
 			{Name: "install-observability-tls", DependsOn: []string{"install-certificate-substrate"}, Run: installObservabilityTLSStage},
-			{Name: "assert-stack-readiness", DependsOn: []string{"install-observability-tls"}, Run: assertStackReadinessStage},
+			{Name: "install-harness-worker", DependsOn: []string{"install-observability-tls"}, Run: installObservabilityHarnessStage},
+			{Name: "assert-stack-readiness", DependsOn: []string{"install-harness-worker"}, Run: assertStackReadinessStage},
 			{Name: "assert-issued-identities", DependsOn: []string{"assert-stack-readiness"}, Run: assertObservabilityIdentitiesStage},
 			{Name: "assert-verified-stack-https", DependsOn: []string{"assert-issued-identities"}, Run: assertVerifiedStackHTTPSStage},
 			{Name: "assert-tls-endpoint-separation", DependsOn: []string{"assert-stack-readiness"}, Run: assertEndpointSeparationStage},
@@ -49,7 +50,7 @@ func installObservabilityTLSStage(t *testing.T, state *chartState) {
 	state.installPlatform(t, 22*time.Minute,
 		filepathFromCharts(state, "values-observability.yaml"),
 		filepathFromCharts(state, "values-tls.yaml"),
-		state.writeValues(t, "observability-tls-runtime", runtimePlatformValues()),
+		state.writeValues(t, "observability-tls-runtime", observabilityPlatformValues()),
 	)
 	assertCandidateImages(t, state)
 }
@@ -99,6 +100,7 @@ func assertTLSExporterPathsStage(t *testing.T, state *chartState) {
 			t.Fatalf("%s did not become 1 over verified Prometheus HTTPS: %v", metric, err)
 		}
 	}
+	assertPlatformMetrics(t, state, client, forward.URL)
 	state.stopForward(t, forward)
 }
 
@@ -150,6 +152,7 @@ func assertGrafanaTLSPathsStage(t *testing.T, state *chartState) {
 	state.redactor.Add(username, password)
 	forward := state.forward(t, "svc/"+testRelease+"-grafana", 80, "https")
 	client := verifiedClient(t, ca, testRelease+"-grafana."+testNamespace+".svc")
+	assertGrafanaDashboardSuite(t, client, forward.URL, username, password)
 	for _, datasource := range []struct {
 		uid, healthPath string
 	}{

@@ -110,6 +110,7 @@ logging:      {level: info, format: json}
 | `REDIS_URL` | `redis.url` | rate-limit counters (required) |
 | `ADMIN_API_KEY` | `auth.admin_key` | debug endpoint |
 | `PORT` | `server.port` | |
+| `METRICS_ENABLED` / `METRICS_PORT` | `metrics.*` | Dedicated in-cluster listener |
 | `LOG_LEVEL` / `LOG_FORMAT` | `logging.*` | |
 
 ## API
@@ -120,7 +121,7 @@ logging:      {level: info, format: json}
 | `GET` | `/v1/models` | Bearer API key | Available aliases |
 | `GET` | `/health` | – | Liveness |
 | `GET` | `/readyz` | – | Readiness (snapshot freshness gate) |
-| `GET` | `/metrics` | – | Prometheus |
+| `GET` | `/metrics` on the dedicated metrics port | – | Prometheus; never exposed through API ingress or workload mTLS |
 | `GET` | `/admin/v1/snapshot` | `X-Admin-Key` | Consumed catalog / debug (read-only, no secrets) |
 
 `/v1` responses carry rate-limit headers (`X-RateLimit-Limit/Remaining/Reset-Requests`

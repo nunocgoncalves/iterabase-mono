@@ -1,9 +1,9 @@
 apiVersion: v2
 name: observability
-description: Observability stack for the iterabase platform — Prometheus, Grafana, Loki, Alertmanager (kube-prometheus-stack + loki) with default alert rules, a Loki Grafana datasource, and optional NVIDIA DCGM (GPU) scraping.
+description: Iterabase production observability — Prometheus, organized Grafana dashboards, Loki, Alertmanager, recording/alert rules, and optional NVIDIA DCGM scraping.
 type: application
-version: 0.1.0
-appVersion: "0.1.0"
+version: 0.1.1
+appVersion: "0.1.1"
 dependencies:
   # kube-prometheus-stack bundles Prometheus + Grafana + Alertmanager + the
   # Prometheus Operator (which ships the ServiceMonitor / PodMonitor /

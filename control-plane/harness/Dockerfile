@@ -17,6 +17,8 @@ COPY src ./src
 RUN npm run build
 
 FROM node:24-bookworm-slim
+ARG VERSION=dev
+ENV HARNESS_BUILD_VERSION=${VERSION}
 RUN apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates \
   && rm -rf /var/lib/apt/lists/*
@@ -25,7 +27,7 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 COPY --from=builder /src/dist ./dist
 USER 65532:65532
-# 8081 = plain-HTTP kubelet probes (/healthz, /readyz) — loopback only.
-# No inbound RPC port: the worker is the gRPC client (it dials the control-plane).
+# 8081 = plain-HTTP kubelet probes plus bounded supervisor /metrics. It is
+# scraped directly by PodMonitor; no inbound application RPC is exposed.
 EXPOSE 8081
 ENTRYPOINT ["node", "dist/main.js"]

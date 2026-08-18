@@ -15,6 +15,7 @@ import { Probes } from "./probes.js";
 import { Supervisor } from "./supervisor.js";
 import { createChildFactory } from "./child-process.js";
 import { ensureSandboxMountRoot } from "./sandbox.js";
+import { HarnessMetrics } from "./metrics.js";
 
 /** The compiled pi child entry, sibling to this module's output. */
 const CHILD_SCRIPT = join(dirname(fileURLToPath(import.meta.url)), "child.js");
@@ -25,7 +26,8 @@ export async function runWorker(): Promise<void> {
   // supervisor (root) can create per-session sandbox entries — a session-UID
   // child can reach its own 0700 root but cannot forge a sibling (HOR-245).
   ensureSandboxMountRoot(cfg.sandboxRoot);
-  const probes = new Probes();
+  const metrics = new HarnessMetrics();
+  const probes = new Probes(metrics.registry);
   await probes.start(cfg.probe.port);
 
   const hello = create(WorkerMessageSchema, {
@@ -45,6 +47,7 @@ export async function runWorker(): Promise<void> {
     hello,
     childFactory: createChildFactory(cfg, CHILD_SCRIPT),
     probes,
+    metrics,
   });
 
   let draining = false;
