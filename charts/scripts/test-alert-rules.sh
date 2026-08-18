@@ -17,8 +17,11 @@ for path in sorted(pathlib.Path("charts/observability/dashboards").rglob("iterab
         for target in panel.get("targets", []):
             expression = target.get("expr")
             if expression:
+                record = f"iterabase_dashboard_query_{len(rules) + 1:03d}"
+                if dashboard["uid"] == "iterabase-tool-runtime" and panel["title"] == "Unknown outcomes":
+                    record = "iterabase:dashboard_tool_runtime_unknown_outcomes"
                 rules.append({
-                    "record": f"iterabase_dashboard_query_{len(rules) + 1:03d}",
+                    "record": record,
                     "expr": expression.replace("$namespace", ".*").replace("$__rate_interval", "5m"),
                 })
 pathlib.Path(sys.argv[1]).write_text(json.dumps({"groups": [{"name": "iterabase-dashboard-queries", "rules": rules}]}))

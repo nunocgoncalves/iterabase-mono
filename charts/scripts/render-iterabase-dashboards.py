@@ -40,7 +40,7 @@ DASHBOARDS = [
     ("iterabase-tool-runtime", "30 — Tool Runtime", [
         ("Connected runner streams", 'sum(control_plane_gateway_runner_connections{namespace=~"$namespace"})', "short", "stat"),
         ("Gateway invocation rate", 'sum by (effect_class,result) (rate(control_plane_gateway_invocations_total{namespace=~"$namespace"}[$__rate_interval]))', "ops", "timeseries"),
-        ("Unknown outcomes", 'sum(increase(control_plane_gateway_invocations_total{namespace=~"$namespace",result="outcome_unknown"}[$__rate_interval])) + sum(increase(control_plane_gateway_recoveries_total{namespace=~"$namespace",result="outcome_unknown"}[$__rate_interval]))', "short", "stat"),
+        ("Unknown outcomes", '(sum(increase(control_plane_gateway_invocations_total{namespace=~"$namespace",result="outcome_unknown"}[$__rate_interval])) or vector(0)) + (sum(control_plane_gateway_recoveries_total{namespace=~"$namespace",result="outcome_unknown"}) or vector(0))', "short", "stat"),
         ("Gateway P95 invocation latency", 'histogram_quantile(0.95, sum by (le,effect_class) (rate(control_plane_gateway_invocation_duration_seconds_bucket{namespace=~"$namespace"}[$__rate_interval])))', "s", "timeseries"),
         ("Tool runner gateway connection", 'sum(tool_runner_gateway_connected{namespace=~"$namespace"})', "short", "stat"),
         ("Ready tool generations", 'sum(tool_runner_generation_ready{namespace=~"$namespace"})', "short", "stat"),
