@@ -883,7 +883,7 @@ func assertEstablishedCRDsJSON(data []byte, required []string) error {
 }
 
 func assertFeatureEnableClientPathsStage(t *testing.T, state *chartState) {
-	assertTLSExporterPathsStage(t, state)
+	assertTLSExporterPaths(t, state, false, false)
 	assertVerifiedSelfMonitorsStage(t, state)
 	assertGrafanaTLSPathsStage(t, state)
 	assertLokiGatewayTLSStage(t, state)

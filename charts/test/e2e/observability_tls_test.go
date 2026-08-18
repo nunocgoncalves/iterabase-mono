@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -93,6 +94,14 @@ func assertVerifiedStackHTTPSStage(t *testing.T, state *chartState) {
 
 func assertTLSExporterPathsStage(t *testing.T, state *chartState) {
 	t.Helper()
+	assertTLSExporterPaths(t, state,
+		os.Getenv("HARNESS_IMAGE_REPO") != "" && os.Getenv("HARNESS_IMAGE_TAG") != "",
+		os.Getenv("TOOL_RUNNER_IMAGE_REPO") != "" && os.Getenv("TOOL_RUNNER_IMAGE_TAG") != "",
+	)
+}
+
+func assertTLSExporterPaths(t *testing.T, state *chartState, includeHarness, includeToolRunner bool) {
+	t.Helper()
 	ca := decodeSecretValue(t, state, testRelease+"-internal-ca-root", "ca.crt")
 	forward := state.forward(t, "svc/"+testRelease+"-kube-prometheus-prometheus", 9090, "https")
 	client := verifiedClient(t, ca, testRelease+"-kube-prometheus-prometheus."+testNamespace+".svc")
@@ -101,7 +110,7 @@ func assertTLSExporterPathsStage(t *testing.T, state *chartState) {
 			t.Fatalf("%s did not become 1 over verified Prometheus HTTPS: %v", metric, err)
 		}
 	}
-	assertPlatformMetrics(t, state, client, forward.URL)
+	assertPlatformMetrics(t, state, client, forward.URL, includeHarness, includeToolRunner)
 	state.stopForward(t, forward)
 }
 
