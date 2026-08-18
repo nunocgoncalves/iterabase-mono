@@ -108,7 +108,6 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	md.BackendURL = entry.BackendURL
-	md.BackendRef = entry.BackendRef
 
 	body = ApplyRequestTransforms(body, &entry)
 	if entry.Transforms.RewriteModelName && entry.BackendModelID != "" {

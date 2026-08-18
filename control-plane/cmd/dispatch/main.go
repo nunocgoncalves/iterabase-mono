@@ -118,7 +118,9 @@ func runServe(ctx context.Context, cfg *config.Config, logger *slog.Logger) erro
 	mux := http.NewServeMux()
 	idmw := dispatch.IdentityMiddleware(cfg.Dispatch.TrustDomain)
 	path, handler := harnessv1connect.NewHarnessHandler(svc)
-	mux.Handle(path, m.ProcedureMiddleware("dispatch-rpc")(idmw(handler)))
+	mux.Handle(path, m.ProcedureMiddleware("dispatch-rpc",
+		harnessv1connect.HarnessWorkProcedure,
+	)(idmw(handler)))
 
 	tlsCfg, err := buildTLSConfig(cfg.Dispatch)
 	if err != nil {

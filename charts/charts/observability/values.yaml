@@ -12,6 +12,24 @@ tls:
 # thresholds because model, GPU, workflow, and customer workloads differ.
 alerts:
   enabled: true
+  # Prometheus `up == 0` cannot detect a target whose Pod, Service endpoint, or
+  # monitor disappeared completely. These are the processes expected from the
+  # default full-platform install; disable entries for intentionally omitted
+  # components. Operator-created harness/model-backend targets become expected
+  # only when an overlay enables those workloads.
+  expectedTargets:
+    controlPlaneAPI: {enabled: true, job: control-plane, component: api}
+    controlPlaneManager: {enabled: true, job: control-plane, component: manager}
+    toolGateway: {enabled: true, job: control-plane, component: gateway}
+    dispatch: {enabled: true, job: control-plane, component: dispatch}
+    toolMaterializer: {enabled: true, job: control-plane, component: tool-materializer}
+    toolRunner: {enabled: true, job: control-plane, component: tool-runner}
+    inferenceGateway: {enabled: true, job: inference-gateway, component: inference-gateway}
+    postgresql: {enabled: true, job: postgresql, component: postgresql}
+    redis: {enabled: true, job: redis, component: redis}
+    minio: {enabled: true, job: minio, component: minio}
+    harness: {enabled: false, job: control-plane, component: harness}
+    modelBackend: {enabled: false, job: control-plane, component: model-backend}
   performance:
     apiP95Seconds: 0
     inferenceP95Seconds: 0

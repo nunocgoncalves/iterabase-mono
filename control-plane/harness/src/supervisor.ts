@@ -805,6 +805,7 @@ export class Supervisor {
         lastSeq: this.outbox.highestSequence,
         walPath: this.outbox.walPath,
       });
+      this.d.metrics?.pendingReplays.set(this.pendingReplay.length);
       this.outbox.close(); // WAL persists on disk for crash recovery; fd released
       this.outbox = null;
     }

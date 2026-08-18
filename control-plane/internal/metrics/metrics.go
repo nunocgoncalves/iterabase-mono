@@ -99,7 +99,7 @@ func New(component, version, commit string) *Metrics {
 			Name: "control_plane_gateway_invocations_in_flight", Help: "Tool invocations currently executing.",
 		}, []string{"effect_class"}),
 		GatewayRecoveries: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "control_plane_gateway_recoveries_total", Help: "Orphan invocation recovery sweeps by bounded result.",
+			Name: "control_plane_gateway_recoveries_total", Help: "Orphan invocation recoveries by bounded durable outcome, plus clean and error sweeps.",
 		}, []string{"result"}),
 
 		DispatchWorkerConnections: prometheus.NewGaugeVec(prometheus.GaugeOpts{
@@ -178,19 +178,29 @@ func (m *Metrics) HTTPMiddleware(listener string) func(http.Handler) http.Handle
 	}
 }
 
-// ProcedureMiddleware records Connect/gRPC requests using the exact generated
-// procedure path. Only statically registered handlers are wrapped, so the path
-// label remains bounded and never contains runtime identifiers.
-func (m *Metrics) ProcedureMiddleware(listener string) func(http.Handler) http.Handler {
+// ProcedureMiddleware records Connect/gRPC requests using an explicit set of
+// generated procedure constants. ServeMux handlers are mounted on service
+// prefixes, so arbitrary suffixes and HTTP verbs must collapse to fixed labels.
+func (m *Metrics) ProcedureMiddleware(listener string, procedures ...string) func(http.Handler) http.Handler {
 	listener = bounded(listener)
+	allowedProcedures := make(map[string]struct{}, len(procedures))
+	for _, procedure := range procedures {
+		allowedProcedures[procedure] = struct{}{}
+	}
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			m.HTTPInFlight.WithLabelValues(listener).Inc()
 			defer m.HTTPInFlight.WithLabelValues(listener).Dec()
 			started := time.Now()
 			observed := httpsnoop.CaptureMetrics(next, w, r)
-			route := bounded(r.URL.Path)
-			method := bounded(strings.ToUpper(r.Method))
+			route := "unmatched"
+			if _, ok := allowedProcedures[r.URL.Path]; ok {
+				route = r.URL.Path
+			}
+			method := "other"
+			if r.Method == http.MethodPost {
+				method = http.MethodPost
+			}
 			statusClass := strconv.Itoa(observed.Code/100) + "xx"
 			m.HTTPRequests.WithLabelValues(listener, method, route, statusClass).Inc()
 			m.HTTPDuration.WithLabelValues(listener, method, route).Observe(time.Since(started).Seconds())

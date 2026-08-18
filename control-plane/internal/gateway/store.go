@@ -1116,12 +1116,22 @@ func (s *Store) FinishInvocation(ctx context.Context, invocationID string, state
 	return nil
 }
 
+// RecoveryCounts reports the bounded durable outcomes produced by one orphan
+// recovery sweep.
+type RecoveryCounts struct {
+	Failed         int
+	OutcomeUnknown int
+}
+
+// Total returns the number of invocations terminalized by the sweep.
+func (c RecoveryCounts) Total() int { return c.Failed + c.OutcomeUnknown }
+
 // RecoverOrphanedInvocations is the crash-recovery sweep (SCN-008/ARCH-014).
 // Non-terminal rows whose lease has expired are terminalized fail-closed:
 // read_only -> failed (no effect possible; caller may retry), writes ->
 // outcome_unknown (a possible effect with no committed result; never
 // auto-repeated). Run once at gateway start and by a background ticker.
-func (s *Store) RecoverOrphanedInvocations(ctx context.Context) (recovered int, err error) {
+func (s *Store) RecoverOrphanedInvocations(ctx context.Context) (recovered RecoveryCounts, err error) {
 	// read_only -> failed.
 	ct, err := s.pool.Exec(ctx, `
 		UPDATE toolgateway.invocations
@@ -1136,9 +1146,9 @@ func (s *Store) RecoverOrphanedInvocations(ctx context.Context) (recovered int, 
 		  AND dispatch_lease_expires_at < now()
 		  AND effect_class = 'read_only'`)
 	if err != nil {
-		return 0, fmt.Errorf("recover read_only: %w", err)
+		return recovered, fmt.Errorf("recover read_only: %w", err)
 	}
-	recovered += int(ct.RowsAffected())
+	recovered.Failed = int(ct.RowsAffected())
 	// writes -> outcome_unknown.
 	ct, err = s.pool.Exec(ctx, `
 		UPDATE toolgateway.invocations
@@ -1155,7 +1165,7 @@ func (s *Store) RecoverOrphanedInvocations(ctx context.Context) (recovered int, 
 	if err != nil {
 		return recovered, fmt.Errorf("recover writes: %w", err)
 	}
-	recovered += int(ct.RowsAffected())
+	recovered.OutcomeUnknown = int(ct.RowsAffected())
 	return recovered, nil
 }
 

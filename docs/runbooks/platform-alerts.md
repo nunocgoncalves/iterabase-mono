@@ -14,6 +14,10 @@ These alerts describe internal operator health. They never assert customer-resul
 
 Confirm the target pod exists and is Ready, the named metrics port is present, and the ServiceMonitor/PodMonitor selects it. Validate `/metrics` from inside the cluster. Roll back the affected image/chart pin if the listener failed after rollout.
 
+## IterabasePlatformTargetAbsent
+
+Confirm the component is intentionally enabled in the deployed values and listed under `observability.alerts.expectedTargets`. Check that its workload, Pod, Service endpoint, and ServiceMonitor/PodMonitor still exist and that Prometheus discovered the monitor. Disable the expectation only when the component is intentionally removed; do not use it to silence an unexplained disappearance.
+
 ## IterabasePostgreSQLUnavailable
 
 Check PostgreSQL pod/volume health, Service endpoints, TLS certificate validity, authentication, and exporter logs. Stop write traffic before destructive recovery. Restore from the accepted backup procedure only with explicit authority.
@@ -36,7 +40,7 @@ Identify the controller label and affected CR status. Check manager logs, RBAC d
 
 ## IterabaseGatewayOutcomeUnknown
 
-Treat this as a possible external effect. Find the durable invocation by time and operator logs, inspect its persisted consequence summary, and reconcile with the external system. Never automatically retry. Record the reconciliation decision before explicit follow-up action.
+Treat this as a possible external effect, including one classified during gateway crash recovery. Find the durable invocation by time and operator logs, inspect its persisted consequence summary, and reconcile with the external system. Never automatically retry. Record the reconciliation decision before explicit follow-up action.
 
 ## IterabaseToolRunnerDisconnected
 
