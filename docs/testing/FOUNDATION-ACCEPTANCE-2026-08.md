@@ -12,7 +12,7 @@ Every approved foundation deliverable and blocker preceding HOR-482 is Done. The
 
 HOR-438 has durable red-before/green-after evidence on the repository-owned `deployed-execution-contracts` scenario. Its exact affected-target candidate passed the complete relevant candidate union, founder-approved promotion published the tested artifacts without rebuild, and OPO1 recovered the same AgentPool after only its missing Secrets were created. Gateway pool, grant, and binding rows materialized atomically before Ready; the bound workflow discovered and invoked its tool.
 
-The security blocker found by the complete run, HOR-497, is also fixed, candidate-validated, founder-promoted, and accepted at the final foundation source. Four remaining material findings are outside the approved blocking categories and have explicit Backlog deferrals. The Platform V2 implementation dependency gate may be released, but this decision does not claim that any future V2 behavior is implemented or tested.
+The security blocker found by the complete run, HOR-497, is also fixed, candidate-validated, founder-promoted, and accepted at the final foundation source. Four remaining material findings are outside the approved blocking categories and remain Todo with explicit deferral decisions. The Platform V2 implementation dependency gate may be released, but this decision does not claim that any future V2 behavior is implemented or tested.
 
 ## Delivery and dependency audit
 
@@ -29,7 +29,7 @@ The accepted project sequence is complete:
 | Complete clean run, defect triage, and HOR-438 repair/rollout | HOR-480, HOR-438 |
 | Complete-run security remediation and exact publication | HOR-497 |
 
-The other defects discovered while completing HOR-480 were resolved under HOR-487 through HOR-496 and HOR-502, or explicitly deferred below. No dependency relation on HOR-482 remains incomplete.
+The other defects discovered while completing HOR-480 were resolved under HOR-487 through HOR-496 and HOR-502, or explicitly deferred below. The accepted HOR-438 and HOR-497 evidence was reconciled with Linear by completing both acceptance workflows and moving both issues to Done. No dependency relation on HOR-482 remains incomplete.
 
 ## Source, history, workspace, and cutover
 
@@ -150,7 +150,7 @@ This closes the sole security/data-integrity blocker found by the complete pre-d
 
 ## Remaining deferrals and exceptions
 
-The approved defect policy permits these material non-blockers to remain in Backlog:
+The approved defect policy permits these material non-blockers to remain open as Todo issues with explicit deferral decisions:
 
 - **HOR-498:** development/build-only Nano ID advisory; absent from the production harness install.
 - **HOR-499:** test-only Moby advisories; no production archive/import path.
