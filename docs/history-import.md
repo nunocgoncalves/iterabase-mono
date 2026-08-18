@@ -108,6 +108,7 @@ history with:
 
 ```sh
 import_acceptance=f54994e3936bb2162966365ae23138565b201dbb
+git merge-base --is-ancestor "$import_acceptance" HEAD
 test "$(git ls-tree --name-only "$import_acceptance" | sort)" = \
 "$(printf '%s\n' .gitleaks.toml README.md charts control-plane docs forge inference-gateway | sort)"
 git fsck --full --no-dangling
