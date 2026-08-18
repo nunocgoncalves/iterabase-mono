@@ -7,12 +7,14 @@
 
 ## Decision
 
-Keep `github.com/docker/docker` pinned at `v28.5.2+incompatible` until
-`golang-migrate` and `dktest` publish an import-compatible upgrade or remove the
-legacy dependency. The pin is not a production Docker client. It exists because
-Go's module graph includes tests of the imported golang-migrate PostgreSQL
-driver; neither control-plane binaries nor control-plane database tests compile
-the legacy module.
+Keep `github.com/docker/docker` pinned at `v28.5.2+incompatible` until the
+legacy module publishes an import-compatible version that clears one or more
+applicable advisories, or `golang-migrate`/`dktest` publish an import-compatible
+upgrade or remove the legacy dependency. Validate any available exit against the
+control-plane database and integration tests before changing the pin. The pin is
+not a production Docker client. It exists because Go's module graph includes
+tests of the imported golang-migrate PostgreSQL driver; neither control-plane
+binaries nor control-plane database tests compile the legacy module.
 
 Do not replace the pin with `github.com/moby/moby/v2` or the
 `docker-v29.3.1` source tag. Moby v2 has a different module/import path, and the
@@ -75,8 +77,9 @@ Consequently, upgrading the legacy pin cannot currently close these alerts
 without an unsupported module-path substitution.
 
 After this decision is reviewed and merged, the five Dependabot alerts may be
-dismissed as `vulnerable_code_not_used`, referencing HOR-499 and this document.
-The dismissal must be revisited under any trigger below.
+dismissed with Dependabot reason `not_used` ("Vulnerable code is not actually
+used"), referencing HOR-499 and this document. The dismissal must be revisited
+under any trigger below.
 
 ## Re-entry triggers
 
@@ -88,6 +91,8 @@ Reopen this decision immediately if any of the following occurs:
   destination;
 - a repository-owned test exposes its Docker API to an untrusted caller or
   configures Docker AuthZ/legacy plugins;
+- `github.com/docker/docker` publishes an import-compatible legacy-module
+  version that clears any applicable advisory;
 - golang-migrate/dktest removes the edge or publishes an import-compatible
   patched dependency; or
 - GitHub publishes corrected legacy-module patch metadata.
