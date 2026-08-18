@@ -193,7 +193,7 @@ class ReleaseContractTests(unittest.TestCase):
         )
 
     def test_component_versions_are_local_authorities(self) -> None:
-        self.assertEqual(release.read_version(ROOT / "control-plane" / "VERSION"), "0.0.28")
+        self.assertEqual(release.read_version(ROOT / "control-plane" / "VERSION"), "0.0.29")
         self.assertEqual(release.read_version(ROOT / "inference-gateway" / "VERSION"), "0.2.6")
         self.assertEqual(release.read_version(ROOT / "forge" / "VERSION"), "0.8.4")
         self.assertFalse((ROOT / "release" / "compatibility.json").exists())
@@ -206,7 +206,7 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertEqual(
             [(item["target"], item["version"], item["production_tag"]) for item in plan["releases"]],
             [
-                ("control-plane", "0.0.28", "control-plane-v0.0.28"),
+                ("control-plane", "0.0.29", "control-plane-v0.0.29"),
                 ("forge", "0.8.4", "forge-v0.8.4"),
                 ("control-plane-chart", "0.4.9", "control-plane-0.4.9"),
             ],
@@ -247,7 +247,7 @@ class ReleaseContractTests(unittest.TestCase):
             plan["tested_with"]["chart_metadata"]["inference-gateway"]["appVersion"],
             "0.2.5",
         )
-        self.assertEqual(plan["tested_with"]["repository_versions"]["control-plane"], "0.0.28")
+        self.assertEqual(plan["tested_with"]["repository_versions"]["control-plane"], "0.0.29")
         self.assertEqual(
             plan["tested_with"]["repository_versions"]["inference-gateway"], "0.2.6"
         )
@@ -707,7 +707,7 @@ class ReleaseContractTests(unittest.TestCase):
                 "  *) printf 'unexpected --repo argument: %s\\n' \"$*\" >&2; exit 2 ;;\n"
                 "esac\n"
                 "if [ \"$2\" = view ]; then\n"
-                "  printf '%s\\n' '{\"tagName\":\"control-plane-v0.0.28\",\"assets\":[{\"name\":\"candidate-plan.json\"}]}'\n"
+                "  printf '%s\\n' '{\"tagName\":\"control-plane-v0.0.29\",\"assets\":[{\"name\":\"candidate-plan.json\"}]}'\n"
                 "elif [ \"$2\" = download ]; then\n"
                 "  destination=''\n"
                 "  while [ $# -gt 0 ]; do case \"$1\" in --dir) destination=$2; shift 2;; *) shift;; esac; done\n"
