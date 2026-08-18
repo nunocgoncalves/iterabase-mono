@@ -1,8 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { spawn } from "node:child_process";
 import { writeFileSync, mkdtempSync, rmSync, mkdirSync, chmodSync } from "node:fs";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { create } from "@bufbuild/protobuf";
 import {
   AssignTurnSchema,
@@ -18,6 +20,15 @@ import type { HarnessConfig } from "./config.js";
 
 const UID = process.getuid();
 const GID = process.getgid();
+const PI_ENTRY_URL = pathToFileURL(join(
+  dirname(fileURLToPath(import.meta.url)),
+  "..",
+  "node_modules",
+  "@earendil-works",
+  "pi-coding-agent",
+  "dist",
+  "index.js",
+)).href;
 
 // A stub child: writes one AssistantMessage event + a COMPLETED result over
 // the framed fd-3 IPC channel (4-byte BE length + JSON), then exits.
@@ -100,6 +111,64 @@ describe("createChildFactory", () => {
     expect(events[0]!.payload.case === "assistantMessage" && events[0]!.payload.value.text).toBe("hi");
     expect(result.outcome).toBe(Outcome.COMPLETED);
   });
+
+  it("keeps post-create Pi model refreshes offline even when network is reachable", async () => {
+    let catalogRequests = 0;
+    const server = createServer((_req, res) => {
+      catalogRequests += 1;
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end("[]");
+    });
+    await new Promise<void>((resolve, reject) => {
+      const onError = (error: Error): void => reject(error);
+      server.once("error", onError);
+      server.listen(0, "127.0.0.1", () => {
+        server.off("error", onError);
+        resolve();
+      });
+    });
+
+    try {
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("test catalog server has no TCP address");
+      const refreshScript = join(dir, "offline-refresh.mjs");
+      writeFileSync(refreshScript, `
+import { writeSync } from "node:fs";
+import { ModelRuntime } from ${JSON.stringify(PI_ENTRY_URL)};
+function frame(obj) {
+  const body = Buffer.from(JSON.stringify(obj));
+  const header = Buffer.alloc(4);
+  header.writeUInt32BE(body.length, 0);
+  writeSync(3, Buffer.concat([header, body]));
+}
+frame({ type: "heartbeat" });
+try {
+  const runtime = await ModelRuntime.create({
+    modelsPath: null,
+    allowModelNetwork: false,
+    refreshOnCreate: false,
+    catalogBaseUrl: ${JSON.stringify(`http://127.0.0.1:${address.port}`)},
+  });
+  await runtime.refresh();
+  frame({ type: "result", outcome: 1 });
+} catch (error) {
+  frame({ type: "result", outcome: 2, message: String(error) });
+}
+`);
+
+      const factory = createChildFactory(cfg(), refreshScript, launchStub);
+      const sandbox = { root: join(dir, "sess-a"), home: join(dir, "sess-a/home"), tmp: join(dir, "sess-a/tmp"), session: join(dir, "sess-a/session"), workspace: join(dir, "sess-a/workspace") };
+      const child = factory(assignment(), sandbox, sandbox.home);
+      const result = await child.result;
+
+      expect(result.outcome).toBe(Outcome.COMPLETED);
+      expect(catalogRequests).toBe(0);
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => error ? reject(error) : resolve());
+      });
+    }
+  }, 10_000);
 
   it("classifies a non-zero exit (no result) as FAILED", async () => {
     const failScript = join(dir, "fail.cjs");

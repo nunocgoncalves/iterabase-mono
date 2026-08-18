@@ -62,6 +62,10 @@ export function createChildFactory(cfg: HarnessConfig, script: string, launch: L
         HARNESS_PI_DIRS: cfg.piDirs.join(":"),
         HARNESS_MODEL_MAX_ATTEMPTS: String(cfg.modelRetry.maxAttempts),
         HARNESS_LIVENESS_INTERVAL_MS: String(livenessMs),
+        // ModelRuntime's allowModelNetwork option controls only create-time
+        // refresh. PI_OFFLINE also makes later extension/API refreshes default
+        // to allowNetwork=false, preserving the credentialless IPC-only path.
+        PI_OFFLINE: "1",
         HOME: sandbox.home,
         TMPDIR: sandbox.tmp,
       },
