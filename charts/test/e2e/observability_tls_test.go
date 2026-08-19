@@ -52,7 +52,7 @@ func installObservabilityTLSStage(t *testing.T, state *chartState) {
 	state.installPlatform(t, 22*time.Minute,
 		filepathFromCharts(state, "values-observability.yaml"),
 		filepathFromCharts(state, "values-tls.yaml"),
-		state.writeValues(t, "observability-tls-runtime", observabilityPlatformValues()),
+		state.writeValues(t, "observability-tls-runtime", observabilityPlatformValues(t)),
 	)
 	assertCandidateImages(t, state)
 }

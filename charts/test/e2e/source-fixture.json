@@ -9,12 +9,12 @@
     {
       "name": "control-plane-image",
       "kind": "published-image",
-      "reference": "ghcr.io/nunocgoncalves/control-plane:0.0.25"
+      "reference": "ghcr.io/nunocgoncalves/control-plane:0.0.30"
     },
     {
       "name": "inference-gateway-image",
       "kind": "published-image",
-      "reference": "ghcr.io/nunocgoncalves/inference-gateway:0.2.5"
+      "reference": "ghcr.io/nunocgoncalves/inference-gateway:0.2.7"
     }
   ]
 }
