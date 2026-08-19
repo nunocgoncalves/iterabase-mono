@@ -4,14 +4,14 @@
     {
       "name": "supported-platform-predecessor",
       "kind": "published-chart",
-      "reference": "oci://ghcr.io/nunocgoncalves/iterabase-charts/iterabase-platform:0.3.10",
-      "checksum": "71b50a9b3b6d5c3fa8d31df01171b5e1d94f0a4e7e58b91ac2a079e318f56bdf"
+      "reference": "oci://ghcr.io/nunocgoncalves/iterabase-charts/iterabase-platform:0.3.12",
+      "checksum": "86b0f23012fb549e47b2afb19b16184c760adcd6fe930bc3d817e031f1d280dd"
     },
     {
       "name": "supported-substrate-predecessor",
       "kind": "published-chart",
-      "reference": "oci://ghcr.io/nunocgoncalves/iterabase-charts/cert-manager-substrate:0.3.10",
-      "checksum": "acfe1185ff52f2c47d6333d1a0e14c891f11af2038de3257958c830d9da303a3"
+      "reference": "oci://ghcr.io/nunocgoncalves/iterabase-charts/cert-manager-substrate:0.3.12",
+      "checksum": "979eb26fbb5fa08a345929c59f5379b03f053f3ba0a66169bf2e84c5c919a67b"
     }
   ]
 }

@@ -1035,10 +1035,10 @@ func TestUnitTransitionBaselineFixtureRejectsMutableOrMismatchedInputs(t *testin
 		t.Fatalf("valid fixture rejected: %v", err)
 	}
 	for name, mutate := range map[string]func(string) string{
-		"latest":       func(value string) string { return strings.Replace(value, ":0.3.10", ":latest", 1) },
-		"bad checksum": func(value string) string { return strings.Replace(value, "71b50a9b", "notahash", 1) },
+		"latest":       func(value string) string { return strings.Replace(value, ":0.3.12", ":latest", 1) },
+		"bad checksum": func(value string) string { return strings.Replace(value, "86b0f230", "notahash", 1) },
 		"version mismatch": func(value string) string {
-			return strings.Replace(value, "cert-manager-substrate:0.3.10", "cert-manager-substrate:0.3.9", 1)
+			return strings.Replace(value, "cert-manager-substrate:0.3.12", "cert-manager-substrate:0.3.11", 1)
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -1099,20 +1099,20 @@ func TestUnitRetainedStateRejectsSecretPVCAndReapplyRolloutChanges(t *testing.T)
 }
 
 func TestUnitRollbackBoundaryRejectsIncorrectHelmHistory(t *testing.T) {
-	entry, err := currentHelmHistoryEntry([]byte(`[{"revision":3,"status":"superseded","chart":"iterabase-platform-0.3.11"},{"revision":4,"status":"deployed","chart":"iterabase-platform-0.3.10"}]`))
+	entry, err := currentHelmHistoryEntry([]byte(`[{"revision":3,"status":"superseded","chart":"iterabase-platform-0.3.15"},{"revision":4,"status":"deployed","chart":"iterabase-platform-0.3.12"}]`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := rollbackHistoryError(entry, "iterabase-platform", "0.3.10", 4); err != nil {
+	if err := rollbackHistoryError(entry, "iterabase-platform", "0.3.12", 4); err != nil {
 		t.Fatalf("valid rollback history rejected: %v", err)
 	}
 	for name, changed := range map[string]helmHistoryEntry{
-		"wrong revision": {Revision: 3, Status: "deployed", Chart: "iterabase-platform-0.3.10"},
-		"wrong status":   {Revision: 4, Status: "failed", Chart: "iterabase-platform-0.3.10"},
-		"wrong chart":    {Revision: 4, Status: "deployed", Chart: "iterabase-platform-0.3.11"},
+		"wrong revision": {Revision: 3, Status: "deployed", Chart: "iterabase-platform-0.3.12"},
+		"wrong status":   {Revision: 4, Status: "failed", Chart: "iterabase-platform-0.3.12"},
+		"wrong chart":    {Revision: 4, Status: "deployed", Chart: "iterabase-platform-0.3.15"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if err := rollbackHistoryError(changed, "iterabase-platform", "0.3.10", 4); err == nil {
+			if err := rollbackHistoryError(changed, "iterabase-platform", "0.3.12", 4); err == nil {
 				t.Fatal("intentional rollback history break passed")
 			}
 		})
@@ -1124,11 +1124,11 @@ func TestUnitTransitionCurrentMustBeNewerThanPredecessor(t *testing.T) {
 	if !slices.Equal(metadata.FixtureModes, []sharede2e.FixtureMode{sharede2e.FixtureSource, sharede2e.FixtureCandidate}) {
 		t.Fatalf("transition fixture modes=%v", metadata.FixtureModes)
 	}
-	if err := newerChartVersionError("0.3.11", "0.3.10"); err != nil {
+	if err := newerChartVersionError("0.3.15", "0.3.12"); err != nil {
 		t.Fatalf("newer current chart rejected: %v", err)
 	}
-	for _, current := range []string{"0.3.10", "0.3.9", "0.3.1", "0.3.11-rc.1"} {
-		if err := newerChartVersionError(current, "0.3.10"); err == nil {
+	for _, current := range []string{"0.3.12", "0.3.11", "0.3.1", "0.3.15-rc.1"} {
+		if err := newerChartVersionError(current, "0.3.12"); err == nil {
 			t.Fatalf("non-newer or unsupported current chart version %q passed", current)
 		}
 	}
