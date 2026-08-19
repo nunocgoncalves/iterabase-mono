@@ -179,6 +179,13 @@ def chart_dependencies(path: Path) -> list[dict[str, str]]:
                 dependencies.append(current)
             current = {"name": name.group(1)}
             continue
+        alias = re.match(r"^\s+alias:\s*([^\s#]+)", raw)
+        if alias and current:
+            # Helm aliases are the deployed dependency identity. Preserve that
+            # name in release evidence instead of recording two indistinguishable
+            # copies of the source chart.
+            current["name"] = alias.group(1)
+            continue
         version = re.match(r"^\s+version:\s*[\"']?([^\"'#\s]+)", raw)
         if version and current:
             current["version"] = version.group(1)

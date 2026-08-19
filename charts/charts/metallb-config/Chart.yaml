@@ -1,6 +1,6 @@
 apiVersion: v2
 name: metallb-config
-description: MetalLB IPAddressPool + L2Advertisement config for the iterabase platform edge (L2 mode). The MetalLB operator itself is provided by the umbrella's community `metallb` dependency; this subchart only renders the pool CRs the operator reconciles.
+description: MetalLB IPAddressPool + L2Advertisement config for Iterabase public and private ingress planes (L2 mode). The MetalLB operator itself is provided by the umbrella's community `metallb` dependency; this subchart only renders the pool CRs the operator reconciles.
 type: application
-version: 0.1.0
-appVersion: "0.1.0"
+version: 0.2.0
+appVersion: "0.2.0"

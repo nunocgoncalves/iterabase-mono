@@ -17,9 +17,9 @@ func freshInstallScenario() sharede2e.Definition {
 	return sharede2e.Define(sharede2e.Scenario[*chartState]{
 		Metadata: chartScenarioMetadata(
 			"fresh-install",
-			"Installs the ordered certificate substrate and minimal platform edge, then proves manager, issuer, workload identity, and verified gateway readiness.",
+			"Installs the ordered certificate substrate plus class-isolated public/private ingress planes, then proves manager, issuer, workload identity, fixed private allocation, route isolation, and verified gateway readiness.",
 			"test-e2e-install", 30,
-			[]string{"HOR-408", "HOR-416", "HOR-475"},
+			[]string{"HOR-408", "HOR-414", "HOR-416", "HOR-475"},
 			[]string{"control-plane-chart", "inference-gateway-chart", "iterabase-platform-chart"},
 		),
 		NewState: newChartState,
@@ -31,6 +31,7 @@ func freshInstallScenario() sharede2e.Definition {
 			{Name: "assert-certificate-issuer", DependsOn: []string{"install-minimal-platform-edge"}, Run: assertCertificateIssuerStage},
 			{Name: "assert-workload-identity", DependsOn: []string{"assert-certificate-issuer"}, Run: assertWorkloadIdentityStage},
 			{Name: "assert-verified-edge", DependsOn: []string{"install-minimal-platform-edge", "assert-certificate-issuer"}, Run: assertVerifiedEdgeStage},
+			{Name: "assert-private-ingress-plane", DependsOn: []string{"install-minimal-platform-edge", "assert-certificate-issuer"}, Run: assertPrivateIngressPlaneStage},
 		},
 		Diagnostics: diagnostics,
 		Cleanup:     cleanup,
@@ -56,9 +57,24 @@ func installMinimalPlatformEdgeStage(t *testing.T, state *chartState) {
 		t.Fatalf("Kind network has no IPv4 subnet: %q", inspect)
 	}
 	pool := fmt.Sprintf("%s.%s.255.200-%s.%s.255.250", parts[0], parts[1], parts[0], parts[1])
+	state.internalIngressIP = fmt.Sprintf("%s.%s.255.180", parts[0], parts[1])
+	internalPool := fmt.Sprintf("%s-%s.%s.255.190", state.internalIngressIP, parts[0], parts[1])
 	values := basePlatformValues()
 	values["metallb"] = map[string]any{"enabled": true}
-	values["metallb-config"] = map[string]any{"enabled": true, "addresses": []string{pool}}
+	values["metallb-config"] = map[string]any{
+		"enabled":   true,
+		"addresses": []string{pool},
+		"additionalPools": []any{map[string]any{
+			"name": "internal", "addresses": []string{internalPool}, "autoAssign": false,
+		}},
+	}
+	values["internal-ingress-nginx"] = map[string]any{
+		"enabled": true,
+		"controller": map[string]any{"service": map[string]any{"annotations": map[string]any{
+			"metallb.io/address-pool":    testRelease + "-internal",
+			"metallb.io/loadBalancerIPs": state.internalIngressIP,
+		}}},
+	}
 	applyCandidateImages(values)
 	state.installPlatform(t, 15*time.Minute, state.writeValues(t, "fresh-install", values))
 	assertCandidateImages(t, state)
@@ -166,4 +182,80 @@ func assertVerifiedEdgeStage(t *testing.T, state *chartState) {
 	}
 	requireHTTP(t, client, http.MethodGet, "https://gateway.iterabase.local/health", nil, http.StatusOK)
 	state.stopForward(t, forward)
+}
+
+func assertPrivateIngressPlaneStage(t *testing.T, state *chartState) {
+	t.Helper()
+	if got := state.kubectl(t, 30*time.Second, "get", "ingressclass/nginx", "-o", "jsonpath={.spec.controller}"); got != "k8s.io/ingress-nginx" {
+		t.Fatalf("public IngressClass controller=%q", got)
+	}
+	if got := state.kubectl(t, 30*time.Second, "get", "ingressclass/nginx-internal", "-o", "jsonpath={.spec.controller}"); got != "k8s.io/ingress-nginx-internal" {
+		t.Fatalf("private IngressClass controller=%q", got)
+	}
+	if got := state.kubectl(t, 30*time.Second, "get", "ipaddresspool/"+testRelease+"-internal", "-n", testNamespace, "-o", "jsonpath={.spec.autoAssign}"); got != "false" {
+		t.Fatalf("private MetalLB pool autoAssign=%q", got)
+	}
+
+	service := testRelease + "-internal-ingress-nginx-controller"
+	var address string
+	err := poll.Until(state.ctx, 3*time.Minute, 2*time.Second, func(context.Context) (bool, string, error) {
+		out, observeErr := state.client.Kubectl(state.ctx, 30*time.Second, "get", "service/"+service, "-n", testNamespace,
+			"-o", "jsonpath={.status.loadBalancer.ingress[0].ip}")
+		if observeErr != nil {
+			return false, "read private LoadBalancer address", observeErr
+		}
+		address = strings.TrimSpace(out)
+		return address == state.internalIngressIP, address, nil
+	})
+	if err != nil {
+		t.Fatalf("private ingress did not receive fixed MetalLB address %s: %v", state.internalIngressIP, err)
+	}
+
+	const host = "private-gateway.iterabase.local"
+	manifest := fmt.Sprintf(`apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: private-ingress-smoke
+  namespace: %s
+  annotations:
+    cert-manager.io/cluster-issuer: selfsigned
+spec:
+  ingressClassName: nginx-internal
+  tls:
+    - hosts: [%s]
+      secretName: private-ingress-smoke-tls
+  rules:
+    - host: %s
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: %s-gateway
+                port:
+                  number: 8080
+`, testNamespace, host, host, testRelease)
+	state.kubectl(t, 30*time.Second, "apply", "-f", state.writeManifest(t, "private-ingress-smoke.yaml", manifest))
+	state.kubectl(t, 3*time.Minute, "wait", "--for=condition=Ready", "certificate/private-ingress-smoke-tls", "-n", testNamespace, "--timeout=2m")
+	certificate := decodeSecretValue(t, state, "private-ingress-smoke-tls", "tls.crt")
+
+	privateForward := state.forward(t, "svc/"+service, 443, "https")
+	privateClient := verifiedDialClient(t, certificate, host, fmt.Sprintf("127.0.0.1:%d", privateForward.LocalPort))
+	if err := waitHTTPReady(state.ctx, privateClient, "https://"+host+"/health", 2*time.Minute); err != nil {
+		t.Fatalf("private ingress route did not become ready: %v", err)
+	}
+	requireHTTP(t, privateClient, http.MethodGet, "https://"+host+"/health", nil, http.StatusOK)
+	state.stopForward(t, privateForward)
+
+	// The public controller must not load an Ingress owned by the private class.
+	// Trust only the private leaf: a response would prove the public controller
+	// served that route and certificate instead of its unrelated default leaf.
+	publicForward := state.forward(t, "svc/"+testRelease+"-ingress-nginx-controller", 443, "https")
+	publicClient := verifiedDialClient(t, certificate, host, fmt.Sprintf("127.0.0.1:%d", publicForward.LocalPort))
+	if response, requestErr := publicClient.Get("https://" + host + "/health"); requestErr == nil {
+		_ = response.Body.Close()
+		t.Fatalf("public ingress served private-class host with status %d", response.StatusCode)
+	}
+	state.stopForward(t, publicForward)
 }

@@ -1,0 +1,143 @@
+# Static private-observability ingress fixture. Pair with
+# values-observability.yaml + values-tls.yaml and render as release `opo1` in
+# namespace `portable-system`. The documentation addresses and hostnames prove
+# a public IPv6 ingress plane and a class-isolated VPN/private IPv4 ingress
+# plane without encoding any deployment-specific network details.
+
+metallb:
+  enabled: true
+
+metallb-config:
+  enabled: true
+  addresses:
+    - "2001:db8:30::100-2001:db8:30::10f"
+  additionalPools:
+    - name: internal
+      addresses:
+        - "10.0.20.200-10.0.20.215"
+      autoAssign: false
+      avoidBuggyIPs: false
+      interfaces:
+        - eth0
+
+ingress-nginx:
+  controller:
+    service:
+      ipFamilyPolicy: SingleStack
+      ipFamilies:
+        - IPv6
+
+internal-ingress-nginx:
+  enabled: true
+  controller:
+    service:
+      annotations:
+        metallb.io/address-pool: opo1-internal
+        metallb.io/loadBalancerIPs: 10.0.20.200
+      ipFamilyPolicy: SingleStack
+      ipFamilies:
+        - IPv4
+    metrics:
+      enabled: true
+      serviceMonitor:
+        enabled: true
+
+cert-issuers:
+  letsencrypt:
+    enabled: true
+    email: operator@example.com
+
+external-dns:
+  enabled: true
+  domainFilters:
+    - example.com.
+
+# The private network/VPN is the authorization boundary for the direct
+# Prometheus, Alertmanager, and Loki APIs. Grafana retains its normal login.
+# Each edge certificate is publicly trusted but its non-proxied A record points
+# at the private LoadBalancer address.
+observability:
+  kube-prometheus-stack:
+    grafana:
+      ingress:
+        enabled: true
+        ingressClassName: nginx-internal
+        annotations:
+          cert-manager.io/cluster-issuer: letsencrypt-prod
+          external-dns.alpha.kubernetes.io/hostname: grafana.internal.example.com
+          external-dns.alpha.kubernetes.io/cloudflare-proxied: "false"
+          nginx.ingress.kubernetes.io/backend-protocol: HTTPS
+          nginx.ingress.kubernetes.io/proxy-ssl-secret: portable-system/observability-grafana-tls
+          nginx.ingress.kubernetes.io/proxy-ssl-verify: "on"
+          nginx.ingress.kubernetes.io/proxy-ssl-server-name: "on"
+          nginx.ingress.kubernetes.io/proxy-ssl-name: opo1-grafana.portable-system.svc
+        hosts:
+          - grafana.internal.example.com
+        tls:
+          - secretName: grafana-internal-example-tls
+            hosts:
+              - grafana.internal.example.com
+    prometheus:
+      ingress:
+        enabled: true
+        ingressClassName: nginx-internal
+        annotations:
+          cert-manager.io/cluster-issuer: letsencrypt-prod
+          external-dns.alpha.kubernetes.io/hostname: prometheus.internal.example.com
+          external-dns.alpha.kubernetes.io/cloudflare-proxied: "false"
+          nginx.ingress.kubernetes.io/backend-protocol: HTTPS
+          nginx.ingress.kubernetes.io/proxy-ssl-secret: portable-system/observability-prometheus-tls
+          nginx.ingress.kubernetes.io/proxy-ssl-verify: "on"
+          nginx.ingress.kubernetes.io/proxy-ssl-server-name: "on"
+          nginx.ingress.kubernetes.io/proxy-ssl-name: opo1-kube-prometheus-stack-prometheus.portable-system.svc
+        hosts:
+          - prometheus.internal.example.com
+        paths:
+          - /
+        tls:
+          - secretName: prometheus-internal-example-tls
+            hosts:
+              - prometheus.internal.example.com
+      prometheusSpec:
+        externalUrl: https://prometheus.internal.example.com
+    alertmanager:
+      ingress:
+        enabled: true
+        ingressClassName: nginx-internal
+        annotations:
+          cert-manager.io/cluster-issuer: letsencrypt-prod
+          external-dns.alpha.kubernetes.io/hostname: alertmanager.internal.example.com
+          external-dns.alpha.kubernetes.io/cloudflare-proxied: "false"
+          nginx.ingress.kubernetes.io/backend-protocol: HTTPS
+          nginx.ingress.kubernetes.io/proxy-ssl-secret: portable-system/observability-alertmanager-tls
+          nginx.ingress.kubernetes.io/proxy-ssl-verify: "on"
+          nginx.ingress.kubernetes.io/proxy-ssl-server-name: "on"
+          nginx.ingress.kubernetes.io/proxy-ssl-name: opo1-kube-prometheus-stack-alertmanager.portable-system.svc
+        hosts:
+          - alertmanager.internal.example.com
+        paths:
+          - /
+        tls:
+          - secretName: alertmanager-internal-example-tls
+            hosts:
+              - alertmanager.internal.example.com
+      alertmanagerSpec:
+        externalUrl: https://alertmanager.internal.example.com
+  loki:
+    gateway:
+      ingress:
+        enabled: true
+        ingressClassName: nginx-internal
+        annotations:
+          cert-manager.io/cluster-issuer: letsencrypt-prod
+          external-dns.alpha.kubernetes.io/hostname: loki.internal.example.com
+          external-dns.alpha.kubernetes.io/cloudflare-proxied: "false"
+        hosts:
+          - host: loki.internal.example.com
+            paths:
+              - path: /
+                pathType: Prefix
+        tls:
+          - secretName: loki-internal-example-tls
+            hosts:
+              - loki.internal.example.com

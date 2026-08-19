@@ -63,6 +63,7 @@ type chartState struct {
 	substrate           kube.Chart
 	transitionBaselines map[string]transitionBaseline
 	snapshots           map[string]lifecycleSnapshot
+	internalIngressIP   string
 }
 
 func newChartState(t *testing.T) *chartState {

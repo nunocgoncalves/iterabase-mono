@@ -9,6 +9,7 @@ RENDER_CP := /tmp/$(CONTROLPLANE).rendered.yaml
 RENDER_TLS := /tmp/$(UMBRELLA).tls.rendered.yaml
 RENDER_OBS := /tmp/$(UMBRELLA).observability.rendered.yaml
 RENDER_OBS_TLS := /tmp/$(UMBRELLA).observability-tls.rendered.yaml
+RENDER_INTERNAL_OBS := /tmp/$(UMBRELLA).internal-observability.rendered.yaml
 # Use OPO1's short release name so static TLS checks exercise the upstream
 # kube-prometheus-stack fullname path that differs from the historical
 # `iterabase` E2E release name.
@@ -33,7 +34,7 @@ else
 E2E_BUILD_DEPS := build-deps
 endif
 
-.PHONY: build-deps lint template kubeconform template-controlplane kubeconform-controlplane template-tls kubeconform-tls template-observability kubeconform-observability template-observability-tls kubeconform-observability-tls check-certificate-substrate check-service-selectors check-redis-exporter-auth check-artifact-config check-tool-runner check-manager-contract check-workload-ca check-metrics-contract check-alerts test-alert-rules check-dashboards check-observability-tls check check-tls check-observability test-e2e test-e2e-unit test-e2e-certificate-migration test-e2e-install test-e2e-upgrade test-e2e-feature-enable test-e2e-reapply-rollback test-e2e-observability test-e2e-observability-tls test-e2e-internal-tls clean
+.PHONY: build-deps lint template kubeconform template-controlplane kubeconform-controlplane template-tls kubeconform-tls template-observability kubeconform-observability template-observability-tls kubeconform-observability-tls template-internal-observability kubeconform-internal-observability check-internal-observability check-certificate-substrate check-service-selectors check-redis-exporter-auth check-artifact-config check-tool-runner check-manager-contract check-workload-ca check-metrics-contract check-alerts test-alert-rules check-dashboards check-observability-tls check check-tls check-observability test-e2e test-e2e-unit test-e2e-certificate-migration test-e2e-install test-e2e-upgrade test-e2e-feature-enable test-e2e-reapply-rollback test-e2e-observability test-e2e-observability-tls test-e2e-internal-tls clean
 
 # Compile the owner entrypoint and run hermetic mechanics plus intentional break
 # fixtures without provisioning infrastructure.
@@ -145,9 +146,9 @@ test-alert-rules: build-deps
 check-dashboards: build-deps
 	./scripts/check-dashboards.sh
 
-check: lint kubeconform kubeconform-controlplane kubeconform-observability check-certificate-substrate check-service-selectors check-redis-exporter-auth check-artifact-config check-tool-runner check-manager-contract check-workload-ca check-metrics-contract check-alerts check-dashboards
+check: lint kubeconform kubeconform-controlplane kubeconform-observability check-internal-observability check-certificate-substrate check-service-selectors check-redis-exporter-auth check-artifact-config check-tool-runner check-manager-contract check-workload-ca check-metrics-contract check-alerts check-dashboards
 
-check-tls: kubeconform-tls kubeconform-observability-tls check-redis-exporter-auth check-observability-tls
+check-tls: kubeconform-tls kubeconform-observability-tls check-internal-observability check-redis-exporter-auth check-observability-tls
 
 # Static check with the observability stack + every component's metrics on
 # (values-observability.yaml). Catches conditional/render errors in the
@@ -176,6 +177,20 @@ kubeconform-observability-tls: template-observability-tls
 check-observability-tls: template-observability-tls
 	./scripts/check-observability-tls.sh $(RENDER_OBS_TLS) $(TLS_TEST_RELEASE) $(TLS_TEST_NAMESPACE)
 
+# Class-isolated private observability ingress: a public IPv6 ingress remains on
+# the default class while a second IPv4 controller consumes an explicitly named,
+# non-auto-assigned MetalLB pool. The same render proves non-proxied DNS,
+# edge-certificate, backend-TLS, and direct API contracts.
+template-internal-observability: build-deps
+	helm template $(TLS_TEST_RELEASE) $(CHARTS_DIR)/$(UMBRELLA) --namespace $(TLS_TEST_NAMESPACE) -f values-observability.yaml -f values-tls.yaml -f values-internal-observability.yaml > $(RENDER_INTERNAL_OBS)
+	@echo "rendered $(RENDER_INTERNAL_OBS)"
+
+kubeconform-internal-observability: template-internal-observability
+	kubeconform -strict -kubernetes-version 1.31.0 -ignore-missing-schemas $(RENDER_INTERNAL_OBS)
+
+check-internal-observability: kubeconform-internal-observability
+	./scripts/check-internal-observability-ingress.sh $(RENDER_INTERNAL_OBS) $(TLS_TEST_RELEASE) $(TLS_TEST_NAMESPACE)
+
 clean:
-	rm -f $(RENDER) $(RENDER_CP) $(RENDER_TLS) $(RENDER_OBS) $(RENDER_OBS_TLS)
+	rm -f $(RENDER) $(RENDER_CP) $(RENDER_TLS) $(RENDER_OBS) $(RENDER_OBS_TLS) $(RENDER_INTERNAL_OBS)
 	rm -rf $(CHARTS_DIR)/$(UMBRELLA)/charts $(CHARTS_DIR)/$(CERT_MANAGER_SUBSTRATE)/charts $(CHARTS_DIR)/$(CONTROLPLANE)/charts $(CHARTS_DIR)/$(OBSERVABILITY)/charts

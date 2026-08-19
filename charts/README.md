@@ -85,6 +85,54 @@ helm install iterabase oci://ghcr.io/nunocgoncalves/iterabase-charts/iterabase-p
 provisioned out-of-band — see the umbrella `values.yaml` comments. For IPv4-first
 clients, set `ipFamilies[0]=IPv4` and an IPv4 `metallb-config.addresses` pool.)
 
+### Private observability ingress
+
+A bare-metal deployment can expose Grafana, Prometheus, Alertmanager, and Loki
+to an operator VPN without publishing those routes through the public ingress
+plane. Enable the aliased `internal-ingress-nginx` dependency, add a named
+MetalLB pool, and bind the private controller's IPv4 LoadBalancer Service to
+that pool explicitly:
+
+```yaml
+metallb-config:
+  additionalPools:
+    - name: internal
+      addresses: ["10.0.20.200-10.0.20.215"]
+      autoAssign: false
+      interfaces: [eth0]
+internal-ingress-nginx:
+  enabled: true
+  controller:
+    service:
+      annotations:
+        metallb.io/address-pool: <release>-internal
+        metallb.io/loadBalancerIPs: 10.0.20.200
+```
+
+Set each upstream observability ingress to `ingressClassName: nginx-internal`.
+Use cert-manager's DNS-01 issuer for publicly trusted leaves and annotate each
+Ingress with `external-dns.alpha.kubernetes.io/cloudflare-proxied: "false"` so
+the resulting `A` record points directly at the private address. Prometheus,
+Alertmanager, and Grafana serve internal-CA HTTPS; their Ingresses must use the
+`backend-protocol`, `proxy-ssl-secret`, `proxy-ssl-verify`, and
+`proxy-ssl-name` annotations shown in [`values-internal-observability.yaml`](values-internal-observability.yaml).
+Loki's Ingress targets its HTTP gateway, which independently verifies the
+internal-CA HTTPS hop to Loki.
+
+The private network/VPN is the authorization boundary for the direct
+Prometheus, Alertmanager, and Loki APIs; Grafana keeps its own login. Do not use
+this recipe on an untrusted LAN, and do not place these routes on the public
+`nginx` class. The complete documentation-address fixture is rendered and
+validated by `make check-internal-observability`.
+
+MetalLB configuration CRs remain post-install/post-upgrade hooks so a fresh
+umbrella install can establish the operator CRDs first. If an additional pool
+is removed from values or the platform is rolled back to a version without it,
+delete its inert hook resources explicitly after the LoadBalancer Service is
+gone: `kubectl delete ipaddresspool,l2advertisement <release>-internal -n
+<namespace>`. With `autoAssign: false`, an unselected leftover pool cannot be
+consumed by another Service.
+
 ### Upgrade from platform 0.2.2 or earlier
 
 Platform 0.2.2 bundled cert-manager and the CSI driver in the platform Helm
