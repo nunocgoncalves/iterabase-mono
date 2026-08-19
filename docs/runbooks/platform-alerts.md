@@ -100,7 +100,7 @@ Inspect Redis availability/latency, blocked clients, gateway concurrency, and po
 
 ## IterabaseCertificateExpiringSoon
 
-Inspect Certificate, CertificateRequest, issuer, DNS challenge/API connectivity, and renewal events. Validate the renewed chain and rollout/reload path before considering manual replacement.
+This warning fires after a cert-manager Certificate remains past its scheduled renewal time for ten minutes, or when its remaining lifetime stays below one hour for ten minutes as an emergency fallback. A healthy short-lived leaf does not fire merely because its total duration is below a fixed threshold. Inspect the Certificate's `Ready`/`Issuing` conditions, `renewalTime`, CertificateRequest and issuer state, DNS challenge/API connectivity, and renewal events. Validate the renewed chain and rollout/reload path before considering manual replacement; successful renewal advances the exported renewal and expiration timestamps and resolves the alert.
 
 ## IterabasePrometheusRuleEvaluationFailures
 

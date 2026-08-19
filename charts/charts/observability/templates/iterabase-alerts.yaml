@@ -253,13 +253,13 @@ spec:
             first_action: "Inspect Redis health, request concurrency, client pool size, network latency, and blocked operations."
             runbook_url: {{ printf "%s#iterabaseinferenceredispooltimeouts" $runbook | quote }}
         - alert: IterabaseCertificateExpiringSoon
-          expr: certmanager_certificate_expiration_timestamp_seconds - time() < 86400 * 14
+          expr: (certmanager_certificate_renewal_timestamp_seconds < time()) or (certmanager_certificate_expiration_timestamp_seconds - time() < 3600)
           for: 10m
           labels: {severity: warning, component: certificates}
           annotations:
-            summary: "Certificate {{`{{ $labels.name }}`}} expires within 14 days"
-            description: "A cert-manager leaf is approaching expiry without a confirmed renewal."
-            first_action: "Inspect Certificate/CertificateRequest conditions, issuer health, and DNS/API reachability."
+            summary: "Certificate {{`{{ $labels.name }}`}} renewal is overdue or expires within one hour"
+            description: "A cert-manager leaf has passed its scheduled renewal time or entered the emergency expiry window."
+            first_action: "Inspect Certificate/CertificateRequest conditions, renewal events, issuer health, and DNS/API reachability."
             runbook_url: {{ printf "%s#iterabasecertificateexpiringsoon" $runbook | quote }}
         - alert: IterabasePrometheusRuleEvaluationFailures
           expr: increase(prometheus_rule_evaluation_failures_total[10m]) > 0
