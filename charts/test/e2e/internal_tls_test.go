@@ -1,6 +1,7 @@
 package e2e_test
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -15,9 +16,9 @@ func internalTLSScenario() sharede2e.Definition {
 	return sharede2e.Define(sharede2e.Scenario[*chartState]{
 		Metadata: chartScenarioMetadata(
 			"internal-tls",
-			"Installs the minimal internal-TLS platform and proves issued identities, gateway dependency readiness, verified control-plane HTTPS, and real Redis/PostgreSQL transport enforcement.",
+			"Installs the minimal internal-TLS platform and proves issued identities, distinct verified control-plane edge/backend TLS, gateway dependency readiness, and real Redis/PostgreSQL transport enforcement.",
 			"test-e2e-internal-tls", 30,
-			[]string{"HOR-371", "HOR-416", "HOR-475"},
+			[]string{"HOR-371", "HOR-416", "HOR-475", "HOR-507"},
 			[]string{"control-plane", "inference-gateway", "control-plane-chart", "inference-gateway-chart", "iterabase-platform-chart"},
 		),
 		NewState: newChartState,
@@ -28,6 +29,7 @@ func internalTLSScenario() sharede2e.Definition {
 			{Name: "assert-internal-identities", DependsOn: []string{"install-internal-tls-platform"}, Run: assertInternalIdentitiesStage},
 			{Name: "assert-gateway-dependencies", DependsOn: []string{"assert-internal-identities"}, Run: assertGatewayDependenciesStage},
 			{Name: "assert-control-plane-verified-https", DependsOn: []string{"assert-internal-identities"}, Run: assertControlPlaneVerifiedHTTPSStage},
+			{Name: "assert-control-plane-ingress-verified-tls", DependsOn: []string{"assert-control-plane-verified-https"}, Run: assertControlPlaneIngressVerifiedTLSStage},
 			{Name: "assert-rendered-client-config", DependsOn: []string{"assert-gateway-dependencies"}, Run: assertRenderedTLSClientConfigStage},
 			{Name: "assert-redis-transport", DependsOn: []string{"assert-internal-identities"}, Run: assertRedisTransportStage},
 			{Name: "assert-postgresql-transport", DependsOn: []string{"assert-internal-identities"}, Run: assertPostgreSQLTransportStage},
@@ -39,9 +41,26 @@ func internalTLSScenario() sharede2e.Definition {
 
 func installInternalTLSPlatformStage(t *testing.T, state *chartState) {
 	t.Helper()
+	values := runtimePlatformValues(t)
+	values["ingress-nginx"] = map[string]any{
+		"enabled": true,
+		"controller": map[string]any{
+			"service": map[string]any{"type": "ClusterIP"},
+		},
+	}
+	controlPlane := values["control-plane"].(map[string]any)
+	controlPlane["ingress"] = map[string]any{
+		"enabled":   true,
+		"className": "nginx",
+		"host":      "control-plane.iterabase.local",
+		"tls": map[string]any{
+			"enabled":       true,
+			"clusterIssuer": "selfsigned",
+		},
+	}
 	state.installPlatform(t, 16*time.Minute,
 		filepathFromCharts(state, "values-tls.yaml"),
-		state.writeValues(t, "internal-tls-runtime", runtimePlatformValues(t)),
+		state.writeValues(t, "internal-tls-runtime", values),
 	)
 	assertCandidateImages(t, state)
 }
@@ -51,6 +70,7 @@ func assertInternalIdentitiesStage(t *testing.T, state *chartState) {
 	state.kubectl(t, 4*time.Minute, "wait", "--for=condition=Ready", "clusterissuer/internal-ca", "--timeout=3m")
 	for _, certificate := range []string{
 		testRelease + "-postgresql-tls", testRelease + "-redis-tls", testRelease + "-control-plane-api-tls",
+		testRelease + "-control-plane-api-ingress-tls",
 	} {
 		state.kubectl(t, 4*time.Minute, "wait", "--for=condition=Ready", "certificate/"+certificate, "-n", testNamespace, "--timeout=3m")
 	}
@@ -78,6 +98,46 @@ func assertControlPlaneVerifiedHTTPSStage(t *testing.T, state *chartState) {
 	forward := state.forward(t, "svc/"+testRelease+"-control-plane-api", 8080, "https")
 	client := verifiedClient(t, ca, testRelease+"-control-plane-api."+testNamespace+".svc")
 	requireHTTP(t, client, http.MethodGet, forward.URL+"/healthz", nil, http.StatusOK)
+	state.stopForward(t, forward)
+}
+
+func assertControlPlaneIngressVerifiedTLSStage(t *testing.T, state *chartState) {
+	t.Helper()
+	const host = "control-plane.iterabase.local"
+	ingress := testRelease + "-control-plane-api"
+	internalSecret := testRelease + "-control-plane-api-tls"
+	edgeSecret := testRelease + "-control-plane-api-ingress-tls"
+
+	if got := state.kubectl(t, 30*time.Second, "get", "ingress/"+ingress, "-n", testNamespace,
+		"-o", "jsonpath={.spec.tls[0].secretName}"); got != edgeSecret {
+		t.Fatalf("control-plane edge TLS Secret=%q want=%q", got, edgeSecret)
+	}
+	if edgeSecret == internalSecret {
+		t.Fatal("control-plane edge and backend TLS Secrets must differ")
+	}
+	expectedAnnotations := map[string]string{
+		"nginx.ingress.kubernetes.io/backend-protocol":      "HTTPS",
+		"nginx.ingress.kubernetes.io/proxy-ssl-secret":      testNamespace + "/" + testRelease + "-internal-ca-root",
+		"nginx.ingress.kubernetes.io/proxy-ssl-verify":      "on",
+		"nginx.ingress.kubernetes.io/proxy-ssl-server-name": "on",
+		"nginx.ingress.kubernetes.io/proxy-ssl-name":        testRelease + "-control-plane-api." + testNamespace + ".svc",
+	}
+	for annotation, want := range expectedAnnotations {
+		got := state.kubectl(t, 30*time.Second, "get", "ingress/"+ingress, "-n", testNamespace,
+			"-o", fmt.Sprintf("jsonpath={.metadata.annotations.%s}", strings.ReplaceAll(annotation, ".", "\\.")))
+		if got != want {
+			t.Fatalf("control-plane ingress annotation %s=%q want=%q", annotation, got, want)
+		}
+	}
+
+	edgeCertificate := decodeSecretValue(t, state, edgeSecret, "tls.crt")
+	forward := state.forward(t, "svc/"+testRelease+"-ingress-nginx-controller", 443, "https")
+	client := verifiedDialClient(t, edgeCertificate, host, fmt.Sprintf("127.0.0.1:%d", forward.LocalPort))
+	if err := waitHTTPReady(state.ctx, client, "https://"+host+"/healthz", 2*time.Minute); err != nil {
+		t.Fatalf("verified control-plane ingress did not become ready: %v", err)
+	}
+	requireHTTP(t, client, http.MethodGet, "https://"+host+"/healthz", nil, http.StatusOK)
+	requireHTTP(t, client, http.MethodGet, "https://"+host+"/", nil, http.StatusOK)
 	state.stopForward(t, forward)
 }
 
