@@ -82,6 +82,14 @@ name lengths (and failed for the short OPO1 release name).
 {{- printf "%s-alertmanager" (include "observability.kubePrometheusStackFullname" .) -}}
 {{- end -}}
 
+{{- define "observability.prometheusReloaderServiceName" -}}
+{{- printf "%s-prometheus-reloader-tls" (include "observability.kubePrometheusStackFullname" .) -}}
+{{- end -}}
+
+{{- define "observability.alertmanagerReloaderServiceName" -}}
+{{- printf "%s-alertmanager-reloader-tls" (include "observability.kubePrometheusStackFullname" .) -}}
+{{- end -}}
+
 {{- define "observability.prometheusURL" -}}
 {{- printf "%s://%s.%s.svc:9090" (include "observability.urlScheme" .) (include "observability.prometheusServiceName" .) .Release.Namespace -}}
 {{- end -}}

@@ -417,22 +417,23 @@ func TestUnitPrometheusObservationErrorsFailImmediately(t *testing.T) {
 	}
 }
 
-func TestUnitServiceMonitorTargetsRequireEveryVerifiedEndpoint(t *testing.T) {
-	expected := []serviceMonitorEndpointExpectation{
-		{index: 0, name: "http-web", port: "9090"},
-		{index: 1, name: "reloader-web", port: "8080"},
+func TestUnitServiceMonitorTargetsRequireEveryVerifiedTarget(t *testing.T) {
+	serverExpected := []serviceMonitorEndpointExpectation{{index: 0, name: "http-web", port: "9090"}}
+	reloaderExpected := []serviceMonitorEndpointExpectation{{index: 0, name: "reloader-web", port: "8080"}}
+	valid := []byte(`{"status":"success","data":{"activeTargets":[{"scrapePool":"serviceMonitor/ns/prometheus-internal-tls/0","scrapeUrl":"https://prometheus:9090/metrics","health":"up","labels":{"endpoint":"http-web"}},{"scrapePool":"serviceMonitor/ns/prometheus-reloader-internal-tls/0","scrapeUrl":"https://prometheus-reloader:8080/metrics","health":"up","labels":{"endpoint":"reloader-web"}}]}}`)
+	if err := assertServiceMonitorTargets(valid, "ns", "prometheus-internal-tls", serverExpected); err != nil {
+		t.Fatalf("valid server target rejected: %v", err)
 	}
-	valid := []byte(`{"status":"success","data":{"activeTargets":[{"scrapePool":"serviceMonitor/ns/prometheus-internal-tls/0","scrapeUrl":"https://prometheus:9090/metrics","health":"up","labels":{"endpoint":"http-web"}},{"scrapePool":"serviceMonitor/ns/prometheus-internal-tls/1","scrapeUrl":"https://prometheus:8080/metrics","health":"up","labels":{"endpoint":"reloader-web"}}]}}`)
-	if err := assertServiceMonitorTargets(valid, "ns", "prometheus-internal-tls", expected); err != nil {
-		t.Fatalf("valid endpoints rejected: %v", err)
+	if err := assertServiceMonitorTargets(valid, "ns", "prometheus-reloader-internal-tls", reloaderExpected); err != nil {
+		t.Fatalf("valid reloader target rejected: %v", err)
 	}
 	for name, body := range map[string][]byte{
 		"missing-reloader":   []byte(`{"status":"success","data":{"activeTargets":[{"scrapePool":"serviceMonitor/ns/prometheus-internal-tls/0","scrapeUrl":"https://prometheus:9090/metrics","health":"up","labels":{"endpoint":"http-web"}}]}}`),
-		"plaintext-reloader": []byte(`{"status":"success","data":{"activeTargets":[{"scrapePool":"serviceMonitor/ns/prometheus-internal-tls/0","scrapeUrl":"https://prometheus:9090/metrics","health":"up","labels":{"endpoint":"http-web"}},{"scrapePool":"serviceMonitor/ns/prometheus-internal-tls/1","scrapeUrl":"http://prometheus:8080/metrics","health":"up","labels":{"endpoint":"reloader-web"}}]}}`),
+		"plaintext-reloader": []byte(`{"status":"success","data":{"activeTargets":[{"scrapePool":"serviceMonitor/ns/prometheus-internal-tls/0","scrapeUrl":"https://prometheus:9090/metrics","health":"up","labels":{"endpoint":"http-web"}},{"scrapePool":"serviceMonitor/ns/prometheus-reloader-internal-tls/0","scrapeUrl":"http://prometheus-reloader:8080/metrics","health":"up","labels":{"endpoint":"reloader-web"}}]}}`),
 	} {
 		t.Run(name, func(t *testing.T) {
-			if err := assertServiceMonitorTargets(body, "ns", "prometheus-internal-tls", expected); err == nil {
-				t.Fatal("incomplete or plaintext monitor targets incorrectly passed")
+			if err := assertServiceMonitorTargets(body, "ns", "prometheus-reloader-internal-tls", reloaderExpected); err == nil {
+				t.Fatal("missing or plaintext reloader target incorrectly passed")
 			}
 		})
 	}

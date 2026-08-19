@@ -2,111 +2,33 @@
 {{- if (dig "internalTLS" "enabled" false (.Values.global | default (dict))) }}
 {{- $kps := index .Values "kube-prometheus-stack" }}
 {{- if (index $kps "enabled") }}
-{{- if (dig "stackServices" "enabled" false (.Values.tls | default (dict))) }}
 {{- $prometheus := index $kps "prometheus" }}
-{{- $prometheusService := index $prometheus "service" }}
 {{- $alertmanager := index $kps "alertmanager" }}
-{{- $alertmanagerService := index $alertmanager "service" }}
-{{- if or (index $prometheusService "enabled") (index $alertmanagerService "enabled") }}
-{{- fail "observability.tls.stackServices requires the upstream Prometheus and Alertmanager Services to be disabled" }}
-{{- end }}
-{{- $kpsChart := index .Subcharts "kube-prometheus-stack" }}
-{{- $kpsName := include "observability.kubePrometheusStackName" . }}
-{{- $kpsVersion := replace "+" "_" $kpsChart.Chart.Version }}
-# kube-prometheus-stack hard-codes appProtocol=http on the config-reloader
-# Service ports even when the Operator passes the server's TLS configuration to
-# those sidecars. Own the two release-identity Services in the TLS preset so
-# appProtocol-aware clients receive the same verified-HTTPS contract as the
-# chart-owned ServiceMonitors.
+# kube-prometheus-stack owns the release-identity Prometheus and Alertmanager
+# Services. Its config-reloader ports hard-code appProtocol=http even though the
+# Operator passes each server's TLS configuration to the sidecar. Keep those
+# upstream Services under upstream ownership and expose dedicated chart-owned
+# scrape Services whose only port advertises the actual HTTPS protocol.
 {{- if (index $prometheus "enabled") }}
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "observability.prometheusServiceName" . }}
+  name: {{ include "observability.prometheusReloaderServiceName" . }}
   namespace: {{ .Release.Namespace }}
   labels:
-    app: {{ $kpsName }}-prometheus
-    self-monitor: {{ index $prometheus "serviceMonitor" "selfMonitor" | quote }}
-    app.kubernetes.io/managed-by: {{ .Release.Service }}
-    app.kubernetes.io/instance: {{ .Release.Name }}
-    app.kubernetes.io/version: {{ $kpsVersion | quote }}
-    app.kubernetes.io/part-of: {{ $kpsName }}
-    chart: {{ printf "%s-%s" $kpsChart.Chart.Name $kpsVersion }}
-    release: {{ .Release.Name | quote }}
-    heritage: {{ .Release.Service | quote }}
-    {{- with (index $kps "commonLabels") }}
-    {{- toYaml . | nindent 4 }}
-    {{- end }}
-    {{- with (index $prometheusService "labels") }}
-    {{- toYaml . | nindent 4 }}
-    {{- end }}
-  {{- with (index $prometheusService "annotations") }}
-  annotations:
-    {{- toYaml . | nindent 4 }}
-  {{- end }}
+    {{- include "observability.labels" . | nindent 4 }}
+    app.kubernetes.io/component: prometheus-config-reloader
+    iterabase.com/observability-reloader: prometheus
 spec:
-  {{- with (index $prometheusService "clusterIP") }}
-  clusterIP: {{ . }}
-  {{- end }}
-  {{- if (index $prometheusService "ipDualStack" "enabled") }}
-  ipFamilies:
-    {{- toYaml (index $prometheusService "ipDualStack" "ipFamilies") | nindent 4 }}
-  ipFamilyPolicy: {{ index $prometheusService "ipDualStack" "ipFamilyPolicy" }}
-  {{- end }}
-  {{- with (index $prometheusService "externalIPs") }}
-  externalIPs:
-    {{- toYaml . | nindent 4 }}
-  {{- end }}
-  {{- with (index $prometheusService "loadBalancerIP") }}
-  loadBalancerIP: {{ . }}
-  {{- end }}
-  {{- with (index $prometheusService "loadBalancerSourceRanges") }}
-  loadBalancerSourceRanges:
-    {{- toYaml . | nindent 4 }}
-  {{- end }}
-  {{- if ne (index $prometheusService "type") "ClusterIP" }}
-  externalTrafficPolicy: {{ index $prometheusService "externalTrafficPolicy" }}
-  {{- end }}
   ports:
-    - name: {{ index $prometheus "prometheusSpec" "portName" }}
-      {{- if eq (index $prometheusService "type") "NodePort" }}
-      nodePort: {{ index $prometheusService "nodePort" }}
-      {{- end }}
-      port: {{ index $prometheusService "port" }}
-      targetPort: {{ index $prometheusService "targetPort" }}
-    {{- with (index $prometheusService "reloaderWebPort") }}
     - name: reloader-web
       appProtocol: https
-      {{- if and (eq (index $prometheusService "type") "NodePort") (not (empty (index $prometheusService "reloaderWebNodePort"))) }}
-      nodePort: {{ index $prometheusService "reloaderWebNodePort" }}
-      {{- end }}
-      port: {{ . }}
+      port: {{ required "kube-prometheus-stack.prometheus.service.reloaderWebPort is required for internal TLS" (index $prometheus "service" "reloaderWebPort") }}
       targetPort: reloader-web
-    {{- end }}
-    {{- if (index $prometheus "thanosIngress" "enabled") }}
-    - name: grpc
-      {{- if eq (index $prometheusService "type") "NodePort" }}
-      nodePort: {{ index $prometheus "thanosIngress" "nodePort" }}
-      {{- end }}
-      port: {{ index $prometheus "thanosIngress" "servicePort" }}
-      targetPort: {{ index $prometheus "thanosIngress" "servicePort" }}
-    {{- end }}
-    {{- with (index $prometheusService "additionalPorts") }}
-    {{- toYaml . | nindent 4 }}
-    {{- end }}
-  publishNotReadyAddresses: {{ index $prometheusService "publishNotReadyAddresses" }}
   selector:
     app.kubernetes.io/name: {{ ternary "prometheus-agent" "prometheus" (index $prometheus "agentMode") }}
     operator.prometheus.io/name: {{ include "observability.prometheusCRName" . }}
-  {{- with (index $prometheusService "sessionAffinity") }}
-  sessionAffinity: {{ . }}
-  {{- end }}
-  {{- if eq (index $prometheusService "sessionAffinity") "ClientIP" }}
-  sessionAffinityConfig:
-    clientIP:
-      timeoutSeconds: {{ index $prometheusService "sessionAffinityConfig" "clientIP" "timeoutSeconds" }}
-  {{- end }}
-  type: {{ index $prometheusService "type" | quote }}
+  type: ClusterIP
 {{- end }}
 {{- if and (index $prometheus "enabled") (index $alertmanager "enabled") }}
 ---
@@ -115,79 +37,22 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "observability.alertmanagerServiceName" . }}
+  name: {{ include "observability.alertmanagerReloaderServiceName" . }}
   namespace: {{ .Release.Namespace }}
   labels:
-    app: {{ $kpsName }}-alertmanager
-    self-monitor: {{ index $alertmanager "serviceMonitor" "selfMonitor" | quote }}
-    app.kubernetes.io/managed-by: {{ .Release.Service }}
-    app.kubernetes.io/instance: {{ .Release.Name }}
-    app.kubernetes.io/version: {{ $kpsVersion | quote }}
-    app.kubernetes.io/part-of: {{ $kpsName }}
-    chart: {{ printf "%s-%s" $kpsChart.Chart.Name $kpsVersion }}
-    release: {{ .Release.Name | quote }}
-    heritage: {{ .Release.Service | quote }}
-    {{- with (index $kps "commonLabels") }}
-    {{- toYaml . | nindent 4 }}
-    {{- end }}
-    {{- with (index $alertmanagerService "labels") }}
-    {{- toYaml . | nindent 4 }}
-    {{- end }}
-  {{- with (index $alertmanagerService "annotations") }}
-  annotations:
-    {{- toYaml . | nindent 4 }}
-  {{- end }}
+    {{- include "observability.labels" . | nindent 4 }}
+    app.kubernetes.io/component: alertmanager-config-reloader
+    iterabase.com/observability-reloader: alertmanager
 spec:
-  {{- with (index $alertmanagerService "clusterIP") }}
-  clusterIP: {{ . }}
-  {{- end }}
-  {{- with (index $alertmanagerService "externalIPs") }}
-  externalIPs:
-    {{- toYaml . | nindent 4 }}
-  {{- end }}
-  {{- with (index $alertmanagerService "loadBalancerIP") }}
-  loadBalancerIP: {{ . }}
-  {{- end }}
-  {{- with (index $alertmanagerService "loadBalancerSourceRanges") }}
-  loadBalancerSourceRanges:
-    {{- toYaml . | nindent 4 }}
-  {{- end }}
-  {{- if ne (index $alertmanagerService "type") "ClusterIP" }}
-  externalTrafficPolicy: {{ index $alertmanagerService "externalTrafficPolicy" }}
-  {{- end }}
   ports:
-    - name: {{ index $alertmanager "alertmanagerSpec" "portName" }}
-      {{- if eq (index $alertmanagerService "type") "NodePort" }}
-      nodePort: {{ index $alertmanagerService "nodePort" }}
-      {{- end }}
-      port: {{ index $alertmanagerService "port" }}
-      targetPort: {{ index $alertmanagerService "targetPort" }}
-      protocol: TCP
     - name: reloader-web
       appProtocol: https
       port: 8080
       targetPort: reloader-web
-    {{- with (index $alertmanagerService "additionalPorts") }}
-    {{- toYaml . | nindent 4 }}
-    {{- end }}
   selector:
     app.kubernetes.io/name: alertmanager
     alertmanager: {{ include "observability.alertmanagerCRName" . }}
-  {{- with (index $alertmanagerService "sessionAffinity") }}
-  sessionAffinity: {{ . }}
-  {{- end }}
-  {{- if eq (index $alertmanagerService "sessionAffinity") "ClientIP" }}
-  sessionAffinityConfig:
-    clientIP:
-      timeoutSeconds: {{ index $alertmanagerService "sessionAffinityConfig" "clientIP" "timeoutSeconds" }}
-  {{- end }}
-  type: {{ index $alertmanagerService "type" | quote }}
-  {{- if (index $alertmanagerService "ipDualStack" "enabled") }}
-  ipFamilies:
-    {{- toYaml (index $alertmanagerService "ipDualStack" "ipFamilies") | nindent 4 }}
-  ipFamilyPolicy: {{ index $alertmanagerService "ipDualStack" "ipFamilyPolicy" }}
-  {{- end }}
-{{- end }}
+  type: ClusterIP
 {{- end }}
 {{- end }}
 {{- end }}
