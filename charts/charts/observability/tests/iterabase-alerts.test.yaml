@@ -137,3 +137,82 @@ tests:
       - eval_time: 20m
         alertname: IterabaseToolMaterializationFailures
         exp_alerts: []
+
+  - name: healthy short-lived certificate stays quiet before scheduled renewal
+    interval: 1m
+    input_series:
+      - series: 'certmanager_certificate_renewal_timestamp_seconds{exported_namespace="iterabase-system",name="healthy-short-lived"}'
+        values: '7200x15'
+      - series: 'certmanager_certificate_expiration_timestamp_seconds{exported_namespace="iterabase-system",name="healthy-short-lived"}'
+        values: '10800x15'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: IterabaseCertificateExpiringSoon
+        exp_alerts: []
+
+  - name: overdue certificate renewal fires after ten minutes
+    interval: 1m
+    input_series:
+      - series: 'certmanager_certificate_renewal_timestamp_seconds{exported_namespace="iterabase-system",name="renewal-overdue"}'
+        values: '60x15'
+      - series: 'certmanager_certificate_expiration_timestamp_seconds{exported_namespace="iterabase-system",name="renewal-overdue"}'
+        values: '86400x15'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: IterabaseCertificateExpiringSoon
+        exp_alerts:
+          - exp_labels:
+              exported_namespace: iterabase-system
+              name: renewal-overdue
+              severity: warning
+              component: certificates
+            exp_annotations:
+              summary: Certificate renewal-overdue renewal is overdue or expires within one hour
+              description: A cert-manager leaf has passed its scheduled renewal time or entered the emergency expiry window.
+              first_action: Inspect Certificate/CertificateRequest conditions, renewal events, issuer health, and DNS/API reachability.
+              runbook_url: https://github.com/nunocgoncalves/iterabase-mono/blob/master/docs/runbooks/platform-alerts.md#iterabasecertificateexpiringsoon
+
+  - name: emergency certificate expiry fires without renewal metadata
+    interval: 1m
+    input_series:
+      - series: 'certmanager_certificate_expiration_timestamp_seconds{exported_namespace="iterabase-system",name="expiry-emergency"}'
+        values: '3000x15'
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: IterabaseCertificateExpiringSoon
+        exp_alerts:
+          - exp_labels:
+              exported_namespace: iterabase-system
+              name: expiry-emergency
+              severity: warning
+              component: certificates
+            exp_annotations:
+              summary: Certificate expiry-emergency renewal is overdue or expires within one hour
+              description: A cert-manager leaf has passed its scheduled renewal time or entered the emergency expiry window.
+              first_action: Inspect Certificate/CertificateRequest conditions, renewal events, issuer health, and DNS/API reachability.
+              runbook_url: https://github.com/nunocgoncalves/iterabase-mono/blob/master/docs/runbooks/platform-alerts.md#iterabasecertificateexpiringsoon
+
+  - name: overdue certificate alert resolves when renewal advances
+    interval: 1m
+    input_series:
+      - series: 'certmanager_certificate_renewal_timestamp_seconds{exported_namespace="iterabase-system",name="renewal-recovers"}'
+        values: '60x12 7200x5'
+      - series: 'certmanager_certificate_expiration_timestamp_seconds{exported_namespace="iterabase-system",name="renewal-recovers"}'
+        values: '86400x18'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: IterabaseCertificateExpiringSoon
+        exp_alerts:
+          - exp_labels:
+              exported_namespace: iterabase-system
+              name: renewal-recovers
+              severity: warning
+              component: certificates
+            exp_annotations:
+              summary: Certificate renewal-recovers renewal is overdue or expires within one hour
+              description: A cert-manager leaf has passed its scheduled renewal time or entered the emergency expiry window.
+              first_action: Inspect Certificate/CertificateRequest conditions, renewal events, issuer health, and DNS/API reachability.
+              runbook_url: https://github.com/nunocgoncalves/iterabase-mono/blob/master/docs/runbooks/platform-alerts.md#iterabasecertificateexpiringsoon
+      - eval_time: 15m
+        alertname: IterabaseCertificateExpiringSoon
+        exp_alerts: []
