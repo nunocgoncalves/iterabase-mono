@@ -270,8 +270,8 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertEqual(
             [(item["name"], item["chart"], item["version"]) for item in transition],
             [
-                ("supported-platform-predecessor", "iterabase-platform", "0.3.10"),
-                ("supported-substrate-predecessor", "cert-manager-substrate", "0.3.10"),
+                ("supported-platform-predecessor", "iterabase-platform", "0.3.12"),
+                ("supported-substrate-predecessor", "cert-manager-substrate", "0.3.12"),
             ],
         )
         self.assertTrue(all(len(item["sha256"]) == 64 for item in transition))
@@ -350,8 +350,8 @@ class ReleaseContractTests(unittest.TestCase):
                 for item in plan["transition_baselines"]["charts"]
             },
             {
-                "iterabase-platform": "0.3.10",
-                "cert-manager-substrate": "0.3.10",
+                "iterabase-platform": "0.3.12",
+                "cert-manager-substrate": "0.3.12",
             },
         )
         self.assertEqual(
@@ -582,7 +582,7 @@ class ReleaseContractTests(unittest.TestCase):
                         "name": "supported-platform-predecessor",
                         "chart": "iterabase-platform",
                         "repository": "oci://example/iterabase-platform",
-                        "version": "0.3.10",
+                        "version": "0.3.12",
                         "sha256": "f" * 64,
                     }
                 ]
