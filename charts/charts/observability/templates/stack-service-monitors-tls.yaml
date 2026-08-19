@@ -2,11 +2,12 @@
 {{- if (dig "internalTLS" "enabled" false (.Values.global | default (dict))) }}
 {{- $ns := .Release.Namespace }}
 {{- $release := .Release.Name }}
+{{- $prometheusService := include "observability.prometheusServiceName" . }}
+{{- $alertmanagerService := include "observability.alertmanagerServiceName" . }}
 {{- if (index .Values "kube-prometheus-stack" "enabled") }}
-# The upstream self-monitors assign one scheme to both the TLS-enabled server
-# and the plaintext config-reloader port. Own the mixed protocol explicitly:
-# product endpoints verify the generated internal CA and exact Service DNS;
-# config-reloader remains on its native HTTP-only metrics port.
+# The Prometheus Operator passes each server's web TLS configuration to its
+# config-reloader sidecar as well. Disable the upstream all-one-scheme monitors
+# and own both verified HTTPS endpoints explicitly.
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
@@ -29,11 +30,18 @@ spec:
           secret:
             name: observability-prometheus-tls
             key: ca.crt
-        serverName: {{ printf "%s-kube-prometheus-prometheus.%s.svc" $release $ns | quote }}
+        serverName: {{ printf "%s.%s.svc" $prometheusService $ns | quote }}
         insecureSkipVerify: false
     - port: reloader-web
       path: /metrics
-      scheme: http
+      scheme: https
+      tlsConfig:
+        ca:
+          secret:
+            name: observability-prometheus-tls
+            key: ca.crt
+        serverName: {{ printf "%s.%s.svc" $prometheusService $ns | quote }}
+        insecureSkipVerify: false
 ---
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
@@ -57,11 +65,18 @@ spec:
           secret:
             name: observability-alertmanager-tls
             key: ca.crt
-        serverName: {{ printf "%s-kube-prometheus-alertmanager.%s.svc" $release $ns | quote }}
+        serverName: {{ printf "%s.%s.svc" $alertmanagerService $ns | quote }}
         insecureSkipVerify: false
     - port: reloader-web
       path: /metrics
-      scheme: http
+      scheme: https
+      tlsConfig:
+        ca:
+          secret:
+            name: observability-alertmanager-tls
+            key: ca.crt
+        serverName: {{ printf "%s.%s.svc" $alertmanagerService $ns | quote }}
+        insecureSkipVerify: false
 ---
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor

@@ -3,6 +3,8 @@
 {{- $ca := (printf "%s-internal-ca-root" .Release.Name) }}
 {{- $ns := .Release.Namespace }}
 {{- $issuer := .Values.tls.issuerName | default "internal-ca" }}
+{{- $prometheusService := include "observability.prometheusServiceName" . }}
+{{- $alertmanagerService := include "observability.alertmanagerServiceName" . }}
 # Stack-component leaf certs (internal TLS). Issued by the internal CA
 # ClusterIssuer (cert-issuers, pre-install) when global.internalTLS is on, so
 # Prometheus/Grafana/Loki/Alertmanager serve HTTPS and the Grafana datasources
@@ -24,10 +26,10 @@ spec:
   duration: 2160h      # 90d
   renewBefore: 360h    # 15d
   dnsNames:
-    - {{ printf "%s-kube-prometheus-prometheus" .Release.Name }}
-    - {{ printf "%s-kube-prometheus-prometheus.%s" .Release.Name $ns }}
-    - {{ printf "%s-kube-prometheus-prometheus.%s.svc" .Release.Name $ns }}
-    - {{ printf "%s-kube-prometheus-prometheus.%s.svc.cluster.local" .Release.Name $ns }}
+    - {{ $prometheusService }}
+    - {{ printf "%s.%s" $prometheusService $ns }}
+    - {{ printf "%s.%s.svc" $prometheusService $ns }}
+    - {{ printf "%s.%s.svc.cluster.local" $prometheusService $ns }}
   issuerRef:
     name: {{ $issuer | quote }}
     kind: ClusterIssuer
@@ -43,10 +45,10 @@ spec:
   duration: 2160h
   renewBefore: 360h
   dnsNames:
-    - {{ printf "%s-kube-prometheus-alertmanager" .Release.Name }}
-    - {{ printf "%s-kube-prometheus-alertmanager.%s" .Release.Name $ns }}
-    - {{ printf "%s-kube-prometheus-alertmanager.%s.svc" .Release.Name $ns }}
-    - {{ printf "%s-kube-prometheus-alertmanager.%s.svc.cluster.local" .Release.Name $ns }}
+    - {{ $alertmanagerService }}
+    - {{ printf "%s.%s" $alertmanagerService $ns }}
+    - {{ printf "%s.%s.svc" $alertmanagerService $ns }}
+    - {{ printf "%s.%s.svc.cluster.local" $alertmanagerService $ns }}
   issuerRef:
     name: {{ $issuer | quote }}
     kind: ClusterIssuer

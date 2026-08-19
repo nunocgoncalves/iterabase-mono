@@ -29,6 +29,24 @@ type endpointSlice struct {
 	} `json:"endpoints"`
 }
 
+func TestUnitKubePrometheusStackComponentName(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		release, component, want string
+	}{
+		{"iterabase", "prometheus", "iterabase-kube-prometheus-prometheus"},
+		{"opo1", "prometheus", "opo1-kube-prometheus-stack-prometheus"},
+		{"opo1", "alertmanager", "opo1-kube-prometheus-stack-alertmanager"},
+	} {
+		t.Run(test.release+"-"+test.component, func(t *testing.T) {
+			t.Parallel()
+			if got := kubePrometheusStackComponentNameForRelease(test.release, test.component); got != test.want {
+				t.Fatalf("component name=%q want=%q", got, test.want)
+			}
+		})
+	}
+}
+
 func projectEndpointPodsJSON(fieldsJSON []byte) ([]byte, error) {
 	var fields []json.RawMessage
 	if err := json.Unmarshal(fieldsJSON, &fields); err != nil {

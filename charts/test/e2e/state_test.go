@@ -24,10 +24,30 @@ import (
 	"github.com/nunocgoncalves/iterabase-mono/testkit/e2e/redact"
 )
 
-const (
-	testNamespace = "iterabase-system"
-	testRelease   = "iterabase"
-)
+const testNamespace = "iterabase-system"
+
+var testRelease = func() string {
+	if configured := strings.TrimSpace(os.Getenv("ITERABASE_E2E_RELEASE")); configured != "" {
+		return configured
+	}
+	return "iterabase"
+}()
+
+func kubePrometheusStackComponentName(component string) string {
+	return kubePrometheusStackComponentNameForRelease(testRelease, component)
+}
+
+func kubePrometheusStackComponentNameForRelease(release, component string) string {
+	const chartName = "kube-prometheus-stack"
+	fullname := release
+	if !strings.Contains(release, chartName) {
+		fullname += "-" + chartName
+	}
+	if len(fullname) > 26 {
+		fullname = fullname[:26]
+	}
+	return strings.TrimSuffix(fullname, "-") + "-" + component
+}
 
 type chartState struct {
 	ctx                 context.Context

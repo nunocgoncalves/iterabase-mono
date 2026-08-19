@@ -6,6 +6,17 @@ release=${2:?usage: check-observability-tls.sh RENDERED_MANIFEST RELEASE NAMESPA
 namespace=${3:?usage: check-observability-tls.sh RENDERED_MANIFEST RELEASE NAMESPACE}
 [[ -f "$rendered" ]] || { echo "missing rendered manifest: $rendered" >&2; exit 1; }
 
+kube_prometheus_chart=kube-prometheus-stack
+if [[ "$release" == *"$kube_prometheus_chart"* ]]; then
+  kube_prometheus_fullname=$release
+else
+  kube_prometheus_fullname="$release-$kube_prometheus_chart"
+fi
+kube_prometheus_fullname=${kube_prometheus_fullname:0:26}
+kube_prometheus_fullname=${kube_prometheus_fullname%-}
+prometheus_service="$kube_prometheus_fullname-prometheus"
+alertmanager_service="$kube_prometheus_fullname-alertmanager"
+
 require() {
   grep -Fq -- "$1" "$rendered" || {
     echo "missing observability TLS render contract: $1" >&2
@@ -26,14 +37,14 @@ for monitor in \
   "$release-loki-internal-tls"; do
   require "name: $monitor"
 done
-require "serverName: \"$release-kube-prometheus-prometheus.$namespace.svc\""
-require "serverName: \"$release-kube-prometheus-alertmanager.$namespace.svc\""
+require "serverName: \"$prometheus_service.$namespace.svc\""
+require "serverName: \"$alertmanager_service.$namespace.svc\""
 require "serverName: \"$release-grafana.$namespace.svc\""
 require "serverName: \"$release-loki.$namespace.svc\""
 require "name: $release-prometheus-alertmanager-tls-config"
 require 'key: additional-alertmanager-configs.yaml'
-require "- \"$release-kube-prometheus-alertmanager.$namespace.svc:9093\""
-require "server_name: \"$release-kube-prometheus-alertmanager.$namespace.svc\""
+require "- \"$alertmanager_service.$namespace.svc:9093\""
+require "server_name: \"$alertmanager_service.$namespace.svc\""
 require 'ca_file: /etc/prometheus/secrets/observability-alertmanager-tls/ca.crt'
 require 'REQUESTS_CA_BUNDLE'
 require 'https://localhost:3000/api/admin/provisioning/datasources/reload'
@@ -50,5 +61,28 @@ reject "proxy_pass       http://$release-loki.$namespace.svc.cluster.local:3100"
 if [[ "$release/$namespace" != "iterabase/iterabase-system" ]]; then
   reject 'iterabase-kube-prometheus-alertmanager.iterabase-system.svc'
 fi
+
+monitor_schemes() {
+  yq eval "select(.kind == \"ServiceMonitor\" and .metadata.name == \"$1\") | .spec.endpoints[].scheme" "$rendered" \
+    | paste -sd, -
+}
+[[ "$(monitor_schemes "$release-prometheus-internal-tls")" == "https,https" ]] || {
+  echo "Prometheus TLS monitor does not verify both server and config-reloader" >&2
+  exit 1
+}
+[[ "$(monitor_schemes "$release-alertmanager-internal-tls")" == "https,https" ]] || {
+  echo "Alertmanager TLS monitor does not verify both server and config-reloader" >&2
+  exit 1
+}
+[[ "$(monitor_schemes "$release-grafana-internal-tls")" == "https" ]] || {
+  echo "Grafana TLS monitor is not verified HTTPS" >&2
+  exit 1
+}
+for stock_monitor in "$prometheus_service" "$alertmanager_service" "$release-grafana"; do
+  if [[ -n "$(yq eval "select(.kind == \"ServiceMonitor\" and .metadata.name == \"$stock_monitor\") | .metadata.name" "$rendered")" ]]; then
+    echo "duplicate upstream TLS-incompatible monitor remains: $stock_monitor" >&2
+    exit 1
+  fi
+done
 
 echo "OK: observability clients and self-monitors render verified internal-CA HTTPS identities for $release/$namespace"

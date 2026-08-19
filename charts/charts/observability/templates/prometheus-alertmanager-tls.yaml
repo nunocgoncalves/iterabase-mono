@@ -1,6 +1,6 @@
 {{- if .Values.enabled }}
 {{- if (dig "internalTLS" "enabled" false (.Values.global | default (dict))) }}
-{{- $alertmanagerService := printf "%s-kube-prometheus-alertmanager.%s.svc" .Release.Name .Release.Namespace }}
+{{- $alertmanagerService := printf "%s.%s.svc" (include "observability.alertmanagerServiceName" .) .Release.Namespace }}
 apiVersion: v1
 kind: Secret
 metadata:

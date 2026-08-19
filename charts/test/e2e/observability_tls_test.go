@@ -76,8 +76,8 @@ func assertVerifiedStackHTTPSStage(t *testing.T, state *chartState) {
 		serverName string
 		path       string
 	}{
-		{testRelease + "-kube-prometheus-prometheus", 9090, testRelease + "-kube-prometheus-prometheus." + testNamespace + ".svc", "/-/healthy"},
-		{testRelease + "-kube-prometheus-alertmanager", 9093, testRelease + "-kube-prometheus-alertmanager." + testNamespace + ".svc", "/-/healthy"},
+		{kubePrometheusStackComponentName("prometheus"), 9090, kubePrometheusStackComponentName("prometheus") + "." + testNamespace + ".svc", "/-/healthy"},
+		{kubePrometheusStackComponentName("alertmanager"), 9093, kubePrometheusStackComponentName("alertmanager") + "." + testNamespace + ".svc", "/-/healthy"},
 		{testRelease + "-grafana", 80, testRelease + "-grafana." + testNamespace + ".svc", "/api/health"},
 		{testRelease + "-loki", 3100, testRelease + "-loki." + testNamespace + ".svc", "/ready"},
 	}
@@ -103,8 +103,9 @@ func assertTLSExporterPathsStage(t *testing.T, state *chartState) {
 func assertTLSExporterPaths(t *testing.T, state *chartState, includeHarness, includeToolRunner bool) {
 	t.Helper()
 	ca := decodeSecretValue(t, state, testRelease+"-internal-ca-root", "ca.crt")
-	forward := state.forward(t, "svc/"+testRelease+"-kube-prometheus-prometheus", 9090, "https")
-	client := verifiedClient(t, ca, testRelease+"-kube-prometheus-prometheus."+testNamespace+".svc")
+	prometheusService := kubePrometheusStackComponentName("prometheus")
+	forward := state.forward(t, "svc/"+prometheusService, 9090, "https")
+	client := verifiedClient(t, ca, prometheusService+"."+testNamespace+".svc")
 	for _, metric := range []string{"pg_up", "redis_up"} {
 		if err := waitPrometheusValue(state.ctx, client, forward.URL, metric, "1", 5*time.Minute); err != nil {
 			t.Fatalf("%s did not become 1 over verified Prometheus HTTPS: %v", metric, err)
@@ -117,8 +118,9 @@ func assertTLSExporterPaths(t *testing.T, state *chartState, includeHarness, inc
 func assertVerifiedSelfMonitorsStage(t *testing.T, state *chartState) {
 	t.Helper()
 	ca := decodeSecretValue(t, state, testRelease+"-internal-ca-root", "ca.crt")
-	forward := state.forward(t, "svc/"+testRelease+"-kube-prometheus-prometheus", 9090, "https")
-	client := verifiedClient(t, ca, testRelease+"-kube-prometheus-prometheus."+testNamespace+".svc")
+	prometheusService := kubePrometheusStackComponentName("prometheus")
+	forward := state.forward(t, "svc/"+prometheusService, 9090, "https")
+	client := verifiedClient(t, ca, prometheusService+"."+testNamespace+".svc")
 	var last []byte
 	err := poll.Until(state.ctx, 5*time.Minute, 5*time.Second, func(context.Context) (bool, string, error) {
 		req, requestErr := http.NewRequestWithContext(state.ctx, http.MethodGet, forward.URL+"/api/v1/targets?state=active", nil)
@@ -280,8 +282,9 @@ spec:
 `
 	state.kubectl(t, 30*time.Second, "apply", "-f", state.writeManifest(t, "tls-alert.yaml", manifest))
 	ca := decodeSecretValue(t, state, testRelease+"-internal-ca-root", "ca.crt")
-	forward := state.forward(t, "svc/"+testRelease+"-kube-prometheus-alertmanager", 9093, "https")
-	client := verifiedClient(t, ca, testRelease+"-kube-prometheus-alertmanager."+testNamespace+".svc")
+	alertmanagerService := kubePrometheusStackComponentName("alertmanager")
+	forward := state.forward(t, "svc/"+alertmanagerService, 9093, "https")
+	client := verifiedClient(t, ca, alertmanagerService+"."+testNamespace+".svc")
 	err := poll.Until(state.ctx, 5*time.Minute, 5*time.Second, func(context.Context) (bool, string, error) {
 		resp, requestErr := client.Get(forward.URL + "/api/v2/alerts")
 		if requestErr != nil {
