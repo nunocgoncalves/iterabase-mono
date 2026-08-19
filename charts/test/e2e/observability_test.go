@@ -273,7 +273,7 @@ func assertEndpointSeparationStage(t *testing.T, state *chartState) {
 
 func assertMonitorDiscoveryStage(t *testing.T, state *chartState) {
 	t.Helper()
-	forward := state.forward(t, "svc/"+testRelease+"-kube-prometheus-prometheus", 9090, "http")
+	forward := state.forward(t, "svc/"+kubePrometheusStackComponentName("prometheus"), 9090, "http")
 	client, err := httpx.Client(15 * time.Second)
 	if err != nil {
 		t.Fatal(err)
@@ -313,7 +313,8 @@ func assertPrometheusPersistenceStage(t *testing.T, state *chartState) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	forward := state.forward(t, "svc/"+testRelease+"-kube-prometheus-prometheus", 9090, "http")
+	prometheusService := kubePrometheusStackComponentName("prometheus")
+	forward := state.forward(t, "svc/"+prometheusService, 9090, "http")
 	timestamp, value, err := prometheusInstantSample(client, forward.URL, `up{job="postgresql"}`)
 	if err != nil || value != "1" {
 		t.Fatalf("capture pre-restart PostgreSQL sample: timestamp=%v value=%q err=%v", timestamp, value, err)
@@ -326,7 +327,7 @@ func assertPrometheusPersistenceStage(t *testing.T, state *chartState) {
 	pod := state.firstPod(t, "app.kubernetes.io/name=prometheus")
 	state.kubectl(t, 2*time.Minute, "delete", "pod", pod, "-n", testNamespace, "--wait=true")
 	state.waitForPods(t, "app.kubernetes.io/name=prometheus", 6*time.Minute)
-	forward = state.forward(t, "svc/"+testRelease+"-kube-prometheus-prometheus", 9090, "http")
+	forward = state.forward(t, "svc/"+prometheusService, 9090, "http")
 	query := url.Values{
 		"query": {`up{job="postgresql"}`},
 		"start": {strconv.FormatFloat(timestamp-30, 'f', 3, 64)},

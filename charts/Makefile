@@ -9,7 +9,10 @@ RENDER_CP := /tmp/$(CONTROLPLANE).rendered.yaml
 RENDER_TLS := /tmp/$(UMBRELLA).tls.rendered.yaml
 RENDER_OBS := /tmp/$(UMBRELLA).observability.rendered.yaml
 RENDER_OBS_TLS := /tmp/$(UMBRELLA).observability-tls.rendered.yaml
-TLS_TEST_RELEASE := portable
+# Use OPO1's short release name so static TLS checks exercise the upstream
+# kube-prometheus-stack fullname path that differs from the historical
+# `iterabase` E2E release name.
+TLS_TEST_RELEASE := opo1
 TLS_TEST_NAMESPACE := portable-system
 E2E_SOURCE_SHA ?= $(shell git rev-parse HEAD)
 E2E_SOURCE_DIRTY ?= $(if $(shell git status --porcelain),true,false)
@@ -57,10 +60,10 @@ test-e2e-reapply-rollback: $(E2E_BUILD_DEPS)
 	cd test/e2e && $(E2E_ENV) go test -v -race -count=1 -timeout 45m -run '^TestE2E$$/^reapply-rollback-recovery$$' .
 
 test-e2e-observability: $(E2E_BUILD_DEPS)
-	cd test/e2e && $(E2E_ENV) go test -v -race -count=1 -timeout 40m -run '^TestE2E$$/^observability$$' .
+	cd test/e2e && ITERABASE_E2E_RELEASE=opo1 $(E2E_ENV) go test -v -race -count=1 -timeout 40m -run '^TestE2E$$/^observability$$' .
 
 test-e2e-observability-tls: $(E2E_BUILD_DEPS)
-	cd test/e2e && $(E2E_ENV) go test -v -race -count=1 -timeout 45m -run '^TestE2E$$/^observability-tls$$' .
+	cd test/e2e && ITERABASE_E2E_RELEASE=opo1 $(E2E_ENV) go test -v -race -count=1 -timeout 45m -run '^TestE2E$$/^observability-tls$$' .
 
 test-e2e-internal-tls: $(E2E_BUILD_DEPS)
 	cd test/e2e && $(E2E_ENV) go test -v -race -count=1 -timeout 30m -run '^TestE2E$$/^internal-tls$$' .

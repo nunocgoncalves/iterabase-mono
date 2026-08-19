@@ -24,9 +24,9 @@ reloader:
 observability:
   kube-prometheus-stack:
     prometheus:
-      # The observability chart renders a mixed-protocol self-monitor: the
-      # Prometheus endpoint is verified HTTPS while config-reloader remains on
-      # its native HTTP port. Disable the upstream all-one-scheme monitor.
+      # The observability chart renders verified-HTTPS endpoints for both the
+      # Prometheus server and config-reloader. Disable the upstream monitor,
+      # which otherwise emits duplicate targets without the generated CA.
       serviceMonitor:
         selfMonitor: false
       prometheusSpec:
@@ -50,9 +50,8 @@ observability:
               name: observability-prometheus-tls
               key: tls.key
     alertmanager:
-      # As with Prometheus, the chart-owned monitor keeps the HTTPS server and
-      # HTTP config-reloader endpoints explicit rather than assigning one scheme
-      # to both ports.
+      # As with Prometheus, the chart-owned monitor verifies both HTTPS server
+      # and config-reloader endpoints against the generated internal CA.
       serviceMonitor:
         selfMonitor: false
       alertmanagerSpec:

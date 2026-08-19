@@ -40,12 +40,32 @@ stack-component leaf certs' SANs cover these Service DNS names).
 {{- if (dig "internalTLS" "enabled" false (.Values.global | default (dict))) }}https{{- else -}}http{{- end -}}
 {{- end -}}
 
+{{/*
+Resolve kube-prometheus-stack's actual release-scoped fullname with the
+upstream helper. That helper truncates its base to 26 characters, so simply
+concatenating `<release>-kube-prometheus` only works for particular release
+name lengths (and failed for the short OPO1 release name).
+*/}}
+{{- define "observability.kubePrometheusStackFullname" -}}
+{{- $chart := dict "Name" "kube-prometheus-stack" -}}
+{{- $context := dict "Chart" $chart "Release" .Release "Values" (index .Values "kube-prometheus-stack") -}}
+{{- include "kube-prometheus-stack.fullname" $context -}}
+{{- end -}}
+
+{{- define "observability.prometheusServiceName" -}}
+{{- printf "%s-prometheus" (include "observability.kubePrometheusStackFullname" .) -}}
+{{- end -}}
+
+{{- define "observability.alertmanagerServiceName" -}}
+{{- printf "%s-alertmanager" (include "observability.kubePrometheusStackFullname" .) -}}
+{{- end -}}
+
 {{- define "observability.prometheusURL" -}}
-{{- printf "%s://%s-kube-prometheus-prometheus.%s.svc:9090" (include "observability.urlScheme" .) .Release.Name .Release.Namespace -}}
+{{- printf "%s://%s.%s.svc:9090" (include "observability.urlScheme" .) (include "observability.prometheusServiceName" .) .Release.Namespace -}}
 {{- end -}}
 
 {{- define "observability.alertmanagerURL" -}}
-{{- printf "%s://%s-kube-prometheus-alertmanager.%s.svc:9093" (include "observability.urlScheme" .) .Release.Name .Release.Namespace -}}
+{{- printf "%s://%s.%s.svc:9093" (include "observability.urlScheme" .) (include "observability.alertmanagerServiceName" .) .Release.Namespace -}}
 {{- end -}}
 
 {{- define "observability.lokiURL" -}}

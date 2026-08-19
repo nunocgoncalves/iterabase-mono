@@ -2,8 +2,8 @@ apiVersion: v2
 name: iterabase-platform
 description: Iterabase platform umbrella chart — inference-gateway + control-plane + Postgres/Redis/MinIO + ingress-nginx + external-dns + observability.
 type: application
-version: 0.3.12
-appVersion: "0.3.12"
+version: 0.3.13
+appVersion: "0.3.13"
 dependencies:
   - name: redis
     version: 0.2.4
@@ -58,6 +58,6 @@ dependencies:
   # metrics.enabled to wire its ServiceMonitor(s) / exporter (see
   # values-observability.yaml).
   - name: observability
-    version: 0.1.1
+    version: 0.1.2
     repository: file://../observability
     condition: observability.enabled
