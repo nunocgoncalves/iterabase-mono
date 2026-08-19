@@ -299,7 +299,7 @@ resources first can fail during REST mapping before any chart hook executes.
 
 The chart-owned `test/e2e/transition-baselines.json` currently declares platform
 and substrate `0.3.12` as the checksum-pinned supported predecessor for current
-`0.3.16`. The supported inverse boundary is current → that declared predecessor
+`0.3.17`. The supported inverse boundary is current → that declared predecessor
 within the post-0.3 companion-ownership model, followed by a current forward
 recovery. Roll back the platform release before the companion substrate. CRDs,
 generated Secrets, and PVCs are retained. The separate pre-0.3 ownership
