@@ -208,7 +208,7 @@ class ReleaseContractTests(unittest.TestCase):
             [
                 ("control-plane", "0.0.30", "control-plane-v0.0.30"),
                 ("forge", "0.8.4", "forge-v0.8.4"),
-                ("control-plane-chart", "0.4.11", "control-plane-0.4.11"),
+                ("control-plane-chart", "0.4.12", "control-plane-0.4.12"),
             ],
         )
         self.assertEqual(
@@ -231,13 +231,13 @@ class ReleaseContractTests(unittest.TestCase):
 
     def test_chart_version_and_dependencies_come_from_chart_source(self) -> None:
         plan = self.plan("iterabase-platform-chart")
-        self.assertEqual(plan["releases"][0]["version"], "0.3.15")
+        self.assertEqual(plan["releases"][0]["version"], "0.3.16")
         self.assertEqual(plan["chart_matrix"][0]["companions"], ["cert-manager-substrate"])
         dependencies = {
             item["name"]: item["version"]
             for item in plan["tested_with"]["selected_chart_dependencies"][0]["dependencies"]
         }
-        self.assertEqual(dependencies["control-plane"], "0.4.11")
+        self.assertEqual(dependencies["control-plane"], "0.4.12")
         self.assertEqual(dependencies["inference-gateway"], "0.2.12")
         self.assertEqual(dependencies["ingress-nginx"], "4.15.1")
         self.assertEqual(dependencies["internal-ingress-nginx"], "4.15.1")
@@ -478,8 +478,8 @@ class ReleaseContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             assets = Path(directory) / "charts"
             assets.mkdir(parents=True)
-            (assets / "iterabase-platform-0.3.15.tgz").write_bytes(b"platform")
-            (assets / "cert-manager-substrate-0.3.15.tgz").write_bytes(b"substrate")
+            (assets / "iterabase-platform-0.3.16.tgz").write_bytes(b"platform")
+            (assets / "cert-manager-substrate-0.3.16.tgz").write_bytes(b"substrate")
             (assets / "checksums-iterabase-platform.txt").write_text(
                 "fixture\n", encoding="utf-8"
             )
@@ -492,9 +492,9 @@ class ReleaseContractTests(unittest.TestCase):
             assets = root / "assets" / "charts"
             assets.mkdir(parents=True)
             for chart, version in (
-                ("control-plane", "0.4.11"),
-                ("iterabase-platform", "0.3.15"),
-                ("cert-manager-substrate", "0.3.15"),
+                ("control-plane", "0.4.12"),
+                ("iterabase-platform", "0.3.16"),
+                ("cert-manager-substrate", "0.3.16"),
             ):
                 (assets / f"{chart}-{version}.tgz").write_bytes(chart.encode())
             for chart in ("control-plane", "iterabase-platform"):
@@ -772,11 +772,11 @@ class ReleaseContractTests(unittest.TestCase):
         result, commands = self.check_availability(self.plan("iterabase-platform-chart"))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(
-            "helm show chart oci://ghcr.io/nunocgoncalves/iterabase-charts/iterabase-platform --version 0.3.15",
+            "helm show chart oci://ghcr.io/nunocgoncalves/iterabase-charts/iterabase-platform --version 0.3.16",
             commands,
         )
         self.assertIn(
-            "helm show chart oci://ghcr.io/nunocgoncalves/iterabase-charts/cert-manager-substrate --version 0.3.15",
+            "helm show chart oci://ghcr.io/nunocgoncalves/iterabase-charts/cert-manager-substrate --version 0.3.16",
             commands,
         )
 
@@ -912,15 +912,15 @@ class ReleaseContractTests(unittest.TestCase):
             assets = Path(directory) / "charts"
             assets.mkdir(parents=True)
             for chart, version in (
-                ("control-plane", "0.4.11"),
-                ("iterabase-platform", "0.3.15"),
-                ("cert-manager-substrate", "0.3.15"),
+                ("control-plane", "0.4.12"),
+                ("iterabase-platform", "0.3.16"),
+                ("cert-manager-substrate", "0.3.16"),
             ):
                 (assets / f"{chart}-{version}.tgz").write_bytes(chart.encode())
             for chart in ("control-plane", "iterabase-platform"):
                 (assets / f"checksums-{chart}.txt").write_text("fixture\n", encoding="utf-8")
             release.validate_candidate_assets(plan, Path(directory))
-            (assets / "control-plane-0.4.11.tgz").unlink()
+            (assets / "control-plane-0.4.12.tgz").unlink()
             with self.assertRaisesRegex(release.ReleaseError, "control-plane"):
                 release.validate_candidate_assets(plan, Path(directory))
 

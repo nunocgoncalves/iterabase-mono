@@ -129,6 +129,43 @@ on an untrusted LAN, and do not place these routes on the public `nginx` class.
 The complete documentation-address fixture is rendered and validated by
 `make check-internal-observability`.
 
+### Private control-plane ingress
+
+The control-plane Ingress owns one same-origin host for the Dashboard, static
+assets, authentication, and every `/v1/*` API. Selecting a private class makes
+that complete host private; it does not leave a separate public API route.
+Deployments choose the exposure boundary. For a VPN-only host on the private
+plane above:
+
+```yaml
+control-plane:
+  ingress:
+    enabled: true
+    className: nginx-internal
+    host: app.private.example.com
+    tls:
+      enabled: true
+      clusterIssuer: letsencrypt-prod
+    externalDns:
+      enabled: true
+      target: 10.0.20.200
+      cloudflareProxied: "false"
+```
+
+The chart derives a dedicated edge Secret named
+`<release>-control-plane-api-ingress-tls`; it never reuses the internal API leaf
+`<release>-control-plane-api-tls`. When `global.internalTLS.enabled=true`, the
+Ingress also verifies the API backend automatically against
+`<release>-internal-ca-root` and the exact
+`<release>-control-plane-api.<namespace>.svc` identity. An explicit edge Secret
+that collides with the internal leaf fails rendering.
+
+Upgrading from control-plane chart `0.4.11` or earlier changes the default edge
+Secret name. cert-manager issues the new edge leaf before ingress-nginx can
+serve the hostname; retain the old Secret until the new Certificate is Ready
+and the route passes trusted TLS validation. The fixture and negative collision
+checks run through `make check-private-control-plane`.
+
 MetalLB configuration CRs remain post-install/post-upgrade hooks so a fresh
 umbrella install can establish the operator CRDs first. If an additional pool
 is removed from values or the platform is rolled back to a version without it,
@@ -205,7 +242,7 @@ resources first can fail during REST mapping before any chart hook executes.
 
 The chart-owned `test/e2e/transition-baselines.json` currently declares platform
 and substrate `0.3.12` as the checksum-pinned supported predecessor for current
-`0.3.15`. The supported inverse boundary is current → that declared predecessor
+`0.3.16`. The supported inverse boundary is current → that declared predecessor
 within the post-0.3 companion-ownership model, followed by a current forward
 recovery. Roll back the platform release before the companion substrate. CRDs,
 generated Secrets, and PVCs are retained. The separate pre-0.3 ownership
