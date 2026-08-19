@@ -16,6 +16,7 @@ spec:
   interfaces:
     {{- toYaml . | nindent 4 }}
   {{- end }}
+{{- end }}
 {{- range $pool := .Values.additionalPools }}
 ---
 apiVersion: metallb.io/v1beta1
@@ -35,6 +36,5 @@ spec:
   interfaces:
     {{- toYaml . | nindent 4 }}
   {{- end }}
-{{- end }}
 {{- end }}
 {{- end }}

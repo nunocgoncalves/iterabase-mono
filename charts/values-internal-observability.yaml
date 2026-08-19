@@ -52,10 +52,11 @@ external-dns:
   domainFilters:
     - example.com.
 
-# The private network/VPN is the authorization boundary for the direct
-# Prometheus, Alertmanager, and Loki APIs. Grafana retains its normal login.
-# Each edge certificate is publicly trusted but its non-proxied A record points
-# at the private LoadBalancer address.
+# This fixture exercises one customer/deployment policy: the trusted private
+# network/VPN is the authorization boundary for the direct Prometheus,
+# Alertmanager, and Loki APIs, while Grafana retains its normal login. Customer
+# overlays own that policy. Each edge certificate is publicly trusted but its
+# non-proxied A record points at the private LoadBalancer address.
 observability:
   kube-prometheus-stack:
     grafana:
