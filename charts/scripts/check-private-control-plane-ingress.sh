@@ -111,6 +111,9 @@ assert api_annotations["external-dns.alpha.kubernetes.io/target"] == "10.0.20.20
 assert api_annotations["external-dns.alpha.kubernetes.io/cloudflare-proxied"] == "false"
 assert api_annotations["nginx.ingress.kubernetes.io/backend-protocol"] == "HTTPS"
 assert api_annotations["nginx.ingress.kubernetes.io/proxy-ssl-secret"] == (
+    f"{namespace}/{internal_secret}"
+)
+assert api_annotations["nginx.ingress.kubernetes.io/proxy-ssl-secret"] != (
     f"{namespace}/{release}-internal-ca-root"
 )
 assert api_annotations["nginx.ingress.kubernetes.io/proxy-ssl-verify"] == "on"
@@ -121,8 +124,11 @@ assert api_annotations["nginx.ingress.kubernetes.io/proxy-ssl-name"] == (
 
 api_certificate = object_("Certificate", internal_secret)
 assert api_certificate["spec"]["secretName"] == internal_secret
+assert not api_certificate["spec"].get("isCA", False)
 assert f"{api_name}.{namespace}.svc" in api_certificate["spec"]["dnsNames"]
 assert "app.private.example.com" not in api_certificate["spec"]["dnsNames"]
+root_certificate = object_("Certificate", f"{release}-internal-ca-root")
+assert root_certificate["spec"]["isCA"] is True
 
 # The public inference API remains on the public controller; the private
 # control-plane route cannot be loaded by that class.
