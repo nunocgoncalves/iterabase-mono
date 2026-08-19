@@ -19,4 +19,22 @@ spec:
   autoAssign: {{ .Values.autoAssign }}
   avoidBuggyIPs: {{ .Values.avoidBuggyIPs }}
 {{- end }}
+{{- range $pool := .Values.additionalPools }}
+---
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: {{ include "metallb-config.additionalPoolName" (dict "root" $ "pool" $pool) }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "10"
+  labels:
+    {{- include "metallb-config.labels" $ | nindent 4 }}
+    iterabase.com/metallb-pool: {{ required "metallb-config.additionalPools[].name is required" $pool.name | quote }}
+spec:
+  addresses:
+    {{- required (printf "metallb-config.additionalPools[%s].addresses is required" (required "metallb-config.additionalPools[].name is required" $pool.name)) $pool.addresses | toYaml | nindent 4 }}
+  autoAssign: {{ $pool.autoAssign | default false }}
+  avoidBuggyIPs: {{ $pool.avoidBuggyIPs | default false }}
+{{- end }}
 {{- end }}

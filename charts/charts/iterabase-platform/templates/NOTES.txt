@@ -6,6 +6,7 @@ Components:
   redis:             {{ .Values.redis.enabled }}
   minio:             {{ .Values.minio.enabled }}
   ingress-nginx:     {{ (index .Values "ingress-nginx").enabled }}
+  internal-ingress:  {{ (index .Values "internal-ingress-nginx").enabled }}
   cert-manager:      prerequisite release {{ .Release.Name }}-cert-manager
   cert-issuers:      {{ (index .Values "cert-issuers").enabled }}
   external-dns:      {{ (index .Values "external-dns").enabled }} (edge DNS → Cloudflare; annotates the gateway Ingress host)

@@ -111,6 +111,40 @@ ingress-nginx:
       serviceMonitor:
         enabled: false # flip on with observability (needs the Prometheus Operator CRDs)
 
+# --- Private ingress controller (opt-in) ---
+# A second, class-isolated ingress plane for operator-only endpoints reachable
+# through a private network/VPN. Its distinct controllerValue prevents these
+# routes from being served by the public `nginx` controller above. Bare-metal
+# overlays pair its IPv4 LoadBalancer Service with a non-auto-assigned named
+# MetalLB pool (metallb-config.additionalPools) and select that pool through a
+# Service annotation. Disabled by default: no private trust boundary or address
+# allocation can be assumed by the reusable chart.
+internal-ingress-nginx:
+  enabled: false
+  controller:
+    kind: Deployment
+    hostNetwork: false
+    electionID: ingress-nginx-internal-leader
+    ingressClass: nginx-internal
+    ingressClassResource:
+      enabled: true
+      default: false
+      name: nginx-internal
+      controllerValue: k8s.io/ingress-nginx-internal
+    watchIngressWithoutClass: false
+    service:
+      enabled: true
+      type: LoadBalancer
+      ipFamilyPolicy: SingleStack
+      ipFamilies:
+        - IPv4
+    hostPort:
+      enabled: false
+    metrics:
+      enabled: false
+      serviceMonitor:
+        enabled: false
+
 # --- MetalLB (LoadBalancer implementation for bare-metal/kind/OPO1) ---
 # The edge's LoadBalancer Service needs an LB implementation. On cloud, the cloud
 # LB provisions it (leave metallb disabled + set provider annotations on
@@ -134,9 +168,19 @@ metallb:
 
 metallb-config:
   enabled: false
-  # addresses: set in the overlay (kind preset / OPO1). CIDR or range; family
-  # must match ingress-nginx.controller.service.ipFamilies.
+  # addresses: the backward-compatible primary edge pool set by kind / prod
+  # overlays. CIDR or range; family must match the public ingress Service.
   addresses: []
+  # Additional named pools support class-isolated private ingress planes. Keep
+  # private pools autoAssign=false and bind their LoadBalancer Service to the
+  # generated `<release>-<name>` pool explicitly. Restrict `interfaces` when a
+  # node has physically distinct public and private VLAN interfaces.
+  additionalPools: []
+  # - name: internal
+  #   addresses: ["10.0.20.200-10.0.20.215"]
+  #   autoAssign: false
+  #   avoidBuggyIPs: false
+  #   interfaces: [eth0]
 
 # cert-manager and its CSI driver are cluster substrate. Install the companion
 # cert-manager-substrate release and wait for its webhook before this chart.
