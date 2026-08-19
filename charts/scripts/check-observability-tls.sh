@@ -62,6 +62,17 @@ if [[ "$release/$namespace" != "iterabase/iterabase-system" ]]; then
   reject 'iterabase-kube-prometheus-alertmanager.iterabase-system.svc'
 fi
 
+service_port_app_protocols() {
+  yq eval "select(.kind == \"Service\" and .metadata.name == \"$1\") | .spec.ports[] | select(.name == \"$2\") | .appProtocol" "$rendered" \
+    | paste -sd, -
+}
+for service in "$prometheus_service" "$alertmanager_service"; do
+  [[ "$(service_port_app_protocols "$service" reloader-web)" == "https" ]] || {
+    echo "$service config-reloader Service port does not advertise HTTPS" >&2
+    exit 1
+  }
+done
+
 monitor_schemes() {
   yq eval "select(.kind == \"ServiceMonitor\" and .metadata.name == \"$1\") | .spec.endpoints[].scheme" "$rendered" \
     | paste -sd, -

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"slices"
 	"sort"
@@ -190,48 +191,104 @@ func assertHistoricalPrometheusSample(body []byte, intervalEnd float64, want str
 	return fmt.Errorf("no value=%s sample at or before bounded interval end %.3f", want, intervalEnd)
 }
 
-func assertDiscoveredTargets(body []byte, names []string, requireHTTPS bool) error {
+type prometheusTarget struct {
+	ScrapePool string            `json:"scrapePool"`
+	ScrapeURL  string            `json:"scrapeUrl"`
+	Health     string            `json:"health"`
+	Labels     map[string]string `json:"labels"`
+}
+
+type serviceMonitorEndpointExpectation struct {
+	index int
+	name  string
+	port  string
+}
+
+func activePrometheusTargets(body []byte) ([]prometheusTarget, error) {
 	var payload struct {
 		Status string `json:"status"`
 		Data   struct {
-			Active []struct {
-				ScrapePool string            `json:"scrapePool"`
-				ScrapeURL  string            `json:"scrapeUrl"`
-				Health     string            `json:"health"`
-				Labels     map[string]string `json:"labels"`
-			} `json:"activeTargets"`
+			Active []prometheusTarget `json:"activeTargets"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil {
-		return fmt.Errorf("decode Prometheus targets: %w", err)
+		return nil, fmt.Errorf("decode Prometheus targets: %w", err)
 	}
 	if payload.Status != "success" {
-		return fmt.Errorf("targets status=%q", payload.Status)
+		return nil, fmt.Errorf("targets status=%q", payload.Status)
+	}
+	return payload.Data.Active, nil
+}
+
+func assertDiscoveredTargets(body []byte, names []string, requireHTTPS bool) error {
+	targets, err := activePrometheusTargets(body)
+	if err != nil {
+		return err
 	}
 	for _, name := range names {
 		matched := false
-		verified := false
-		for _, target := range payload.Data.Active {
+		for _, target := range targets {
 			identity := target.ScrapePool + " " + target.ScrapeURL + " " + target.Labels["job"] + " " + target.Labels["service"]
 			if !strings.Contains(identity, name) {
 				continue
 			}
 			matched = true
 			if requireHTTPS && !strings.HasPrefix(target.ScrapeURL, "https://") {
-				// Prometheus and Alertmanager expose an independent plaintext
-				// config-reloader metrics port in the same ServiceMonitor.
-				continue
+				return fmt.Errorf("target %s is not verified HTTPS (%s)", name, identity)
 			}
 			if target.Health != "up" {
 				return fmt.Errorf("target %s health=%s (%s)", name, target.Health, identity)
 			}
-			verified = true
 		}
 		if !matched {
 			return fmt.Errorf("no active target matched %q", name)
 		}
-		if requireHTTPS && !verified {
-			return fmt.Errorf("no verified HTTPS target matched %q", name)
+	}
+	return nil
+}
+
+func assertServiceMonitorTargets(body []byte, namespace, monitor string, expected []serviceMonitorEndpointExpectation) error {
+	targets, err := activePrometheusTargets(body)
+	if err != nil {
+		return err
+	}
+	prefix := fmt.Sprintf("serviceMonitor/%s/%s/", namespace, monitor)
+	matching := make([]prometheusTarget, 0, len(expected))
+	for _, target := range targets {
+		if strings.HasPrefix(target.ScrapePool, prefix) {
+			matching = append(matching, target)
+		}
+	}
+	if len(matching) != len(expected) {
+		return fmt.Errorf("ServiceMonitor %s has %d active targets, want exactly %d", monitor, len(matching), len(expected))
+	}
+	for _, endpoint := range expected {
+		pool := fmt.Sprintf("%s%d", prefix, endpoint.index)
+		matches := 0
+		for _, target := range matching {
+			if target.ScrapePool != pool {
+				continue
+			}
+			matches++
+			if target.Labels["endpoint"] != endpoint.name {
+				return fmt.Errorf("ServiceMonitor %s endpoint %d label=%q, want %q", monitor, endpoint.index, target.Labels["endpoint"], endpoint.name)
+			}
+			scrapeURL, parseErr := url.Parse(target.ScrapeURL)
+			if parseErr != nil {
+				return fmt.Errorf("ServiceMonitor %s endpoint %d scrape URL: %w", monitor, endpoint.index, parseErr)
+			}
+			if scrapeURL.Scheme != "https" {
+				return fmt.Errorf("ServiceMonitor %s endpoint %d scheme=%q, want https", monitor, endpoint.index, scrapeURL.Scheme)
+			}
+			if scrapeURL.Port() != endpoint.port {
+				return fmt.Errorf("ServiceMonitor %s endpoint %d port=%q, want %q", monitor, endpoint.index, scrapeURL.Port(), endpoint.port)
+			}
+			if target.Health != "up" {
+				return fmt.Errorf("ServiceMonitor %s endpoint %d health=%s", monitor, endpoint.index, target.Health)
+			}
+		}
+		if matches != 1 {
+			return fmt.Errorf("ServiceMonitor %s endpoint %d has %d active targets, want exactly 1", monitor, endpoint.index, matches)
 		}
 	}
 	return nil
@@ -357,6 +414,27 @@ func TestUnitPrometheusObservationErrorsFailImmediately(t *testing.T) {
 
 	if _, _, err := observePrometheusValue(server.Client(), server.URL, "redis_up", "1"); err == nil {
 		t.Fatal("malformed Prometheus response was treated as pending readiness")
+	}
+}
+
+func TestUnitServiceMonitorTargetsRequireEveryVerifiedEndpoint(t *testing.T) {
+	expected := []serviceMonitorEndpointExpectation{
+		{index: 0, name: "http-web", port: "9090"},
+		{index: 1, name: "reloader-web", port: "8080"},
+	}
+	valid := []byte(`{"status":"success","data":{"activeTargets":[{"scrapePool":"serviceMonitor/ns/prometheus-internal-tls/0","scrapeUrl":"https://prometheus:9090/metrics","health":"up","labels":{"endpoint":"http-web"}},{"scrapePool":"serviceMonitor/ns/prometheus-internal-tls/1","scrapeUrl":"https://prometheus:8080/metrics","health":"up","labels":{"endpoint":"reloader-web"}}]}}`)
+	if err := assertServiceMonitorTargets(valid, "ns", "prometheus-internal-tls", expected); err != nil {
+		t.Fatalf("valid endpoints rejected: %v", err)
+	}
+	for name, body := range map[string][]byte{
+		"missing-reloader":   []byte(`{"status":"success","data":{"activeTargets":[{"scrapePool":"serviceMonitor/ns/prometheus-internal-tls/0","scrapeUrl":"https://prometheus:9090/metrics","health":"up","labels":{"endpoint":"http-web"}}]}}`),
+		"plaintext-reloader": []byte(`{"status":"success","data":{"activeTargets":[{"scrapePool":"serviceMonitor/ns/prometheus-internal-tls/0","scrapeUrl":"https://prometheus:9090/metrics","health":"up","labels":{"endpoint":"http-web"}},{"scrapePool":"serviceMonitor/ns/prometheus-internal-tls/1","scrapeUrl":"http://prometheus:8080/metrics","health":"up","labels":{"endpoint":"reloader-web"}}]}}`),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := assertServiceMonitorTargets(body, "ns", "prometheus-internal-tls", expected); err == nil {
+				t.Fatal("incomplete or plaintext monitor targets incorrectly passed")
+			}
+		})
 	}
 }
 

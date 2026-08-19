@@ -52,6 +52,28 @@ name lengths (and failed for the short OPO1 release name).
 {{- include "kube-prometheus-stack.fullname" $context -}}
 {{- end -}}
 
+{{- define "observability.kubePrometheusStackName" -}}
+{{- default "kube-prometheus-stack" (index .Values "kube-prometheus-stack" "nameOverride") | trunc 50 | trimSuffix "-" -}}
+{{- end -}}
+
+{{- define "observability.prometheusCRName" -}}
+{{- $fullname := include "observability.kubePrometheusStackFullname" . -}}
+{{- if (index .Values "kube-prometheus-stack" "cleanPrometheusOperatorObjectNames") -}}
+{{- $fullname -}}
+{{- else -}}
+{{- printf "%s-prometheus" $fullname -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "observability.alertmanagerCRName" -}}
+{{- $fullname := include "observability.kubePrometheusStackFullname" . -}}
+{{- if (index .Values "kube-prometheus-stack" "cleanPrometheusOperatorObjectNames") -}}
+{{- $fullname -}}
+{{- else -}}
+{{- printf "%s-alertmanager" $fullname -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "observability.prometheusServiceName" -}}
 {{- printf "%s-prometheus" (include "observability.kubePrometheusStackFullname" .) -}}
 {{- end -}}
