@@ -5,6 +5,8 @@
 {{- $issuer := .Values.tls.issuerName | default "internal-ca" }}
 {{- $prometheusService := include "observability.prometheusServiceName" . }}
 {{- $alertmanagerService := include "observability.alertmanagerServiceName" . }}
+{{- $prometheusReloaderService := include "observability.prometheusReloaderServiceName" . }}
+{{- $alertmanagerReloaderService := include "observability.alertmanagerReloaderServiceName" . }}
 # Stack-component leaf certs (internal TLS). Issued by the internal CA
 # ClusterIssuer (cert-issuers, pre-install) when global.internalTLS is on, so
 # Prometheus/Grafana/Loki/Alertmanager serve HTTPS and the Grafana datasources
@@ -30,6 +32,10 @@ spec:
     - {{ printf "%s.%s" $prometheusService $ns }}
     - {{ printf "%s.%s.svc" $prometheusService $ns }}
     - {{ printf "%s.%s.svc.cluster.local" $prometheusService $ns }}
+    - {{ $prometheusReloaderService }}
+    - {{ printf "%s.%s" $prometheusReloaderService $ns }}
+    - {{ printf "%s.%s.svc" $prometheusReloaderService $ns }}
+    - {{ printf "%s.%s.svc.cluster.local" $prometheusReloaderService $ns }}
   issuerRef:
     name: {{ $issuer | quote }}
     kind: ClusterIssuer
@@ -49,6 +55,10 @@ spec:
     - {{ printf "%s.%s" $alertmanagerService $ns }}
     - {{ printf "%s.%s.svc" $alertmanagerService $ns }}
     - {{ printf "%s.%s.svc.cluster.local" $alertmanagerService $ns }}
+    - {{ $alertmanagerReloaderService }}
+    - {{ printf "%s.%s" $alertmanagerReloaderService $ns }}
+    - {{ printf "%s.%s.svc" $alertmanagerReloaderService $ns }}
+    - {{ printf "%s.%s.svc.cluster.local" $alertmanagerReloaderService $ns }}
   issuerRef:
     name: {{ $issuer | quote }}
     kind: ClusterIssuer

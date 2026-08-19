@@ -4,10 +4,12 @@
 {{- $release := .Release.Name }}
 {{- $prometheusService := include "observability.prometheusServiceName" . }}
 {{- $alertmanagerService := include "observability.alertmanagerServiceName" . }}
+{{- $prometheusReloaderService := include "observability.prometheusReloaderServiceName" . }}
+{{- $alertmanagerReloaderService := include "observability.alertmanagerReloaderServiceName" . }}
 {{- if (index .Values "kube-prometheus-stack" "enabled") }}
-# The Prometheus Operator passes each server's web TLS configuration to its
-# config-reloader sidecar as well. Disable the upstream all-one-scheme monitors
-# and own both verified HTTPS endpoints explicitly.
+# Disable the upstream all-one-scheme monitors and own each verified HTTPS
+# endpoint explicitly. The server monitors select the upstream-owned Services;
+# the reloader monitors select dedicated Services whose appProtocol is HTTPS.
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
@@ -32,6 +34,20 @@ spec:
             key: ca.crt
         serverName: {{ printf "%s.%s.svc" $prometheusService $ns | quote }}
         insecureSkipVerify: false
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ $release }}-prometheus-reloader-internal-tls
+  labels:
+    {{- include "observability.labels" . | nindent 4 }}
+spec:
+  namespaceSelector:
+    matchNames: [{{ $ns | quote }}]
+  selector:
+    matchLabels:
+      iterabase.com/observability-reloader: prometheus
+  endpoints:
     - port: reloader-web
       path: /metrics
       scheme: https
@@ -40,7 +56,7 @@ spec:
           secret:
             name: observability-prometheus-tls
             key: ca.crt
-        serverName: {{ printf "%s.%s.svc" $prometheusService $ns | quote }}
+        serverName: {{ printf "%s.%s.svc" $prometheusReloaderService $ns | quote }}
         insecureSkipVerify: false
 ---
 apiVersion: monitoring.coreos.com/v1
@@ -67,6 +83,20 @@ spec:
             key: ca.crt
         serverName: {{ printf "%s.%s.svc" $alertmanagerService $ns | quote }}
         insecureSkipVerify: false
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ $release }}-alertmanager-reloader-internal-tls
+  labels:
+    {{- include "observability.labels" . | nindent 4 }}
+spec:
+  namespaceSelector:
+    matchNames: [{{ $ns | quote }}]
+  selector:
+    matchLabels:
+      iterabase.com/observability-reloader: alertmanager
+  endpoints:
     - port: reloader-web
       path: /metrics
       scheme: https
@@ -75,7 +105,7 @@ spec:
           secret:
             name: observability-alertmanager-tls
             key: ca.crt
-        serverName: {{ printf "%s.%s.svc" $alertmanagerService $ns | quote }}
+        serverName: {{ printf "%s.%s.svc" $alertmanagerReloaderService $ns | quote }}
         insecureSkipVerify: false
 ---
 apiVersion: monitoring.coreos.com/v1

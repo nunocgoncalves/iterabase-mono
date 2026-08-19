@@ -160,14 +160,24 @@ func assertVerifiedSelfMonitorTargets(body []byte) error {
 			name: testRelease + "-prometheus-internal-tls",
 			endpoints: []serviceMonitorEndpointExpectation{
 				{index: 0, name: "http-web", port: "9090"},
-				{index: 1, name: "reloader-web", port: "8080"},
+			},
+		},
+		{
+			name: testRelease + "-prometheus-reloader-internal-tls",
+			endpoints: []serviceMonitorEndpointExpectation{
+				{index: 0, name: "reloader-web", port: "8080"},
 			},
 		},
 		{
 			name: testRelease + "-alertmanager-internal-tls",
 			endpoints: []serviceMonitorEndpointExpectation{
 				{index: 0, name: "http-web", port: "9093"},
-				{index: 1, name: "reloader-web", port: "8080"},
+			},
+		},
+		{
+			name: testRelease + "-alertmanager-reloader-internal-tls",
+			endpoints: []serviceMonitorEndpointExpectation{
+				{index: 0, name: "reloader-web", port: "8080"},
 			},
 		},
 	} {

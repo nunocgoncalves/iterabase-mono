@@ -16,6 +16,8 @@ kube_prometheus_fullname=${kube_prometheus_fullname:0:26}
 kube_prometheus_fullname=${kube_prometheus_fullname%-}
 prometheus_service="$kube_prometheus_fullname-prometheus"
 alertmanager_service="$kube_prometheus_fullname-alertmanager"
+prometheus_reloader_service="$kube_prometheus_fullname-prometheus-reloader-tls"
+alertmanager_reloader_service="$kube_prometheus_fullname-alertmanager-reloader-tls"
 
 require() {
   grep -Fq -- "$1" "$rendered" || {
@@ -32,13 +34,17 @@ reject() {
 
 for monitor in \
   "$release-prometheus-internal-tls" \
+  "$release-prometheus-reloader-internal-tls" \
   "$release-alertmanager-internal-tls" \
+  "$release-alertmanager-reloader-internal-tls" \
   "$release-grafana-internal-tls" \
   "$release-loki-internal-tls"; do
   require "name: $monitor"
 done
 require "serverName: \"$prometheus_service.$namespace.svc\""
+require "serverName: \"$prometheus_reloader_service.$namespace.svc\""
 require "serverName: \"$alertmanager_service.$namespace.svc\""
+require "serverName: \"$alertmanager_reloader_service.$namespace.svc\""
 require "serverName: \"$release-grafana.$namespace.svc\""
 require "serverName: \"$release-loki.$namespace.svc\""
 require "name: $release-prometheus-alertmanager-tls-config"
@@ -66,9 +72,15 @@ service_port_app_protocols() {
   yq eval "select(.kind == \"Service\" and .metadata.name == \"$1\") | .spec.ports[] | select(.name == \"$2\") | .appProtocol" "$rendered" \
     | paste -sd, -
 }
-for service in "$prometheus_service" "$alertmanager_service"; do
+for service in "$prometheus_reloader_service" "$alertmanager_reloader_service"; do
   [[ "$(service_port_app_protocols "$service" reloader-web)" == "https" ]] || {
-    echo "$service config-reloader Service port does not advertise HTTPS" >&2
+    echo "$service config-reloader scrape port does not advertise HTTPS" >&2
+    exit 1
+  }
+done
+for service in "$prometheus_service" "$alertmanager_service"; do
+  [[ "$(yq eval-all "[select(.kind == \"Service\" and .metadata.name == \"$service\")] | length" "$rendered")" == "1" ]] || {
+    echo "$service is not rendered exactly once under upstream ownership" >&2
     exit 1
   }
 done
@@ -77,18 +89,17 @@ monitor_schemes() {
   yq eval "select(.kind == \"ServiceMonitor\" and .metadata.name == \"$1\") | .spec.endpoints[].scheme" "$rendered" \
     | paste -sd, -
 }
-[[ "$(monitor_schemes "$release-prometheus-internal-tls")" == "https,https" ]] || {
-  echo "Prometheus TLS monitor does not verify both server and config-reloader" >&2
-  exit 1
-}
-[[ "$(monitor_schemes "$release-alertmanager-internal-tls")" == "https,https" ]] || {
-  echo "Alertmanager TLS monitor does not verify both server and config-reloader" >&2
-  exit 1
-}
-[[ "$(monitor_schemes "$release-grafana-internal-tls")" == "https" ]] || {
-  echo "Grafana TLS monitor is not verified HTTPS" >&2
-  exit 1
-}
+for monitor in \
+  "$release-prometheus-internal-tls" \
+  "$release-prometheus-reloader-internal-tls" \
+  "$release-alertmanager-internal-tls" \
+  "$release-alertmanager-reloader-internal-tls" \
+  "$release-grafana-internal-tls"; do
+  [[ "$(monitor_schemes "$monitor")" == "https" ]] || {
+    echo "$monitor is not a single verified HTTPS endpoint" >&2
+    exit 1
+  }
+done
 for stock_monitor in "$prometheus_service" "$alertmanager_service" "$release-grafana"; do
   if [[ -n "$(yq eval "select(.kind == \"ServiceMonitor\" and .metadata.name == \"$stock_monitor\") | .metadata.name" "$rendered")" ]]; then
     echo "duplicate upstream TLS-incompatible monitor remains: $stock_monitor" >&2
