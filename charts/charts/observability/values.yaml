@@ -6,6 +6,11 @@ enabled: true
 # the upstream charts to serve HTTPS + the Grafana datasources switch to https.
 tls:
   issuerName: internal-ca
+  # kube-prometheus-stack hard-codes appProtocol=http on its reloader Service
+  # ports. The shared TLS preset enables chart-owned drop-in Services whose
+  # reloader ports advertise the HTTPS protocol that the Operator configures.
+  stackServices:
+    enabled: false
 
 # Platform-owned rule policy. Invariant correctness/availability alerts ship
 # enabled; workload-dependent performance alerts require explicit overlay

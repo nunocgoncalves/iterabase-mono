@@ -137,10 +137,7 @@ func assertVerifiedSelfMonitorsStage(t *testing.T, state *chartState) {
 			return false, "decode targets", decodeErr
 		}
 		last = payload
-		assertErr := assertDiscoveredTargets(last, []string{
-			"prometheus-internal-tls", "alertmanager-internal-tls", "grafana-internal-tls", "loki-internal-tls",
-		}, true)
-		if assertErr != nil {
+		if assertErr := assertVerifiedSelfMonitorTargets(last); assertErr != nil {
 			return false, assertErr.Error(), nil
 		}
 		return true, "all verified stack targets are up", nil
@@ -148,12 +145,39 @@ func assertVerifiedSelfMonitorsStage(t *testing.T, state *chartState) {
 	if err != nil {
 		t.Fatalf("verified stack self-monitors did not converge: %v\n%s", err, stateSafeBody(last))
 	}
-	if err := assertDiscoveredTargets(last, []string{
-		"prometheus-internal-tls", "alertmanager-internal-tls", "grafana-internal-tls", "loki-internal-tls",
-	}, true); err != nil {
+	if err := assertVerifiedSelfMonitorTargets(last); err != nil {
 		t.Fatal(err)
 	}
 	state.stopForward(t, forward)
+}
+
+func assertVerifiedSelfMonitorTargets(body []byte) error {
+	for _, monitor := range []struct {
+		name      string
+		endpoints []serviceMonitorEndpointExpectation
+	}{
+		{
+			name: testRelease + "-prometheus-internal-tls",
+			endpoints: []serviceMonitorEndpointExpectation{
+				{index: 0, name: "http-web", port: "9090"},
+				{index: 1, name: "reloader-web", port: "8080"},
+			},
+		},
+		{
+			name: testRelease + "-alertmanager-internal-tls",
+			endpoints: []serviceMonitorEndpointExpectation{
+				{index: 0, name: "http-web", port: "9093"},
+				{index: 1, name: "reloader-web", port: "8080"},
+			},
+		},
+	} {
+		if err := assertServiceMonitorTargets(body, testNamespace, monitor.name, monitor.endpoints); err != nil {
+			return err
+		}
+	}
+	return assertDiscoveredTargets(body, []string{
+		testRelease + "-grafana-internal-tls", testRelease + "-loki-internal-tls",
+	}, true)
 }
 
 func assertGrafanaTLSPathsStage(t *testing.T, state *chartState) {

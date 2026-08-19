@@ -22,11 +22,17 @@ reloader:
 # datasources are disabled here because their scheme is hardcoded, not value-
 # overridable). Cert Secret names are FIXED (single-tenant, once-per-cluster).
 observability:
+  # Own the Prometheus and Alertmanager Services in the TLS preset because the
+  # upstream chart hard-codes appProtocol=http on both HTTPS config-reloaders.
+  tls:
+    stackServices:
+      enabled: true
   kube-prometheus-stack:
     prometheus:
-      # The observability chart renders verified-HTTPS endpoints for both the
-      # Prometheus server and config-reloader. Disable the upstream monitor,
-      # which otherwise emits duplicate targets without the generated CA.
+      # The observability chart renders the exact release-identity Service and
+      # verified-HTTPS endpoints for both Prometheus and config-reloader.
+      service:
+        enabled: false
       serviceMonitor:
         selfMonitor: false
       prometheusSpec:
@@ -50,8 +56,10 @@ observability:
               name: observability-prometheus-tls
               key: tls.key
     alertmanager:
-      # As with Prometheus, the chart-owned monitor verifies both HTTPS server
-      # and config-reloader endpoints against the generated internal CA.
+      # As with Prometheus, the chart owns the release-identity Service and the
+      # monitor so the reloader port advertises and verifies HTTPS end to end.
+      service:
+        enabled: false
       serviceMonitor:
         selfMonitor: false
       alertmanagerSpec:
