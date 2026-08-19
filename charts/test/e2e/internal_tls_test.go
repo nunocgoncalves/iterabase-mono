@@ -70,7 +70,6 @@ func assertInternalIdentitiesStage(t *testing.T, state *chartState) {
 	state.kubectl(t, 4*time.Minute, "wait", "--for=condition=Ready", "clusterissuer/internal-ca", "--timeout=3m")
 	for _, certificate := range []string{
 		testRelease + "-postgresql-tls", testRelease + "-redis-tls", testRelease + "-control-plane-api-tls",
-		testRelease + "-control-plane-api-ingress-tls",
 	} {
 		state.kubectl(t, 4*time.Minute, "wait", "--for=condition=Ready", "certificate/"+certificate, "-n", testNamespace, "--timeout=3m")
 	}
@@ -108,6 +107,7 @@ func assertControlPlaneIngressVerifiedTLSStage(t *testing.T, state *chartState) 
 	internalSecret := testRelease + "-control-plane-api-tls"
 	edgeSecret := testRelease + "-control-plane-api-ingress-tls"
 
+	state.kubectl(t, 4*time.Minute, "wait", "--for=condition=Ready", "certificate/"+edgeSecret, "-n", testNamespace, "--timeout=3m")
 	if got := state.kubectl(t, 30*time.Second, "get", "ingress/"+ingress, "-n", testNamespace,
 		"-o", "jsonpath={.spec.tls[0].secretName}"); got != edgeSecret {
 		t.Fatalf("control-plane edge TLS Secret=%q want=%q", got, edgeSecret)
