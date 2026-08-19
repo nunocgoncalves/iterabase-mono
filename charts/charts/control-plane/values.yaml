@@ -107,8 +107,9 @@ service:
 # assets, authentication, and every /v1/* API. The deployment-selected class may
 # be public or private. TLS terminates at ingress-nginx via a dedicated edge
 # Secret; it never reuses the API's internal serving leaf. When internalTLS is
-# enabled, ingress-nginx automatically verifies the API leaf against the shared
-# internal CA and exact <service>.<namespace>.svc identity.
+# enabled, ingress-nginx uses the non-CA API leaf Secret (including its ca.crt)
+# to verify the backend at the exact <service>.<namespace>.svc identity; it is
+# never given the internal CA signing Secret.
 ingress:
   enabled: false
   className: nginx

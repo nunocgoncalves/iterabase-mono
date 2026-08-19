@@ -155,16 +155,73 @@ control-plane:
 The chart derives a dedicated edge Secret named
 `<release>-control-plane-api-ingress-tls`; it never reuses the internal API leaf
 `<release>-control-plane-api-tls`. When `global.internalTLS.enabled=true`, the
-Ingress also verifies the API backend automatically against
-`<release>-internal-ca-root` and the exact
-`<release>-control-plane-api.<namespace>.svc` identity. An explicit edge Secret
-that collides with the internal leaf fails rendering.
+Ingress uses that non-CA API leaf Secret as its proxy TLS material: the
+Secret's `ca.crt` verifies the backend at the exact
+`<release>-control-plane-api.<namespace>.svc` identity. The internal root CA
+signing Secret and private key are never passed to ingress-nginx. An explicit
+edge Secret that collides with the internal leaf fails rendering.
+
+#### Pre-`0.4.12` edge certificate migration
 
 Upgrading from control-plane chart `0.4.11` or earlier changes the default edge
-Secret name. cert-manager issues the new edge leaf before ingress-nginx can
-serve the hostname; retain the old Secret until the new Certificate is Ready
-and the route passes trusted TLS validation. The fixture and negative collision
-checks run through `make check-private-control-plane`.
+Secret name. A single Helm upgrade cannot guarantee that ingress-shim issues
+that new Secret before ingress-nginx observes the changed Ingress. Pre-issue it
+while the existing Ingress still references the old Secret, then switch in a
+second phase (with Flux/reconcilers suspended when that is the deployment's
+normal maintenance procedure):
+
+```sh
+release=iterabase
+namespace=iterabase-system
+host=app.example.com
+issuer=letsencrypt-prod
+edge_secret="${release}-control-plane-api-ingress-tls"
+staging_certificate="${edge_secret}-preissue"
+
+# Phase 1: issue the replacement without changing the live Ingress.
+cat <<EOF | kubectl apply -f -
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: ${staging_certificate}
+  namespace: ${namespace}
+spec:
+  secretName: ${edge_secret}
+  dnsNames:
+    - ${host}
+  issuerRef:
+    name: ${issuer}
+    kind: ClusterIssuer
+EOF
+kubectl wait -n "$namespace" --for=condition=Ready \
+  "certificate/$staging_certificate" --timeout=10m
+kubectl get secret "$edge_secret" -n "$namespace"
+kubectl get secret "$edge_secret" -n "$namespace" \
+  -o jsonpath='{.data.tls\.crt}' | base64 -d | \
+  openssl x509 -noout -checkhost "$host"
+
+# Preserve the issued Secret but remove the temporary Certificate so
+# ingress-shim can become its sole owner after the upgrade.
+kubectl delete certificate "$staging_certificate" -n "$namespace" \
+  --cascade=orphan
+kubectl get secret "$edge_secret" -n "$namespace"
+
+# Phase 2: run the normal upgrade with the deployment's complete values. Update
+# any explicit ingress.tls.secretName override to $edge_secret first.
+helm upgrade "$release" \
+  oci://ghcr.io/nunocgoncalves/iterabase-charts/iterabase-platform \
+  --version <target-version> -n "$namespace" -f /path/to/values.yaml --wait
+kubectl wait -n "$namespace" --for=condition=Ready \
+  "certificate/$edge_secret" --timeout=10m
+kubectl get ingress "${release}-control-plane-api" -n "$namespace" \
+  -o jsonpath='{.spec.tls[0].secretName}{"\n"}'
+```
+
+Do not delete `<release>-control-plane-api-tls` after the switch: with internal
+TLS it remains the API backend's serving leaf. Resume reconciliation only after
+the new edge Certificate is Ready and the route passes trusted TLS validation.
+The fixture and negative collision checks run through
+`make check-private-control-plane`.
 
 MetalLB configuration CRs remain post-install/post-upgrade hooks so a fresh
 umbrella install can establish the operator CRDs first. If an additional pool

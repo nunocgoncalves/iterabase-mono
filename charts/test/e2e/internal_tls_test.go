@@ -117,7 +117,7 @@ func assertControlPlaneIngressVerifiedTLSStage(t *testing.T, state *chartState) 
 	}
 	expectedAnnotations := map[string]string{
 		"nginx.ingress.kubernetes.io/backend-protocol":      "HTTPS",
-		"nginx.ingress.kubernetes.io/proxy-ssl-secret":      testNamespace + "/" + testRelease + "-internal-ca-root",
+		"nginx.ingress.kubernetes.io/proxy-ssl-secret":      testNamespace + "/" + internalSecret,
 		"nginx.ingress.kubernetes.io/proxy-ssl-verify":      "on",
 		"nginx.ingress.kubernetes.io/proxy-ssl-server-name": "on",
 		"nginx.ingress.kubernetes.io/proxy-ssl-name":        testRelease + "-control-plane-api." + testNamespace + ".svc",
