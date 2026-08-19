@@ -231,7 +231,7 @@ func TestUnitObservabilityToolFixturePublishesCanonicalArchive(t *testing.T) {
 func TestUnitObservabilityCandidateUsesMaterializableToolSource(t *testing.T) {
 	t.Setenv("TOOL_RUNNER_IMAGE_REPO", "example.invalid/tool-runner")
 	t.Setenv("TOOL_RUNNER_IMAGE_TAG", "candidate")
-	values := observabilityPlatformValues()
+	values := observabilityPlatformValues(t)
 	controlPlane := values["control-plane"].(map[string]any)
 	toolRunner := controlPlane["toolRunner"].(map[string]any)
 	flux := toolRunner["flux"].(map[string]any)

@@ -55,7 +55,7 @@ func observabilityScenario() sharede2e.Definition {
 
 func installObservabilityStage(t *testing.T, state *chartState) {
 	t.Helper()
-	values := observabilityPlatformValues()
+	values := observabilityPlatformValues(t)
 	state.installPlatform(t, 20*time.Minute,
 		filepathFromCharts(state, "values-observability.yaml"),
 		state.writeValues(t, "observability-runtime", values),
@@ -63,8 +63,9 @@ func installObservabilityStage(t *testing.T, state *chartState) {
 	assertCandidateImages(t, state)
 }
 
-func observabilityPlatformValues() map[string]any {
-	values := runtimePlatformValues()
+func observabilityPlatformValues(t *testing.T) map[string]any {
+	t.Helper()
+	values := runtimePlatformValues(t)
 	controlPlane := values["control-plane"].(map[string]any)
 	if os.Getenv("HARNESS_IMAGE_REPO") != "" && os.Getenv("HARNESS_IMAGE_TAG") != "" {
 		controlPlane["dispatch"] = map[string]any{

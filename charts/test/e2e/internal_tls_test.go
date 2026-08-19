@@ -41,7 +41,7 @@ func installInternalTLSPlatformStage(t *testing.T, state *chartState) {
 	t.Helper()
 	state.installPlatform(t, 16*time.Minute,
 		filepathFromCharts(state, "values-tls.yaml"),
-		state.writeValues(t, "internal-tls-runtime", runtimePlatformValues()),
+		state.writeValues(t, "internal-tls-runtime", runtimePlatformValues(t)),
 	)
 	assertCandidateImages(t, state)
 }

@@ -283,41 +283,120 @@ func basePlatformValues() map[string]any {
 	}
 }
 
-func runtimePlatformValues() map[string]any {
+func runtimePlatformValues(t *testing.T) map[string]any {
+	t.Helper()
 	values := basePlatformValues()
 	values["ingress-nginx"] = map[string]any{"enabled": false}
 	values["metallb"] = map[string]any{"enabled": false}
 	values["metallb-config"] = map[string]any{"enabled": false}
-	applyCandidateImages(values)
+	applyRuntimeImages(t, values)
 	return values
 }
 
+func applyRuntimeImages(t *testing.T, values map[string]any) {
+	t.Helper()
+	// Hold runtime artifacts constant while transition scenarios roll chart
+	// revisions backward and forward. Candidate mode does this through resolved
+	// image environment variables; source mode uses the equivalent immutable
+	// fixture inputs instead of accidentally exercising a database downgrade.
+	if sharede2e.FixtureMode(os.Getenv("ITERABASE_E2E_FIXTURE_MODE")) == sharede2e.FixtureSource {
+		path := os.Getenv("ITERABASE_E2E_SOURCE_INPUTS")
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read source runtime fixture: %v", err)
+		}
+		var fixture sharede2e.Fixture
+		if err := json.Unmarshal(data, &fixture); err != nil {
+			t.Fatalf("decode source runtime fixture: %v", err)
+		}
+		required := map[string]string{
+			"control-plane-image":     "control-plane",
+			"inference-gateway-image": "inference-gateway",
+		}
+		for _, input := range fixture.Inputs {
+			component, ok := required[input.Name]
+			if !ok {
+				continue
+			}
+			repository, tag, err := splitImageReference(input.Reference)
+			if err != nil {
+				t.Fatalf("source runtime fixture %s: %v", input.Name, err)
+			}
+			setPlatformImage(values, component, repository, tag)
+			delete(required, input.Name)
+		}
+		if len(required) != 0 {
+			t.Fatalf("source runtime fixture is missing image inputs: %v", required)
+		}
+		return
+	}
+	applyCandidateImages(values)
+}
+
+func splitImageReference(reference string) (string, string, error) {
+	separator := strings.LastIndexByte(reference, ':')
+	if separator <= strings.LastIndexByte(reference, '/') || separator == len(reference)-1 {
+		return "", "", fmt.Errorf("reference has no exact tag: %q", reference)
+	}
+	return reference[:separator], reference[separator+1:], nil
+}
+
+func setPlatformImage(values map[string]any, component, repository, tag string) {
+	componentValues, _ := values[component].(map[string]any)
+	if componentValues == nil {
+		componentValues = map[string]any{}
+		values[component] = componentValues
+	}
+	image, _ := componentValues["image"].(map[string]any)
+	if image == nil {
+		image = map[string]any{}
+		componentValues["image"] = image
+	}
+	if repository != "" {
+		image["repository"] = repository
+	}
+	if tag != "" {
+		image["tag"] = tag
+	}
+}
+
 func applyCandidateImages(values map[string]any) {
-	setImage := func(component, prefix string) {
-		repository := os.Getenv(prefix + "_IMAGE_REPO")
-		tag := os.Getenv(prefix + "_IMAGE_TAG")
-		if repository == "" && tag == "" {
-			return
-		}
-		componentValues, _ := values[component].(map[string]any)
-		if componentValues == nil {
-			componentValues = map[string]any{}
-			values[component] = componentValues
-		}
-		image, _ := componentValues["image"].(map[string]any)
-		if image == nil {
-			image = map[string]any{}
-			componentValues["image"] = image
-		}
-		if repository != "" {
-			image["repository"] = repository
-		}
-		if tag != "" {
-			image["tag"] = tag
+	for component, prefix := range map[string]string{
+		"control-plane":     "CONTROL_PLANE",
+		"inference-gateway": "INFERENCE_GATEWAY",
+	} {
+		repository, tag := os.Getenv(prefix+"_IMAGE_REPO"), os.Getenv(prefix+"_IMAGE_TAG")
+		if repository != "" || tag != "" {
+			setPlatformImage(values, component, repository, tag)
 		}
 	}
-	setImage("control-plane", "CONTROL_PLANE")
-	setImage("inference-gateway", "INFERENCE_GATEWAY")
+}
+
+func TestUnitSourceRuntimeImagesRemainConstantAcrossChartTransitions(t *testing.T) {
+	fixture := filepath.Join(t.TempDir(), "source-fixture.json")
+	if err := os.WriteFile(fixture, []byte(`{
+		"mode":"published",
+		"inputs":[
+			{"name":"control-plane-image","kind":"published-image","reference":"registry.example/control-plane:0.0.30"},
+			{"name":"inference-gateway-image","kind":"published-image","reference":"registry.example/inference-gateway:0.2.7"}
+		]
+	}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ITERABASE_E2E_FIXTURE_MODE", string(sharede2e.FixtureSource))
+	t.Setenv("ITERABASE_E2E_SOURCE_INPUTS", fixture)
+
+	values := runtimePlatformValues(t)
+	for component, want := range map[string]string{
+		"control-plane":     "0.0.30",
+		"inference-gateway": "0.2.7",
+	} {
+		componentValues := values[component].(map[string]any)
+		image := componentValues["image"].(map[string]any)
+		if got := image["tag"]; got != want {
+			t.Fatalf("%s image tag = %v, want %s", component, got, want)
+		}
+	}
 }
 
 func (state *chartState) installSubstrate(t *testing.T) {

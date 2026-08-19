@@ -357,7 +357,7 @@ func installPredecessorLifecyclePlatformStage(t *testing.T, state *chartState) {
 func installPredecessorFeatureDisabledStage(t *testing.T, state *chartState) {
 	installPredecessorPlatform(t, state,
 		filepathFromCharts(state, "values-tls.yaml"),
-		state.writeValues(t, "feature-disabled", runtimePlatformValues()),
+		state.writeValues(t, "feature-disabled", runtimePlatformValues(t)),
 	)
 	assertInternalIdentitiesStage(t, state)
 	assertGatewayDependenciesStage(t, state)
@@ -388,7 +388,7 @@ func requireTransitionBaseline(t *testing.T, state *chartState, name string) tra
 
 func lifecyclePlatformValueFiles(t *testing.T, state *chartState) []string {
 	t.Helper()
-	values := runtimePlatformValues()
+	values := runtimePlatformValues(t)
 	values["minio"] = map[string]any{
 		"enabled":         true,
 		"artifactService": map[string]any{"enabled": true, "bucket": "iterabase-artifacts"},
@@ -409,7 +409,7 @@ func enableObservabilityTLSStage(t *testing.T, state *chartState) {
 	state.installPlatform(t, 22*time.Minute,
 		filepathFromCharts(state, "values-observability.yaml"),
 		filepathFromCharts(state, "values-tls.yaml"),
-		state.writeValues(t, "feature-enabled", runtimePlatformValues()),
+		state.writeValues(t, "feature-enabled", runtimePlatformValues(t)),
 	)
 	assertCandidateImages(t, state)
 }
