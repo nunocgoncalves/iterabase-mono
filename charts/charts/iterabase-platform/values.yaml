@@ -112,13 +112,13 @@ ingress-nginx:
         enabled: false # flip on with observability (needs the Prometheus Operator CRDs)
 
 # --- Private ingress controller (opt-in) ---
-# A second, class-isolated ingress plane for operator-only endpoints reachable
-# through a private network/VPN. Its distinct controllerValue prevents these
-# routes from being served by the public `nginx` controller above. Bare-metal
-# overlays pair its IPv4 LoadBalancer Service with a non-auto-assigned named
-# MetalLB pool (metallb-config.additionalPools) and select that pool through a
-# Service annotation. Disabled by default: no private trust boundary or address
-# allocation can be assumed by the reusable chart.
+# A second, class-isolated ingress plane for deployment observability endpoints.
+# Its distinct controllerValue prevents these routes from being served by the
+# public `nginx` controller above. Customer overlays own network reachability,
+# DNS, and authorization policy; bare-metal deployments can pair its IPv4
+# LoadBalancer Service with a non-auto-assigned named MetalLB pool
+# (metallb-config.additionalPools) and select that pool through a Service
+# annotation. Disabled by default: the reusable chart assumes no exposure model.
 internal-ingress-nginx:
   enabled: false
   controller:

@@ -87,11 +87,13 @@ clients, set `ipFamilies[0]=IPv4` and an IPv4 `metallb-config.addresses` pool.)
 
 ### Private observability ingress
 
-A bare-metal deployment can expose Grafana, Prometheus, Alertmanager, and Loki
-to an operator VPN without publishing those routes through the public ingress
-plane. Enable the aliased `internal-ingress-nginx` dependency, add a named
-MetalLB pool, and bind the private controller's IPv4 LoadBalancer Service to
-that pool explicitly:
+A deployment can expose Grafana, Prometheus, Alertmanager, and Loki through a
+dedicated ingress plane without publishing those routes through the public
+ingress plane. Reachability, DNS, and authorization are customer/deployment
+policy owned by the overlay; the reusable chart does not prescribe a universal
+exposure model. This private-network example enables the aliased
+`internal-ingress-nginx` dependency, adds a named MetalLB pool, and binds the
+private controller's IPv4 LoadBalancer Service to that pool explicitly:
 
 ```yaml
 metallb-config:
@@ -119,11 +121,13 @@ Alertmanager, and Grafana serve internal-CA HTTPS; their Ingresses must use the
 Loki's Ingress targets its HTTP gateway, which independently verifies the
 internal-CA HTTPS hop to Loki.
 
-The private network/VPN is the authorization boundary for the direct
-Prometheus, Alertmanager, and Loki APIs; Grafana keeps its own login. Do not use
-this recipe on an untrusted LAN, and do not place these routes on the public
-`nginx` class. The complete documentation-address fixture is rendered and
-validated by `make check-internal-observability`.
+For this example policy, the trusted private network/VPN is the authorization
+boundary for the direct Prometheus, Alertmanager, and Loki APIs; Grafana keeps
+its own login. A customer deployment must choose and approve its own network
+reachability and authentication policy in the overlay. Do not use this recipe
+on an untrusted LAN, and do not place these routes on the public `nginx` class.
+The complete documentation-address fixture is rendered and validated by
+`make check-internal-observability`.
 
 MetalLB configuration CRs remain post-install/post-upgrade hooks so a fresh
 umbrella install can establish the operator CRDs first. If an additional pool

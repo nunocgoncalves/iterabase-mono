@@ -4,8 +4,25 @@ set -euo pipefail
 render=${1:-/tmp/iterabase-platform.internal-observability.rendered.yaml}
 release=${2:-opo1}
 namespace=${3:-portable-system}
+script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
-python3 - "$render" "$release" "$namespace" <<'PY'
+additional_only_values=$(mktemp)
+additional_only_render=$(mktemp)
+trap 'rm -f "$additional_only_values" "$additional_only_render"' EXIT
+cat >"$additional_only_values" <<'YAML'
+addresses: []
+additionalPools:
+  - name: internal
+    addresses:
+      - 10.0.20.200-10.0.20.215
+    autoAssign: false
+    interfaces:
+      - eth0
+YAML
+helm template demo "$script_dir/../charts/metallb-config" \
+  -f "$additional_only_values" >"$additional_only_render"
+
+python3 - "$render" "$release" "$namespace" "$additional_only_render" <<'PY'
 from __future__ import annotations
 
 import sys
@@ -13,14 +30,18 @@ from pathlib import Path
 
 import yaml
 
-render, release, namespace = sys.argv[1:]
+render, release, namespace, additional_only_render = sys.argv[1:]
 objects = [obj for obj in yaml.safe_load_all(Path(render).read_text()) if obj]
+additional_only_objects = [
+    obj for obj in yaml.safe_load_all(Path(additional_only_render).read_text()) if obj
+]
 
 
-def object_(kind: str, name: str) -> dict:
+def object_(kind: str, name: str, source: list[dict] | None = None) -> dict:
+    source = objects if source is None else source
     matches = [
         obj
-        for obj in objects
+        for obj in source
         if obj.get("kind") == kind and obj.get("metadata", {}).get("name") == name
     ]
     if len(matches) != 1:
@@ -65,6 +86,22 @@ assert internal_pool["spec"]["autoAssign"] is False
 internal_advertisement = object_("L2Advertisement", f"{release}-internal")
 assert internal_advertisement["spec"]["ipAddressPools"] == [f"{release}-internal"]
 assert internal_advertisement["spec"]["interfaces"] == ["eth0"]
+
+# Named pools remain independently usable when the backward-compatible primary
+# edge pool is intentionally empty.
+additional_only_pool = object_("IPAddressPool", "demo-internal", additional_only_objects)
+assert additional_only_pool["spec"]["addresses"] == ["10.0.20.200-10.0.20.215"]
+additional_only_advertisement = object_(
+    "L2Advertisement", "demo-internal", additional_only_objects
+)
+assert additional_only_advertisement["spec"]["ipAddressPools"] == ["demo-internal"]
+assert additional_only_advertisement["spec"]["interfaces"] == ["eth0"]
+assert not [
+    obj
+    for obj in additional_only_objects
+    if obj.get("metadata", {}).get("name") == "demo-edge"
+    and obj.get("kind") in {"IPAddressPool", "L2Advertisement"}
+]
 
 expected_ingresses = {
     f"{release}-grafana": (
