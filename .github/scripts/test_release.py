@@ -185,6 +185,7 @@ class ReleaseContractTests(unittest.TestCase):
                 "charts/fresh-install",
                 "charts/feature-enable-upgrade",
                 "charts/internal-tls",
+                "charts/metallb-upgrade-reapply",
                 "charts/n-minus-one-upgrade",
                 "charts/observability",
                 "charts/observability-tls",
@@ -196,7 +197,7 @@ class ReleaseContractTests(unittest.TestCase):
     def test_component_versions_are_local_authorities(self) -> None:
         self.assertEqual(release.read_version(ROOT / "control-plane" / "VERSION"), "0.0.30")
         self.assertEqual(release.read_version(ROOT / "inference-gateway" / "VERSION"), "0.2.7")
-        self.assertEqual(release.read_version(ROOT / "forge" / "VERSION"), "0.8.4")
+        self.assertEqual(release.read_version(ROOT / "forge" / "VERSION"), "0.8.5")
         self.assertFalse((ROOT / "release" / "compatibility.json").exists())
 
     def test_candidate_accepts_and_canonicalizes_an_explicit_target_set(self) -> None:
@@ -208,7 +209,7 @@ class ReleaseContractTests(unittest.TestCase):
             [(item["target"], item["version"], item["production_tag"]) for item in plan["releases"]],
             [
                 ("control-plane", "0.0.30", "control-plane-v0.0.30"),
-                ("forge", "0.8.4", "forge-v0.8.4"),
+                ("forge", "0.8.5", "forge-v0.8.5"),
                 ("control-plane-chart", "0.4.12", "control-plane-0.4.12"),
             ],
         )
@@ -226,13 +227,13 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertEqual(plan["targets"], ["forge"])
         self.assertTrue(plan["forge"])
         self.assertTrue(plan["real_machine"])
-        self.assertEqual(plan["releases"][0]["production_tag"], "forge-v0.8.4")
+        self.assertEqual(plan["releases"][0]["production_tag"], "forge-v0.8.5")
         self.assertEqual(plan["image_matrix"], [])
         self.assertEqual(plan["chart_matrix"], [])
 
     def test_chart_version_and_dependencies_come_from_chart_source(self) -> None:
         plan = self.plan("iterabase-platform-chart")
-        self.assertEqual(plan["releases"][0]["version"], "0.3.19")
+        self.assertEqual(plan["releases"][0]["version"], "0.3.20")
         self.assertEqual(plan["chart_matrix"][0]["companions"], ["cert-manager-substrate"])
         dependencies = {
             item["name"]: item["version"]
@@ -469,7 +470,7 @@ class ReleaseContractTests(unittest.TestCase):
             assets = Path(directory) / "forge"
             assets.mkdir(parents=True)
             for platform in ("linux_amd64", "linux_arm64", "darwin_amd64", "darwin_arm64"):
-                (assets / f"forge_0.8.4_{platform}.tar.gz").write_bytes(platform.encode())
+                (assets / f"forge_0.8.5_{platform}.tar.gz").write_bytes(platform.encode())
             (assets / "checksums.txt").write_text("fixture\n", encoding="utf-8")
             release.validate_candidate_assets(plan, Path(directory))
             self.assertFalse(any(path.name == "forge" for path in assets.rglob("*")))
@@ -479,8 +480,8 @@ class ReleaseContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             assets = Path(directory) / "charts"
             assets.mkdir(parents=True)
-            (assets / "iterabase-platform-0.3.19.tgz").write_bytes(b"platform")
-            (assets / "cert-manager-substrate-0.3.19.tgz").write_bytes(b"substrate")
+            (assets / "iterabase-platform-0.3.20.tgz").write_bytes(b"platform")
+            (assets / "cert-manager-substrate-0.3.20.tgz").write_bytes(b"substrate")
             (assets / "checksums-iterabase-platform.txt").write_text(
                 "fixture\n", encoding="utf-8"
             )
@@ -494,8 +495,8 @@ class ReleaseContractTests(unittest.TestCase):
             assets.mkdir(parents=True)
             for chart, version in (
                 ("control-plane", "0.4.12"),
-                ("iterabase-platform", "0.3.19"),
-                ("cert-manager-substrate", "0.3.19"),
+                ("iterabase-platform", "0.3.20"),
+                ("cert-manager-substrate", "0.3.20"),
             ):
                 (assets / f"{chart}-{version}.tgz").write_bytes(chart.encode())
             for chart in ("control-plane", "iterabase-platform"):
@@ -773,11 +774,11 @@ class ReleaseContractTests(unittest.TestCase):
         result, commands = self.check_availability(self.plan("iterabase-platform-chart"))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(
-            "helm show chart oci://ghcr.io/nunocgoncalves/iterabase-charts/iterabase-platform --version 0.3.19",
+            "helm show chart oci://ghcr.io/nunocgoncalves/iterabase-charts/iterabase-platform --version 0.3.20",
             commands,
         )
         self.assertIn(
-            "helm show chart oci://ghcr.io/nunocgoncalves/iterabase-charts/cert-manager-substrate --version 0.3.19",
+            "helm show chart oci://ghcr.io/nunocgoncalves/iterabase-charts/cert-manager-substrate --version 0.3.20",
             commands,
         )
 
@@ -915,8 +916,8 @@ class ReleaseContractTests(unittest.TestCase):
             assets.mkdir(parents=True)
             for chart, version in (
                 ("control-plane", "0.4.12"),
-                ("iterabase-platform", "0.3.19"),
-                ("cert-manager-substrate", "0.3.19"),
+                ("iterabase-platform", "0.3.20"),
+                ("cert-manager-substrate", "0.3.20"),
             ):
                 (assets / f"{chart}-{version}.tgz").write_bytes(chart.encode())
             for chart in ("control-plane", "iterabase-platform"):

@@ -57,20 +57,23 @@ func kubePrometheusStackComponentNameForRelease(release, component string) strin
 }
 
 type chartState struct {
-	ctx                 context.Context
-	chartsRoot          string
-	outputDir           string
-	diagnosticsDir      string
-	redactor            *redact.Redactor
-	runner              process.Runner
-	cluster             *kindcluster.Cluster
-	client              kube.Client
-	forwards            []*kube.Forward
-	platform            kube.Chart
-	substrate           kube.Chart
-	transitionBaselines map[string]transitionBaseline
-	snapshots           map[string]lifecycleSnapshot
-	internalIngressIP   string
+	ctx                  context.Context
+	chartsRoot           string
+	outputDir            string
+	diagnosticsDir       string
+	redactor             *redact.Redactor
+	runner               process.Runner
+	cluster              *kindcluster.Cluster
+	client               kube.Client
+	forwards             []*kube.Forward
+	platform             kube.Chart
+	substrate            kube.Chart
+	transitionBaselines  map[string]transitionBaseline
+	snapshots            map[string]lifecycleSnapshot
+	internalIngressIP    string
+	internalPool         string
+	internalPoolInternal string
+	metalLB              *metalLBSnapshot
 }
 
 func newChartState(t *testing.T) *chartState {
@@ -448,7 +451,7 @@ func (state *chartState) installPlatform(t *testing.T, timeout time.Duration, va
 	}
 	state.helmUpgrade(t, timeout, valueFiles, nil)
 	if metallb {
-		if final := state.metalLBValidationPolicy(t); final != "" && final != metalLBPolicyFail {
+		if final := state.metalLBValidationPolicy(t); final != metalLBPolicyFail {
 			t.Fatalf("metallb validation failurePolicy not converged to %s: got %q", metalLBPolicyFail, final)
 		}
 	}
@@ -557,40 +560,35 @@ func (state *chartState) preapplyAllCRDs(t *testing.T, valueFiles ...string) boo
 	if err != nil {
 		t.Fatalf("read rendered chart CRDs: %v", err)
 	}
-	// MetalLB is enabled only when the rendered template set includes the MetalLB
-	// CRDs; observability/control-plane also render CRDs as regular templates, so a
-	// non-empty render alone does not imply MetalLB. The pre-apply is strictly
-	// scoped to the MetalLB CRDs (DES-HOR-511-03/04): every other CRD the chart
-	// ships in `crds/` directories or renders as an ordinary template is left
-	// entirely to Helm's own install path, which owns it correctly on a fresh
-	// install. Pre-applying those without Helm ownership makes a fresh `helm
-	// install` fail to import them ("invalid ownership metadata"), so only the
-	// MetalLB set is established before Helm so the pools and advertisements render
-	// against an Established schema.
-	metallbShow, err := selectMetalLBCRDs(string(showCRDs))
-	if err != nil {
-		t.Fatalf("select MetalLB shipped CRDs: %v", err)
-	}
+	// DES-HOR-511-03/04 pre-apply (mirrors Forge's applyChartCRDs):
+	//  - Every crds/-directory CRD (surfaced by `helm show crds`, e.g.
+	//    observability/Prometheus and external-dns) is preserved in the pre-apply
+	//    set; Helm only installs crds/-dir CRDs on an initial install, so this is
+	//    what makes an operator-feature-enable upgrade deterministic.
+	//  - Only the MetalLB rendered template CRDs receive Helm ownership and are
+	//    added to the pre-apply set. Other rendered template CRDs (e.g. control-
+	//    plane's agentpools) are left to Helm: pre-applying them without Helm
+	//    ownership makes a fresh `helm install` fail to import them.
 	metallbRendered, err := selectMetalLBCRDs(string(rendered))
 	if err != nil {
 		t.Fatalf("select MetalLB rendered CRDs: %v", err)
-	}
-	if metallbShow == "" && metallbRendered == "" {
-		return false // MetalLB disabled: no CRD pre-apply; Helm owns every CRD.
 	}
 	renderedOwned, err := markRenderedCRDsOwned(metallbRendered, testRelease, testNamespace)
 	if err != nil {
 		t.Fatalf("mark rendered MetalLB CRDs Helm-adoptable: %v", err)
 	}
 
-	combined := metallbShow + "\n---\n" + renderedOwned
+	combined := string(showCRDs)
+	if renderedOwned != "" {
+		combined += "\n---\n" + renderedOwned
+	}
 	selected, err := selectBundledCRDs(combined)
 	if err != nil {
-		t.Fatalf("select authoritative MetalLB platform CRDs: %v", err)
+		t.Fatalf("select authoritative platform CRDs: %v", err)
 	}
 	names, err := bundledCRDNames(combined)
 	if err != nil {
-		t.Fatalf("collect MetalLB platform CRD names: %v", err)
+		t.Fatalf("collect platform CRD names: %v", err)
 	}
 	if err := os.WriteFile(path, []byte(selected), 0o600); err != nil {
 		t.Fatalf("write selected platform CRDs: %v", err)
@@ -599,7 +597,7 @@ func (state *chartState) preapplyAllCRDs(t *testing.T, valueFiles ...string) boo
 	for _, name := range names {
 		state.kubectl(t, 3*time.Minute, "wait", "--for=condition=Established", "crd/"+name, "--timeout=2m")
 	}
-	return true
+	return metallbRendered != ""
 }
 
 // adoptMetalLBHookObjects transfers ownership of any MetalLB IPAddressPool /

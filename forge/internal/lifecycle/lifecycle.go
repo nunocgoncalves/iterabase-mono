@@ -491,6 +491,14 @@ func applyOverlayPhase(ctx context.Context, cfg *config.Cluster, o overlayer.Ove
 	// Upgrade the old owner with the new runner deferred, transfer only the kept
 	// CRD annotations, then install the companion. The normal platform apply
 	// below restores the overlay's intended runner value after Flux is Ready.
+	// MetalLB hook-ownership adoption (DES-HOR-511-01) runs before this hand-off:
+	// hook-era predecessors created the pools/advertisements as unowned hooks, so
+	// Helm must adopt them before any target platform apply (including the
+	// certificate hand-off apply below) renders them as ordinary resources, or it
+	// rejects the upgrade. Idempotent and a no-op when no hooks exist.
+	if err := migrateMetalLBHookOwnership(ctx, cfg, d, opts); err != nil {
+		return err
+	}
 	migrated, err := migrateCertificateOwnership(ctx, cfg, d, opts, res, overlayDest)
 	if err != nil {
 		return err
@@ -516,9 +524,6 @@ func applyOverlayPhase(ctx context.Context, cfg *config.Cluster, o overlayer.Ove
 }
 
 func applyPlatformChartPhase(ctx context.Context, cfg *config.Cluster, d deployer.Deployer, opts ApplyOpts, res *Result, overlayDest string, migrated bool) error {
-	if err := migrateMetalLBHookOwnership(ctx, cfg, d, opts); err != nil {
-		return err
-	}
 	if migrated {
 		// Routine gateway config changes roll through the chart's pod-template
 		// checksum. The migration still stages an explicit restart because its

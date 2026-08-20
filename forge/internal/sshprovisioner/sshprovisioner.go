@@ -809,36 +809,44 @@ func (p *SSHProvisioner) applyChartCRDs(ctx context.Context, opts deployer.Apply
 	if err != nil {
 		return false, fmt.Errorf("discover rendered chart CRDs: %w", err)
 	}
-	// The pre-apply is strictly scoped to the MetalLB CRDs (DES-HOR-511-03/04):
-	// other CRDs the chart ships in `crds/` directories or renders as ordinary
-	// templates are left entirely to Helm's own install path, which owns them
-	// correctly on a fresh install. Pre-applying them without Helm ownership made
-	// a fresh `helm install` fail to import them ("invalid ownership metadata"),
-	// so only the MetalLB set is established before Helm so the pools and
-	// advertisements render against an Established schema.
-	combined := raw
-	if rendered != "" {
-		combined += "\n---\n" + rendered
-	}
-	metallbCRDs, err := selectMetalLBCRDs(combined)
+	// DES-HOR-511-03/04 pre-apply:
+	//  - Every CRD shipped in a `crds/` directory (surfaced by `helm show crds`,
+	//    e.g. observability/Prometheus and external-dns) is preserved in the
+	//    apply/wait set. Helm only installs crds/-dir CRDs on a release's initial
+	//    install, so pre-applying them is what makes an operator-feature-enable
+	//    upgrade (which adds a dependency) deterministic. These CRDs go through
+	//    Helm's own crds/ path and need no ownership marking.
+	//  - Only the MetalLB template CRDs (rendered) receive Helm-ownership marking
+	//    and are added to the apply/wait set. Non-MetalLB rendered template CRDs
+	//    (e.g. control-plane's agentpools) are left entirely to Helm: pre-applying
+	//    them without Helm ownership makes a fresh `helm install` fail to import
+	//    them ("invalid ownership metadata").
+	metallbRendered, err := selectMetalLBCRDs(rendered)
 	if err != nil {
 		return false, fmt.Errorf("select MetalLB chart CRDs: %w", err)
 	}
-	if metallbCRDs == "" {
-		// MetalLB disabled/absent: no CRD pre-apply; Helm owns every CRD.
-		return false, nil
+	metallbEnabled := metallbRendered != ""
+	if metallbRendered != "" {
+		metallbRendered, err = markHelmAdoptableCRDs(metallbRendered, opts.Release, opts.Namespace)
+		if err != nil {
+			return false, fmt.Errorf("mark MetalLB CRDs Helm-adoptable: %w", err)
+		}
+		raw += "\n---\n" + metallbRendered
 	}
-	metallbCRDs, err = markHelmAdoptableCRDs(metallbCRDs, opts.Release, opts.Namespace)
+	crds, err := extractChartCRDs(raw)
 	if err != nil {
-		return false, fmt.Errorf("mark MetalLB CRDs Helm-adoptable: %w", err)
+		return false, err
 	}
-	if _, err := p.runStdin(ctx, kubectlCmd("apply", "--server-side", "--force-conflicts", "-f", "-"), metallbCRDs); err != nil {
-		return false, fmt.Errorf("apply MetalLB chart CRDs: %w", err)
+	if crds == "" {
+		return metallbEnabled, nil
 	}
-	if _, err := p.runStdin(ctx, kubectlCmd("wait", "--for=condition=Established", "--timeout=2m", "-f", "-"), metallbCRDs); err != nil {
-		return false, fmt.Errorf("wait for MetalLB chart CRDs: %w", err)
+	if _, err := p.runStdin(ctx, kubectlCmd("apply", "--server-side", "--force-conflicts", "-f", "-"), crds); err != nil {
+		return false, fmt.Errorf("apply chart CRDs: %w", err)
 	}
-	return true, nil
+	if _, err := p.runStdin(ctx, kubectlCmd("wait", "--for=condition=Established", "--timeout=2m", "-f", "-"), crds); err != nil {
+		return false, fmt.Errorf("wait for chart CRDs: %w", err)
+	}
+	return metallbEnabled, nil
 }
 
 // renderChartCRDs renders the exact pinned chart with the release's value files
@@ -1026,12 +1034,14 @@ func (p *SSHProvisioner) Apply(ctx context.Context, opts deployer.ApplyOpts) err
 		return fmt.Errorf("helm install: %w", err)
 	}
 
-	// Assert the steady-state Fail policy once the MetalLB webhook is present.
+	// Assert the exact steady-state Fail policy once the MetalLB webhook is
+	// present (DES-HOR-511-04): success requires a live fail-closed webhook
+	// converged to `Fail`, never an absent/empty configuration.
 	final, err := p.metalLBValidationPolicy(ctx, opts.Namespace)
 	if err != nil {
 		return fmt.Errorf("read metallb validation policy: %w", err)
 	}
-	if final != "" && final != metalLBPolicyFail {
+	if final != metalLBPolicyFail {
 		return fmt.Errorf("metallb validation failurePolicy not converged to %s: got %q", metalLBPolicyFail, final)
 	}
 	return nil
@@ -1329,8 +1339,14 @@ func (p *SSHProvisioner) metalLBValidationPolicy(ctx context.Context, namespace 
 	out, err := p.run(ctx, kubectlCmd("get", "validatingwebhookconfiguration", metalLBWebhookConfigName,
 		"-o", "jsonpath={.webhooks[0].failurePolicy}"))
 	if err != nil {
-		// No webhook configuration => MetalLB disabled/absent, not an error.
-		return "", nil
+		// A genuinely absent webhook configuration (not yet wired by MetalLB) is
+		// represented as empty, distinct from a real read failure which is
+		// propagated so callers don't mistake it for convergence.
+		detail := err.Error() + "\n" + out
+		if strings.Contains(detail, "NotFound") || strings.Contains(strings.ToLower(detail), "not found") {
+			return "", nil
+		}
+		return "", fmt.Errorf("read metallb validation policy: %w", err)
 	}
 	return strings.TrimSpace(out), nil
 }

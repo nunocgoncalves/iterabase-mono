@@ -47,6 +47,8 @@ jobs:
             target: test-e2e-observability-ingress-recovery
           - name: reapply rollback recovery
             target: test-e2e-reapply-rollback
+          - name: metalLB upgrade reapply
+            target: test-e2e-metallb-transition
           - name: observability
             target: test-e2e-observability
           - name: observability internal TLS
