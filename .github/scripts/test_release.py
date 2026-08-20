@@ -189,6 +189,7 @@ class ReleaseContractTests(unittest.TestCase):
                 "charts/observability",
                 "charts/observability-tls",
                 "charts/reapply-rollback-recovery",
+                "charts/single-node-observability-ingress-recovery",
             },
         )
 
@@ -231,7 +232,7 @@ class ReleaseContractTests(unittest.TestCase):
 
     def test_chart_version_and_dependencies_come_from_chart_source(self) -> None:
         plan = self.plan("iterabase-platform-chart")
-        self.assertEqual(plan["releases"][0]["version"], "0.3.18")
+        self.assertEqual(plan["releases"][0]["version"], "0.3.19")
         self.assertEqual(plan["chart_matrix"][0]["companions"], ["cert-manager-substrate"])
         dependencies = {
             item["name"]: item["version"]
@@ -478,8 +479,8 @@ class ReleaseContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             assets = Path(directory) / "charts"
             assets.mkdir(parents=True)
-            (assets / "iterabase-platform-0.3.18.tgz").write_bytes(b"platform")
-            (assets / "cert-manager-substrate-0.3.18.tgz").write_bytes(b"substrate")
+            (assets / "iterabase-platform-0.3.19.tgz").write_bytes(b"platform")
+            (assets / "cert-manager-substrate-0.3.19.tgz").write_bytes(b"substrate")
             (assets / "checksums-iterabase-platform.txt").write_text(
                 "fixture\n", encoding="utf-8"
             )
@@ -493,8 +494,8 @@ class ReleaseContractTests(unittest.TestCase):
             assets.mkdir(parents=True)
             for chart, version in (
                 ("control-plane", "0.4.12"),
-                ("iterabase-platform", "0.3.18"),
-                ("cert-manager-substrate", "0.3.18"),
+                ("iterabase-platform", "0.3.19"),
+                ("cert-manager-substrate", "0.3.19"),
             ):
                 (assets / f"{chart}-{version}.tgz").write_bytes(chart.encode())
             for chart in ("control-plane", "iterabase-platform"):
@@ -772,11 +773,11 @@ class ReleaseContractTests(unittest.TestCase):
         result, commands = self.check_availability(self.plan("iterabase-platform-chart"))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(
-            "helm show chart oci://ghcr.io/nunocgoncalves/iterabase-charts/iterabase-platform --version 0.3.18",
+            "helm show chart oci://ghcr.io/nunocgoncalves/iterabase-charts/iterabase-platform --version 0.3.19",
             commands,
         )
         self.assertIn(
-            "helm show chart oci://ghcr.io/nunocgoncalves/iterabase-charts/cert-manager-substrate --version 0.3.18",
+            "helm show chart oci://ghcr.io/nunocgoncalves/iterabase-charts/cert-manager-substrate --version 0.3.19",
             commands,
         )
 
@@ -913,8 +914,8 @@ class ReleaseContractTests(unittest.TestCase):
             assets.mkdir(parents=True)
             for chart, version in (
                 ("control-plane", "0.4.12"),
-                ("iterabase-platform", "0.3.18"),
-                ("cert-manager-substrate", "0.3.18"),
+                ("iterabase-platform", "0.3.19"),
+                ("cert-manager-substrate", "0.3.19"),
             ):
                 (assets / f"{chart}-{version}.tgz").write_bytes(chart.encode())
             for chart in ("control-plane", "iterabase-platform"):

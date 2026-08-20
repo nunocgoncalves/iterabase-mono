@@ -35,7 +35,7 @@ else
 E2E_BUILD_DEPS := build-deps
 endif
 
-.PHONY: build-deps lint template kubeconform template-controlplane kubeconform-controlplane template-tls kubeconform-tls template-observability kubeconform-observability template-observability-tls kubeconform-observability-tls template-internal-observability kubeconform-internal-observability check-internal-observability template-private-control-plane kubeconform-private-control-plane check-private-control-plane check-certificate-substrate check-service-selectors check-redis-exporter-auth check-artifact-config check-tool-runner check-manager-contract check-workload-ca check-metrics-contract check-alerts test-alert-rules check-dashboards check-observability-tls check check-tls check-observability test-e2e test-e2e-unit test-e2e-certificate-migration test-e2e-install test-e2e-upgrade test-e2e-feature-enable test-e2e-reapply-rollback test-e2e-observability test-e2e-observability-tls test-e2e-internal-tls clean
+.PHONY: build-deps lint template kubeconform template-controlplane kubeconform-controlplane template-tls kubeconform-tls template-observability kubeconform-observability template-observability-tls kubeconform-observability-tls template-internal-observability kubeconform-internal-observability check-internal-observability template-private-control-plane kubeconform-private-control-plane check-private-control-plane check-certificate-substrate check-service-selectors check-redis-exporter-auth check-artifact-config check-tool-runner check-manager-contract check-workload-ca check-metrics-contract check-alerts test-alert-rules check-dashboards check-observability-tls check check-tls check-observability test-e2e test-e2e-unit test-e2e-certificate-migration test-e2e-install test-e2e-upgrade test-e2e-feature-enable test-e2e-observability-ingress-recovery test-e2e-reapply-rollback test-e2e-observability test-e2e-observability-tls test-e2e-internal-tls clean
 
 # Compile the owner entrypoint and run hermetic mechanics plus intentional break
 # fixtures without provisioning infrastructure.
@@ -44,7 +44,7 @@ test-e2e-unit:
 	cd test/e2e && $(E2E_ENV) go test -race -count=1 -run '^TestUnit' .
 
 # Each target creates one fresh isolated Kind cluster and runs exactly once.
-test-e2e: test-e2e-certificate-migration test-e2e-install test-e2e-upgrade test-e2e-feature-enable test-e2e-reapply-rollback test-e2e-observability test-e2e-observability-tls test-e2e-internal-tls
+test-e2e: test-e2e-certificate-migration test-e2e-install test-e2e-upgrade test-e2e-feature-enable test-e2e-observability-ingress-recovery test-e2e-reapply-rollback test-e2e-observability test-e2e-observability-tls test-e2e-internal-tls
 
 test-e2e-certificate-migration: $(E2E_BUILD_DEPS)
 	cd test/e2e && $(E2E_ENV) go test -v -race -count=1 -timeout 35m -run '^TestE2E$$/^certificate-ownership-migration$$' .
@@ -57,6 +57,9 @@ test-e2e-upgrade: $(E2E_BUILD_DEPS)
 
 test-e2e-feature-enable: $(E2E_BUILD_DEPS)
 	cd test/e2e && $(E2E_ENV) go test -v -race -count=1 -timeout 50m -run '^TestE2E$$/^feature-enable-upgrade$$' .
+
+test-e2e-observability-ingress-recovery: $(E2E_BUILD_DEPS)
+	cd test/e2e && $(E2E_ENV) go test -v -race -count=1 -timeout 60m -run '^TestE2E$$/^single-node-observability-ingress-recovery$$' .
 
 test-e2e-reapply-rollback: $(E2E_BUILD_DEPS)
 	cd test/e2e && $(E2E_ENV) go test -v -race -count=1 -timeout 45m -run '^TestE2E$$/^reapply-rollback-recovery$$' .

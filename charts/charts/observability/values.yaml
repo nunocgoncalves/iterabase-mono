@@ -171,6 +171,18 @@ loki:
           index:
             prefix: index_
             period: 24h
+  # The default gateway is a single replica with required same-component pod
+  # anti-affinity. RollingUpdate deadlocks on a one-node cluster because the
+  # replacement cannot schedule beside its predecessor. Recreate preserves the
+  # isolation rule and accepts a brief gateway interruption during rollout.
+  # HA/object-storage overlays may explicitly restore RollingUpdate when their
+  # replica and topology contract can satisfy it (DES-HOR-506-01).
+  gateway:
+    deploymentStrategy:
+      type: Recreate
+      # Helm's server-side apply must explicitly clear the RollingUpdate fields
+      # owned by the 0.3.12 manifest when changing the strategy discriminator.
+      rollingUpdate: null
   # SimpleScalable targets default to 3 replicas each; zero them for
   # SingleBinary mode (only singleBinary.replicas runs).
   write:
