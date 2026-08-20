@@ -299,7 +299,7 @@ resources first can fail during REST mapping before any chart hook executes.
 
 The chart-owned `test/e2e/transition-baselines.json` currently declares platform
 and substrate `0.3.12` as the checksum-pinned supported predecessor for current
-`0.3.17`. The supported inverse boundary is current → that declared predecessor
+`0.3.18`. The supported inverse boundary is current → that declared predecessor
 within the post-0.3 companion-ownership model, followed by a current forward
 recovery. Roll back the platform release before the companion substrate. CRDs,
 generated Secrets, and PVCs are retained. The separate pre-0.3 ownership
@@ -410,7 +410,10 @@ pods; Postgres/Redis exporters; MinIO; and enabled upstream substrate targets.
 Dedicated metrics listeners keep customer ingress and mandatory-mTLS workload
 listeners isolated.
 GPU metrics: set `observability.dcgmExporter.enabled=true` (gpu-operator must be
-installed out-of-band). Alertmanager **email routing is overlay-owned** — the
+installed out-of-band). The default monitor matches GPU Operator's exact
+`app=nvidia-dcgm-exporter` Service label and `gpu-metrics` named port across
+namespaces; deployments with a supported renamed contract may override both.
+Alertmanager **email routing is overlay-owned** — the
 chart ships a null-receiver default; set
 `observability.kube-prometheus-stack.alertmanager.config` in the prod overlay
 (HOR-408: the OPO1 overlay carries the email receiver).

@@ -12,11 +12,11 @@
 # --- The stack (Prometheus / Grafana / Loki / Alertmanager + operator CRDs) ---
 observability:
   enabled: true
-  # Enable NVIDIA DCGM (GPU) scraping in GPU/inference deploys; off here (no GPU
-  # in kind). gpu-operator must be installed out-of-band for the target Service
-  # to exist.
+  # Exercise NVIDIA DCGM scraping in static renders. The observability Kind
+  # scenario installs a deterministic Service fixture with GPU Operator's exact
+  # label and named-port contract; production still supplies the real operator.
   dcgmExporter:
-    enabled: false
+    enabled: true
 
 # --- Component metrics knobs (ServiceMonitors / exporters) ---
 inference-gateway:
