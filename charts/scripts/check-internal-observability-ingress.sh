@@ -22,7 +22,10 @@ YAML
 helm template demo "$script_dir/../charts/metallb-config" \
   -f "$additional_only_values" >"$additional_only_render"
 
-python3 - "$render" "$release" "$namespace" "$additional_only_render" <<'PY'
+python3 - "$render" "$release" "$namespace" "$additional_only_render" \
+  "$script_dir/../charts/iterabase-platform/templates/internal-ingress-admission-recovery.yaml" \
+  "$script_dir/../charts/iterabase-platform/templates/loki-gateway-rollout-recovery.yaml" \
+  "$script_dir/../charts/iterabase-platform/values.yaml" <<'PY'
 from __future__ import annotations
 
 import sys
@@ -30,7 +33,15 @@ from pathlib import Path
 
 import yaml
 
-render, release, namespace, additional_only_render = sys.argv[1:]
+(
+    render,
+    release,
+    namespace,
+    additional_only_render,
+    admission_recovery_template,
+    rollout_recovery_template,
+    platform_values_path,
+) = sys.argv[1:]
 objects = [obj for obj in yaml.safe_load_all(Path(render).read_text()) if obj]
 additional_only_objects = [
     obj for obj in yaml.safe_load_all(Path(additional_only_render).read_text()) if obj
@@ -67,6 +78,75 @@ for expected in (
     f"--publish-service=$(POD_NAMESPACE)/{release}-internal-ingress-nginx-controller",
 ):
     assert expected in args, f"internal controller missing {expected}"
+
+# The one-replica gateway keeps hard anti-affinity and deliberately accepts a
+# short Recreate interruption rather than deadlocking on a one-node rollout.
+loki_gateway = object_("Deployment", f"{release}-loki-gateway")
+assert loki_gateway["spec"]["replicas"] == 1
+assert loki_gateway["spec"]["strategy"] == {
+    "type": "Recreate",
+    "rollingUpdate": None,
+}
+required_anti_affinity = loki_gateway["spec"]["template"]["spec"]["affinity"][
+    "podAntiAffinity"
+]["requiredDuringSchedulingIgnoredDuringExecution"]
+assert required_anti_affinity[0]["topologyKey"] == "kubernetes.io/hostname"
+assert required_anti_affinity[0]["labelSelector"]["matchLabels"] == {
+    "app.kubernetes.io/component": "gateway",
+    "app.kubernetes.io/instance": release,
+    "app.kubernetes.io/name": "loki",
+}
+
+# Admission stays fail-closed. The normal upstream create/post-patch hooks keep
+# their pinned identity, while the wrapper adds a lookup-gated pre-upgrade
+# recovery using the same Secret, webhook, RBAC identity, and certgen image.
+admission_name = f"{release}-internal-ingress-nginx-admission"
+webhook = object_("ValidatingWebhookConfiguration", admission_name)
+assert webhook["webhooks"][0]["failurePolicy"] == "Fail"
+assert webhook["webhooks"][0]["clientConfig"]["service"] == {
+    "name": f"{release}-internal-ingress-nginx-controller-admission",
+    "namespace": namespace,
+    "port": 443,
+    "path": "/networking/v1/ingresses",
+}
+create_job = object_("Job", f"{admission_name}-create")
+patch_job = object_("Job", f"{admission_name}-patch")
+assert annotations(create_job)["helm.sh/hook"] == "pre-install,pre-upgrade"
+assert annotations(patch_job)["helm.sh/hook"] == "post-install,post-upgrade"
+certgen_image = create_job["spec"]["template"]["spec"]["containers"][0]["image"]
+assert certgen_image == patch_job["spec"]["template"]["spec"]["containers"][0]["image"]
+assert certgen_image == (
+    "registry.k8s.io/ingress-nginx/kube-webhook-certgen:v1.6.9@"
+    "sha256:01038e7de14b78d702d2849c3aad72fd25903c4765af63cf16aa3398f5d5f2dd"
+)
+recovery_source = Path(admission_recovery_template).read_text()
+for contract in (
+    'lookup "admissionregistration.k8s.io/v1" "ValidatingWebhookConfiguration"',
+    'helm.sh/hook-weight: "1"',
+    "--webhook-name={{ $admissionName }}",
+    "--secret-name={{ $admissionName }}",
+    "--patch-failure-policy={{ index $admission \"failurePolicy\" }}",
+):
+    assert contract in recovery_source, f"admission recovery lost {contract}"
+
+rollout_source = Path(rollout_recovery_template).read_text()
+for contract in (
+    'lookup "apps/v1" "Deployment"',
+    'helm.sh/hook-weight: "-1"',
+    'resources: ["deployments"]',
+    'resourceNames: [{{ $gatewayName | quote }}]',
+    "--field-manager=helm",
+    '--patch={"spec":{"strategy":{"type":"Recreate","rollingUpdate":null}}}',
+):
+    assert contract in rollout_source, f"Loki rollout recovery lost {contract}"
+platform_values = yaml.safe_load(Path(platform_values_path).read_text())
+recovery_image = platform_values["observabilityUpgradeRecovery"]["image"]
+assert recovery_image == {
+    "repository": "registry.k8s.io/kubectl",
+    "tag": "v1.31.0",
+    "digest": "sha256:99b37df34bc4f99ee322521d4c85cb98c1ceb8f70ff0618bef84eec9fe1ebc20",
+    "pullPolicy": "IfNotPresent",
+}
 
 public_service = object_("Service", f"{release}-ingress-nginx-controller")
 internal_service = object_("Service", f"{release}-internal-ingress-nginx-controller")

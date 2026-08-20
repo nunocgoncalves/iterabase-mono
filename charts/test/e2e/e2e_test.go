@@ -20,6 +20,7 @@ func TestE2E(t *testing.T) {
 		freshInstallScenario(),
 		nMinusOneUpgradeScenario(),
 		featureEnableUpgradeScenario(),
+		singleNodeObservabilityIngressRecoveryScenario(),
 		reapplyRollbackRecoveryScenario(),
 		observabilityScenario(),
 		observabilityTLSScenario(),
