@@ -218,12 +218,13 @@ promtail:
 # survives wherever gpu-operator lands.
 dcgmExporter:
   enabled: false
-  # The dcgm-exporter Service is matched by label (namespace-agnostic). Override
-  # the selector/port only if your gpu-operator install renames them.
+  # Match the stable Service contract created by NVIDIA GPU Operator. Keep the
+  # selector exact so unrelated metrics Services cannot enter the scrape pool;
+  # override only when a supported operator installation renames this contract.
   namespaceSelector:
     any: true
   selector:
     matchLabels:
-      app.kubernetes.io/name: dcgm-exporter
-  port: http-metrics
+      app: nvidia-dcgm-exporter
+  port: gpu-metrics
   path: /metrics
