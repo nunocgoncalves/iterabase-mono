@@ -264,13 +264,37 @@ the new edge Certificate is Ready and the route passes trusted TLS validation.
 The fixture and negative collision checks run through
 `make check-private-control-plane`.
 
-MetalLB configuration CRs remain post-install/post-upgrade hooks so a fresh
-umbrella install can establish the operator CRDs first. If an additional pool
-is removed from values or the platform is rolled back to a version without it,
-delete its inert hook resources explicitly after the LoadBalancer Service is
-gone: `kubectl delete ipaddresspool,l2advertisement <release>-internal -n
+MetalLB pools and advertisements are **ordinary kept resources**, not Helm
+hooks (DES-HOR-511-01/05): `IPAddressPool`/`L2Advertisement` carry
+`helm.sh/resource-policy: keep`, so upgrades, exact reapplies, uninstall, and
+rollback never delete them or the LoadBalancer VIP they assign. The nine
+MetalLB 0.16.1 CRDs are owned as umbrella template resources gated by
+`metallb.enabled` (DES-HOR-511-03). A direct (`Forge`-less) `helm install` of
+the umbrella with `metallb.enabled=true` therefore needs the same bounded
+pre-apply/bootstrap Forge performs automatically, in order, before Helm can
+REST-map the pools:
+
+1. Render the **exact target chart archive** with the release namespace and
+   extract its `CustomResourceDefinition` documents (`helm template -n
+   <namespace>` → keep the `.metallb.io` ones).
+2. Mark those nine CRDs Helm-adoptable for the incoming release
+   (`meta.helm.sh/release-name`/`-namespace` + `app.kubernetes.io/managed-by:
+   Helm`), apply them server-side with `kubectl apply --server-side
+   --force-conflicts`, and wait for every one to become `Established`.
+3. `helm install` with `--set metallb.crds.validationFailurePolicy=Ignore`, wait
+   until the MetalLB controller Deployment is Available and
+   `metallb-webhook-service` has ready endpoints, then run the same upgrade
+   again without the override so the admission webhook converges to its
+   steady-state `Fail` policy. Forge performs this bootstrap; a direct operator
+   must repeat it and verify the live webhook policy is `Fail`.
+
+Because the pools are kept resources, removing one is always an explicit act
+after its LoadBalancer Service is gone:
+`kubectl delete ipaddresspool,l2advertisement <release>-internal -n
 <namespace>`. With `autoAssign: false`, an unselected leftover pool cannot be
-consumed by another Service.
+consumed by another Service. Rollback returns to the predecessor's pool set;
+the kept objects are restored by the still-owned CRDs and release, matching the
+transition scenario's inverse-handoff ordering.
 
 ### Upgrade from platform 0.2.2 or earlier
 
@@ -340,10 +364,12 @@ resources first can fail during REST mapping before any chart hook executes.
 
 The chart-owned `test/e2e/transition-baselines.json` currently declares platform
 and substrate `0.3.12` as the checksum-pinned supported predecessor for current
-`0.3.19`. The supported inverse boundary is current → that declared predecessor
-within the post-0.3 companion-ownership model, followed by a current forward
-recovery. Roll back the platform release before the companion substrate. CRDs,
-generated Secrets, and PVCs are retained. The separate pre-0.3 ownership
+`0.3.20`, and a checksum-pinned `0.3.19` MetalLB hook predecessor transition
+(DES-HOR-511) covers the hook→ordinary pool/VIP preservation path through
+upgrade and reapply. The supported inverse boundary is current → the declared
+predecessor within the post-0.3 companion-ownership model, followed by a current
+forward recovery. Roll back the platform release before the companion substrate.
+CRDs, generated Secrets, and PVCs are retained. The separate pre-0.3 ownership
 handoff above remains mandatory; arbitrary-version rollback safety is not
 claimed.
 

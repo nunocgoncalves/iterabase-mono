@@ -631,7 +631,7 @@ func TestDeployer_Apply_NoWait(t *testing.T) {
 	assert.Contains(t, got, "'--timeout' '10m'")
 }
 
-func TestDeployer_Apply_SkipsNonMetalLBCRDPreApply(t *testing.T) {
+func TestDeployer_Apply_ReconcilesCRDsBeforeUpgrade(t *testing.T) {
 	const crds = "apiVersion: apiextensions.k8s.io/v1\nkind: CustomResourceDefinition\nmetadata:\n  name: examples.example.com\n"
 	var commands []string
 	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
@@ -643,6 +643,10 @@ func TestDeployer_Apply_SkipsNonMetalLBCRDPreApply(t *testing.T) {
 			return crds, 0
 		case strings.Contains(cmd, "'template'"):
 			return "", 0
+		case strings.Contains(cmd, "'kubectl' 'apply'"):
+			return "customresourcedefinition.apiextensions.k8s.io/examples.example.com serverside-applied\n", 0
+		case strings.Contains(cmd, "'kubectl' 'wait'"):
+			return "customresourcedefinition.apiextensions.k8s.io/examples.example.com condition met\n", 0
 		case strings.Contains(cmd, "'upgrade' '--install'"):
 			return "", 0
 		default:
@@ -656,18 +660,17 @@ func TestDeployer_Apply_SkipsNonMetalLBCRDPreApply(t *testing.T) {
 		Release: "opo1", Repository: "oci://ghcr.io/nunocgoncalves/iterabase-platform",
 		Version: "0.1.27", Namespace: "iterabase-system",
 	}))
-	// Non-MetalLB CRDs (crds/ directories or templates) are left entirely to
-	// Helm's own install path and never pre-applied (DES-HOR-511-03/04 strict
-	// scope); pre-applying them without Helm ownership breaks fresh install.
-	require.Len(t, commands, 4)
+	// Every crds/-directory CRD (surfaced by `helm show crds`) is preserved in
+	// the pre-apply set so an operator-feature-enable upgrade can introduce new
+	// dependency CRDs (DES-HOR-511-03); only rendered MetalLB CRDs receive Helm
+	// ownership. A non-MetalLB crds/-dir CRD therefore still triggers apply/wait.
+	require.Len(t, commands, 6)
 	assert.Equal(t, helmVerifyCommand, commands[0])
 	assert.Contains(t, commands[1], "'show' 'crds'")
 	assert.Contains(t, commands[2], "'template'")
-	assert.Contains(t, commands[3], "'upgrade' '--install'")
-	for _, c := range commands {
-		assert.NotContains(t, c, "'kubectl' 'apply'")
-		assert.NotContains(t, c, "'kubectl' 'wait'")
-	}
+	assert.Contains(t, commands[3], "'kubectl' 'apply'")
+	assert.Contains(t, commands[4], "'kubectl' 'wait'")
+	assert.Contains(t, commands[5], "'upgrade' '--install'")
 }
 
 func TestDeployer_Apply_ReconcilesRenderedTemplateCRDs(t *testing.T) {
@@ -786,6 +789,10 @@ func TestDeployer_Apply_MetalLBBootstrapTimeout(t *testing.T) {
 			return "", 0
 		case strings.Contains(cmd, "'status'"):
 			return "", 1
+		case strings.Contains(cmd, "validatingwebhookconfiguration"):
+			// Fresh install: the webhook configuration is absent (NotFound), not a
+			// read failure, so the bootstrap proceeds and then times out.
+			return "Error from server (NotFound): validatingwebhookconfigurations.admissionregistration.k8s.io \"metallb-webhook-configuration\" not found\n", 1
 		case strings.Contains(cmd, "'upgrade' '--install'"):
 			return "", 0
 		default:
@@ -879,8 +886,8 @@ func TestDeployer_Apply_CRDFailuresStopBeforeUpgrade(t *testing.T) {
 		showOutput string
 	}{
 		{name: "discover", failAt: "show", wantErr: "discover chart CRDs"},
-		{name: "apply", failAt: "apply", wantErr: "apply MetalLB chart CRDs", showOutput: crds},
-		{name: "wait", failAt: "wait", wantErr: "wait for MetalLB chart CRDs", showOutput: crds},
+		{name: "apply", failAt: "apply", wantErr: "apply chart CRDs", showOutput: crds},
+		{name: "wait", failAt: "wait", wantErr: "wait for chart CRDs", showOutput: crds},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

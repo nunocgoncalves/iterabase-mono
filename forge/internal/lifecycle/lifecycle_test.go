@@ -284,8 +284,8 @@ type repoCall struct{ name, url string }
 type uninstallCall struct{ release, namespace string }
 type ownershipTransferCall struct{ selector, release, namespace string }
 
-// mnCall records a transferMetalLBHookOwnership invocation (release + namespace).
-type mnCall struct{ release, namespace string }
+// metalLBHookOwnershipCall records a transferMetalLBHookOwnership invocation (release + namespace).
+type metalLBHookOwnershipCall struct{ release, namespace string }
 type restartCall struct{ selector, namespace string }
 
 // fakeDeployer is a controllable deployer.Deployer for lifecycle chart tests.
@@ -298,7 +298,7 @@ type fakeDeployer struct {
 	applyManifestCalls              []string // captured manifests (JSON) piped via stdin
 	ownershipTransfers              []ownershipTransferCall
 	hookOwnershipTransfers          []ownershipTransferCall
-	metallbHookOwnershipTransfers   []mnCall
+	metallbHookOwnershipTransfers   []metalLBHookOwnershipCall
 	restarts                        []restartCall
 	order                           []string // ordered op log for phase-ordering assertions
 	statusStates                    map[string]deployer.ChartState
@@ -368,7 +368,7 @@ func (f *fakeDeployer) TransferCertificateHookOwnership(_ context.Context, selec
 	return f.hookOwnershipTransferErr
 }
 func (f *fakeDeployer) TransferMetalLBHookOwnership(_ context.Context, release, namespace string) error {
-	f.metallbHookOwnershipTransfers = append(f.metallbHookOwnershipTransfers, mnCall{release, namespace})
+	f.metallbHookOwnershipTransfers = append(f.metallbHookOwnershipTransfers, metalLBHookOwnershipCall{release, namespace})
 	f.order = append(f.order, "metallb-hook-transfer")
 	return f.metallbHookOwnershipTransferErr
 }
@@ -514,10 +514,10 @@ func TestApply_Chart_MigratesPreSubstrateOwnershipBeforeCompanion(t *testing.T) 
 		namespace: "iterabase-system",
 	}}, d.restarts)
 	assert.True(t, d.crdsMigrationComplete)
-	require.Equal(t, []mnCall{{
+	require.Equal(t, []metalLBHookOwnershipCall{{
 		release: "opo1", namespace: "iterabase-system",
 	}}, d.metallbHookOwnershipTransfers)
-	assert.Equal(t, []string{"hook-transfer", "apply", "crd-transfer", "apply", "metallb-hook-transfer", "apply", "restart", "apply", "annotate-crds"}, d.order)
+	assert.Equal(t, []string{"metallb-hook-transfer", "hook-transfer", "apply", "crd-transfer", "apply", "apply", "restart", "apply", "annotate-crds"}, d.order)
 }
 
 func TestApply_Chart_ResumesAfterCRDOwnershipBeforeGatewayRestart(t *testing.T) {
@@ -1268,7 +1268,7 @@ func TestApply_Flux(t *testing.T) {
 
 	// Source manifests precede Helm so the runner can load a generation during
 	// --wait; continuous reconciliation starts only after the one-time CR apply.
-	require.Equal(t, []string{"apply", "manifest", "manifest", "manifest", "metallb-hook-transfer", "apply", "annotate-crds", "kustomize", "manifest"}, d.order)
+	require.Equal(t, []string{"metallb-hook-transfer", "apply", "manifest", "manifest", "manifest", "apply", "annotate-crds", "kustomize", "manifest"}, d.order)
 }
 
 func TestApply_Flux_PublicRepoNoToken(t *testing.T) {
