@@ -9,6 +9,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "charts" / "observability" / "dashboards"
 DS = {"type": "prometheus", "uid": "prometheus"}
+NAMESPACE_JOBS = "control-plane|inference-gateway|postgresql|redis|minio|.*dcgm-exporter.*"
 
 DASHBOARDS = [
     ("iterabase-platform-overview", "00 — Platform Overview", [
@@ -131,7 +132,7 @@ def render(uid: str, title: str, specs: list[tuple[str, str, str, str]]) -> dict
         "tags": ["iterabase", "production", "platform"],
         "templating": {"list": [{
             "name": "namespace", "label": "Namespace", "type": "query", "datasource": DS,
-            "query": {"query": 'label_values(up{job=~"control-plane|inference-gateway|postgresql|redis|minio"}, namespace)', "refId": "VariableQuery"},
+            "query": {"query": f'label_values(up{{job=~"{NAMESPACE_JOBS}"}}, namespace)', "refId": "VariableQuery"},
             "includeAll": True, "allValue": ".*", "refresh": 2, "sort": 1,
         }]},
         "time": {"from": "now-6h", "to": "now"}, "timepicker": {},

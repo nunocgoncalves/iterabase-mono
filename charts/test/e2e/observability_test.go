@@ -350,6 +350,66 @@ func assertGrafanaDashboardSuite(t *testing.T, client *http.Client, baseURL, use
 	}
 }
 
+func grafanaInferenceDashboardQueries(t *testing.T, client *http.Client, baseURL, username, password string) (string, string) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, baseURL+"/api/dashboards/uid/iterabase-inference-model-serving", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.SetBasicAuth(username, password)
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("Grafana inference dashboard status=%d", resp.StatusCode)
+	}
+	var payload struct {
+		Dashboard struct {
+			Panels []struct {
+				Title   string `json:"title"`
+				Targets []struct {
+					Expression string `json:"expr"`
+				} `json:"targets"`
+			} `json:"panels"`
+			Templating struct {
+				List []struct {
+					Name  string `json:"name"`
+					Query struct {
+						Expression string `json:"query"`
+					} `json:"query"`
+				} `json:"list"`
+			} `json:"templating"`
+		} `json:"dashboard"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	var variableQuery, panelQuery string
+	for _, variable := range payload.Dashboard.Templating.List {
+		if variable.Name == "namespace" {
+			variableQuery = variable.Query.Expression
+			break
+		}
+	}
+	for _, panel := range payload.Dashboard.Panels {
+		if panel.Title == "GPU utilization" && len(panel.Targets) == 1 {
+			panelQuery = panel.Targets[0].Expression
+			break
+		}
+	}
+	const variablePrefix = "label_values("
+	const variableSuffix = ", namespace)"
+	if !strings.HasPrefix(variableQuery, variablePrefix) || !strings.HasSuffix(variableQuery, variableSuffix) {
+		t.Fatalf("Grafana inference dashboard namespace variable has unsupported query %q", variableQuery)
+	}
+	if !strings.Contains(panelQuery, "$namespace") {
+		t.Fatalf("Grafana inference dashboard GPU utilization query does not use the namespace variable: %q", panelQuery)
+	}
+	return strings.TrimSuffix(strings.TrimPrefix(variableQuery, variablePrefix), variableSuffix), panelQuery
+}
+
 func assertEndpointSeparationStage(t *testing.T, state *chartState) {
 	t.Helper()
 	// Project only membership fields so shared evidence redaction cannot rewrite
@@ -391,11 +451,24 @@ func assertMonitorDiscoveryStage(t *testing.T, state *chartState) {
 		{`count(up{namespace="gpu-operator",service="nvidia-dcgm-exporter",endpoint="gpu-metrics"} == 1)`, "1"},
 		{`DCGM_FI_DEV_GPU_UTIL{namespace="gpu-operator",UUID="GPU-e2e",device="nvidia0",modelName="NVIDIA E2E GPU"}`, "42"},
 		{`DCGM_FI_DEV_FB_FREE{namespace="gpu-operator",UUID="GPU-e2e",device="nvidia0",modelName="NVIDIA E2E GPU"}`, "81920"},
-		{`avg by (gpu) (DCGM_FI_DEV_GPU_UTIL{namespace=~"gpu-operator"})`, "42"},
 	} {
 		if err := waitPrometheusValue(state.ctx, client, forward.URL, metric.query, metric.want, 5*time.Minute); err != nil {
 			t.Fatalf("representative DCGM metric %s did not become %s: %v", metric.query, metric.want, err)
 		}
+	}
+
+	username := string(decodeSecretValue(t, state, testRelease+"-grafana", "admin-user"))
+	password := string(decodeSecretValue(t, state, testRelease+"-grafana", "admin-password"))
+	state.redactor.Add(username, password)
+	grafanaForward := state.forward(t, "svc/"+testRelease+"-grafana", 80, "http")
+	namespaceSelector, panelQuery := grafanaInferenceDashboardQueries(t, &http.Client{Timeout: 15 * time.Second}, grafanaForward.URL, username, password)
+	state.stopForward(t, grafanaForward)
+	if err := requirePrometheusSeriesLabelValue(client, forward.URL, namespaceSelector, "namespace", gpuOperatorFixtureNamespace); err != nil {
+		t.Fatalf("Grafana inference dashboard namespace variable does not select the GPU Operator namespace: %v", err)
+	}
+	panelQuery = strings.ReplaceAll(panelQuery, "$namespace", gpuOperatorFixtureNamespace)
+	if err := waitPrometheusValue(state.ctx, client, forward.URL, panelQuery, "42", 5*time.Minute); err != nil {
+		t.Fatalf("shipped Grafana inference GPU panel query %s did not become 42: %v", panelQuery, err)
 	}
 	assertPlatformMetrics(t, state, client, forward.URL,
 		os.Getenv("HARNESS_IMAGE_REPO") != "" && os.Getenv("HARNESS_IMAGE_TAG") != "",
@@ -560,6 +633,34 @@ func TestUnitFeatureRuntimeAssertionsMatchDisabledComponents(t *testing.T) {
 			t.Fatalf("enabled component %q missing from metric queries: %s", component, candidateQueries)
 		}
 	}
+}
+
+func requirePrometheusSeriesLabelValue(client *http.Client, baseURL, selector, label, want string) error {
+	endpoint := baseURL + "/api/v1/series?" + url.Values{"match[]": {selector}}.Encode()
+	resp, err := client.Get(endpoint)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("status %d", resp.StatusCode)
+	}
+	var payload struct {
+		Status string              `json:"status"`
+		Data   []map[string]string `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return err
+	}
+	if payload.Status != "success" {
+		return fmt.Errorf("series status=%q", payload.Status)
+	}
+	for _, series := range payload.Data {
+		if series[label] == want {
+			return nil
+		}
+	}
+	return fmt.Errorf("selector %q returned no series with %s=%q", selector, label, want)
 }
 
 func waitPrometheusValue(ctx context.Context, client *http.Client, baseURL, query, want string, timeout time.Duration) error {

@@ -9,7 +9,7 @@ This directory owns the compiled runtime contracts for declarative chart behavio
 | `n-minus-one-upgrade` | `test-e2e-upgrade` | Checksum-pinned supported predecessor → exact current pair, schema ownership, state, Secret/PVC retention, hooks/Jobs, and rollout health |
 | `feature-enable-upgrade` | `test-e2e-feature-enable` | Internal-TLS predecessor without observability → authoritative operator CRD pre-apply/Established gate → combined current observability/TLS client paths |
 | `reapply-rollback-recovery` | `test-e2e-reapply-rollback` | No-rollout current reapply, supported inverse rollback to the declared predecessor, and forward recovery with retained state |
-| `observability` | `test-e2e-observability` | Stack readiness, exact candidate process targets over a valid synthetic Flux tool generation, disjoint datastore/exporter endpoints, GPU Operator-compatible DCGM Service discovery and representative GPU panel series, and bounded Prometheus/Loki persistence |
+| `observability` | `test-e2e-observability` | Stack readiness, exact candidate process targets over a valid synthetic Flux tool generation, disjoint datastore/exporter endpoints, GPU Operator-compatible DCGM Service discovery through the shipped dashboard namespace-variable and GPU-panel queries, and bounded Prometheus/Loki persistence |
 | `observability-tls` | `test-e2e-observability-tls` | Internal-CA/DNS verification for stack servers, self-monitors, Grafana datasources/sidecars, Loki gateway, Promtail, and Alertmanager delivery |
 | `internal-tls` | `test-e2e-internal-tls` | Platform identities, control-plane HTTPS, gateway clients, and rejected plaintext Redis/PostgreSQL transport |
 
