@@ -516,6 +516,9 @@ func applyOverlayPhase(ctx context.Context, cfg *config.Cluster, o overlayer.Ove
 }
 
 func applyPlatformChartPhase(ctx context.Context, cfg *config.Cluster, d deployer.Deployer, opts ApplyOpts, res *Result, overlayDest string, migrated bool) error {
+	if err := migrateMetalLBHookOwnership(ctx, cfg, d, opts); err != nil {
+		return err
+	}
 	if migrated {
 		// Routine gateway config changes roll through the chart's pod-template
 		// checksum. The migration still stages an explicit restart because its
@@ -551,6 +554,22 @@ func applyPlatformChartPhase(ctx context.Context, cfg *config.Cluster, d deploye
 			auditFail(cfg, "mark-certificate-migration-complete", err)
 			return fmt.Errorf("mark certificate migration complete: %w", err)
 		}
+	}
+	return nil
+}
+
+// migrateMetalLBHookOwnership adopts legacy hook-created MetalLB pools and
+// advertisements into the platform release before it renders them as ordinary
+// resources (DES-HOR-511-01). It is idempotent and a no-op unless legacy
+// hook-owned objects exist, and must run before Helm's upgrade (which would
+// otherwise reject adopting the existing objects).
+func migrateMetalLBHookOwnership(ctx context.Context, cfg *config.Cluster, d deployer.Deployer, opts ApplyOpts) error {
+	if d == nil || opts.SkipChart || cfg.Spec.Chart.Version == "" || cfg.Spec.Chart.Namespace == "" {
+		return nil
+	}
+	if err := d.TransferMetalLBHookOwnership(ctx, cfg.Spec.Chart.Release, cfg.Spec.Chart.Namespace); err != nil {
+		auditFail(cfg, "migrate-metallb-hook-ownership", err)
+		return fmt.Errorf("metallb hook ownership migration: %w", err)
 	}
 	return nil
 }

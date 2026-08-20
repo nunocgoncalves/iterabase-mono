@@ -162,15 +162,31 @@ internal-ingress-nginx:
 # The edge's LoadBalancer Service needs an LB implementation. On cloud, the cloud
 # LB provisions it (leave metallb disabled + set provider annotations on
 # ingress-nginx.controller.service). On bare-metal/kind/OPO1, enable MetalLB L2:
-# the community metallb chart (operator + speaker + CRDs) + metallb-config
-# (IPAddressPool + L2Advertisement CRs, post-install hooks). The pool addresses
+# the community metallb chart (operator + speaker) + metallb-config
+# (IPAddressPool + L2Advertisement CRs as ordinary resources). The pool addresses
 # (metallb-config.addresses) must match ingress-nginx.controller.service.ipFamilies.
 # Disabled by default; the kind preset (values-kind.yaml) + the OPO1 overlay
 # enable both. frrk8s is off (L2-only — no BGP/frr overhead).
+#
+# MetalLB CRDs are owned by this chart (DES-HOR-511-03): the nine CRDs render as
+# regular umbrella template resources (gated by metallb.enabled) so they persist
+# across install/upgrade/reapply, and the Forge/harness render-extract CRD
+# pre-apply establishes them (waiting for Established) before ordinary
+# metallb-config resources apply. The bundled metallb crds subchart is therefore
+# disabled to avoid installing the same CRDs twice. Each CRD also carries
+# helm.sh/resource-policy: keep so disable, uninstall, upgrade, and rollback never
+# delete the CRDs or their custom-resource data (DES-HOR-511-05).
+#
+# The MetalLB admission webhook failurePolicy stays at the chart default Fail as
+# the steady-state production policy (DES-HOR-511-04). Forge and the test harness
+# apply a bounded bootstrap-only Ignore override on fresh installs (and on any
+# interrupted bootstrap reapply), wait for the MetalLB controller + webhook
+# backend to be ready, converge the release back to Fail, and assert the final
+# webhook failurePolicy is Fail.
 metallb:
   enabled: false
   crds:
-    enabled: true
+    enabled: false
   frrk8s:
     enabled: false
   # Metrics + ServiceMonitor (native to the metallb chart). Flip on with

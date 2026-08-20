@@ -3,10 +3,12 @@
 apiVersion: metallb.io/v1beta1
 kind: L2Advertisement
 metadata:
-  name: {{ include "metallb-config.name" . }}
+  # Ordinary release resource (DES-HOR-511-01); see ipaddresspool.yaml. Kept
+  # (DES-HOR-511-05) so the advertisement (VIP config data) survives disable,
+  # uninstall, upgrade, and rollback; still updated in place on upgrade.
   annotations:
-    helm.sh/hook: post-install,post-upgrade
-    helm.sh/hook-weight: "11"
+    helm.sh/resource-policy: keep
+  name: {{ include "metallb-config.name" . }}
   labels:
     {{- include "metallb-config.labels" . | nindent 4 }}
 spec:
@@ -22,10 +24,9 @@ spec:
 apiVersion: metallb.io/v1beta1
 kind: L2Advertisement
 metadata:
-  name: {{ include "metallb-config.additionalPoolName" (dict "root" $ "pool" $pool) }}
   annotations:
-    helm.sh/hook: post-install,post-upgrade
-    helm.sh/hook-weight: "11"
+    helm.sh/resource-policy: keep
+  name: {{ include "metallb-config.additionalPoolName" (dict "root" $ "pool" $pool) }}
   labels:
     {{- include "metallb-config.labels" $ | nindent 4 }}
     iterabase.com/metallb-pool: {{ required "metallb-config.additionalPools[].name is required" $pool.name | quote }}

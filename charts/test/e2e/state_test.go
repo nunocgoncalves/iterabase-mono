@@ -26,6 +26,13 @@ import (
 
 const testNamespace = "iterabase-system"
 
+const (
+	metalLBValidationPolicyValue = "metallb.crds.validationFailurePolicy"
+	metalLBPolicyFail            = "Fail"
+	metalLBPolicyIgnore          = "Ignore"
+	metalLBWebhookConfigName     = "metallb-webhook-configuration"
+)
+
 var testRelease = func() string {
 	if configured := strings.TrimSpace(os.Getenv("ITERABASE_E2E_RELEASE")); configured != "" {
 		return configured
@@ -412,12 +419,217 @@ func (state *chartState) installSubstrate(t *testing.T) {
 
 func (state *chartState) installPlatform(t *testing.T, timeout time.Duration, valueFiles ...string) {
 	t.Helper()
+	// Mirror Forge's pre-apply (DES-HOR-511-03): establish the exact chart's CRDs
+	// (from its `crds/` directories AND CRDs rendered as ordinary template
+	// resources, e.g. the MetalLB CRDs) and wait for Established before Helm, so
+	// ordinary custom resources can be mapped. Idempotent. Returns whether MetalLB
+	// is enabled (its rendered template CRDs are present).
+	metallb := state.preapplyAllCRDs(t, valueFiles...)
+	// Mirror Forge's DES-HOR-511 pre-apply: adopt any legacy hook-created MetalLB
+	// pools/advertisements into the release before Helm upgrades, so the transition
+	// from a hook-based predecessor preserves object UIDs instead of failing to
+	// adopt them. Idempotent and a no-op when none exist.
+	state.adoptMetalLBHookObjects(t)
+
+	// Mirror Forge's bounded bootstrap (DES-HOR-511-04): when MetalLB is enabled
+	// and this is a fresh install or an interrupted bootstrap still at the Ignore
+	// policy, install with a bootstrap-only validationFailurePolicy=Ignore, wait for
+	// the MetalLB controller + webhook backend to become ready, then converge the
+	// release back to the steady-state Fail policy and assert it.
+	if metallb {
+		installed, _ := state.releaseInstalled(t)
+		policy := state.metalLBValidationPolicy(t)
+		if !installed || policy == metalLBPolicyIgnore {
+			state.helmUpgrade(t, timeout, valueFiles, map[string]string{
+				metalLBValidationPolicyValue: metalLBPolicyIgnore,
+			})
+			state.waitMetalLBAdmissionBackend(t, timeout)
+		}
+	}
+	state.helmUpgrade(t, timeout, valueFiles, nil)
+	if metallb {
+		if final := state.metalLBValidationPolicy(t); final != "" && final != metalLBPolicyFail {
+			t.Fatalf("metallb validation failurePolicy not converged to %s: got %q", metalLBPolicyFail, final)
+		}
+	}
+}
+
+// helmUpgrade is a thin helper wrapping client.HelmUpgrade with the platform
+// release/namespace and the given value files and --set-string overrides.
+func (state *chartState) helmUpgrade(t *testing.T, timeout time.Duration, valueFiles []string, values map[string]string) {
+	t.Helper()
 	out, err := state.client.HelmUpgrade(state.ctx, kube.HelmOptions{
 		Release: testRelease, Namespace: testNamespace, Chart: state.platform,
-		ValueFiles: valueFiles, Wait: true, Timeout: timeout,
+		ValueFiles: valueFiles, Values: values, Wait: true, Timeout: timeout,
 	})
 	if err != nil {
 		t.Fatalf("install platform: %v\n%s", err, out)
+	}
+}
+
+// releaseInstalled reports whether the platform Helm release exists.
+func (state *chartState) releaseInstalled(t *testing.T) (bool, error) {
+	out, err := state.runner.Run(state.ctx, process.Command{
+		Name: "helm", Args: []string{"status", testRelease, "-n", testNamespace, "--kubeconfig", state.client.Kubeconfig},
+		Timeout: 30 * time.Second, OutputName: "helm-status.log",
+	})
+	if err != nil {
+		return false, nil // release not found
+	}
+	return strings.Contains(out.Output, "STATUS: deployed"), nil
+}
+
+// metalLBValidationPolicy reads the failurePolicy of the MetalLB admission webhook
+// configuration ("" when absent, e.g. MetalLB disabled).
+func (state *chartState) metalLBValidationPolicy(t *testing.T) string {
+	out, err := state.client.Kubectl(state.ctx, 30*time.Second, "get", "validatingwebhookconfiguration",
+		metalLBWebhookConfigName, "-o", "jsonpath={.webhooks[0].failurePolicy}")
+	if err != nil {
+		return "" // absent => MetalLB disabled
+	}
+	return strings.TrimSpace(out)
+}
+
+// waitMetalLBAdmissionBackend polls until the metallb controller deployment is
+// Available and the webhook service has ready endpoints (or the timeout elapses).
+func (state *chartState) waitMetalLBAdmissionBackend(t *testing.T, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		replicas, _ := state.client.Kubectl(state.ctx, 30*time.Second, "get", "deployment", "-n", testNamespace,
+			"-l", "app.kubernetes.io/instance="+testRelease+",app.kubernetes.io/name=metallb,app.kubernetes.io/component=controller",
+			"-o", "jsonpath={.items[0].status.readyReplicas}")
+		endpoints, _ := state.client.Kubectl(state.ctx, 30*time.Second, "get", "endpoints", "-n", testNamespace,
+			"metallb-webhook-service", "-o", "jsonpath={.subsets[*].addresses[*].ip}")
+		if strings.TrimSpace(replicas) != "" && strings.TrimSpace(replicas) != "0" && strings.TrimSpace(endpoints) != "" {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("metallb admission backend not ready after %s", timeout)
+		}
+		time.Sleep(3 * time.Second)
+	}
+}
+
+// preapplyAllCRDs establishes the exact platform chart's CRDs before Helm by
+// unioning `helm show crds` (CRDs in `crds/` directories) with the CRDs rendered
+// as ordinary template resources (DES-HOR-511-03: the MetalLB CRDs), applying
+// them server-side and waiting for Established. The rendered (template) CRDs are
+// marked Helm-adoptable for the incoming release (DES-HOR-511-04) so a fresh
+// `helm install` can adopt them. Returns whether MetalLB is enabled (rendered
+// template CRDs present). CRD schemas contain credential-shaped property names
+// that text redaction can corrupt, so the exact payload is written to a private
+// temp file and applied with `-f`.
+func (state *chartState) preapplyAllCRDs(t *testing.T, valueFiles ...string) bool {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "platform-crds.yaml")
+	showArgs := []string{"-o", "pipefail", "-c", `helm show crds "$@" > "$CRD_OUTPUT"`, "--"}
+	showArgs = append(showArgs, helmChartArgs(state.platform)...)
+	if _, err := state.runner.Run(state.ctx, process.Command{
+		Name: "bash", Args: showArgs, Env: map[string]string{"CRD_OUTPUT": path}, Timeout: 2 * time.Minute,
+	}); err != nil {
+		t.Fatalf("extract chart CRDs (helm show crds): %v", err)
+	}
+	showCRDs, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read chart CRDs (helm show crds): %v", err)
+	}
+
+	// Render CRDs owned as ordinary template resources (gated by their values, so
+	// e.g. MetalLB CRDs appear only when MetalLB is enabled). Render with the
+	// release namespace so `.Release.Namespace`-templated fields (e.g. the
+	// bgppeers conversion webhook's clientConfig.service.namespace) resolve
+	// identically to the subsequent `helm install`, avoiding an SSA conflict when
+	// Helm adopts the pre-applied CRD.
+	renderedPath := filepath.Join(t.TempDir(), "platform-rendered-crds.yaml")
+	tmplArgs := []string{"-o", "pipefail", "-c", `helm template "$@" > "$TMPL_OUTPUT"`, "--"}
+	tmplArgs = append(tmplArgs, helmChartArgs(state.platform)...)
+	for _, f := range valueFiles {
+		tmplArgs = append(tmplArgs, "-f", f)
+	}
+	tmplArgs = append(tmplArgs, "-n", testNamespace)
+	if _, err := state.runner.Run(state.ctx, process.Command{
+		Name: "bash", Args: tmplArgs, Env: map[string]string{"TMPL_OUTPUT": renderedPath}, Timeout: 3 * time.Minute,
+	}); err != nil {
+		t.Fatalf("render chart CRDs (helm template): %v", err)
+	}
+	rendered, err := os.ReadFile(renderedPath)
+	if err != nil {
+		t.Fatalf("read rendered chart CRDs: %v", err)
+	}
+	// MetalLB is enabled only when the rendered template set includes the MetalLB
+	// CRDs; observability/control-plane also render CRDs as regular templates, so a
+	// non-empty render alone does not imply MetalLB. The pre-apply is strictly
+	// scoped to the MetalLB CRDs (DES-HOR-511-03/04): every other CRD the chart
+	// ships in `crds/` directories or renders as an ordinary template is left
+	// entirely to Helm's own install path, which owns it correctly on a fresh
+	// install. Pre-applying those without Helm ownership makes a fresh `helm
+	// install` fail to import them ("invalid ownership metadata"), so only the
+	// MetalLB set is established before Helm so the pools and advertisements render
+	// against an Established schema.
+	metallbShow, err := selectMetalLBCRDs(string(showCRDs))
+	if err != nil {
+		t.Fatalf("select MetalLB shipped CRDs: %v", err)
+	}
+	metallbRendered, err := selectMetalLBCRDs(string(rendered))
+	if err != nil {
+		t.Fatalf("select MetalLB rendered CRDs: %v", err)
+	}
+	if metallbShow == "" && metallbRendered == "" {
+		return false // MetalLB disabled: no CRD pre-apply; Helm owns every CRD.
+	}
+	renderedOwned, err := markRenderedCRDsOwned(metallbRendered, testRelease, testNamespace)
+	if err != nil {
+		t.Fatalf("mark rendered MetalLB CRDs Helm-adoptable: %v", err)
+	}
+
+	combined := metallbShow + "\n---\n" + renderedOwned
+	selected, err := selectBundledCRDs(combined)
+	if err != nil {
+		t.Fatalf("select authoritative MetalLB platform CRDs: %v", err)
+	}
+	names, err := bundledCRDNames(combined)
+	if err != nil {
+		t.Fatalf("collect MetalLB platform CRD names: %v", err)
+	}
+	if err := os.WriteFile(path, []byte(selected), 0o600); err != nil {
+		t.Fatalf("write selected platform CRDs: %v", err)
+	}
+	state.kubectl(t, 3*time.Minute, "apply", "--server-side", "--force-conflicts", "--field-manager="+transitionFieldManager, "-f", path)
+	for _, name := range names {
+		state.kubectl(t, 3*time.Minute, "wait", "--for=condition=Established", "crd/"+name, "--timeout=2m")
+	}
+	return true
+}
+
+// adoptMetalLBHookObjects transfers ownership of any MetalLB IPAddressPool /
+// L2Advertisement created by a hook-era (pre-DES-HOR-511) chart into the current
+// release before Helm renders them as ordinary resources. Only this release's
+// objects (matching the instance label) are touched, only ownership/hook metadata
+// changes, and the step is best-effort (a no-op when the kinds or objects are
+// absent, e.g. cloud installs).
+func (state *chartState) adoptMetalLBHookObjects(t *testing.T) {
+	t.Helper()
+	sel := "app.kubernetes.io/instance=" + testRelease
+	for _, kind := range []string{"ipaddresspool", "l2advertisement"} {
+		out, err := state.client.Kubectl(state.ctx, 30*time.Second, "get", kind, "-n", testNamespace, "-l", sel, "-o", "name")
+		if err != nil {
+			continue // kind absent (cloud/older chart) => nothing to adopt
+		}
+		resources := strings.Fields(out)
+		if len(resources) == 0 {
+			continue
+		}
+		args := append([]string{"annotate", "--overwrite", "-n", testNamespace}, resources...)
+		args = append(args,
+			"meta.helm.sh/release-name="+testRelease,
+			"meta.helm.sh/release-namespace="+testNamespace,
+			"helm.sh/hook-",
+			"helm.sh/hook-weight-",
+		)
+		if _, err := state.client.Kubectl(state.ctx, 30*time.Second, args...); err != nil {
+			t.Fatalf("adopt MetalLB %s ownership: %v", kind, err)
+		}
 	}
 }
 
