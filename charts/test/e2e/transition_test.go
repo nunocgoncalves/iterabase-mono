@@ -142,7 +142,7 @@ func singleNodeObservabilityIngressRecoveryScenario() sharede2e.Definition {
 	return sharede2e.Define(sharede2e.Scenario[*chartState]{
 		Metadata: transitionScenarioMetadata(
 			"single-node-observability-ingress-recovery",
-			"Upgrades the exact 0.3.12 single-node observability baseline while first enabling private ingress, injects a failure before admission post-hooks, then proves fail-closed reapply, explicit rollback, and forward recovery.",
+			"Upgrades the exact 0.3.12 single-node observability baseline after proving an explicit RollingUpdate override bypasses migration, injects a failure before admission post-hooks, then proves fail-closed reapply, explicit rollback, and forward recovery.",
 			"test-e2e-observability-ingress-recovery", 60,
 			[]string{"HOR-414", "HOR-506"},
 			[]string{"iterabase-platform-chart"},
@@ -153,7 +153,8 @@ func singleNodeObservabilityIngressRecoveryScenario() sharede2e.Definition {
 			{Name: "resolve-supported-predecessor", DependsOn: []string{"create-kind"}, Run: resolveTransitionBaselinesStage},
 			{Name: "install-predecessor-substrate", DependsOn: []string{"resolve-supported-predecessor"}, Run: installPredecessorSubstrateStage},
 			{Name: "install-predecessor-observability", DependsOn: []string{"install-predecessor-substrate"}, Run: installPredecessorSingleNodeObservabilityStage},
-			{Name: "preapply-current-operator-crds", DependsOn: []string{"install-predecessor-observability"}, Run: preapplyCurrentOperatorCRDsStage},
+			{Name: "assert-rolling-update-override-bypasses-recovery", DependsOn: []string{"install-predecessor-observability"}, Run: assertRollingUpdateOverrideBypassesRecoveryStage},
+			{Name: "preapply-current-operator-crds", DependsOn: []string{"assert-rolling-update-override-bypasses-recovery"}, Run: preapplyCurrentOperatorCRDsStage},
 			{Name: "inject-failed-current-upgrade", DependsOn: []string{"preapply-current-operator-crds"}, Run: injectFailedSingleNodeIngressUpgradeStage},
 			{Name: "assert-interrupted-boundary", DependsOn: []string{"inject-failed-current-upgrade"}, Run: assertInterruptedSingleNodeIngressUpgradeStage},
 			{Name: "reapply-current-intent", DependsOn: []string{"assert-interrupted-boundary"}, Run: reapplySingleNodeIngressUpgradeStage},
@@ -519,6 +520,39 @@ func installPredecessorSingleNodeObservabilityStage(t *testing.T, state *chartSt
 	assertReleaseChartVersion(t, state, testRelease, baseline.Chart, baseline.Version)
 	assertSingleNodeGateway(t, state, "RollingUpdate", singleNodeGatewayPredecessor)
 	assertIngressAdmissionCA(t, state, "ingress-nginx")
+}
+
+func assertRollingUpdateOverrideBypassesRecoveryStage(t *testing.T, state *chartState) {
+	t.Helper()
+	values := singleNodeObservabilityValueFiles(t, state, singleNodeGatewayPredecessor, false, false)
+	values = append(values, state.writeValues(t, "rolling-update-override", map[string]any{
+		"observability": map[string]any{
+			"loki": map[string]any{
+				"gateway": map[string]any{
+					"deploymentStrategy": map[string]any{
+						"type": "RollingUpdate",
+						"rollingUpdate": map[string]any{
+							"maxSurge":       1,
+							"maxUnavailable": 0,
+						},
+					},
+				},
+			},
+		},
+	}))
+	args := []string{"upgrade", testRelease}
+	args = append(args, helmChartArgs(state.platform)...)
+	args = append(args, "--namespace", testNamespace, "--kubeconfig", state.cluster.Kubeconfig,
+		"--dry-run=server", "--hide-secret")
+	for _, valuesFile := range values {
+		args = append(args, "--values", valuesFile)
+	}
+	out := state.process(t, 4*time.Minute, "helm", args...)
+	hookName := testRelease + "-loki-gateway-rollout-recovery"
+	if strings.Contains(out, hookName) {
+		t.Fatalf("explicit RollingUpdate override rendered migration hook %q", hookName)
+	}
+	assertSingleNodeGateway(t, state, "RollingUpdate", singleNodeGatewayPredecessor)
 }
 
 func injectFailedSingleNodeIngressUpgradeStage(t *testing.T, state *chartState) {

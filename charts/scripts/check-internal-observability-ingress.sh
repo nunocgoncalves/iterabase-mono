@@ -132,6 +132,8 @@ for contract in (
 rollout_source = Path(rollout_recovery_template).read_text()
 for contract in (
     'lookup "apps/v1" "Deployment"',
+    '$desiredStrategy := dig "deploymentStrategy" "type" "" $gateway',
+    '(eq $desiredStrategy "Recreate")',
     'helm.sh/hook-weight: "-1"',
     'resources: ["deployments"]',
     'resourceNames: [{{ $gatewayName | quote }}]',

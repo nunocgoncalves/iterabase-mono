@@ -1,10 +1,11 @@
 {{- /*
 Migrate an existing one-replica Loki gateway from the predecessor's
-RollingUpdate strategy before Helm server-side applies the corrected Recreate
-manifest. Kubernetes rejects a discriminator change while the old
-strategy.rollingUpdate fields remain owned, even when the desired YAML carries
-an explicit null. A JSON merge patch atomically replaces the strategy before
-the regular Deployment update changes its pod template.
+RollingUpdate strategy only when the desired strategy remains Recreate.
+Kubernetes rejects a discriminator change while the old strategy.rollingUpdate
+fields remain owned, even when the desired YAML carries an explicit null. A
+JSON merge patch atomically replaces the strategy before the regular Deployment
+update changes its pod template. An explicit HA RollingUpdate override renders
+no migration hooks.
 
 A fresh install has no existing Deployment and renders no hooks. Rollback to a
 legacy stored revision cannot execute hooks introduced by the current chart;
@@ -15,6 +16,7 @@ DES-HOR-506-01 owns the Recreate/downtime behavior.
 {{- $recovery := index .Values "observabilityUpgradeRecovery" -}}
 {{- $loki := default (dict) (index $observability "loki") -}}
 {{- $gateway := default (dict) (index $loki "gateway") -}}
+{{- $desiredStrategy := dig "deploymentStrategy" "type" "" $gateway -}}
 {{- if and (index $observability "enabled") (index $recovery "enabled") (index $loki "enabled") (index $gateway "enabled") -}}
 {{- $name := default "loki" (index $loki "nameOverride") -}}
 {{- $fullname := "" -}}
@@ -28,7 +30,7 @@ DES-HOR-506-01 owns the Recreate/downtime behavior.
 {{- $gatewayName := printf "%s-gateway" $fullname | trunc 253 | trimSuffix "-" -}}
 {{- $namespace := default .Release.Namespace (index $loki "namespaceOverride") -}}
 {{- $existing := lookup "apps/v1" "Deployment" $namespace $gatewayName -}}
-{{- if and $existing (ne (dig "spec" "strategy" "type" "RollingUpdate" $existing) "Recreate") -}}
+{{- if and (eq $desiredStrategy "Recreate") $existing (ne (dig "spec" "strategy" "type" "RollingUpdate" $existing) "Recreate") -}}
 {{- $hookName := printf "%s-rollout-recovery" $gatewayName | trunc 63 | trimSuffix "-" -}}
 {{- $image := index $recovery "image" -}}
 apiVersion: v1
