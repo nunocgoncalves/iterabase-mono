@@ -137,9 +137,10 @@ or object-storage overlay may explicitly restore `RollingUpdate` only when its
 replica and topology contract can satisfy the anti-affinity rule. When upgrading
 an existing legacy `RollingUpdate` Deployment, a lookup-gated pre-upgrade hook
 uses the digest-pinned Kubernetes `v1.31.0` kubectl image to replace the strategy
-before Helm server-side applies the changed pod template. The patch uses Helm's
-field-manager identity, so it does not create a competing owner that blocks the
-explicit rollback below.
+before Helm server-side applies the changed pod template. The hook is gated on
+the desired strategy remaining `Recreate`; an explicit `RollingUpdate` overlay
+is never migrated. The patch uses Helm's field-manager identity, so it does not
+create a competing owner that blocks the explicit rollback below.
 
 Ingress admission remains fail-closed. On first enablement, ingress-nginx's
 pre-hook creates a stable serving Secret and its post-hook patches the validating
@@ -164,9 +165,10 @@ helm rollback <release>-cert-manager <substrate-revision> -n <namespace> --wait
 ```
 
 `make test-e2e-observability-ingress-recovery` exercises the checksum-pinned
-`0.3.12` baseline, a changed one-replica gateway, an injected failure before
-admission post-hooks, fail-closed reapply, the explicit legacy rollback above,
-and current forward recovery.
+`0.3.12` baseline, bypass of migration for an explicit `RollingUpdate` override,
+a changed one-replica gateway, an injected failure before admission post-hooks,
+fail-closed reapply, the explicit legacy rollback above, and current forward
+recovery.
 
 ### Private control-plane ingress
 
