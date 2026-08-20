@@ -106,7 +106,18 @@ spec:
         - name: exporter
           image: busybox:1.37.0
           command: ["sh", "-c"]
-          args: ["exec httpd -f -p 9400 -h /www"]
+          args:
+            - |
+              body="$(cat /www/metrics)"
+              while true; do
+                {
+                  printf 'HTTP/1.1 200 OK\r\n'
+                  printf 'Content-Type: text/plain; version=0.0.4; charset=utf-8\r\n'
+                  printf 'Content-Length: %s\r\n' "${#body}"
+                  printf 'Connection: close\r\n\r\n'
+                  printf '%s' "$body"
+                } | nc -l -p 9400
+              done
           ports:
             - name: gpu-metrics
               containerPort: 9400
