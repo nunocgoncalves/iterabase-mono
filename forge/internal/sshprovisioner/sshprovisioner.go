@@ -740,44 +740,341 @@ func extractChartCRDs(raw string) (string, error) {
 	return strings.Join(manifests, "\n---\n") + "\n", nil
 }
 
-// applyChartCRDs reconciles the CRDs bundled in the exact pinned chart artifact
-// before Helm renders/maps the release's custom resources. Helm installs CRDs
-// only on a release's initial install; it does not install CRDs introduced by a
-// dependency that is enabled later during upgrade. Server-side apply avoids the
-// oversized last-applied annotation common with CRDs and makes repeated applies
-// idempotent. CRDs intentionally remain on uninstall to protect custom-resource
-// data, matching Helm's CRD lifecycle semantics.
-func (p *SSHProvisioner) applyChartCRDs(ctx context.Context, opts deployer.ApplyOpts) error {
+// selectMetalLBCRDs filters a CRD manifest to only the MetalLB CRDs (those whose
+// metadata.name ends in .metallb.io). The pre-apply is intentionally scoped to the
+// MetalLB CRDs (DES-HOR-511-03/04): every other CRD the chart ships in `crds/`
+// directories or renders as an ordinary template is left entirely to Helm's own
+// install path, which owns them correctly on a fresh install. Pre-applying those
+// other CRDs without Helm ownership made a fresh `helm install` fail to import
+// them ("invalid ownership metadata"), so only the MetalLB set is established up
+// front.
+func selectMetalLBCRDs(raw string) (string, error) {
+	decoder := yaml.NewDecoder(strings.NewReader(raw))
+	var crds []string
+	for {
+		var document yaml.Node
+		if err := decoder.Decode(&document); err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return "", fmt.Errorf("decode MetalLB chart CRDs: %w", err)
+		}
+		var header chartCRDHeader
+		if err := document.Decode(&header); err != nil {
+			return "", fmt.Errorf("decode MetalLB chart CRD header: %w", err)
+		}
+		if header.APIVersion != "apiextensions.k8s.io/v1" || header.Kind != "CustomResourceDefinition" {
+			continue
+		}
+		if !strings.HasSuffix(header.Metadata.Name, ".metallb.io") {
+			continue
+		}
+		var resource any
+		if err := document.Decode(&resource); err != nil {
+			return "", fmt.Errorf("decode MetalLB chart CRD: %w", err)
+		}
+		manifest, err := yaml.Marshal(resource)
+		if err != nil {
+			return "", fmt.Errorf("encode MetalLB chart CRD: %w", err)
+		}
+		crds = append(crds, strings.TrimSpace(string(manifest)))
+	}
+	if len(crds) == 0 {
+		return "", nil
+	}
+	return strings.Join(crds, "\n---\n") + "\n", nil
+}
+
+// applyChartCRDs reconciles the CRDs that the exact pinned chart release will
+// depend on before Helm renders/maps the release's custom resources. It unions
+// two sources: CRDs shipped in `crds/` directories (surfaced by `helm show
+// crds`, e.g. observability/external-dns) and CRDs rendered as ordinary template
+// resources (DES-HOR-511-03: the MetalLB CRDs, which `helm show crds` cannot
+// see), discovered by rendering the exact chart with the release's value files.
+// Helm installs crds/-dir CRDs only on a release's initial install; rendering
+// the template CRDs and establishing all of them up front makes both fresh
+// installs and upgrades deterministic. The rendered (template) CRDs are marked
+// Helm-adoptable for the incoming release so a fresh `helm install` can adopt
+// them (DES-HOR-511-04); crds/-dir CRDs install through Helm's own crds/ path
+// and need no such marking. Server-side apply avoids the oversized last-applied
+// annotation common with CRDs and makes repeated applies idempotent. CRDs
+// intentionally remain on uninstall to protect custom-resource data, matching
+// Helm's CRD lifecycle semantics.
+func (p *SSHProvisioner) applyChartCRDs(ctx context.Context, opts deployer.ApplyOpts) (bool, error) {
 	raw, err := p.run(ctx, helmCmd("show", "crds", opts.Repository, "--version", opts.Version))
 	if err != nil {
-		return fmt.Errorf("discover chart CRDs: %w", err)
+		return false, fmt.Errorf("discover chart CRDs: %w", err)
 	}
-	crds, err := extractChartCRDs(raw)
+	rendered, err := p.renderChartCRDs(ctx, opts)
 	if err != nil {
-		return err
+		return false, fmt.Errorf("discover rendered chart CRDs: %w", err)
 	}
-	if crds == "" {
-		return nil
+	// The pre-apply is strictly scoped to the MetalLB CRDs (DES-HOR-511-03/04):
+	// other CRDs the chart ships in `crds/` directories or renders as ordinary
+	// templates are left entirely to Helm's own install path, which owns them
+	// correctly on a fresh install. Pre-applying them without Helm ownership made
+	// a fresh `helm install` fail to import them ("invalid ownership metadata"),
+	// so only the MetalLB set is established before Helm so the pools and
+	// advertisements render against an Established schema.
+	combined := raw
+	if rendered != "" {
+		combined += "\n---\n" + rendered
 	}
-	if _, err := p.runStdin(ctx, kubectlCmd("apply", "--server-side", "--force-conflicts", "-f", "-"), crds); err != nil {
-		return fmt.Errorf("apply chart CRDs: %w", err)
+	metallbCRDs, err := selectMetalLBCRDs(combined)
+	if err != nil {
+		return false, fmt.Errorf("select MetalLB chart CRDs: %w", err)
 	}
-	if _, err := p.runStdin(ctx, kubectlCmd("wait", "--for=condition=Established", "--timeout=2m", "-f", "-"), crds); err != nil {
-		return fmt.Errorf("wait for chart CRDs: %w", err)
+	if metallbCRDs == "" {
+		// MetalLB disabled/absent: no CRD pre-apply; Helm owns every CRD.
+		return false, nil
 	}
-	return nil
+	metallbCRDs, err = markHelmAdoptableCRDs(metallbCRDs, opts.Release, opts.Namespace)
+	if err != nil {
+		return false, fmt.Errorf("mark MetalLB CRDs Helm-adoptable: %w", err)
+	}
+	if _, err := p.runStdin(ctx, kubectlCmd("apply", "--server-side", "--force-conflicts", "-f", "-"), metallbCRDs); err != nil {
+		return false, fmt.Errorf("apply MetalLB chart CRDs: %w", err)
+	}
+	if _, err := p.runStdin(ctx, kubectlCmd("wait", "--for=condition=Established", "--timeout=2m", "-f", "-"), metallbCRDs); err != nil {
+		return false, fmt.Errorf("wait for MetalLB chart CRDs: %w", err)
+	}
+	return true, nil
+}
+
+// renderChartCRDs renders the exact pinned chart with the release's value files
+// and overrides and returns only the CustomResourceDefinition documents it
+// renders (CRDs owned as ordinary template resources, e.g. the MetalLB CRDs). It
+// returns "" when the chart renders no CRDs (e.g. MetalLB disabled in values).
+func (p *SSHProvisioner) renderChartCRDs(ctx context.Context, opts deployer.ApplyOpts) (string, error) {
+	// Render with the release namespace so `.Release.Namespace`-templated fields
+	// (e.g. the bgppeers conversion webhook's clientConfig.service.namespace)
+	// resolve identically to the subsequent `helm install`, avoiding an SSA
+	// conflict when Helm adopts the pre-applied CRD.
+	args := []string{"template", opts.Repository, "--version", opts.Version, "-n", opts.Namespace}
+	for _, f := range opts.ValueFiles {
+		args = append(args, "-f", f)
+	}
+	for _, v := range opts.Values {
+		args = append(args, "--set", v)
+	}
+	out, err := p.run(ctx, helmCmd(args...))
+	if err != nil {
+		return "", err
+	}
+	return extractChartCRDs(out)
+}
+
+// markHelmAdoptableCRDs injects the incoming release's Helm ownership metadata
+// into every rendered (template) CustomResourceDefinition so a fresh
+// `helm install` can adopt them instead of failing to import them as
+// "existing ... cannot be imported into the current release: invalid ownership
+// metadata" (DES-HOR-511-04). Scope is strict: only the rendered template CRDs
+// (the MetalLB set) are marked for the incoming release/namespace, never the
+// crds/-directory CRDs which Helm installs through its own crds/ path. Idempotent
+// on upgrade (re-asserting the same ownership) and a no-op shape change only
+// when a rendered CRD is absent.
+func markHelmAdoptableCRDs(rendered string, release, namespace string) (string, error) {
+	decoder := yaml.NewDecoder(strings.NewReader(rendered))
+	var manifests []string
+	for {
+		var document yaml.Node
+		if err := decoder.Decode(&document); err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return "", fmt.Errorf("decode rendered CRD for helm adoption: %w", err)
+		}
+		var header chartCRDHeader
+		if err := document.Decode(&header); err != nil {
+			return "", fmt.Errorf("decode rendered CRD header: %w", err)
+		}
+		if header.APIVersion != "apiextensions.k8s.io/v1" || header.Kind != "CustomResourceDefinition" {
+			continue
+		}
+		// Strict founder scope (DES-HOR-511-04): only the nine MetalLB CRDs are
+		// marked Helm-adoptable; other rendered template CRDs are still included in
+		// the pre-apply set (established before Helm) but left unmarked.
+		if strings.HasSuffix(header.Metadata.Name, ".metallb.io") {
+			markCRDHelmOwnership(&document, release, namespace)
+		}
+		var resource any
+		if err := document.Decode(&resource); err != nil {
+			return "", fmt.Errorf("decode rendered CRD for helm adoption: %w", err)
+		}
+		manifest, err := yaml.Marshal(resource)
+		if err != nil {
+			return "", fmt.Errorf("encode rendered CRD for helm adoption: %w", err)
+		}
+		manifests = append(manifests, strings.TrimSpace(string(manifest)))
+	}
+	return strings.Join(manifests, "\n---\n") + "\n", nil
+}
+
+// markCRDHelmOwnership sets the release-ownership annotations and the
+// app.kubernetes.io/managed-by: Helm label on a rendered CRD's metadata so Helm
+// can adopt the pre-applied object on install.
+func markCRDHelmOwnership(doc *yaml.Node, release, namespace string) {
+	root := doc.Content[0]
+	var meta *yaml.Node
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		if root.Content[i].Value == "metadata" {
+			meta = root.Content[i+1]
+			break
+		}
+	}
+	if meta == nil {
+		meta = &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+		root.Content = append(root.Content, keyNode("metadata"), meta)
+	}
+	ensureMapKey(meta, "annotations", map[string]string{
+		"meta.helm.sh/release-name":      release,
+		"meta.helm.sh/release-namespace": namespace,
+	})
+	ensureMapKey(meta, "labels", map[string]string{
+		"app.kubernetes.io/managed-by": "Helm",
+	})
+}
+
+func keyNode(value string) *yaml.Node {
+	return &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: value}
+}
+
+// ensureMapKey sets scalar key/value pairs on a mapping node, creating or
+// overwriting them (idempotent), and preserves the existing node order otherwise.
+func ensureMapKey(mapNode *yaml.Node, key string, values map[string]string) {
+	var sub *yaml.Node
+	found := -1
+	for i := 0; i+1 < len(mapNode.Content); i += 2 {
+		if mapNode.Content[i].Value == key {
+			sub = mapNode.Content[i+1]
+			found = i
+			break
+		}
+	}
+	if sub == nil {
+		sub = &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+		mapNode.Content = append(mapNode.Content, keyNode(key), sub)
+	} else if sub.Kind != yaml.MappingNode {
+		sub = &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map", Content: sub.Content}
+		mapNode.Content[found+1] = sub
+	}
+	for k, v := range values {
+		var set bool
+		for i := 0; i+1 < len(sub.Content); i += 2 {
+			if sub.Content[i].Value == k {
+				sub.Content[i+1].Value = v
+				sub.Content[i+1].Tag = "!!str"
+				set = true
+				break
+			}
+		}
+		if !set {
+			sub.Content = append(sub.Content, keyNode(k), &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: v})
+		}
+	}
 }
 
 // Apply implements deployer.Deployer: idempotent helm upgrade --install of a
 // Helm release, applying -f value files (ValueFiles, in order) then --set values
 // (Values), ensuring helm and reconciling the pinned chart's CRDs first.
+//
+// When MetalLB is enabled and this is a fresh install (or an unresolved
+// interrupted bootstrap) the ordinary pool/advertisement CRs would otherwise be
+// admitted against a not-yet-running MetalLB webhook. Apply runs a bounded
+// bootstrap-only Ignore override (DES-HOR-511-04): it first applies the release
+// with metallb.crds.validationFailurePolicy=Ignore so the CRs can be created,
+// then waits for the MetalLB controller and webhook backend to be ready, then
+// immediately reapplies the release with the chart's steady-state Fail policy
+// and asserts the live webhook failurePolicy is Fail. Failure returns so a
+// later reapply re-enters and completes the bootstrap safely.
 func (p *SSHProvisioner) Apply(ctx context.Context, opts deployer.ApplyOpts) error {
 	if err := p.ensureHelm(ctx); err != nil {
 		return err
 	}
-	if err := p.applyChartCRDs(ctx, opts); err != nil {
+	metallbEnabled, err := p.applyChartCRDs(ctx, opts)
+	if err != nil {
 		return err
 	}
+	if !metallbEnabled {
+		// MetalLB disabled/absent: a single steady-state apply, no bootstrap.
+		if _, err := p.run(ctx, helmCmd(applyArgs(opts, "")...)); err != nil {
+			return fmt.Errorf("helm install: %w", err)
+		}
+		return nil
+	}
+
+	// MetalLB enabled: reconcile the admission-webhook failurePolicy to the
+	// steady-state Fail, running a bounded bootstrap-only Ignore override when the
+	// release is fresh or an interrupted bootstrap awaits converge (DES-HOR-511-04).
+	installed, err := p.releaseInstalled(ctx, opts)
+	if err != nil {
+		return fmt.Errorf("read release state for metallb bootstrap: %w", err)
+	}
+	policy, err := p.metalLBValidationPolicy(ctx, opts.Namespace)
+	if err != nil {
+		return fmt.Errorf("read metallb validation policy: %w", err)
+	}
+	if !installed || policy == metalLBPolicyIgnore {
+		if _, err := p.run(ctx, helmCmd(applyArgs(opts, metalLBValidationPolicyValue+"="+metalLBPolicyIgnore)...)); err != nil {
+			return fmt.Errorf("helm bootstrap install: %w", err)
+		}
+		if err := p.waitMetalLBAdmissionBackend(ctx, opts.Release, opts.Namespace); err != nil {
+			return err
+		}
+	}
+	if _, err := p.run(ctx, helmCmd(applyArgs(opts, "")...)); err != nil {
+		return fmt.Errorf("helm install: %w", err)
+	}
+
+	// Assert the steady-state Fail policy once the MetalLB webhook is present.
+	final, err := p.metalLBValidationPolicy(ctx, opts.Namespace)
+	if err != nil {
+		return fmt.Errorf("read metallb validation policy: %w", err)
+	}
+	if final != "" && final != metalLBPolicyFail {
+		return fmt.Errorf("metallb validation failurePolicy not converged to %s: got %q", metalLBPolicyFail, final)
+	}
+	return nil
+}
+
+// releaseInstalled reports whether a helm release already exists for the target.
+func (p *SSHProvisioner) releaseInstalled(ctx context.Context, opts deployer.ApplyOpts) (bool, error) {
+	state, err := p.Status(ctx, opts.Release, opts.Namespace)
+	if err != nil {
+		return false, err
+	}
+	return state.Installed, nil
+}
+
+// waitMetalLBAdmissionBackend polls until the MetalLB controller deployment is
+// available and the metallb-webhook-service has ready endpoints (or the timeout
+// elapses). Admission probes return "not ready" rather than erroring while the
+// controller is still installing.
+func (p *SSHProvisioner) waitMetalLBAdmissionBackend(ctx context.Context, release, namespace string) error {
+	deadline := time.Now().Add(metalLBBackendWaitTimeout)
+	for {
+		ready, err := p.metalLBAdmissionBackendReady(ctx, release, namespace)
+		if err != nil {
+			return fmt.Errorf("probe metallb admission backend: %w", err)
+		}
+		if ready {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("metallb admission backend not ready after %s", metalLBBackendWaitTimeout)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(metalLBBackendWaitInterval):
+		}
+	}
+}
+
+// applyArgs builds the helm upgrade --install argument list for opts, appending
+// a bootstrap --set override when override is non-empty. A non-empty override is
+// appended last so it wins over any -f value-file / earlier --set on the same key.
+func applyArgs(opts deployer.ApplyOpts, override string) []string {
 	args := []string{"upgrade", "--install", opts.Release, opts.Repository,
 		"--version", opts.Version,
 		"-n", opts.Namespace,
@@ -793,10 +1090,10 @@ func (p *SSHProvisioner) Apply(ctx context.Context, opts deployer.ApplyOpts) err
 	for _, v := range opts.Values {
 		args = append(args, "--set", v)
 	}
-	if _, err := p.run(ctx, helmCmd(args...)); err != nil {
-		return fmt.Errorf("helm install: %w", err)
+	if override != "" {
+		args = append(args, "--set", override)
 	}
-	return nil
+	return args
 }
 
 // Status implements deployer.Deployer. A missing release is {Installed: false},
@@ -830,6 +1127,28 @@ func (p *SSHProvisioner) Status(ctx context.Context, release, namespace string) 
 }
 
 const crdOwnershipJSONPath = `{range .items[*]}{.metadata.name}{"\t"}{.metadata.annotations.meta\.helm\.sh/release-name}{"\t"}{.metadata.annotations.meta\.helm\.sh/release-namespace}{"\n"}{end}`
+
+// metalLBWebhookConfigName is the ValidatingWebhookConfiguration the bundled
+// metallb subchart renders; its failurePolicy mirrors metallb.crds.validationFailurePolicy.
+const metalLBWebhookConfigName = "metallb-webhook-configuration"
+
+const (
+	// metalLBValidationPolicyValue is the helm --set key the bundled metallb
+	// subchart maps to metallb-webhook-configuration's failurePolicy.
+	metalLBValidationPolicyValue = "metallb.crds.validationFailurePolicy"
+	// metalLBPolicyFail is the steady-state production validation failurePolicy.
+	metalLBPolicyFail = "Fail"
+	// metalLBPolicyIgnore is the bounded bootstrap-only override used while the
+	// MetalLB admission webhook backend is still coming up on a fresh install.
+	metalLBPolicyIgnore = "Ignore"
+	// metalLBBackendWaitInterval is the poll period for the backend readiness probe.
+	metalLBBackendWaitInterval = 5 * time.Second
+)
+
+// metalLBBackendWaitTimeout caps the fresh-install bootstrap wait for the
+// MetalLB controller + webhook backend to be ready before converging. A package
+// variable so tests can shorten it.
+var metalLBBackendWaitTimeout = 10 * time.Minute
 
 // CRDOwnedBy implements deployer.Deployer from live Helm ownership annotations.
 func (p *SSHProvisioner) CRDOwnedBy(ctx context.Context, labelSelector, release, namespace string) (bool, error) {
@@ -962,6 +1281,78 @@ func (p *SSHProvisioner) TransferCRDOwnership(ctx context.Context, labelSelector
 		return fmt.Errorf("transfer CRD ownership to %s/%s: %w", namespace, release, err)
 	}
 	return nil
+}
+
+// TransferMetalLBHookOwnership implements deployer.Deployer. The pre-DES-HOR-511
+// platform created the IPAddressPool and L2Advertisement objects as Helm
+// post-install/post-upgrade hooks, so they carry a helm.sh/hook annotation but
+// no release ownership annotations. The current platform chart renders them as
+// ordinary resources; annotate this release's existing objects before upgrade so
+// Helm adopts them in place (preserving UIDs and desired spec/status) instead of
+// deleting and recreating them. It is idempotent and non-destructive: only the
+// ownership/hook metadata changes, and it is a no-op when no matching objects
+// (or the MetalLB CRDs themselves) exist.
+func (p *SSHProvisioner) TransferMetalLBHookOwnership(ctx context.Context, release, namespace string) error {
+	for _, kind := range []string{"ipaddresspool", "l2advertisement"} {
+		out, err := p.run(ctx, kubectlCmd("get", kind, "-n", namespace,
+			"-l", "app.kubernetes.io/instance="+release, "-o", "name"))
+		if err != nil {
+			// Best-effort idempotent migration: a cloud install (or an older chart
+			// that never installed the MetalLB CRDs) has no such kind/objects, so a
+			// list failure is a valid no-op. A genuinely needed adoption still fails
+			// loudly at the subsequent Helm upgrade if it cannot run.
+			continue
+		}
+		resources := strings.Fields(out)
+		if len(resources) == 0 {
+			continue
+		}
+		args := append([]string{"annotate", "--overwrite", "-n", namespace}, resources...)
+		args = append(args,
+			"meta.helm.sh/release-name="+release,
+			"meta.helm.sh/release-namespace="+namespace,
+			"helm.sh/hook-",
+			"helm.sh/hook-weight-",
+		)
+		if _, err := p.run(ctx, kubectlCmd(args...)); err != nil {
+			return fmt.Errorf("transfer %s ownership to %s/%s: %w", kind, namespace, release, err)
+		}
+	}
+	return nil
+}
+
+// metalLBValidationPolicy reads the failurePolicy of the MetalLB admission
+// webhook configuration (set from metallb.crds.validationFailurePolicy by the
+// bundled metallb subchart). Returns "" when the webhook configuration does
+// not exist (e.g. MetalLB disabled).
+func (p *SSHProvisioner) metalLBValidationPolicy(ctx context.Context, namespace string) (string, error) {
+	out, err := p.run(ctx, kubectlCmd("get", "validatingwebhookconfiguration", metalLBWebhookConfigName,
+		"-o", "jsonpath={.webhooks[0].failurePolicy}"))
+	if err != nil {
+		// No webhook configuration => MetalLB disabled/absent, not an error.
+		return "", nil
+	}
+	return strings.TrimSpace(out), nil
+}
+
+// metalLBAdmissionBackendReady reports whether the MetalLB admission webhook
+// backend is serving so a fresh-install bootstrap can converge the release back
+// to a Fail validation policy safely. Returns true only when the metallb
+// controller Deployment is Available (it serves the webhook) and the
+// metallb-webhook-service has at least one ready endpoint.
+func (p *SSHProvisioner) metalLBAdmissionBackendReady(ctx context.Context, release, namespace string) (bool, error) {
+	replicas, err := p.run(ctx, kubectlCmd("get", "deployment", "-n", namespace,
+		"-l", "app.kubernetes.io/instance="+release+",app.kubernetes.io/name=metallb,app.kubernetes.io/component=controller",
+		"-o", "jsonpath={.items[0].status.readyReplicas}"))
+	if err != nil || strings.TrimSpace(replicas) == "" || strings.TrimSpace(replicas) == "0" {
+		return false, nil
+	}
+	endpoints, err := p.run(ctx, kubectlCmd("get", "endpoints", "-n", namespace, "metallb-webhook-service",
+		"-o", "jsonpath={.subsets[*].addresses[*].ip}"))
+	if err != nil || strings.TrimSpace(endpoints) == "" {
+		return false, nil
+	}
+	return true, nil
 }
 
 // RestartDeployment implements deployer.Deployer for the one migration seam

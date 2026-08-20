@@ -3,14 +3,16 @@
 apiVersion: metallb.io/v1beta1
 kind: IPAddressPool
 metadata:
-  name: {{ include "metallb-config.name" . }}
+  # Ordinary release resource (DES-HOR-511-01): the reusable platform chart's
+  # MetalLB CRDs are established and verified by the Forge CRD pre-apply stage
+  # before Helm applies this resource, so no post-install/post-upgrade hook
+  # lifecycle (which deleted and recreated the pool each upgrade) is needed.
+  # resource-policy: keep (DES-HOR-511-05) keeps this instance (the VIP config
+  # data) from being deleted by disable, uninstall, upgrade, or rollback; kept
+  # resources are still updated in place on upgrade.
   annotations:
-    # MetalLB's CRDs ship in the same release (the community metallb subchart's
-    # `crds` subchart); helm can't apply a CR before its CRD is established, so
-    # apply it as a post-install/post-upgrade hook (after `helm --wait` confirms
-    # the MetalLB operator is Ready).
-    helm.sh/hook: post-install,post-upgrade
-    helm.sh/hook-weight: "10"
+    helm.sh/resource-policy: keep
+  name: {{ include "metallb-config.name" . }}
   labels:
     {{- include "metallb-config.labels" . | nindent 4 }}
 spec:
@@ -24,10 +26,9 @@ spec:
 apiVersion: metallb.io/v1beta1
 kind: IPAddressPool
 metadata:
-  name: {{ include "metallb-config.additionalPoolName" (dict "root" $ "pool" $pool) }}
   annotations:
-    helm.sh/hook: post-install,post-upgrade
-    helm.sh/hook-weight: "10"
+    helm.sh/resource-policy: keep
+  name: {{ include "metallb-config.additionalPoolName" (dict "root" $ "pool" $pool) }}
   labels:
     {{- include "metallb-config.labels" $ | nindent 4 }}
     iterabase.com/metallb-pool: {{ required "metallb-config.additionalPools[].name is required" $pool.name | quote }}

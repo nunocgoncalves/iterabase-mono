@@ -1172,6 +1172,49 @@ func selectBundledCRDs(raw string) (string, error) {
 	return strings.Join(manifests, "\n---\n") + "\n", nil
 }
 
+func selectMetalLBCRDs(raw string) (string, error) {
+	decoder := yaml.NewDecoder(strings.NewReader(raw))
+	var crds []string
+	for {
+		var document yaml.Node
+		if err := decoder.Decode(&document); err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return "", fmt.Errorf("decode MetalLB bundled CRDs: %w", err)
+		}
+		var header bundledCRDHeader
+		if err := document.Decode(&header); err != nil {
+			return "", fmt.Errorf("decode MetalLB bundled CRD header: %w", err)
+		}
+		if header.APIVersion != "apiextensions.k8s.io/v1" || header.Kind != "CustomResourceDefinition" {
+			continue
+		}
+		if !strings.HasSuffix(header.Metadata.Name, ".metallb.io") {
+			continue
+		}
+		var resource any
+		if err := document.Decode(&resource); err != nil {
+			return "", fmt.Errorf("decode MetalLB bundled CRD: %w", err)
+		}
+		encoded, err := yaml.Marshal(resource)
+		if err != nil {
+			return "", fmt.Errorf("encode MetalLB bundled CRD %s: %w", header.Metadata.Name, err)
+		}
+		crds = append(crds, strings.TrimSpace(string(encoded)))
+	}
+	// Filter only the MetalLB CRDs; every other CRD the chart ships in `crds/`
+	// directories or renders as an ordinary template is left entirely to Helm's
+	// own install path, which owns it correctly on a fresh install. Pre-applying
+	// those without Helm ownership makes a fresh `helm install` fail to import
+	// them ("invalid ownership metadata"), so only the MetalLB set is established
+	// before Helm (mirrors Forge's selectMetalLBCRDs, DES-HOR-511-03/04).
+	if len(crds) == 0 {
+		return "", nil
+	}
+	return strings.Join(crds, "\n---\n") + "\n", nil
+}
+
 func selectBundledCRD(existing, candidate bundledCRD) (bundledCRD, error) {
 	if existing.manifest == candidate.manifest {
 		return existing, nil
@@ -1241,6 +1284,138 @@ func compareNumericVersions(left, right string) (int, error) {
 		}
 	}
 	return 0, nil
+}
+
+// bundledCRDNames returns the sorted, de-duplicated CRD names in raw YAML
+// (selecting the authoritative candidate on duplicate names), mirroring
+// selectBundledCRDs but returning names rather than manifests.
+func bundledCRDNames(raw string) ([]string, error) {
+	decoder := yaml.NewDecoder(strings.NewReader(raw))
+	seen := make(map[string]struct{})
+	for {
+		var document yaml.Node
+		if err := decoder.Decode(&document); err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return nil, fmt.Errorf("decode CRD names: %w", err)
+		}
+		var header bundledCRDHeader
+		if err := document.Decode(&header); err != nil {
+			return nil, fmt.Errorf("decode CRD header: %w", err)
+		}
+		if header.APIVersion != "apiextensions.k8s.io/v1" || header.Kind != "CustomResourceDefinition" || header.Metadata.Name == "" {
+			continue
+		}
+		seen[header.Metadata.Name] = struct{}{}
+	}
+	names := make([]string, 0, len(seen))
+	for name := range seen {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
+// markRenderedCRDsOwned injects the incoming release's Helm ownership metadata
+// into every rendered (template) CustomResourceDefinition so a fresh `helm
+// install` can adopt them (mirrors Forge's markHelmAdoptableCRDs, DES-HOR-511-04).
+// Scope is strict: only the rendered template MetalLB CRDs are marked for the
+// incoming release/namespace; crds/-directory CRDs install via Helm's own path.
+// Idempotent; preserves existing metadata.
+func markRenderedCRDsOwned(rendered, release, namespace string) (string, error) {
+	decoder := yaml.NewDecoder(strings.NewReader(rendered))
+	var manifests []string
+	for {
+		var document yaml.Node
+		if err := decoder.Decode(&document); err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return "", fmt.Errorf("decode rendered CRD for helm adoption: %w", err)
+		}
+		var header bundledCRDHeader
+		if err := document.Decode(&header); err != nil {
+			return "", fmt.Errorf("decode rendered CRD header: %w", err)
+		}
+		if header.APIVersion != "apiextensions.k8s.io/v1" || header.Kind != "CustomResourceDefinition" {
+			continue
+		}
+		// Strict founder scope (DES-HOR-511-04): only the nine MetalLB CRDs are
+		// marked Helm-adoptable; other rendered template CRDs are still included in
+		// the pre-apply set (established before Helm) but left unmarked.
+		if strings.HasSuffix(header.Metadata.Name, ".metallb.io") {
+			injectHelmOwnership(document.Content[0], release, namespace)
+		}
+		var resource any
+		if err := document.Decode(&resource); err != nil {
+			return "", fmt.Errorf("decode rendered CRD for helm adoption: %w", err)
+		}
+		manifest, err := yaml.Marshal(resource)
+		if err != nil {
+			return "", fmt.Errorf("encode rendered CRD for helm adoption: %w", err)
+		}
+		manifests = append(manifests, strings.TrimSpace(string(manifest)))
+	}
+	return strings.Join(manifests, "\n---\n") + "\n", nil
+}
+
+// injectHelmOwnership sets release-ownership annotations + managed-by label on a
+// CRD's metadata node, preserving existing metadata (idempotent).
+func injectHelmOwnership(root *yaml.Node, release, namespace string) {
+	var meta *yaml.Node
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		if root.Content[i].Value == "metadata" {
+			meta = root.Content[i+1]
+			break
+		}
+	}
+	if meta == nil {
+		meta = &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+		root.Content = append(root.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "metadata"}, meta)
+	}
+	ensureYAMLMapKeys(meta, "annotations", map[string]string{
+		"meta.helm.sh/release-name":      release,
+		"meta.helm.sh/release-namespace": namespace,
+	})
+	ensureYAMLMapKeys(meta, "labels", map[string]string{
+		"app.kubernetes.io/managed-by": "Helm",
+	})
+}
+
+// ensureYAMLMapKeys sets scalar key/value pairs on a mapping node, preserving
+// the existing node structure and other entries.
+func ensureYAMLMapKeys(mapNode *yaml.Node, key string, values map[string]string) {
+	var sub *yaml.Node
+	for i := 0; i+1 < len(mapNode.Content); i += 2 {
+		if mapNode.Content[i].Value == key {
+			sub = mapNode.Content[i+1]
+		}
+	}
+	if sub == nil {
+		sub = &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+		mapNode.Content = append(mapNode.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key}, sub)
+	}
+	if sub.Kind != yaml.MappingNode {
+		sub = &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+	}
+	for k, v := range values {
+		var set bool
+		for i := 0; i+1 < len(sub.Content); i += 2 {
+			if sub.Content[i].Value == k {
+				sub.Content[i+1].Value = v
+				if sub.Content[i+1].Kind != yaml.ScalarNode {
+					sub.Content[i+1] = &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: v}
+				}
+				set = true
+				break
+			}
+		}
+		if !set {
+			sub.Content = append(sub.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: k},
+				&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: v})
+		}
+	}
 }
 
 func assertEstablishedCRDsJSON(data []byte, required []string) error {

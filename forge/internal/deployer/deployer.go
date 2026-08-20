@@ -59,6 +59,15 @@ type Deployer interface {
 	// different Helm release. Used only for the platform 0.2.x -> 0.3 substrate
 	// ownership hand-off; CRD contents and custom resources are left untouched.
 	TransferCRDOwnership(ctx context.Context, labelSelector, release, namespace string) error
+	// TransferMetalLBHookOwnership adopts the IPAddressPool and L2Advertisement
+	// resources the pre-DES-HOR-511 platform created as Helm post-install hooks
+	// into the platform release before it renders them as ordinary resources.
+	// It annotates only this release's objects, adding release-ownership metadata
+	// and dropping the stale hook annotations so Helm upgrades them in place
+	// (preserving object UIDs) instead of deleting and recreating them. It is
+	// idempotent and non-destructive: it changes only ownership/hook metadata and
+	// is a no-op when no such objects exist.
+	TransferMetalLBHookOwnership(ctx context.Context, release, namespace string) error
 	// RestartDeployment rolls Deployments selected by label and waits for the
 	// rollout. Used by the 0.2 -> 0.3 migration after publishing gateway config.
 	RestartDeployment(ctx context.Context, labelSelector, namespace string) error
