@@ -572,6 +572,7 @@ def make_plan(
         "internal-tls",
         "n-minus-one-upgrade",
         "feature-enable-upgrade",
+        "single-node-observability-ingress-recovery",
         "reapply-rollback-recovery",
     }
     real_machine = bool(real_machine_matrix)

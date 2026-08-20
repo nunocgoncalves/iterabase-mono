@@ -829,6 +829,7 @@ class ReleaseContractTests(unittest.TestCase):
             ROOT / ".github" / "workflows" / "charts-runtime.yml"
         ).read_text(encoding="utf-8")
         self.assertIn("image_candidates:", charts_runtime)
+        self.assertIn("target: test-e2e-observability-ingress-recovery", charts_runtime)
         self.assertIn("pattern: candidate-image-*", charts_runtime)
         self.assertIn("${{ runner.temp }}/candidates/images", charts_runtime)
         self.assertIn("path: candidate-charts/", candidate)
