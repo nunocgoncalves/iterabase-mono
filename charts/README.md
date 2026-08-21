@@ -288,13 +288,43 @@ REST-map the pools:
    steady-state `Fail` policy. Forge performs this bootstrap; a direct operator
    must repeat it and verify the live webhook policy is `Fail`.
 
-Because the pools are kept resources, removing one is always an explicit act
-after its LoadBalancer Service is gone:
-`kubectl delete ipaddresspool,l2advertisement <release>-internal -n
-<namespace>`. With `autoAssign: false`, an unselected leftover pool cannot be
-consumed by another Service. Rollback returns to the predecessor's pool set;
-the kept objects are restored by the still-owned CRDs and release, matching the
-transition scenario's inverse-handoff ordering.
+### Direct upgrade and rollback ownership procedure
+
+**Upgrading from a hook-era predecessor (0.3.19 and earlier, whose pools were
+Helm hooks).** Before running step 1 above, transfer the live hook-created pools
+and advertisements into the incoming release (DES-HOR-511-01) so the upgrade
+preserves their UIDs instead of Helm rejecting the new ordinary resources:
+
+```sh
+pools=$(kubectl get ipaddresspool,l2advertisement -n <namespace> \
+  -l app.kubernetes.io/instance=<release> -o name)
+kubectl annotate --overwrite $pools \
+  meta.helm.sh/release-name=<release> \
+  meta.helm.sh/release-namespace=<namespace> \
+  'helm.sh/hook-' 'helm.sh/hook-weight-'  # strip the hook metadata
+```
+
+This ownership/hook-metadata transfer is exactly what the transition scenario
+asserts: the pools keep their `meta.helm.sh` owner and lose their `helm.sh/hook`
+markers, so a subsequent upgrade adopts them rather than recreating them.
+
+**Rollback to a hook-era predecessor.** A `helm rollback <release> <previous>
+-n <namespace> --wait` to a pre-DES-HOR-511 revision is safe and **does not tear
+down the pools or the LoadBalancer VIP**: because they carry
+`helm.sh/resource-policy: keep` and were Helm-adopted, the rollback leaves their
+UIDs, desired specs, and ownership/hook metadata intact and the wire route stays
+healthy. This predecessor-pool restoration is **proven** (not merely claimed) by
+the `metallb-upgrade-reapply` transition, which captures the predecessor desired
+specs before the rollback and re-asserts UID + spec + ownership metadata after.
+
+**Safe predecessor reapply / forward recovery.** The supported recovery after
+rolling back to a hook-era predecessor is a forward re-upgrade to the current
+chart, which re-owns the kept resources under continuous observed VIP and route
+continuity and restores the steady-state `Fail` admission policy. Re-running the
+hook-era chart's own raw resources is **not** a supported regression path: that
+revision's hooks would try to recreate objects that the kept release still owns.
+Always recover via forward re-upgrade rather than re-applying the predecessor's
+raw manifests.
 
 ### Upgrade from platform 0.2.2 or earlier
 

@@ -200,6 +200,40 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertEqual(release.read_version(ROOT / "forge" / "VERSION"), "0.8.5")
         self.assertFalse((ROOT / "release" / "compatibility.json").exists())
 
+    def test_active_release_intent_records_forge_platform_substrate_trio(self) -> None:
+        # HOR-511 release intent: Forge v0.8.5 is published alongside
+        # iterabase-platform-chart 0.3.20 and its same-version cert-manager-substrate
+        # companion. The compiled release metadata must record all three together so
+        # the candidate bundle and evidence bind them as one coordinated release.
+        plan = self.plan("forge,iterabase-platform-chart")
+        releases = {item["target"]: item["version"] for item in plan["releases"]}
+        self.assertEqual(releases["forge"], "0.8.5")
+        self.assertEqual(releases["iterabase-platform-chart"], "0.3.20")
+
+        repo_versions = plan["tested_with"]["repository_versions"]
+        self.assertEqual(repo_versions["forge"], "0.8.5")
+        self.assertEqual(repo_versions["iterabase-platform-chart"], "0.3.20")
+
+        platform = next(
+            item
+            for item in plan["chart_matrix"]
+            if item["chart"] == "iterabase-platform"
+        )
+        self.assertEqual(platform["version"], "0.3.20")
+        self.assertEqual(platform["companions"], ["cert-manager-substrate"])
+        self.assertEqual(
+            plan["tested_with"]["chart_metadata"]["cert-manager-substrate"]["version"],
+            "0.3.20",
+        )
+
+        # One coordinated validation exercises both the Forge real-machine matrix and
+        # the chart MetalLB upgrade/rollback transition.
+        self.assertEqual(
+            {item["name"] for item in plan["real_machine_matrix"]}, {"cpu", "gpu"}
+        )
+        for scenario in ("forge/digitalocean-cpu", "forge/digitalocean-gpu", "charts/metallb-upgrade-reapply"):
+            self.assertIn(scenario, plan["selected_scenarios"])
+
     def test_candidate_accepts_and_canonicalizes_an_explicit_target_set(self) -> None:
         plan = self.plan("forge, control-plane-chart,control-plane")
         self.assertEqual(
