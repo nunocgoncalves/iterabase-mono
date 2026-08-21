@@ -320,6 +320,20 @@ func (state *chartState) observeMetalLBContinuity(svc, expectedVIP string, done 
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 	samples := []metalLBContinuitySample{}
+	sample := func() error {
+		s, err := state.sampleMetalLBContinuity(svc, expectedVIP, client)
+		if err != nil {
+			return err
+		}
+		samples = append(samples, s)
+		return nil
+	}
+	// Take one sample immediately on start so even an operation that completes
+	// before the next tick (e.g. an instantaneous rollback of kept resources) is
+	// still observed, not zero-sampled; then keep sampling each tick.
+	if err := sample(); err != nil {
+		return samples, err
+	}
 	for {
 		select {
 		case upgradeErr := <-done:
@@ -330,32 +344,42 @@ func (state *chartState) observeMetalLBContinuity(svc, expectedVIP string, done 
 		case <-deadline:
 			return samples, fmt.Errorf("metalLB continuity observation timed out before upgrade completed")
 		case <-ticker.C:
-			sample := metalLBContinuitySample{At: time.Now()}
-			vip, err := state.client.Kubectl(state.ctx, 30*time.Second, "get", "service", svc, "-n", testNamespace,
-				"-o", "jsonpath={.status.loadBalancer.ingress[0].ip}")
-			if err != nil {
-				return samples, fmt.Errorf("kubectl read of %s failed during operation: %v", svc, err)
+			if err := sample(); err != nil {
+				return samples, err
 			}
-			sample.VIP = strings.TrimSpace(vip)
-			if sample.VIP == "" {
-				return samples, fmt.Errorf("LoadBalancer VIP became empty during operation")
-			}
-			if sample.VIP != expectedVIP {
-				return samples, fmt.Errorf("LoadBalancer VIP changed during operation: %s -> %s", expectedVIP, sample.VIP)
-			}
-			resp, err := client.Get("http://" + sample.VIP)
-			if err != nil {
-				return samples, fmt.Errorf("route lost during operation at %s: %v", sample.VIP, err)
-			}
-			sample.RouteOK = resp.StatusCode < 500
-			sample.RouteStatus = resp.StatusCode
-			resp.Body.Close()
-			if !sample.RouteOK {
-				return samples, fmt.Errorf("route unreachable during operation at %s: %s", sample.VIP, resp.Status)
-			}
-			samples = append(samples, sample)
 		}
 	}
+}
+
+// sampleMetalLBContinuity captures ONE fail-closed observation of the
+// internal-ingress Service LoadBalancer identity and route reachability. It
+// returns an error on any kubectl read error, empty/missing VIP, changed VIP, or
+// route failure, so a violating sample is never skipped.
+func (state *chartState) sampleMetalLBContinuity(svc, expectedVIP string, client *http.Client) (metalLBContinuitySample, error) {
+	sample := metalLBContinuitySample{At: time.Now()}
+	vip, err := state.client.Kubectl(state.ctx, 30*time.Second, "get", "service", svc, "-n", testNamespace,
+		"-o", "jsonpath={.status.loadBalancer.ingress[0].ip}")
+	if err != nil {
+		return sample, fmt.Errorf("kubectl read of %s failed during operation: %v", svc, err)
+	}
+	sample.VIP = strings.TrimSpace(vip)
+	if sample.VIP == "" {
+		return sample, fmt.Errorf("LoadBalancer VIP became empty during operation")
+	}
+	if sample.VIP != expectedVIP {
+		return sample, fmt.Errorf("LoadBalancer VIP changed during operation: %s -> %s", expectedVIP, sample.VIP)
+	}
+	resp, err := client.Get("http://" + sample.VIP)
+	if err != nil {
+		return sample, fmt.Errorf("route lost during operation at %s: %v", sample.VIP, err)
+	}
+	sample.RouteOK = resp.StatusCode < 500
+	sample.RouteStatus = resp.StatusCode
+	resp.Body.Close()
+	if !sample.RouteOK {
+		return sample, fmt.Errorf("route unreachable during operation at %s: %s", sample.VIP, resp.Status)
+	}
+	return sample, nil
 }
 
 // assertMetalLBContinuity verifies a fail-closed observation actually sampled the
