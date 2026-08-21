@@ -10,32 +10,20 @@ import (
 	sharede2e "github.com/nunocgoncalves/iterabase-mono/testkit/e2e"
 )
 
-// metalLBTransitionSourceVersion is the published hook-era predecessor whose
-// IPAddressPool/L2Advertisement were Helm hooks (DES-HOR-511-01). A successful
-// upgrade to the current ordinary-resource chart must preserve their UIDs, the
-// assigned internal LoadBalancer VIP, controller health, and route continuity,
-// then remain UID-stable under reapply and recover across a hook-predecessor
-// rollback/forward boundary. The archive is checksum-pinned for reproducibility.
-const (
-	metalLBTransitionSourceVersion  = "0.3.19"
-	metalLBTransitionSourceChecksum = "252e5fea513c998eb04cfa75408ebc6d216831778cb96dfe23176ede5f6e76ff"
-	metalLBSubstrateSourceVersion   = "0.3.19"
-	metalLBSubstrateSourceChecksum  = "437e5ab1e244261e7011fe369e7a59323ed628588e07e2dc5204531e867a5481"
-)
-
 func metalLBTransitionScenario() sharede2e.Definition {
 	diagnostics, cleanup := scenarioHooks()
 	return sharede2e.Define(sharede2e.Scenario[*chartState]{
 		Metadata: transitionScenarioMetadata(
 			"metallb-upgrade-reapply",
-			"Installs the checksum-pinned hook-era predecessor 0.3.19 on MetalLB L2, upgrades to the current ordinary-resource chart, and proves pool/advertisement UID preservation, LoadBalancer VIP continuity, controller health, idempotent reapply, and the hook-predecessor rollback/forward boundary.",
+			"Installs the checksum-pinned hook-era predecessor 0.3.19 (recorded in transition-baselines.json) on MetalLB L2, upgrades to the current ordinary-resource chart, and proves pool/advertisement UID preservation, LoadBalancer VIP continuity, controller health, idempotent reapply, and the hook-predecessor rollback/forward boundary.",
 			"test-e2e-metallb-transition", 55,
 			[]string{"HOR-511"}, []string{"iterabase-platform-chart"},
 		),
 		NewState: newChartState,
 		Stages: []sharede2e.Stage[*chartState]{
 			{Name: "create-kind", Run: createKindStage},
-			{Name: "install-metallb-predecessor-substrate", DependsOn: []string{"create-kind"}, Run: installMetalLBPredecessorSubstrateStage},
+			{Name: "resolve-predecessor-baselines", DependsOn: []string{"create-kind"}, Run: resolveTransitionBaselinesStage},
+			{Name: "install-metallb-predecessor-substrate", DependsOn: []string{"resolve-predecessor-baselines"}, Run: installMetalLBPredecessorSubstrateStage},
 			{Name: "install-metallb-predecessor", DependsOn: []string{"install-metallb-predecessor-substrate"}, Run: installMetalLBPredecessorStage},
 			{Name: "record-pre-upgrade-signals", DependsOn: []string{"install-metallb-predecessor"}, Run: recordMetalLBPreUpgradeSignalsStage},
 			{Name: "upgrade-current-metallb", DependsOn: []string{"record-pre-upgrade-signals"}, Run: upgradeCurrentMetalLBStage},
@@ -89,27 +77,23 @@ func metalLBTransitionValues(state *chartState) map[string]any {
 
 func installMetalLBPredecessorSubstrateStage(t *testing.T, state *chartState) {
 	t.Helper()
-	args := []string{"install", testRelease + "-cert-manager",
-		"oci://ghcr.io/nunocgoncalves/iterabase-charts/cert-manager-substrate",
-		"--version", metalLBSubstrateSourceVersion,
-		"--namespace", testNamespace, "--create-namespace", "--kubeconfig", state.cluster.Kubeconfig,
-		"--wait", "--timeout", "8m",
-	}
+	baseline := requireTransitionBaseline(t, state, metalLBSubstratePredecessorName)
+	args := []string{"upgrade", "--install", testRelease + "-cert-manager", "--namespace", testNamespace,
+		"--create-namespace", "--kubeconfig", state.cluster.Kubeconfig, "--wait", "--timeout", "8m", baseline.Archive}
 	state.process(t, 10*time.Minute, "helm", args...)
+	assertReleaseChartVersion(t, state, testRelease+"-cert-manager", baseline.Chart, baseline.Version)
 }
 
 func installMetalLBPredecessorStage(t *testing.T, state *chartState) {
 	t.Helper()
 	resolveMetalLBSubnet(t, state)
+	baseline := requireTransitionBaseline(t, state, metalLBPlatformPredecessorName)
 	values := state.writeValues(t, "metallb-predecessor", metalLBTransitionValues(state))
-	args := []string{
-		"install", testRelease, "oci://ghcr.io/nunocgoncalves/iterabase-charts/iterabase-platform",
-		"--version", metalLBTransitionSourceVersion,
-		"--namespace", testNamespace, "--create-namespace", "--kubeconfig", state.cluster.Kubeconfig,
-		"--wait", "--timeout", "8m", "--values", values,
-	}
-	state.process(t, 10*time.Minute, "helm", args...)
-	state.kubectl(t, 3*time.Minute, "wait", "--for=condition=Established", "crd/ipaddresspools.metallb.io", "--timeout=2m")
+	args := []string{"upgrade", "--install", testRelease, "--namespace", testNamespace,
+		"--kubeconfig", state.cluster.Kubeconfig, "--wait", "--timeout", "18m",
+		"--values", values, baseline.Archive}
+	state.process(t, 20*time.Minute, "helm", args...)
+	assertReleaseChartVersion(t, state, testRelease, baseline.Chart, baseline.Version)
 }
 
 func recordMetalLBPreUpgradeSignalsStage(t *testing.T, state *chartState) {

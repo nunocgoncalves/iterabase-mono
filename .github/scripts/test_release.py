@@ -274,6 +274,8 @@ class ReleaseContractTests(unittest.TestCase):
             [
                 ("supported-platform-predecessor", "iterabase-platform", "0.3.12"),
                 ("supported-substrate-predecessor", "cert-manager-substrate", "0.3.12"),
+                ("metallb-platform-predecessor", "iterabase-platform", "0.3.19"),
+                ("metallb-substrate-predecessor", "cert-manager-substrate", "0.3.19"),
             ],
         )
         self.assertTrue(all(len(item["sha256"]) == 64 for item in transition))
@@ -348,12 +350,14 @@ class ReleaseContractTests(unittest.TestCase):
         )
         self.assertEqual(
             {
-                item["chart"]: item["version"]
+                item["name"]: item["version"]
                 for item in plan["transition_baselines"]["charts"]
             },
             {
-                "iterabase-platform": "0.3.12",
-                "cert-manager-substrate": "0.3.12",
+                "supported-platform-predecessor": "0.3.12",
+                "supported-substrate-predecessor": "0.3.12",
+                "metallb-platform-predecessor": "0.3.19",
+                "metallb-substrate-predecessor": "0.3.19",
             },
         )
         self.assertEqual(

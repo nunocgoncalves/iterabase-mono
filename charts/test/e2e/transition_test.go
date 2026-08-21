@@ -29,13 +29,15 @@ import (
 )
 
 const (
-	platformPredecessorName        = "supported-platform-predecessor"
-	substratePredecessorName       = "supported-substrate-predecessor"
-	transitionFieldManager         = "iterabase-chart-e2e"
-	transitionMarker               = "hor-475-persisted-state"
-	singleNodeGatewayGenerationKey = "iterabase.com/e2e-gateway-generation"
-	singleNodeGatewayPredecessor   = "predecessor"
-	singleNodeGatewayCurrent       = "corrected-current"
+	platformPredecessorName         = "supported-platform-predecessor"
+	substratePredecessorName        = "supported-substrate-predecessor"
+	metalLBPlatformPredecessorName  = "metallb-platform-predecessor"
+	metalLBSubstratePredecessorName = "metallb-substrate-predecessor"
+	transitionFieldManager          = "iterabase-chart-e2e"
+	transitionMarker                = "hor-475-persisted-state"
+	singleNodeGatewayGenerationKey  = "iterabase.com/e2e-gateway-generation"
+	singleNodeGatewayPredecessor    = "predecessor"
+	singleNodeGatewayCurrent        = "corrected-current"
 )
 
 var operatorCRDs = []string{
@@ -232,12 +234,14 @@ func decodeTransitionBaselineFixture(data []byte) (sharede2e.Fixture, error) {
 	if err := fixture.Validate(); err != nil {
 		return sharede2e.Fixture{}, err
 	}
-	if len(fixture.Inputs) != 2 {
-		return sharede2e.Fixture{}, fmt.Errorf("transition baseline fixture must contain exactly two charts")
+	if len(fixture.Inputs) != 4 {
+		return sharede2e.Fixture{}, fmt.Errorf("transition baseline fixture must contain exactly four charts (supported + MetalLB predecessor pairs)")
 	}
 	expected := map[string]string{
-		platformPredecessorName:  "iterabase-platform",
-		substratePredecessorName: "cert-manager-substrate",
+		platformPredecessorName:         "iterabase-platform",
+		substratePredecessorName:        "cert-manager-substrate",
+		metalLBPlatformPredecessorName:  "iterabase-platform",
+		metalLBSubstratePredecessorName: "cert-manager-substrate",
 	}
 	versions := make(map[string]string)
 	for _, input := range fixture.Inputs {
@@ -253,8 +257,14 @@ func decodeTransitionBaselineFixture(data []byte) (sharede2e.Fixture, error) {
 		}
 		versions[input.Name] = version
 	}
-	if versions[platformPredecessorName] != versions[substratePredecessorName] {
-		return sharede2e.Fixture{}, fmt.Errorf("platform and substrate predecessors must use the same version")
+	pairs := [][2]string{
+		{platformPredecessorName, substratePredecessorName},
+		{metalLBPlatformPredecessorName, metalLBSubstratePredecessorName},
+	}
+	for _, pair := range pairs {
+		if versions[pair[0]] != versions[pair[1]] {
+			return sharede2e.Fixture{}, fmt.Errorf("platform and substrate predecessors %s/%s must use the same version", pair[0], pair[1])
+		}
 	}
 	return fixture, nil
 }
@@ -313,8 +323,10 @@ func resolveTransitionBaselinesStage(t *testing.T, state *chartState) {
 		t.Fatalf("create transition baseline directory: %v", err)
 	}
 	environment := map[string]string{
-		platformPredecessorName:  "ITERABASE_E2E_PREDECESSOR_PLATFORM_ARCHIVE",
-		substratePredecessorName: "ITERABASE_E2E_PREDECESSOR_SUBSTRATE_ARCHIVE",
+		platformPredecessorName:         "ITERABASE_E2E_PREDECESSOR_PLATFORM_ARCHIVE",
+		substratePredecessorName:        "ITERABASE_E2E_PREDECESSOR_SUBSTRATE_ARCHIVE",
+		metalLBPlatformPredecessorName:  "ITERABASE_E2E_METALLB_PREDECESSOR_PLATFORM_ARCHIVE",
+		metalLBSubstratePredecessorName: "ITERABASE_E2E_METALLB_PREDECESSOR_SUBSTRATE_ARCHIVE",
 	}
 	for name, baseline := range baselines {
 		archive := os.Getenv(environment[name])
@@ -1606,8 +1618,14 @@ func TestUnitTransitionBaselineFixtureRejectsMutableOrMismatchedInputs(t *testin
 	for name, mutate := range map[string]func(string) string{
 		"latest":       func(value string) string { return strings.Replace(value, ":0.3.12", ":latest", 1) },
 		"bad checksum": func(value string) string { return strings.Replace(value, "86b0f230", "notahash", 1) },
+		"bad metallb checksum": func(value string) string {
+			return strings.Replace(value, "252e5fea", "notahash", 1)
+		},
 		"version mismatch": func(value string) string {
 			return strings.Replace(value, "cert-manager-substrate:0.3.12", "cert-manager-substrate:0.3.11", 1)
+		},
+		"metallb version mismatch": func(value string) string {
+			return strings.Replace(value, "cert-manager-substrate:0.3.19", "cert-manager-substrate:0.3.18", 1)
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -1727,7 +1745,7 @@ func TestUnitTransitionBaselineOrderIsStable(t *testing.T) {
 	for _, input := range fixture.Inputs {
 		names = append(names, input.Name)
 	}
-	if !slices.Equal(names, []string{platformPredecessorName, substratePredecessorName}) {
+	if !slices.Equal(names, []string{platformPredecessorName, substratePredecessorName, metalLBPlatformPredecessorName, metalLBSubstratePredecessorName}) {
 		t.Fatalf("transition baseline order=%v", names)
 	}
 }
