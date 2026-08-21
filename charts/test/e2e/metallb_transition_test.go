@@ -168,12 +168,12 @@ func reapplyMetalLBStage(t *testing.T, state *chartState) {
 func metalLBPredecessorRollbackForwardStage(t *testing.T, state *chartState) {
 	t.Helper()
 	before := state.metalLB
-	// Capture the predecessor's desired specs and ownership/hook metadata so the
-	// rollback boundary can prove desired-state (and UID) restoration and that the
-	// kept + Helm-adopted ownership survives the hook-era predecessor rollback.
+	// Capture the predecessor desired specs so the rollback boundary can prove
+	// desired-state restoration. Ownership/hook metadata is NOT cached here: per
+	// the founder correction (2026-08-21) it must be re-queried from the live
+	// objects after the rollback completes.
 	edgeSpec := metalLBPoolSpec(t, state, testRelease+"-edge")
 	internalSpec := metalLBPoolSpec(t, state, testRelease+"-internal")
-	edgeMeta := metalLBPoolMetadata(t, state, testRelease+"-edge")
 
 	// Inverse boundary: roll back the platform to the hook-era predecessor. The
 	// pool/VIP objects are kept (helm.sh/resource-policy: keep) and Helm-adopted,
@@ -181,8 +181,8 @@ func metalLBPredecessorRollbackForwardStage(t *testing.T, state *chartState) {
 	state.process(t, 10*time.Minute, "helm", "rollback", testRelease, "1",
 		"--namespace", testNamespace, "--kubeconfig", state.cluster.Kubeconfig, "--wait", "--timeout", "8m")
 
-	// Prove predecessor-pool restoration: UIDs + desired specs are unchanged and
-	// ownership/hook metadata is retained across the hook-predecessor rollback.
+	// Prove predecessor-pool restoration: UIDs + desired specs are unchanged across
+	// the hook-predecessor rollback.
 	if got := metalLBPoolUID(t, state, testRelease+"-edge"); got != before.EdgePoolUID {
 		t.Fatalf("rollback to hook predecessor changed edge pool UID: %s -> %s", before.EdgePoolUID, got)
 	}
@@ -192,8 +192,19 @@ func metalLBPredecessorRollbackForwardStage(t *testing.T, state *chartState) {
 	if got := metalLBPoolSpec(t, state, testRelease+"-internal"); got != internalSpec {
 		t.Fatalf("rollback changed internal pool desired spec:\n%s\n!= predecessor\n%s", got, internalSpec)
 	}
-	if !strings.Contains(edgeMeta, "meta.helm.sh/release-name") || !strings.Contains(edgeMeta, `"helm.sh/resource-policy":"keep"`) {
-		t.Fatalf("rollback dropped kept/adopted ownership metadata: %s", edgeMeta)
+	// Re-query the LIVE objects after rollback and verify their ACTUAL ownership
+	// and hook metadata (not values cached before rollback): ownership retained and
+	// the transient hook markers absent.
+	livePoolMeta := metalLBPoolMetadata(t, state, testRelease+"-edge")
+	liveAdvertMeta := metalLBAdvertMetadata(t, state, testRelease+"-edge")
+	if !strings.Contains(livePoolMeta, "meta.helm.sh/release-name") || !strings.Contains(livePoolMeta, `"helm.sh/resource-policy":"keep"`) {
+		t.Fatalf("post-rollback edge pool ownership/keep metadata missing: %s", livePoolMeta)
+	}
+	if strings.Contains(livePoolMeta, "helm.sh/hook-") {
+		t.Fatalf("post-rollback edge pool still carries hook metadata: %s", livePoolMeta)
+	}
+	if !strings.Contains(liveAdvertMeta, "meta.helm.sh/release-name") || strings.Contains(liveAdvertMeta, "helm.sh/hook-") {
+		t.Fatalf("post-rollback edge advertisement ownership/hook metadata unexpected: %s", liveAdvertMeta)
 	}
 	if got := metalLBLBIP(t, state); got != before.InternalLBIP {
 		t.Fatalf("rollback changed internal LoadBalancer VIP: %s -> %s", before.InternalLBIP, got)
@@ -272,11 +283,17 @@ func (state *chartState) installMetalLBObserved(t *testing.T, timeout time.Durat
 		})
 		done <- err
 	}()
-	samples, upgradeErr := state.observeMetalLBContinuity(svc, expectedVIP, done, timeout)
-	if upgradeErr != nil {
-		t.Fatalf("install platform: %v", upgradeErr)
+	// The DES-HOR-511 pre-apply + hook-object adoption run before the upgrade, and
+	// the blocking Helm upgrade itself is observed continuously (VIP identity,
+	// service LoadBalancer status, and route reachability) rather than sampled
+	// only before and after. Every observation is fail-closed (founder decision
+	// 2026-08-21): any kubectl read error, empty/changed VIP, or route failure
+	// fails the operation; no failed/empty sample is skipped.
+	samples, opErr := state.observeMetalLBContinuity(svc, expectedVIP, done, timeout)
+	if opErr != nil {
+		t.Fatalf("MetalLB continuity/upgrade failed during blocking operation: %v", opErr)
 	}
-	state.assertMetalLBContinuity(t, samples, expectedVIP)
+	state.assertMetalLBContinuity(t, samples)
 	if final := state.metalLBValidationPolicy(t); final != metalLBPolicyFail {
 		t.Fatalf("metallb validation failurePolicy not converged to %s: got %q", metalLBPolicyFail, final)
 	}
@@ -284,69 +301,62 @@ func (state *chartState) installMetalLBObserved(t *testing.T, timeout time.Durat
 
 // observeMetalLBContinuity samples the internal-ingress Service's LoadBalancer IP
 // and route reachability at a fixed cadence until the blocking upgrade finishes
-// or the deadline expires, returning the recorded observations alongside the
-// upgrade result. The upgrade goroutine is joined through done.
+// or the deadline expires. It is FAIL-CLOSED (founder decision 2026-08-21): any
+// sample that hits a kubectl read error, an empty or changed VIP, or a route
+// failure returns immediately with an error and does not skip the failed sample,
+// so an operation can never be accepted because another sample succeeded.
 func (state *chartState) observeMetalLBContinuity(svc, expectedVIP string, done <-chan error, max time.Duration) ([]metalLBContinuitySample, error) {
 	client := &http.Client{Timeout: 3 * time.Second}
 	deadline := time.After(max)
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 	samples := []metalLBContinuitySample{}
-	var upgradeErr error
 	for {
 		select {
-		case upgradeErr = <-done:
-			return samples, upgradeErr
+		case upgradeErr := <-done:
+			if upgradeErr != nil {
+				return samples, fmt.Errorf("helm upgrade failed: %w", upgradeErr)
+			}
+			return samples, nil
 		case <-deadline:
 			return samples, fmt.Errorf("metalLB continuity observation timed out before upgrade completed")
 		case <-ticker.C:
+			sample := metalLBContinuitySample{At: time.Now()}
 			vip, err := state.client.Kubectl(state.ctx, 30*time.Second, "get", "service", svc, "-n", testNamespace,
 				"-o", "jsonpath={.status.loadBalancer.ingress[0].ip}")
-			sample := metalLBContinuitySample{At: time.Now()}
-			if err == nil {
-				sample.VIP = strings.TrimSpace(vip)
+			if err != nil {
+				return samples, fmt.Errorf("kubectl read of %s failed during operation: %v", svc, err)
 			}
-			if sample.VIP != "" {
-				resp, err := client.Get("http://" + sample.VIP)
-				if err == nil {
-					sample.RouteOK = resp.StatusCode < 500
-					sample.RouteStatus = resp.StatusCode
-					resp.Body.Close()
-				}
+			sample.VIP = strings.TrimSpace(vip)
+			if sample.VIP == "" {
+				return samples, fmt.Errorf("LoadBalancer VIP became empty during operation")
+			}
+			if sample.VIP != expectedVIP {
+				return samples, fmt.Errorf("LoadBalancer VIP changed during operation: %s -> %s", expectedVIP, sample.VIP)
+			}
+			resp, err := client.Get("http://" + sample.VIP)
+			if err != nil {
+				return samples, fmt.Errorf("route lost during operation at %s: %v", sample.VIP, err)
+			}
+			sample.RouteOK = resp.StatusCode < 500
+			sample.RouteStatus = resp.StatusCode
+			resp.Body.Close()
+			if !sample.RouteOK {
+				return samples, fmt.Errorf("route unreachable during operation at %s: %s", sample.VIP, resp.Status)
 			}
 			samples = append(samples, sample)
 		}
 	}
 }
 
-// assertMetalLBContinuity proves the LoadBalancer VIP identity never changed
-// across every continuous observation taken during a blocking operation, that at
-// least one sample was captured (continuous rather than before/after-only), and
-// that route reachability was observed during the operation.
-func (state *chartState) assertMetalLBContinuity(t *testing.T, samples []metalLBContinuitySample, expectedVIP string) {
+// assertMetalLBContinuity verifies a fail-closed observation actually sampled the
+// Live LoadBalancer identity throughout the operation (violations already fail
+// inside observeMetalLBContinuity), so the continuity claim is backed by at least
+// one healthy continuous observation rather than a before/after-only sample.
+func (state *chartState) assertMetalLBContinuity(t *testing.T, samples []metalLBContinuitySample) {
 	t.Helper()
 	if len(samples) == 0 {
 		t.Fatal("no MetalLB continuity samples observed during the blocking operation")
-	}
-	reachable := false
-	tracked := 0
-	for _, sample := range samples {
-		if sample.VIP == "" {
-			continue
-		}
-		tracked++
-		if sample.VIP != expectedVIP {
-			t.Fatalf("LoadBalancer VIP changed during operation: %s -> %s", expectedVIP, sample.VIP)
-		}
-		if sample.RouteOK {
-			reachable = true
-		}
-	}
-	if tracked == 0 {
-		t.Fatal("no LoadBalancer VIP observations during the blocking operation")
-	}
-	if !reachable {
-		t.Fatal("route was never observed reachable during the blocking operation")
 	}
 }
 
@@ -359,6 +369,12 @@ func metalLBPoolSpec(t *testing.T, state *chartState, name string) string {
 func metalLBPoolMetadata(t *testing.T, state *chartState, name string) string {
 	t.Helper()
 	return state.kubectl(t, 30*time.Second, "get", "ipaddresspool", name, "-n", testNamespace,
+		"-o", "jsonpath={.metadata.annotations}")
+}
+
+func metalLBAdvertMetadata(t *testing.T, state *chartState, name string) string {
+	t.Helper()
+	return state.kubectl(t, 30*time.Second, "get", "l2advertisement", name, "-n", testNamespace,
 		"-o", "jsonpath={.metadata.annotations}")
 }
 
