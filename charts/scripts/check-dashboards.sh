@@ -28,4 +28,11 @@ for uid in infrastructure-components observability-stack; do
     exit 1
   }
 done
+# The manager reconciliation panel must target the stable control-plane manager
+# scrape identity so unrelated controller-runtime producers (MetalLB, GPU
+# Operator, ingress) cannot be misattributed.
+grep -Fq 'controller_runtime_reconcile_total{namespace=~\"$namespace\",result=\"error\",component=\"manager\"}' <<<"$rendered" || {
+  echo 'ERROR: manager reconciliation dashboard panel must target the stable component="manager" scrape identity' >&2
+  exit 1
+}
 echo "OK: $labels provisioned dashboards are organized across Kubernetes, Iterabase, Infrastructure, and Observability; stable UIDs are enforced"

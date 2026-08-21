@@ -115,6 +115,41 @@ tests:
         alertname: IterabaseHarnessDisconnected
         exp_alerts: []
 
+  - name: warning manager reconciliation threshold fires after the five-minute hold
+    interval: 1m
+    input_series:
+      - series: 'controller_runtime_reconcile_total{namespace="iterabase-system",controller="IterabaseExampleController",result="error",component="manager"}'
+        values: '0 1 2 3 3 3 3 3 3 3 3 3'
+    alert_rule_test:
+      - eval_time: 7m
+        alertname: IterabaseManagerReconciliationFailures
+        exp_alerts: []
+      - eval_time: 9m
+        alertname: IterabaseManagerReconciliationFailures
+        exp_alerts:
+          - exp_labels:
+              namespace: iterabase-system
+              controller: IterabaseExampleController
+              severity: warning
+              component: manager
+            exp_annotations:
+              summary: Controller reconciliation is repeatedly failing
+              description: A control-plane controller recorded at least three reconciliation errors in ten minutes.
+              first_action: Inspect manager logs and the affected CR status, RBAC, and Kubernetes events.
+              runbook_url: https://github.com/nunocgoncalves/iterabase-mono/blob/master/docs/runbooks/platform-alerts.md#iterabasemanagerreconciliationfailures
+
+  - name: external controller-runtime errors do not trigger the manager alert
+    interval: 1m
+    input_series:
+      - series: 'controller_runtime_reconcile_total{namespace="metallb-system",controller="PoolStatusController",result="error",job="opo1-metallb-controller-monitor-service"}'
+        values: '0 1 2 3 4 5 6 7 8 9 10 11'
+      - series: 'controller_runtime_reconcile_total{namespace="gpu-operator",controller="NvidiaGpuOperator",result="error"}'
+        values: '0 1 2 3 4 5 6 7 8 9 10 11'
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: IterabaseManagerReconciliationFailures
+        exp_alerts: []
+
   - name: warning materialization failure threshold fires and resolves
     interval: 1m
     input_series:

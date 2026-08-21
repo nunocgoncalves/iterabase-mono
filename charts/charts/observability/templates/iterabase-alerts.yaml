@@ -100,7 +100,7 @@ spec:
             first_action: "Check MinIO readiness, credentials, metadata state, object integrity, and API/gateway logs."
             runbook_url: {{ printf "%s#iterabaseartifactoperationsfailing" $runbook | quote }}
         - alert: IterabaseManagerReconciliationFailures
-          expr: sum by (namespace,controller) (increase(controller_runtime_reconcile_total{result="error"}[10m])) >= 3
+          expr: sum by (namespace,controller) (increase(controller_runtime_reconcile_total{result="error",component="manager"}[10m])) >= 3
           for: 5m
           labels: {severity: warning, component: manager}
           annotations:

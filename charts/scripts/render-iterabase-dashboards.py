@@ -24,7 +24,7 @@ DASHBOARDS = [
         ("API request rate by route", 'sum by (route) (rate(control_plane_http_requests_total{namespace=~"$namespace",component="api"}[$__rate_interval]))', "reqps", "timeseries"),
         ("API server error ratio", 'sum(rate(control_plane_http_requests_total{namespace=~"$namespace",component="api",status_class="5xx"}[$__rate_interval])) / clamp_min(sum(rate(control_plane_http_requests_total{namespace=~"$namespace",component="api"}[$__rate_interval])), 0.001)', "percentunit", "timeseries"),
         ("API P95 latency", 'histogram_quantile(0.95, sum by (le,route) (rate(control_plane_http_request_duration_seconds_bucket{namespace=~"$namespace",component="api"}[$__rate_interval])))', "s", "timeseries"),
-        ("Manager reconciliation errors", 'sum by (controller) (rate(controller_runtime_reconcile_total{namespace=~"$namespace",result="error"}[$__rate_interval]))', "ops", "timeseries"),
+        ("Manager reconciliation errors", 'sum by (controller) (rate(controller_runtime_reconcile_total{namespace=~"$namespace",result="error",component="manager"}[$__rate_interval]))', "ops", "timeseries"),
         ("Manager workqueue depth", 'sum by (name) (workqueue_depth{namespace=~"$namespace",job="control-plane"})', "short", "timeseries"),
         ("Database pool utilization", 'control_plane_database_pool_connections{namespace=~"$namespace",state="total"} / clamp_min(control_plane_database_pool_max_connections{namespace=~"$namespace"}, 1)', "percentunit", "timeseries"),
     ]),
