@@ -34,4 +34,11 @@ done
 for rule in 'iterabase:control_plane_api_error_ratio5m' 'iterabase:inference_error_ratio5m' 'iterabase:inference_ttft_p95_5m'; do
   grep -q "$rule" <<<"$base" || { echo "ERROR: missing recording rule $rule" >&2; exit 1; }
 done
+# The manager reconciliation alert must target the stable control-plane manager
+# scrape identity so unrelated controller-runtime producers (MetalLB, GPU
+# Operator, ingress) cannot trigger it.
+grep -Fq 'controller_runtime_reconcile_total{result="error",component="manager"}' <<<"$base" || {
+  echo 'ERROR: manager reconciliation alert must target the stable component="manager" scrape identity' >&2
+  exit 1
+}
 echo "OK: $alerts invariant alerts carry runbooks/actions; six performance alerts are threshold-gated; recording rules render"
