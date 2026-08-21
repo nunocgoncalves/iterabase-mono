@@ -192,7 +192,7 @@ func metalLBPredecessorRollbackForwardStage(t *testing.T, state *chartState) {
 	if got := metalLBPoolSpec(t, state, testRelease+"-internal"); got != internalSpec {
 		t.Fatalf("rollback changed internal pool desired spec:\n%s\n!= predecessor\n%s", got, internalSpec)
 	}
-	if !strings.Contains(edgeMeta, "meta.helm.sh/release-name") || !strings.Contains(edgeMeta, "helm.sh/resource-policy: keep") {
+	if !strings.Contains(edgeMeta, "meta.helm.sh/release-name") || !strings.Contains(edgeMeta, `"helm.sh/resource-policy":"keep"`) {
 		t.Fatalf("rollback dropped kept/adopted ownership metadata: %s", edgeMeta)
 	}
 	if got := metalLBLBIP(t, state); got != before.InternalLBIP {
