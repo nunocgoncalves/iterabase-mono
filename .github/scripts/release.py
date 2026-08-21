@@ -271,6 +271,8 @@ def chart_transition_baselines(root: Path) -> dict[str, list[dict[str, str]]]:
     expected = {
         "supported-platform-predecessor": "iterabase-platform",
         "supported-substrate-predecessor": "cert-manager-substrate",
+        "metallb-platform-predecessor": "iterabase-platform",
+        "metallb-substrate-predecessor": "cert-manager-substrate",
     }
     charts: list[dict[str, str]] = []
     for item in fixture["inputs"]:
@@ -301,12 +303,19 @@ def chart_transition_baselines(root: Path) -> dict[str, list[dict[str, str]]]:
         )
     if len(charts) != len(expected) or {item["name"] for item in charts} != set(expected):
         raise ReleaseError("chart transition baseline pair is incomplete or duplicated")
-    if len({item["version"] for item in charts}) != 1:
-        raise ReleaseError("platform and substrate transition baselines must use one version")
-    current = chart_metadata(root / "charts" / "charts" / "iterabase-platform" / "Chart.yaml")["version"]
-    predecessor = charts[0]["version"]
-    if tuple(map(int, predecessor.split("."))) >= tuple(map(int, current.split("."))):
-        raise ReleaseError("chart transition predecessor must be older than current authority")
+    current = chart_metadata(
+        root / "charts" / "charts" / "iterabase-platform" / "Chart.yaml"
+    )["version"]
+    substrate_current = chart_metadata(
+        root / "charts" / "charts" / "cert-manager-substrate" / "Chart.yaml"
+    )["version"]
+    currents = {"iterabase-platform": current, "cert-manager-substrate": substrate_current}
+    for item in charts:
+        chart_version = currents[item["chart"]]
+        if tuple(map(int, item["version"].split("."))) >= tuple(map(int, chart_version.split("."))):
+            raise ReleaseError(
+                f"chart transition predecessor {item['name']} must be older than current {item['chart']} {chart_version}"
+            )
     return {"charts": charts}
 
 

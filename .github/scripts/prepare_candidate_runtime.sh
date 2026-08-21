@@ -98,6 +98,12 @@ while IFS=$'\t' read -r name chart repository version checksum; do
     supported-substrate-predecessor)
       set_env "ITERABASE_E2E_PREDECESSOR_SUBSTRATE_ARCHIVE=$PWD/$archive"
       ;;
+    metallb-platform-predecessor)
+      set_env "ITERABASE_E2E_METALLB_PREDECESSOR_PLATFORM_ARCHIVE=$PWD/$archive"
+      ;;
+    metallb-substrate-predecessor)
+      set_env "ITERABASE_E2E_METALLB_PREDECESSOR_SUBSTRATE_ARCHIVE=$PWD/$archive"
+      ;;
     *)
       echo "unknown chart transition baseline $name" >&2
       exit 1
