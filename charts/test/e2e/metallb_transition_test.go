@@ -9,6 +9,7 @@ import (
 
 	sharede2e "github.com/nunocgoncalves/iterabase-mono/testkit/e2e"
 	"github.com/nunocgoncalves/iterabase-mono/testkit/e2e/kube"
+	"github.com/nunocgoncalves/iterabase-mono/testkit/e2e/process"
 )
 
 // metalLBContinuitySample is one observation of the internal-ingress Service's
@@ -178,8 +179,17 @@ func metalLBPredecessorRollbackForwardStage(t *testing.T, state *chartState) {
 	// Inverse boundary: roll back the platform to the hook-era predecessor. The
 	// pool/VIP objects are kept (helm.sh/resource-policy: keep) and Helm-adopted,
 	// so they survive the rollback rather than being torn down by the 0.3.19 hooks.
-	state.process(t, 10*time.Minute, "helm", "rollback", testRelease, "1",
-		"--namespace", testNamespace, "--kubeconfig", state.cluster.Kubeconfig, "--wait", "--timeout", "8m")
+	// The blocking rollback itself runs under the same concurrent fail-closed
+	// observation used for upgrade/reapply/forward recovery (founder correction
+	// 2026-08-21): every Kubernetes read error, empty/changed VIP, or route failure
+	// during the rollback fails the scenario.
+	state.observeMetalLBOperation(t, 10*time.Minute, before.InternalLBIP, func() error {
+		_, err := state.runner.Run(state.ctx, process.Command{Name: "helm", Args: []string{
+			"rollback", testRelease, "1", "--namespace", testNamespace,
+			"--kubeconfig", state.cluster.Kubeconfig, "--wait", "--timeout", "8m",
+		}, Timeout: 10 * time.Minute})
+		return err
+	})
 
 	// Prove predecessor-pool restoration: UIDs + desired specs are unchanged across
 	// the hook-predecessor rollback.
@@ -193,19 +203,13 @@ func metalLBPredecessorRollbackForwardStage(t *testing.T, state *chartState) {
 		t.Fatalf("rollback changed internal pool desired spec:\n%s\n!= predecessor\n%s", got, internalSpec)
 	}
 	// Re-query the LIVE objects after rollback and verify their ACTUAL ownership
-	// and hook metadata (not values cached before rollback): ownership retained and
-	// the transient hook markers absent.
-	livePoolMeta := metalLBPoolMetadata(t, state, testRelease+"-edge")
-	liveAdvertMeta := metalLBAdvertMetadata(t, state, testRelease+"-edge")
-	if !strings.Contains(livePoolMeta, "meta.helm.sh/release-name") || !strings.Contains(livePoolMeta, `"helm.sh/resource-policy":"keep"`) {
-		t.Fatalf("post-rollback edge pool ownership/keep metadata missing: %s", livePoolMeta)
-	}
-	if strings.Contains(livePoolMeta, "helm.sh/hook-") {
-		t.Fatalf("post-rollback edge pool still carries hook metadata: %s", livePoolMeta)
-	}
-	if !strings.Contains(liveAdvertMeta, "meta.helm.sh/release-name") || strings.Contains(liveAdvertMeta, "helm.sh/hook-") {
-		t.Fatalf("post-rollback edge advertisement ownership/hook metadata unexpected: %s", liveAdvertMeta)
-	}
+	// and hook metadata (not values cached before rollback): adoption ownership is
+	// retained, keep policy intact, and neither helm.sh/hook nor helm.sh/hook-weight
+	// is present — for the tested edge and internal pools and their advertisements.
+	assertMetalLBAdoptedMetadata(t, metalLBPoolMetadata(t, state, testRelease+"-edge"), "ipaddresspool", testRelease+"-edge")
+	assertMetalLBAdoptedMetadata(t, metalLBPoolMetadata(t, state, testRelease+"-internal"), "ipaddresspool", testRelease+"-internal")
+	assertMetalLBAdoptedMetadata(t, metalLBAdvertMetadata(t, state, testRelease+"-edge"), "l2advertisement", testRelease+"-edge")
+	assertMetalLBAdoptedMetadata(t, metalLBAdvertMetadata(t, state, testRelease+"-internal"), "l2advertisement", testRelease+"-internal")
 	if got := metalLBLBIP(t, state); got != before.InternalLBIP {
 		t.Fatalf("rollback changed internal LoadBalancer VIP: %s -> %s", before.InternalLBIP, got)
 	}
@@ -273,30 +277,35 @@ func (state *chartState) installMetalLBObserved(t *testing.T, timeout time.Durat
 	t.Helper()
 	state.preapplyAllCRDs(t, valueFiles...)
 	state.adoptMetalLBHookObjects(t)
-	svc := testRelease + "-internal-ingress-nginx-controller"
-
-	done := make(chan error, 1)
-	go func() {
+	state.observeMetalLBOperation(t, timeout, expectedVIP, func() error {
 		_, err := state.client.HelmUpgrade(state.ctx, kube.HelmOptions{
 			Release: testRelease, Namespace: testNamespace, Chart: state.platform,
 			ValueFiles: valueFiles, Wait: true, Timeout: timeout,
 		})
-		done <- err
-	}()
-	// The DES-HOR-511 pre-apply + hook-object adoption run before the upgrade, and
-	// the blocking Helm upgrade itself is observed continuously (VIP identity,
-	// service LoadBalancer status, and route reachability) rather than sampled
-	// only before and after. Every observation is fail-closed (founder decision
-	// 2026-08-21): any kubectl read error, empty/changed VIP, or route failure
-	// fails the operation; no failed/empty sample is skipped.
-	samples, opErr := state.observeMetalLBContinuity(svc, expectedVIP, done, timeout)
-	if opErr != nil {
-		t.Fatalf("MetalLB continuity/upgrade failed during blocking operation: %v", opErr)
-	}
-	state.assertMetalLBContinuity(t, samples)
+		return err
+	})
 	if final := state.metalLBValidationPolicy(t); final != metalLBPolicyFail {
 		t.Fatalf("metallb validation failurePolicy not converged to %s: got %q", metalLBPolicyFail, final)
 	}
+}
+
+// observeMetalLBOperation runs a blocking Helm operation in the background while
+// the main goroutine continuously samples the internal-ingress Service's
+// LoadBalancer identity and route reachability throughout the operation, then
+// asserts VIP identity never changed and the route was observed reachable. It is
+// FAIL-CLOSED (founder decision 2026-08-21): any kubectl read error,
+// empty/changed VIP, or route failure fails the test, and no failed/empty sample
+// is skipped — so an operation is never accepted because another sample succeeded.
+func (state *chartState) observeMetalLBOperation(t *testing.T, timeout time.Duration, expectedVIP string, op func() error) {
+	t.Helper()
+	svc := testRelease + "-internal-ingress-nginx-controller"
+	done := make(chan error, 1)
+	go func() { done <- op() }()
+	samples, opErr := state.observeMetalLBContinuity(svc, expectedVIP, done, timeout)
+	if opErr != nil {
+		t.Fatalf("MetalLB continuity/operation failed during blocking Helm operation: %v", opErr)
+	}
+	state.assertMetalLBContinuity(t, samples)
 }
 
 // observeMetalLBContinuity samples the internal-ingress Service's LoadBalancer IP
@@ -315,7 +324,7 @@ func (state *chartState) observeMetalLBContinuity(svc, expectedVIP string, done 
 		select {
 		case upgradeErr := <-done:
 			if upgradeErr != nil {
-				return samples, fmt.Errorf("helm upgrade failed: %w", upgradeErr)
+				return samples, fmt.Errorf("blocking Helm operation failed: %w", upgradeErr)
 			}
 			return samples, nil
 		case <-deadline:
@@ -376,6 +385,29 @@ func metalLBAdvertMetadata(t *testing.T, state *chartState, name string) string 
 	t.Helper()
 	return state.kubectl(t, 30*time.Second, "get", "l2advertisement", name, "-n", testNamespace,
 		"-o", "jsonpath={.metadata.annotations}")
+}
+
+// assertMetalLBAdoptedMetadata asserts a live MetalLB object's ACTUAL annotations
+// (re-queried after the operation) carry the exact helm adoption ownership
+// (release-name and release-namespace), the keep policy, and NO hook markers —
+// neither the primary helm.sh/hook key nor helm.sh/hook-weight.
+func assertMetalLBAdoptedMetadata(t *testing.T, meta, kind, name string) {
+	t.Helper()
+	for _, pair := range [][2]string{
+		{"meta.helm.sh/release-name", testRelease},
+		{"meta.helm.sh/release-namespace", testNamespace},
+	} {
+		want := fmt.Sprintf(`"%s":"%s"`, pair[0], pair[1])
+		if !strings.Contains(meta, want) {
+			t.Fatalf("%s %s missing adoption ownership %s: %s", kind, name, want, meta)
+		}
+	}
+	if !strings.Contains(meta, `"helm.sh/resource-policy":"keep"`) {
+		t.Fatalf("%s %s missing keep policy: %s", kind, name, meta)
+	}
+	if strings.Contains(meta, `"helm.sh/hook`) {
+		t.Fatalf("%s %s still carries hook metadata (helm.sh/hook or helm.sh/hook-weight): %s", kind, name, meta)
+	}
 }
 
 // metalLBSnapshot holds the observable MetalLB identity signals captured before

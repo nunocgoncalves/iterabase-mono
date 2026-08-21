@@ -315,14 +315,15 @@ down the pools or the LoadBalancer VIP**: because they carry
 UIDs, desired specs, and ownership/hook metadata intact and the wire route stays
 healthy. This predecessor-pool restoration is **proven** (not merely claimed) by
 the `metallb-upgrade-reapply` transition: it captures the predecessor desired
-specs before the rollback, then after the rollback **re-queries the live
-objects** and verifies their actual UID, desired spec, `meta.helm.sh` ownership,
-and `helm.sh/resource-policy: keep` metadata (and that the transient
-`helm.sh/hook-` markers are absent) — never asserting metadata cached before the
-rollback. During every blocking upgrade, exact reapply, and rollback/forward
-recovery, the scenario observes the Service LoadBalancer identity and route
-**fail-closed**: any kubectl read error, empty or changed VIP, or route failure
-fails the scenario rather than being skipped.
+specs before the rollback, then after the rollback **re-queries the live objects**
+and asserts their exact `meta.helm.sh/release-name` and
+`meta.helm.sh/release-namespace` ownership, `helm.sh/resource-policy: keep`, and
+the absence of **both** `helm.sh/hook` and `helm.sh/hook-weight` markers (plus
+UID, desired-spec, VIP, and route) — for the tested edge and internal pools and
+their advertisements — never asserting metadata cached before the rollback.
+During every blocking upgrade, exact reapply, rollback, and forward recovery, the blocking operation itself runs under a concurrent **fail-closed** observation
+of the Service LoadBalancer identity and route: any kubectl read error, empty or
+changed VIP, or route failure fails the scenario rather than being skipped.
 
 **Safe predecessor reapply / forward recovery.** The supported recovery after
 rolling back to a hook-era predecessor is a forward re-upgrade to the current
