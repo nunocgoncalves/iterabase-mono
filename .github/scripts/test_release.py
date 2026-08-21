@@ -200,15 +200,17 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertEqual(release.read_version(ROOT / "forge" / "VERSION"), "0.8.5")
         self.assertFalse((ROOT / "release" / "compatibility.json").exists())
 
-    def test_active_release_intent_records_forge_platform_substrate_trio(self) -> None:
-        # The coordinated publishable set is Forge v0.8.5 alongside the current
-        # iterabase-platform-chart and its same-version cert-manager-substrate
-        # companion. The compiled release metadata must record all three together so
-        # the candidate bundle and evidence bind them as one coordinated release.
-        plan = self.plan("forge,iterabase-platform-chart")
+    def test_active_release_intent_records_platform_pair_with_forge_baseline(self) -> None:
+        # HOR-512 release intent: iterabase-platform-chart is the sole candidate.
+        # Forge v0.8.5 is already published, so it is recorded as an immutable
+        # baseline rather than a co-published member; platform and its same-version
+        # cert-manager-substrate companion remain the coordinated chart release.
+        # The compiled metadata must record the platform+substrate pair and the
+        # forge baseline so candidate preflight never co-publishes existing tags.
+        plan = self.plan("iterabase-platform-chart")
         releases = {item["target"]: item["version"] for item in plan["releases"]}
-        self.assertEqual(releases["forge"], "0.8.5")
-        self.assertEqual(releases["iterabase-platform-chart"], "0.3.21")
+        self.assertEqual(releases, {"iterabase-platform-chart": "0.3.21"})
+        self.assertNotIn("forge", releases)
 
         repo_versions = plan["tested_with"]["repository_versions"]
         self.assertEqual(repo_versions["forge"], "0.8.5")
