@@ -9,8 +9,10 @@ set -euo pipefail
 # rendered platform chart and FAILS if ANY mapping contains a duplicate key.
 chart=charts/iterabase-platform
 
+# Read the program from the heredoc (stdin) but the YAML document from a file
+# path argument, so the render data is never consumed as the script source.
 unique_yaml() {
-  python3 - <<'PY'
+  python3 - "$1" <<'PY'
 import sys, yaml
 
 class UniqueKeyLoader(yaml.SafeLoader):
@@ -29,7 +31,8 @@ def construct_mapping(loader, node, deep=False):
 UniqueKeyLoader.add_constructor(
     yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, construct_mapping)
 
-text = sys.stdin.read()
+with open(sys.argv[1]) as f:
+    text = f.read()
 try:
     list(yaml.load_all(text, Loader=UniqueKeyLoader))
 except Exception as exc:
@@ -40,14 +43,29 @@ PY
 
 render_and_check() {
   local name="$1"; shift
-  local render
+  local render tmp
   render=$(helm template "$name" "$chart" "$@")
+  tmp=$(mktemp)
+  printf '%s\n' "$render" > "$tmp"
   printf '== %s: %s resources\n' "$name" "$(grep -c '^kind:' <<<"$render")"
-  if ! unique_yaml <<<"$render"; then
+  if ! unique_yaml "$tmp"; then
     echo "error: duplicate YAML mapping key in '$name' full rendered chart" >&2
+    rm -f "$tmp"
     exit 1
   fi
+  rm -f "$tmp"
 }
+
+# Self-test: the guard must reject an intentional duplicate mapping key, proving
+# it actually parses the document and can catch the HOR-509 defect class.
+self_test=$(mktemp)
+printf 'app.kubernetes.io/component: gateway\napp.kubernetes.io/component: gateway-workload\n' > "$self_test"
+if unique_yaml "$self_test"; then
+  echo "error: duplicate-key guard failed to reject an intentional duplicate" >&2
+  rm -f "$self_test"
+  exit 1
+fi
+rm -f "$self_test"
 
 # The workload Certificate only renders when an overlay opts into
 # inference-gateway.workload.enabled (OPO1 does), so exercise it explicitly in
