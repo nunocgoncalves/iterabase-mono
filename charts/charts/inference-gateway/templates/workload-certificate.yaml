@@ -11,7 +11,9 @@ kind: Certificate
 metadata:
   name: {{ include "inference-gateway.workloadTLSSecretName" . }}
   labels:
-    {{- include "inference-gateway.labels" . | nindent 4 }}
+    app.kubernetes.io/name: inference-gateway
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
     app.kubernetes.io/component: gateway-workload
 spec:
   secretName: {{ include "inference-gateway.workloadTLSSecretName" . }}
