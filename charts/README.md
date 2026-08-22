@@ -402,7 +402,7 @@ resources first can fail during REST mapping before any chart hook executes.
 
 The chart-owned `test/e2e/transition-baselines.json` currently declares platform
 and substrate `0.3.12` as the checksum-pinned supported predecessor for current
-`0.3.21`, and a checksum-pinned `0.3.19` MetalLB hook predecessor transition
+`0.3.22`, and a checksum-pinned `0.3.19` MetalLB hook predecessor transition
 (DES-HOR-511) covers the hook→ordinary pool/VIP preservation path through
 upgrade and reapply. The supported inverse boundary is current → the declared
 predecessor within the post-0.3 companion-ownership model, followed by a current
