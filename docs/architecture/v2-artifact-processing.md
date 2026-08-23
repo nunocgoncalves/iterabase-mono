@@ -73,7 +73,7 @@ The founder approved the complete package below for HOR-460 on 2026-08-23. The f
 - **Approved by:** Nuno Gonçalves
 - **Approved on:** 2026-08-23
 - **Scope:** Deployment topology, service transport, credentials, filesystem, network, and resource isolation.
-- **Decision:** A trusted control-plane-owned coordinator alone holds bounded PostgreSQL and MinIO credentials and leases work. Separate scanner and extractor pods accept one bounded stream over internal mTLS, hold no database, artifact, Kubernetes, or customer credential, use no service-account token, run non-root with read-only roots, seccomp, capability drop, and bounded scratch, and have deny-by-default ingress and egress. The extractor has no network egress; signature update is a separate isolated path.
+- **Decision:** A trusted control-plane-owned coordinator alone holds bounded PostgreSQL and MinIO credentials and leases work. Separate scanner and extractor pods accept one bounded stream over internal mTLS, hold no database, artifact, Kubernetes, or customer credential, use no service-account token, run non-root with read-only roots, seccomp, capability drop, and bounded scratch, and have deny-by-default ingress and zero egress. A separate FreshClam updater pod and network identity is the only signature-source client; it atomically writes a dedicated ReadWriteMany signature PVC that scanner pods mount read-only, so no updater or synchronizer shares the scanner network namespace.
 - **Consequences:** Malformed bytes never execute in an API, gateway, coordinator, or credentialed parser process. Processor resources and replicas may be operator-sized without making scanner or parser choice customer-configurable.
 - **Evidence:** Founder approval recorded in HOR-460.
 
@@ -82,7 +82,7 @@ The founder approved the complete package below for HOR-460 on 2026-08-23. The f
 - **Approved by:** Nuno Gonçalves
 - **Approved on:** 2026-08-23
 - **Scope:** Asynchronous scheduling, crash recovery, timeout, transient/permanent classification, and manual retry.
-- **Decision:** PostgreSQL `FOR UPDATE SKIP LOCKED` leasing plus attempt generation and fencing drives scan and extraction. Automatic retry is limited to three pre-verdict transient attempts with fixed exponential delay. Browser-only manual retry creates a new attributable attempt. Late or expired workers cannot commit. Scanner timeout is 120 seconds and extractor/OCR timeout is five minutes. Deterministic malformed, password, and resource-policy failures are permanent; service, lease, and transport failures are retryable.
+- **Decision:** PostgreSQL `FOR UPDATE SKIP LOCKED` leasing plus attempt generation and fencing drives scan and extraction. Each processing trigger permits exactly three total pre-verdict transient attempts: attempt 1 immediately, attempt 2 after one minute, and attempt 3 after five minutes; there is no automatic attempt 4. Browser-only manual retry creates a new attributable trigger and attempt. Late or expired workers cannot commit. Scanner timeout is 120 seconds and extractor/OCR timeout is five minutes. Deterministic malformed, password, and resource-policy failures are permanent under the same processor/configuration/policy generation; service, lease, and transport failures are retryable.
 - **Consequences:** No stage silently retries forever or changes a prior attempt. Retry never converts unchanged malware bytes to clean, and uncertain or missing verdicts remain unavailable.
 - **Evidence:** Founder approval recorded in HOR-460.
 
@@ -169,7 +169,7 @@ The founder approved the complete package below for HOR-460 on 2026-08-23. The f
 | `work.artifact_links` | Preserve immutable work/attempt/node references and historical FK continuity | Add consumption mode, exact original/derivative evidence, active-reference deletion query, and three-principal attribution. A link cannot make unscanned bytes available. |
 | Customer REST `POST/GET/HEAD/DELETE /v1/artifacts` | Preserve streaming single-object upload/download shape and existing download path | V2 upload returns processing state rather than immediately available; add shared list/search/recent/status and derivative reads; apply exact V2 actions and mixed-credential denial; delete must block active work and purge all bytes. |
 | Workload `ArtifactService` over gateway mTLS | Preserve exact assignment/invocation authorization and no object-store credential in supervisor/runner/child | Outputs enter quarantine and are not returned as usable refs until clearance. Workload reads require V2 clearance and exact consumption mode. Processing services are a separate internal identity, not a new caller scope. |
-| MinIO chart bucket and dedicated user | Preserve customer-controlled object storage and unique immutable objects | Replace the broad read/write/delete identity with write-only quarantine, read-only cleared-serving, coordinator lifecycle, and signature-only policies. Expand the MinIO NetworkPolicy only for named processors. |
+| MinIO chart bucket and dedicated user | Preserve customer-controlled object storage and unique immutable objects | Replace the broad read/write/delete identity with write-only quarantine, read-only cleared-serving, and coordinator lifecycle policies. Expand the MinIO NetworkPolicy only for the coordinator; scanner/extractor and signature updater receive no artifact-bucket path. |
 | Existing retention/deletion sweeper | Preserve idempotent cross-store retries and metadata tombstones | Split pending/rejected/transient/safe retention, fence processing, remove search atomically, block active work, purge every derivative, and minimize tombstone content. |
 | PostgreSQL with pgvector available | Preserve PostgreSQL as the durable database | Use built-in full-text `simple` configuration and GIN indexes; no embeddings or vector search enter V2 artifact search. |
 | Authentication decisions in HOR-451 | Preserve current role/account/action checks and owner/actor/credential evidence | Replace v1 `artifact:read|write` and broad Admin scope with `artifacts.read`, `artifacts.upload`, and personal-current-Admin `artifacts.delete`; processing retries remain cookie-only. |
@@ -203,14 +203,16 @@ Artifact coordinator (trusted control-plane binary)
               Scanner adapter pod      Extractor adapter pod
               mTLS -> local clamd       mTLS -> local Tika/Tesseract
               no data credentials       no data credentials
-              no customer egress        no egress
+              zero egress               zero egress
                          ^
+                         | read-only filesystem mount
                          |
-              signature sync (read-only)
+             dedicated signature RWX PVC
                          ^
+                         | sole read-write mount; atomic version publish
                          |
-FreshClam updater -> versioned signature zone
-(no artifact/DB credentials; only update egress)
+             FreshClam updater pod
+             separate network identity; update-source egress only
 ```
 
 Trust rules:
@@ -219,8 +221,8 @@ Trust rules:
 - The coordinator holds only its exact database and object-zone lifecycle grants. It computes transport digests and interprets bounded processor result envelopes; it never loads document parser libraries.
 - Scanner and extractor pods receive exactly one bounded stream and return a bounded verdict/output stream. They cannot list or fetch artifacts and cannot assert artifact, human, credential, work, or workflow identity.
 - The mTLS adapter in each processing pod authenticates the coordinator, binds one request ID, enforces limits, and talks only to its local engine. Engine processes receive no TLS key or service-account token.
-- The scanner pod receives signature files through a read-only shared mount. A dedicated synchronizer has only read access to the signature zone. `clamd` itself has no object credential.
-- The FreshClam updater is the only workload with signature-source egress. It has no route or credential to artifact bytes or PostgreSQL and publishes only validated versioned signature bundles through a signature-only credential.
+- Scanner pods have an empty egress policy and no signature synchronizer container. They mount the dedicated signature PVC read-only; `clamd` observes only complete version directories selected by an atomic current-manifest switch.
+- The FreshClam updater is a separate pod and network identity, the sole read-write mounter of the signature PVC, and the only workload with signature-source HTTPS/DNS egress. It has no route or credential to artifact bytes, MinIO, PostgreSQL, Product API, or the scanner processing port.
 - Extractor egress is empty. Tika external-resource resolution, XML external entities, URL fetching, embedded launch, and macro execution are disabled or rejected.
 - Product clients, Chat, supervisors, runners, tools, and workflows continue to receive artifact references, never MinIO credentials, storage keys, processor endpoints, or signed URLs.
 
@@ -265,7 +267,7 @@ Trust rules:
 | Processor result spoof | Coordinator authenticates exact service identity, validates bounded protocol/version/request/digest/result schema, and commits only under the matching lease generation. |
 | Object copied before DB promotion | Serving route still requires the DB security/storage predicate; unique unreferenced safe-zone object is orphan-swept. |
 | DB promoted before response or quarantine cleanup | Safe original is already exact and readable; replay converges on the same state; quarantine deletion is idempotent. |
-| Cross-user quarantine status guess | Query requires upload owner/current credential or security-operation authority in the same SQL predicate; return not found otherwise. |
+| Cross-user quarantine status guess | Every status query requires the browser role or bearer `artifacts.read`; an unregistered row additionally requires the initiating-human/exact-credential or browser security-operation predicate in the same SQL query. Return not found otherwise. |
 | Shared search leak | Registration/security/storage filters execute before count, rank, and snippet; index rows are transactionally removed before delete/withdraw. |
 | Stale artifact confirmation | HOR-456 current-state recheck transitions pending confirmation to `stale`; no work or tool effect is created. |
 | Delete races active work | Artifact row lock plus authoritative active-reference query returns `409 artifact_in_use`; no state or object changes. |
@@ -280,8 +282,8 @@ Trust rules:
 - Every V2 artifact byte stream, including browser/personal/automation upload, pasted-text capture, sandbox publication, and tool/workflow output intended for the V2 library, uses the same hard limit.
 - A known `Content-Length` over the limit is rejected before a quarantine row or object is created. Missing/chunked length is accepted only through the bounded streaming reader and fails after reading one excess byte.
 - One API upload creates one artifact. A multi-file browser action issues bounded individual uploads and retains each returned handle.
-- A Chat message transaction accepts at most six distinct artifact IDs. New uploads, pasted-text artifacts, and recent/search reuse all count. Duplicate IDs are invalid rather than a way to alter count or order.
-- The six-reference constraint belongs to message acceptance, not the standalone upload count. Uploading a seventh object does not attach it; the UI must return the approved explicit excess message.
+- The Chat composer accepts at most six distinct attachment selections across provisional upload handles, pasted-text handles, and canonical recent/search refs. Duplicate selections are invalid rather than a way to alter count or order.
+- The Chat message transaction accepts at most six canonical artifact refs and rejects every provisional handle. The standalone upload count is independent; uploading a seventh object does not attach it, and the UI must return the approved explicit excess message.
 
 ### Exact V2 allow-list
 
@@ -333,13 +335,14 @@ stateDiagram-v2
     promoting --> stored: exact safe object + DB promotion committed
     quarantined --> deleting: permanent reject or expiry
     promoting --> deleting: promotion canceled/fails permanently
-    stored --> deleting: eligible Admin delete/retention/security withdrawal
+    stored --> stored: security withdrawal/re-scan; bytes retained but gated
+    stored --> deleting: eligible Admin delete/retention or rejecting re-scan
     deleting --> deleting: object purge retry
     deleting --> deleted: every byte absent + tombstone committed
     deleted --> [*]
 ```
 
-No state returns to `quarantined` or `stored`. A security re-scan of a stored original does not move bytes back to a customer-readable quarantine credential; it first withdraws registration and use, then scans through the coordinator's lifecycle credential.
+No state returns to `quarantined` after promotion, and no state returns from `deleting` or `deleted`. A security withdrawal leaves the immutable original in `storage_state='stored'`, withdraws registration, and gates all reads through `security_state='rescan_pending'`; it scans through the coordinator's lifecycle credential without changing storage state. A clean re-scan can return security to `cleared` and re-register the same original. Only a rejecting re-scan or an eligible deletion/retention request enters `deleting`.
 
 ### Security lifecycle
 
@@ -360,9 +363,9 @@ stateDiagram-v2
 ```
 
 - `cleared` records one exact successful attempt, engine/config/signature version, canonical type, and verdict time.
-- Signature refresh alone does not rewrite historical verdicts or make the entire library flap. A concrete security advisory, known-bad digest, engine defect, or operator incident can transition selected artifacts to `rescan_pending`; that transition immediately unregisters and gates them before scanning.
-- A malware/type/policy `rejected` artifact cannot retry unchanged bytes. Replacement means a new upload/artifact ID and digest.
-- A transient failure retains no clean verdict. Automatic retry transitions through a new append-only attempt; after three failures, only an eligible browser security retry can schedule another attempt.
+- Signature refresh alone does not rewrite historical verdicts or make the entire library flap. A concrete security advisory, known-bad digest, engine defect, or operator incident can transition selected artifacts to `rescan_pending`; that transition immediately unregisters and gates them before scanning while storage remains `stored`.
+- A malware/type/policy `rejected` artifact cannot retry unchanged bytes. Replacement means a new upload/artifact ID and digest; a rejecting re-scan also starts the storage deletion path.
+- A transient trigger has exactly three total attempts: the initial attempt plus two automatic retries. After attempt 3 fails, only an eligible browser security retry can create a new trigger.
 
 ### Extraction lifecycle
 
@@ -373,13 +376,13 @@ stateDiagram-v2
     pending --> extracting: fenced attempt leased
     extracting --> ready: complete derivative set committed
     extracting --> retryable_failed: service/lease/transport failure exhausted
-    extracting --> failed: malformed/password/resource/deterministic parser failure
+    extracting --> failed: malformed/resource/deterministic parser failure
     retryable_failed --> pending: browser manual retry or bounded automatic retry
-    failed --> pending: browser manual retry
+    failed --> pending: changed generation + retry-on-change failure class
     ready --> pending: explicit new extraction attempt after reviewed processor update
 ```
 
-Extraction state never changes security state. A security withdrawal gates a previously ready derivative but retains its historical extraction evidence until lifecycle purge. A new successful extraction set does not mutate the prior set.
+Extraction state never changes security state. A security withdrawal gates a previously ready derivative but retains its historical extraction evidence until lifecycle purge. A new successful extraction set does not mutate the prior set. `retryable_failed` may retry under the same processor/configuration/policy generation. `failed` is terminal for that generation: it can transition only when the current approved generation differs from the failed attempt and its fixed failure classification is `retry_on_new_generation=true` (limited to `malformed_document`, `parser_limitation`, or `resource_limit`). Password/encryption/active-content rejection never reaches extraction and cannot use this transition.
 
 ### Library registration
 
@@ -396,7 +399,7 @@ Extraction state never changes security state. A security withdrawal gates a pre
 | Security retryable failure | `security_check_failed_retryable` | Originator/Admin status and browser retry; no other use |
 | Security rejected | `rejected` | Safe reason and replace/remove guidance; bytes are purged; no retry of unchanged artifact |
 | Security cleared; extraction pending/extracting | `processing_content` | Shared metadata/recent/download; raw-compatible workflow allowed; Chat cannot read content |
-| Security cleared; extraction retryable/permanent failed | `safe_content_not_extracted` | Shared metadata/download; browser extraction retry; exact raw-compatible workflow only |
+| Security cleared; extraction retryable/permanent failed | `safe_content_not_extracted` | Shared metadata/download; browser extraction retry only when the failure/generation eligibility contract permits; exact raw-compatible workflow only |
 | Security cleared; extraction ready | `ready` | Shared metadata/download/search; Chat uses exact derivative; raw-compatible workflow may still choose declared raw mode |
 | Storage deleting/deleted or security withdrawn | `unavailable`/`deleted` | Tombstone/reference-safe projection only; no byte/derivative/search use |
 
@@ -586,15 +589,15 @@ A future proposal may add a separate, immutable, non-canonical semantic derivati
 | Apache Tika | **3.3.1**, upstream full image `apache/tika:3.3.1.0-full@sha256:d8e6ed96260ad89307a93195a1b856102987a818ac648502f8efbaf313d32470` reviewed 2026-08-23 | Deterministic content detection, structural parser substrate, text/table extraction | Apache-2.0; deployed in a separate credentialless extractor image/pod. |
 | Tesseract OCR | **5.5.0** as verified in the selected Tika image, plus pinned `eng`, `por`, and `osd` trained data | OCR for supported images and scanned PDF pages | Apache-2.0 engine; language-data license/checksum must be included in the image SBOM and notice inventory. |
 | PostgreSQL full-text | Existing PostgreSQL 16-compatible database, `simple` text-search configuration and GIN | Metadata and extracted-content search | Existing repository dependency; no new external service. |
-| MinIO | Existing chart-owned customer-controlled object store | Quarantine/original/derived/signature byte zones | Existing repository dependency and artifact identity; policies/credentials change in HOR-461. |
+| MinIO | Existing chart-owned customer-controlled object store | Quarantine/original/derived byte zones | Existing repository dependency and artifact identity; policies/credentials change in HOR-461. |
 
 The final project-owned scanner adapter, extractor image with Portuguese data, and coordinator image digests do not exist in this design ticket. HOR-461/HOR-462 must build them from the reviewed upstream references, generate SBOM/provenance, run license and vulnerability policy, and pin exact release digests before enablement. A security patch may advance an engine/parser patch version through a reviewed implementation/release ticket only when all state, output, isolation, and compatibility contracts remain unchanged. Replacing ClamAV/Tika/Tesseract, adopting a new major with changed semantics, or introducing an LLM/document service requires a new architecture decision.
 
 ### Signature and image update policy
 
-- FreshClam checks the official Cisco/ClamAV source or an operator-controlled exact mirror at least every two hours.
-- Updater validates the database using ClamAV tooling, records version/time/checksum, and publishes an immutable signature bundle into a signature-only zone. It never receives artifact/DB credentials.
-- Scanner sync polls the internal signature zone, atomically switches complete bundles, asks `clamd` to reload, and exposes readiness only after engine/database self-test.
+- FreshClam in the separate updater pod checks the official Cisco/ClamAV source or an operator-controlled exact mirror at least every two hours.
+- The updater validates the database using ClamAV tooling, records version/time/checksum, writes a new immutable version directory to the dedicated ReadWriteMany signature PVC, and atomically changes a bounded current-manifest only after validation. It never receives artifact, MinIO, database, or Kubernetes credentials.
+- Scanner pods mount the PVC read-only, have no sync sidecar and zero egress, and configure `clamd` self-check/reload to adopt only the complete manifest-selected version. Readiness returns only after the adapter verifies engine/database self-test, version, checksum, and age.
 - Signature age over 24 hours prevents a new clean verdict. Pending work remains unavailable and reports retryable scanner state.
 - Signature update failure alerts but does not rewrite prior attempt evidence. A known-bad signature release is rolled back to the last validated bundle with explicit operational evidence; new verdicts record that exact version.
 - Engine/parser/base-image CVE review runs for every release candidate. Critical exploitable findings block release or require an explicit recorded exception; tags alone are never deployment authority.
@@ -626,7 +629,8 @@ Scanner and extractor pods require:
 - read-only root filesystem and bounded `emptyDir` scratch with no executable shared mount where the runtime supports it;
 - no shared process namespace and no secret/customer volume mounted into engine containers;
 - one in-flight artifact per engine pod; process/PID and wall-clock limits; engine restart after OOM/protocol violation;
-- pod-level deny-all egress for extractor and only signature-zone/DNS egress for the scanner signature synchronizer. The ClamAV engine has no credential even though it shares the pod network.
+- pod-level deny-all egress for both scanner and extractor, with no signature synchronizer in the scanner pod;
+- the dedicated signature PVC mounted read-only in scanner containers; scanner has no write mount or signature-source credential.
 
 Coordinator requires only:
 
@@ -635,7 +639,7 @@ Coordinator requires only:
 - egress to PostgreSQL, MinIO, scanner/extractor Services, DNS, and metrics only;
 - no customer-facing listener or Kubernetes write authority.
 
-FreshClam updater requires only update-source HTTPS/DNS and signature-zone write access. It cannot reach PostgreSQL, artifact zones, API/gateway, scanner processing port, or extractor.
+The separate FreshClam updater pod requires only update-source HTTPS/DNS and the sole read-write signature PVC mount. Its NetworkPolicy cannot reach PostgreSQL, MinIO/artifact zones, API/gateway, scanner processing port, extractor, or customer systems; scanner pods cannot reach the updater or its update source.
 
 ### Reference resource profile
 
@@ -647,7 +651,7 @@ These are the approved starting limits for implementation sizing, not a throughp
 | Scanner adapter | 100m / 128 MiB | 500m / 256 MiB | 1 stream |
 | ClamAV engine | 500m / 1536 MiB | 2 CPU / 3 GiB | 1 scan; 512 MiB scratch |
 | Extractor adapter + Tika/Tesseract pod | 1 CPU / 1 GiB | 2 CPU / 2 GiB | 1 extraction; JVM `-Xmx1g`; 1 GiB scratch |
-| Signature updater/sync | 100m / 128 MiB | 500m / 256 MiB | one bundle at a time; 512 MiB staging |
+| Signature updater | 100m / 128 MiB | 500m / 256 MiB | one atomic bundle publish at a time; 512 MiB staging |
 
 - Scanner deadline is 120 seconds per artifact.
 - Detection and complete extraction/OCR share a five-minute extraction-service deadline; detector failure before clearance is security retryable, while deterministic extraction limits after clearance follow section 7.
@@ -661,11 +665,11 @@ These are the approved starting limits for implementation sizing, not a throughp
 
 - Every attempt is immutable after terminal state.
 - Lease acquisition uses database time, `FOR UPDATE SKIP LOCKED`, a unique owner, generation, expiry, and heartbeat. Commit requires the exact non-expired generation and unchanged input/lifecycle pins.
-- Automatic retry delays are 1 minute, 5 minutes, and 15 minutes; at most three automatic attempts exist for one trigger before customer state becomes retryable failure.
-- Manual retry is cookie-session-only with current account/role, exact-origin CSRF, and owner/shared-resource authorization. Security retry on an unregistered artifact is limited to its initiating human or current Admin; extraction retry is available to any current Operator/Admin because the cleared artifact is installation-wide. Every retry records actor/session/reason.
-- Personal/automation keys may upload and poll but cannot invoke security or extraction retry. There is no retry action in the bearer catalogue.
-- Malware, unsupported/conflicting type, unsafe container, encrypted/active content, oversize, and known deterministic resource-policy failures do not automatically or manually retry unchanged bytes in the same stage.
-- Scanner timeout is retryable because engine/service health may differ. An extractor process timeout caused by service loss is retryable; a repeatable document deadline/resource cap reported by the bounded adapter is permanent `resource_limit`.
+- Each initial or manual trigger has a maximum of three total executions: attempt 1 runs immediately, automatic retry attempt 2 runs after one minute, and automatic retry attempt 3 runs after five minutes. There is no 15-minute retry and no automatic attempt 4; failure of attempt 3 makes the trigger terminal and projects retryable failure only when its class permits a new manual trigger.
+- Manual retry is cookie-session-only with current account/role, exact-origin CSRF, and owner/shared-resource authorization. Security retry on an unregistered artifact is limited to its initiating human or current Admin. Extraction `retryable_failed` may create a new trigger under the same generation; extraction `failed` may do so only after the approved processor/configuration/policy generation changed and the prior fixed class is marked `retry_on_new_generation`. Every retry records actor/session/reason and source/target generation.
+- Personal/automation keys may upload. Status polling additionally requires `artifacts.read`, and an unregistered status read also requires the initiating-human/exact-credential predicate; bearer credentials cannot invoke security or extraction retry.
+- Malware, unsupported/conflicting type, unsafe container, encrypted/active content, oversize, and deterministic malformed/resource-policy failures do not automatically or manually retry unchanged bytes under the same generation.
+- Scanner timeout is retryable because engine/service health may differ. An extractor process timeout caused by service loss is retryable; a repeatable document deadline/resource cap reported by the bounded adapter is permanent `resource_limit` until an approved changed generation makes that fixed class retry-on-change eligible.
 
 ### Failure matrix
 
@@ -682,7 +686,7 @@ These are the approved starting limits for implementation sizing, not a throughp
 | DB promotion response lost after commit | Stored, cleared, registered, extraction queued | Replay returns current handle; no duplicate original |
 | Quarantine deletion fails after promotion | Cleared original remains authoritative; inaccessible quarantine residue | Idempotent residue sweep |
 | Extractor unavailable/crash/transport loss | Clearance and original unchanged; extraction retryable | Bounded new attempt; no partial set visible |
-| Deterministic malformed/password/resource limit | `safe_content_not_extracted` | Browser may create explicit new attempt after operator/parser change; raw-compatible workflow remains possible |
+| Deterministic malformed/parser-limitation/resource limit | `safe_content_not_extracted` | Browser may create a new attempt only after an approved generation change and `retry_on_new_generation=true`; raw-compatible workflow remains possible |
 | Derived object write/DB commit fails | Building/abandoned set, not selected | Purge orphan; new attempt/set |
 | Search projection fails in extraction transaction | Do not select ready set until projection is consistent | Retry projection/commit; original remains cleared |
 | Signature security advisory | Immediate withdrawal and `rescan_pending` | Re-scan exact stored digest; clean may re-register, reject purges |
@@ -709,12 +713,12 @@ Exact path spelling may follow current server conventions, but authentication mo
 | Route/family | Authentication/action | Contract |
 | --- | --- | --- |
 | `POST /v1/artifacts` | Browser current Operator/Admin or personal/automation `artifacts.upload` | One raw stream, required safe name and idempotency key, 25 MiB limit; returns `202` processing handle, never immediate reusable bytes |
-| `GET /v1/artifacts?search=&recent=&cursor=&limit=` | Browser or personal/automation `artifacts.read` | Registered installation-wide metadata/search/recent only; stable pagination and safe snippets |
-| `GET /v1/artifacts/{id}/status` | Registered: `artifacts.read`; unregistered: exact initiator/credential or browser security authority | Independent storage/security/extraction/library state, safe reason/retry eligibility and attempt timestamps; no engine/internal detail |
-| `GET /v1/artifacts/{id}` / `HEAD` | Browser or personal/automation `artifacts.read` | Preserve existing byte route; only current cleared/stored/registered original; no content sniff override or inline active rendering |
-| `GET /v1/artifacts/{id}/extraction` | Browser or personal/automation `artifacts.read` | Ready selected derivative text/table pages plus lineage/coverage; no object URL or raw parser data |
-| `POST /v1/artifacts/{id}/security-retries` | Cookie session only + CSRF | Initiating human or Admin; only retryable security state; append one attempt |
-| `POST /v1/artifacts/{id}/extraction-retries` | Cookie session only + CSRF | Current Operator/Admin; only cleared and retryable/failed extraction; append one attempt |
+| `GET /v1/artifacts?search=&recent=&cursor=&limit=` | Browser current Operator/Admin or personal/automation `artifacts.read` | Registered installation-wide metadata/search/recent only; stable pagination and safe snippets |
+| `GET /v1/artifacts/{id}/status` | Browser current Operator/Admin or personal/automation `artifacts.read` | Registered rows are shared. An unregistered row additionally requires the same initiating human (browser/personal), the exact automation credential/accountable-owner browser authority, or Admin browser security authority; otherwise not found. Returns independent safe state/retry evidence only. |
+| `GET /v1/artifacts/{id}` / `HEAD` | Browser current Operator/Admin or personal/automation `artifacts.read` | Preserve existing byte route; only current cleared/stored/registered original; no content sniff override or inline active rendering |
+| `GET /v1/artifacts/{id}/extraction` | Browser current Operator/Admin or personal/automation `artifacts.read` | Ready selected derivative text/table pages plus lineage/coverage; no object URL or raw parser data |
+| `POST /v1/artifacts/{id}/security-retries` | Cookie session only + CSRF | Initiating human or Admin; only retryable security state; create one new three-attempt trigger |
+| `POST /v1/artifacts/{id}/extraction-retries` | Cookie session only + CSRF | Current Operator/Admin; `retryable_failed`, or `failed` only with changed approved generation and `retry_on_new_generation=true`; create one new trigger |
 | `DELETE /v1/artifacts/{id}` | Current personal Admin key with both `artifacts.read` and `artifacts.delete` | Controlled API/runbook; active-reference block; async/idempotent purge may return accepted/deleting status |
 | Processing RPCs | Exact coordinator mTLS only | Internal bounded stream; no customer action/listener |
 | Workload ArtifactService | Existing exact supervisor/runner mTLS plus current artifact predicates | Put goes to quarantine; Get/Stat require cleared exact authorized ref/consumption mode |
@@ -733,7 +737,7 @@ Rules:
 ### Registration and visibility
 
 - V2 is one installation-wide library. After registration, uploader identity does not create private visibility; all active Operators/Admins with browser authority and all applicable personal/automation credentials with `artifacts.read` receive the same artifact metadata set.
-- Before registration, only the initiating human, exact automation credential/accountable owner, and authorized browser security operation can resolve the opaque status handle. Other callers receive not found.
+- Before registration, a browser status read requires a current Operator/Admin plus the initiating-human or Admin-security predicate. A bearer status read always requires `artifacts.read` and additionally the same initiating human for personal keys or the exact automation credential; its accountable Admin owner may inspect through the browser security path. Other callers, including an upload-only key, receive not found/forbidden without learning row state.
 - `recent` orders registered eligible artifacts by library registration or last safe reference time using a stable cursor. It is not an activity feed containing quarantined attempts.
 - Work-item source/result artifacts remain visible through work views under their owning work projection. Shared-library visibility is additional and never bypasses work-field safety.
 - There is no top-level library screen in V2. HOR-458/HOR-517 consume these APIs contextually from Chat and work evidence.
@@ -782,10 +786,21 @@ The customer-facing artifact ref remains:
 
 It identifies the immutable original. It does not assert current availability, extraction readiness, permission, raw compatibility, or a derivative set. Every consuming boundary resolves those facts live and snapshots exact evidence when work begins.
 
+A `202 Accepted` upload returns a distinct opaque provisional status handle:
+
+```json
+{
+  "uploadId": "uuid",
+  "state": "checking_security"
+}
+```
+
+The handle has no canonical MIME, digest, size, or artifact-ref semantics. It may occupy one of the six composer attachment slots and identify the subject of a bounded status query, but the browser role or bearer `artifacts.read` plus the pre-registration predicate still authorizes that query. The handle cannot be stored in `chat.message_artifact_refs`, a work input, confirmation, tool call, or shared-library result. After security clearance, status returns a separate complete canonical artifact ref; this does not mutate any message because no message can accept the provisional handle.
+
 ### Chat behavior
 
-- A Chat message accepts no more than six distinct refs and preserves them immutably.
-- Sending may preserve a security-checking or extraction-pending attachment for UI status, but model context receives no content until the artifact is cleared and a complete selected derivative exists.
+- The composer accepts no more than six distinct provisional handles or canonical refs. A Chat message accepts no more than six canonical refs and preserves them immutably.
+- Message submission is gated until every selected provisional handle has either promoted to a canonical ref or been removed/replaced. Submitting `checking_security`, transient-failed, or rejected handles returns stable `attachments_not_cleared` and creates no message/execution. A security-cleared canonical ref may be submitted while extraction is pending, but model context receives no content until a complete selected derivative exists.
 - When ready, Chat context points to the exact derivative set, digest, coverage, and page/sheet spans supplied. It never copies raw bytes into conversation tables.
 - Safe extraction failure is explicit. Chat may state that a file is attached and safe but not that it read, summarized, or understood unavailable content.
 - Artifact security, extraction selection, library, workflow version, or raw compatibility drift makes a pending confirmation stale under HOR-456.
@@ -926,7 +941,8 @@ Fail V2 artifact enablement when any of the following is absent or ambiguous:
 
 - active V2 identity/action authority and owner/actor attribution;
 - supported PostgreSQL schema/index/procedure and object-store backup evidence;
-- distinct quarantine-write, cleared-read, lifecycle, and signature credentials with no broad/default policy;
+- distinct quarantine-write, cleared-read, and lifecycle credentials with no broad/default policy;
+- a dedicated ReadWriteMany signature PVC with exactly one updater read-write identity, scanner read-only mounts, and no scanner/synchronizer network egress;
 - scanner/extractor exact identities, protocols, images, licenses, resources, and NetworkPolicies;
 - fresh validated ClamAV signature set and EN/PT/OCR self-test;
 - format/malicious/resource corpus pass;
@@ -970,11 +986,11 @@ There is no split interval where v1 immediate availability and V2 security autho
 
 ### Static and schema tests
 
-- Every state transition, illegal transition, immutability rule, current-attempt pointer, lease generation, object/set selection, registration, and tombstone minimization.
-- One nonterminal attempt per stage/artifact; `SKIP LOCKED` multi-worker races; expired/late generation cannot commit.
+- Every state transition, illegal transition, immutability rule, current-attempt pointer, lease generation, object/set selection, registration, and tombstone minimization, including stored-byte preservation across `rescan_pending` and deletion only after a rejecting re-scan.
+- One nonterminal attempt per stage/artifact; `SKIP LOCKED` multi-worker races; expired/late generation cannot commit; attempt 1 is immediate, attempts 2/3 occur after one/five minutes, and no automatic attempt 4 exists.
 - Exact action/route classification, mixed credential denial, owner/actor/credential attribution, and no wildcard/internal route.
 - MinIO policy regression proves API/gateway cannot read/list quarantine or write/overwrite cleared/derived, processor services hold no data credential, and lifecycle cannot access root/admin scope.
-- Static chart check for no ServiceAccount token, hardened contexts, mTLS-only processing Service, deny-default NetworkPolicies, resource/scratch limits, and no extractor egress.
+- Static chart check for no ServiceAccount token, hardened contexts, mTLS-only processing Service, deny-default NetworkPolicies, resource/scratch limits, zero scanner/extractor egress, separate updater pod/network identity, and updater-write/scanner-read-only signature PVC mounts.
 - Image/SBOM/license/provenance and pinned upstream/final digests; no floating tags.
 
 ### Admission and malicious-file corpus
@@ -999,22 +1015,22 @@ Assertions cover permanent versus transient classification, immediate rejected-b
 - Formula/macro/external-resource non-execution; XML entity/URL/SSRF negative tests.
 - Digital, scanned, and mixed PDF coverage; page/sheet/table provenance and canonical deterministic bytes/digests across repeated attempts.
 - Page/pixel/expanded/output/table-cell/deadline/OOM limits produce honest failure and no partial selected set.
-- Retry creates a new attempt/set and never mutates prior rows/objects; identical deterministic output may share bytes only if a future approved dedupe design exists—V2 still creates distinct lineage.
+- Retryable failures create a new attempt/set without mutating prior rows/objects. A permanent failure cannot retry under the same processor/configuration/policy generation; a changed generation succeeds only for a fixed `retry_on_new_generation` class. Identical deterministic output may share bytes only if a future approved dedupe design exists—V2 still creates distinct lineage.
 - Portuguese language data presence/checksum and reviewed sample accuracy are extraction evidence, not a business correctness claim.
 
 ### Isolation and transport tests
 
 - Wrong/no/expired cert, API/gateway/AgentPool/child/runner identity, unversioned/oversized request, digest mismatch, replayed attempt, and expired generation fail before engine/DB mutation.
-- Scanner/extractor cannot reach PostgreSQL, artifact zones, Product API, Internet, Kubernetes API, metadata endpoints, each other, or customer systems; extractor cannot resolve/fetch an embedded URL.
-- Engine containers cannot read adapter TLS key, signature credential, service-account token, or another container filesystem.
-- Scanner receives only read-only validated signatures; updater cannot reach customer artifact paths.
+- Scanner/extractor cannot reach PostgreSQL, artifact zones, Product API, Internet, DNS, Kubernetes API, metadata endpoints, each other, updater, or customer systems; extractor cannot resolve/fetch an embedded URL.
+- Engine containers cannot read adapter TLS key, updater state, service-account token, or another container filesystem.
+- Scanner receives only the read-only validated signature PVC and cannot alter it; the separately selected updater can reach the signature source but cannot reach customer artifact paths or scanner processing endpoints.
 - Resource limit, process crash, adapter restart, packet loss, and mTLS rotation preserve documented failure state and no unsafe promotion.
 
 ### API, shared visibility, and search tests
 
-- Browser Operator/Admin, personal Operator/Admin, automation, missing/disabled/revoked/demoted credentials, wrong action, mixed cookie/bearer, other upload owner, and guessed UUID matrix for every route.
-- Upload response is processing; before clearance no other user can see status/count/recent/search/download and no work/Chat reference validates.
-- Clearance atomically registers for another installation user while extraction remains pending; metadata search works and content search does not.
+- Browser Operator/Admin, personal Operator/Admin, automation, missing/disabled/revoked/demoted credentials, wrong action, mixed cookie/bearer, other upload owner, and guessed UUID matrix for every route; an upload-only key cannot poll status, while `artifacts.read` plus the pre-registration identity/credential predicate can.
+- Upload response is a provisional processing handle, never an artifact ref. Before clearance no other user can see status/count/recent/search/download, no work/Chat reference validates, and message submission containing the handle creates no message/execution.
+- Clearance atomically returns a separate canonical ref and registers it for another installation user while extraction remains pending; metadata search works and content search does not.
 - Ready extraction adds bounded content search and safe snippets; failed extraction remains metadata-searchable and raw-compatible only.
 - Security withdrawal/delete removes count/rank/snippet before object work; projection rebuild cannot reintroduce it.
 - Search query/log/event/metric safety and EN/PT stable status/retry/delete copy.
