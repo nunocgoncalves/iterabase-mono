@@ -129,6 +129,47 @@ on an untrusted LAN, and do not place these routes on the public `nginx` class.
 The complete documentation-address fixture is rendered and validated by
 `make check-internal-observability`.
 
+The default Loki gateway has one replica and retains required same-component
+pod anti-affinity. It therefore uses `Recreate`, accepting a brief gateway/log-
+ingest interruption so a one-node upgrade cannot deadlock waiting for a second
+schedulable node. The Loki backend and persisted data remain intact. An HA
+or object-storage overlay may explicitly restore `RollingUpdate` only when its
+replica and topology contract can satisfy the anti-affinity rule. When upgrading
+an existing legacy `RollingUpdate` Deployment, a lookup-gated pre-upgrade hook
+uses the digest-pinned Kubernetes `v1.31.0` kubectl image to replace the strategy
+before Helm server-side applies the changed pod template. The hook is gated on
+the desired strategy remaining `Recreate`; an explicit `RollingUpdate` overlay
+is never migrated. The patch uses Helm's field-manager identity, so it does not
+create a competing owner that blocks the explicit rollback below.
+
+Ingress admission remains fail-closed. On first enablement, ingress-nginx's
+pre-hook creates a stable serving Secret and its post-hook patches the validating
+webhook CA. If Helm fails while waiting for workloads before that post-hook, run
+the exact same upgrade again: the platform detects the existing internal webhook
+and executes a pre-upgrade recovery hook after Secret creation, repairing the CA
+before normal resources are reapplied. Do not patch the CA manually or weaken
+`failurePolicy: Fail`.
+
+A rollback to a revision before `0.3.19` restores that revision's legacy
+`RollingUpdate` gateway manifest. On a one-node deployment, make the downtime
+explicit by scaling the gateway to zero before rolling back the platform, then
+roll back the same-version substrate after the platform:
+
+```sh
+kubectl scale deployment/<release>-loki-gateway -n <namespace> --replicas=0
+kubectl wait -n <namespace> --for=delete pod \
+  -l app.kubernetes.io/name=loki,app.kubernetes.io/component=gateway \
+  --timeout=5m
+helm rollback <release> <platform-revision> -n <namespace> --wait
+helm rollback <release>-cert-manager <substrate-revision> -n <namespace> --wait
+```
+
+`make test-e2e-observability-ingress-recovery` exercises the checksum-pinned
+`0.3.12` baseline, bypass of migration for an explicit `RollingUpdate` override,
+a changed one-replica gateway, an injected failure before admission post-hooks,
+fail-closed reapply, the explicit legacy rollback above, and current forward
+recovery.
+
 ### Private control-plane ingress
 
 The control-plane Ingress owns one same-origin host for the Dashboard, static
@@ -223,13 +264,75 @@ the new edge Certificate is Ready and the route passes trusted TLS validation.
 The fixture and negative collision checks run through
 `make check-private-control-plane`.
 
-MetalLB configuration CRs remain post-install/post-upgrade hooks so a fresh
-umbrella install can establish the operator CRDs first. If an additional pool
-is removed from values or the platform is rolled back to a version without it,
-delete its inert hook resources explicitly after the LoadBalancer Service is
-gone: `kubectl delete ipaddresspool,l2advertisement <release>-internal -n
-<namespace>`. With `autoAssign: false`, an unselected leftover pool cannot be
-consumed by another Service.
+MetalLB pools and advertisements are **ordinary kept resources**, not Helm
+hooks (DES-HOR-511-01/05): `IPAddressPool`/`L2Advertisement` carry
+`helm.sh/resource-policy: keep`, so upgrades, exact reapplies, uninstall, and
+rollback never delete them or the LoadBalancer VIP they assign. The nine
+MetalLB 0.16.1 CRDs are owned as umbrella template resources gated by
+`metallb.enabled` (DES-HOR-511-03). A direct (`Forge`-less) `helm install` of
+the umbrella with `metallb.enabled=true` therefore needs the same bounded
+pre-apply/bootstrap Forge performs automatically, in order, before Helm can
+REST-map the pools:
+
+1. Render the **exact target chart archive** with the release namespace and
+   extract its `CustomResourceDefinition` documents (`helm template -n
+   <namespace>` → keep the `.metallb.io` ones).
+2. Mark those nine CRDs Helm-adoptable for the incoming release
+   (`meta.helm.sh/release-name`/`-namespace` + `app.kubernetes.io/managed-by:
+   Helm`), apply them server-side with `kubectl apply --server-side
+   --force-conflicts`, and wait for every one to become `Established`.
+3. `helm install` with `--set metallb.crds.validationFailurePolicy=Ignore`, wait
+   until the MetalLB controller Deployment is Available and
+   `metallb-webhook-service` has ready endpoints, then run the same upgrade
+   again without the override so the admission webhook converges to its
+   steady-state `Fail` policy. Forge performs this bootstrap; a direct operator
+   must repeat it and verify the live webhook policy is `Fail`.
+
+### Direct upgrade and rollback ownership procedure
+
+**Upgrading from a hook-era predecessor (0.3.19 and earlier, whose pools were
+Helm hooks).** Before running step 1 above, transfer the live hook-created pools
+and advertisements into the incoming release (DES-HOR-511-01) so the upgrade
+preserves their UIDs instead of Helm rejecting the new ordinary resources:
+
+```sh
+pools=$(kubectl get ipaddresspool,l2advertisement -n <namespace> \
+  -l app.kubernetes.io/instance=<release> -o name)
+kubectl annotate --overwrite $pools \
+  meta.helm.sh/release-name=<release> \
+  meta.helm.sh/release-namespace=<namespace> \
+  'helm.sh/hook-' 'helm.sh/hook-weight-'  # strip the hook metadata
+```
+
+This ownership/hook-metadata transfer is exactly what the transition scenario
+asserts: the pools keep their `meta.helm.sh` owner and lose their `helm.sh/hook`
+markers, so a subsequent upgrade adopts them rather than recreating them.
+
+**Rollback to a hook-era predecessor.** A `helm rollback <release> <previous>
+-n <namespace> --wait` to a pre-DES-HOR-511 revision is safe and **does not tear
+down the pools or the LoadBalancer VIP**: because they carry
+`helm.sh/resource-policy: keep` and were Helm-adopted, the rollback leaves their
+UIDs, desired specs, and ownership/hook metadata intact and the wire route stays
+healthy. This predecessor-pool restoration is **proven** (not merely claimed) by
+the `metallb-upgrade-reapply` transition: it captures the predecessor desired
+specs before the rollback, then after the rollback **re-queries the live objects**
+and asserts their exact `meta.helm.sh/release-name` and
+`meta.helm.sh/release-namespace` ownership, `helm.sh/resource-policy: keep`, and
+the absence of **both** `helm.sh/hook` and `helm.sh/hook-weight` markers (plus
+UID, desired-spec, VIP, and route) — for the tested edge and internal pools and
+their advertisements — never asserting metadata cached before the rollback.
+During every blocking upgrade, exact reapply, rollback, and forward recovery, the blocking operation itself runs under a concurrent **fail-closed** observation
+of the Service LoadBalancer identity and route: any kubectl read error, empty or
+changed VIP, or route failure fails the scenario rather than being skipped.
+
+**Safe predecessor reapply / forward recovery.** The supported recovery after
+rolling back to a hook-era predecessor is a forward re-upgrade to the current
+chart, which re-owns the kept resources under continuous observed VIP and route
+continuity and restores the steady-state `Fail` admission policy. Re-running the
+hook-era chart's own raw resources is **not** a supported regression path: that
+revision's hooks would try to recreate objects that the kept release still owns.
+Always recover via forward re-upgrade rather than re-applying the predecessor's
+raw manifests.
 
 ### Upgrade from platform 0.2.2 or earlier
 
@@ -299,16 +402,19 @@ resources first can fail during REST mapping before any chart hook executes.
 
 The chart-owned `test/e2e/transition-baselines.json` currently declares platform
 and substrate `0.3.12` as the checksum-pinned supported predecessor for current
-`0.3.16`. The supported inverse boundary is current → that declared predecessor
-within the post-0.3 companion-ownership model, followed by a current forward
-recovery. Roll back the platform release before the companion substrate. CRDs,
-generated Secrets, and PVCs are retained. The separate pre-0.3 ownership
+`0.3.22`, and a checksum-pinned `0.3.19` MetalLB hook predecessor transition
+(DES-HOR-511) covers the hook→ordinary pool/VIP preservation path through
+upgrade and reapply. The supported inverse boundary is current → the declared
+predecessor within the post-0.3 companion-ownership model, followed by a current
+forward recovery. Roll back the platform release before the companion substrate.
+CRDs, generated Secrets, and PVCs are retained. The separate pre-0.3 ownership
 handoff above remains mandatory; arbitrary-version rollback safety is not
 claimed.
 
-Run `make test-e2e-feature-enable` for the absent-CRD path and
-`make test-e2e-reapply-rollback` for idempotent reapply plus inverse/forward
-recovery evidence.
+Run `make test-e2e-feature-enable` for the absent-CRD path,
+`make test-e2e-observability-ingress-recovery` for the interrupted single-node
+private-ingress path, and `make test-e2e-reapply-rollback` for idempotent reapply
+plus the general inverse/forward recovery evidence.
 
 ## Flux-backed gateway tool runner
 
@@ -367,6 +473,7 @@ make test-e2e-unit          # compiled suite + intentional break fixtures (no cl
 make test-e2e-install       # one fresh Kind cluster
 make test-e2e-upgrade       # checksum-pinned N-1 -> exact current transition
 make test-e2e-feature-enable # disabled operator dependency -> CRDs -> current
+make test-e2e-observability-ingress-recovery # 0.3.12 private-ingress interrupted upgrade/reapply/rollback
 make test-e2e-reapply-rollback # idempotent reapply + inverse/forward recovery
 make test-e2e-observability
 make test-e2e-observability-tls
@@ -410,7 +517,12 @@ pods; Postgres/Redis exporters; MinIO; and enabled upstream substrate targets.
 Dedicated metrics listeners keep customer ingress and mandatory-mTLS workload
 listeners isolated.
 GPU metrics: set `observability.dcgmExporter.enabled=true` (gpu-operator must be
-installed out-of-band). Alertmanager **email routing is overlay-owned** — the
+installed out-of-band). The default monitor matches GPU Operator's exact
+`app=nvidia-dcgm-exporter` Service label and `gpu-metrics` named port across
+namespaces; deployments with a supported renamed contract may override both.
+The Grafana namespace variable includes discovered DCGM exporter jobs so the
+out-of-band namespace remains selectable in the shipped GPU panels.
+Alertmanager **email routing is overlay-owned** — the
 chart ships a null-receiver default; set
 `observability.kube-prometheus-stack.alertmanager.config` in the prod overlay
 (HOR-408: the OPO1 overlay carries the email receiver).

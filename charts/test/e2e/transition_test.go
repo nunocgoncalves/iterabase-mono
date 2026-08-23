@@ -2,8 +2,11 @@ package e2e_test
 
 import (
 	"crypto/sha256"
+	"crypto/x509"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -26,10 +29,15 @@ import (
 )
 
 const (
-	platformPredecessorName  = "supported-platform-predecessor"
-	substratePredecessorName = "supported-substrate-predecessor"
-	transitionFieldManager   = "iterabase-chart-e2e"
-	transitionMarker         = "hor-475-persisted-state"
+	platformPredecessorName         = "supported-platform-predecessor"
+	substratePredecessorName        = "supported-substrate-predecessor"
+	metalLBPlatformPredecessorName  = "metallb-platform-predecessor"
+	metalLBSubstratePredecessorName = "metallb-substrate-predecessor"
+	transitionFieldManager          = "iterabase-chart-e2e"
+	transitionMarker                = "hor-475-persisted-state"
+	singleNodeGatewayGenerationKey  = "iterabase.com/e2e-gateway-generation"
+	singleNodeGatewayPredecessor    = "predecessor"
+	singleNodeGatewayCurrent        = "corrected-current"
 )
 
 var operatorCRDs = []string{
@@ -131,6 +139,39 @@ func featureEnableUpgradeScenario() sharede2e.Definition {
 	})
 }
 
+func singleNodeObservabilityIngressRecoveryScenario() sharede2e.Definition {
+	diagnostics, cleanup := scenarioHooks()
+	return sharede2e.Define(sharede2e.Scenario[*chartState]{
+		Metadata: transitionScenarioMetadata(
+			"single-node-observability-ingress-recovery",
+			"Upgrades the exact 0.3.12 single-node observability baseline after proving an explicit RollingUpdate override bypasses migration, injects a failure before admission post-hooks, then proves fail-closed reapply, explicit rollback, and forward recovery.",
+			"test-e2e-observability-ingress-recovery", 60,
+			[]string{"HOR-414", "HOR-506"},
+			[]string{"iterabase-platform-chart"},
+		),
+		NewState: newChartState,
+		Stages: []sharede2e.Stage[*chartState]{
+			{Name: "create-kind", Run: createKindStage},
+			{Name: "resolve-supported-predecessor", DependsOn: []string{"create-kind"}, Run: resolveTransitionBaselinesStage},
+			{Name: "install-predecessor-substrate", DependsOn: []string{"resolve-supported-predecessor"}, Run: installPredecessorSubstrateStage},
+			{Name: "install-predecessor-observability", DependsOn: []string{"install-predecessor-substrate"}, Run: installPredecessorSingleNodeObservabilityStage},
+			{Name: "assert-rolling-update-override-bypasses-recovery", DependsOn: []string{"install-predecessor-observability"}, Run: assertRollingUpdateOverrideBypassesRecoveryStage},
+			{Name: "preapply-current-operator-crds", DependsOn: []string{"assert-rolling-update-override-bypasses-recovery"}, Run: preapplyCurrentOperatorCRDsStage},
+			{Name: "inject-failed-current-upgrade", DependsOn: []string{"preapply-current-operator-crds"}, Run: injectFailedSingleNodeIngressUpgradeStage},
+			{Name: "assert-interrupted-boundary", DependsOn: []string{"inject-failed-current-upgrade"}, Run: assertInterruptedSingleNodeIngressUpgradeStage},
+			{Name: "reapply-current-intent", DependsOn: []string{"assert-interrupted-boundary"}, Run: reapplySingleNodeIngressUpgradeStage},
+			{Name: "assert-recovered-upgrade", DependsOn: []string{"reapply-current-intent"}, Run: assertRecoveredSingleNodeIngressUpgradeStage},
+			{Name: "prepare-explicit-legacy-rollback", DependsOn: []string{"assert-recovered-upgrade"}, Run: prepareSingleNodeLegacyRollbackStage},
+			{Name: "rollback-predecessor-pair", DependsOn: []string{"prepare-explicit-legacy-rollback"}, Run: rollbackSingleNodePredecessorStage},
+			{Name: "assert-rollback-boundary", DependsOn: []string{"rollback-predecessor-pair"}, Run: assertSingleNodeRollbackStage},
+			{Name: "forward-recovery", DependsOn: []string{"assert-rollback-boundary"}, Run: forwardSingleNodeRecoveryStage},
+			{Name: "assert-forward-recovery", DependsOn: []string{"forward-recovery"}, Run: assertForwardSingleNodeRecoveryStage},
+		},
+		Diagnostics: diagnostics,
+		Cleanup:     cleanup,
+	})
+}
+
 func reapplyRollbackRecoveryScenario() sharede2e.Definition {
 	diagnostics, cleanup := scenarioHooks()
 	return sharede2e.Define(sharede2e.Scenario[*chartState]{
@@ -193,12 +234,14 @@ func decodeTransitionBaselineFixture(data []byte) (sharede2e.Fixture, error) {
 	if err := fixture.Validate(); err != nil {
 		return sharede2e.Fixture{}, err
 	}
-	if len(fixture.Inputs) != 2 {
-		return sharede2e.Fixture{}, fmt.Errorf("transition baseline fixture must contain exactly two charts")
+	if len(fixture.Inputs) != 4 {
+		return sharede2e.Fixture{}, fmt.Errorf("transition baseline fixture must contain exactly four charts (supported + MetalLB predecessor pairs)")
 	}
 	expected := map[string]string{
-		platformPredecessorName:  "iterabase-platform",
-		substratePredecessorName: "cert-manager-substrate",
+		platformPredecessorName:         "iterabase-platform",
+		substratePredecessorName:        "cert-manager-substrate",
+		metalLBPlatformPredecessorName:  "iterabase-platform",
+		metalLBSubstratePredecessorName: "cert-manager-substrate",
 	}
 	versions := make(map[string]string)
 	for _, input := range fixture.Inputs {
@@ -214,8 +257,14 @@ func decodeTransitionBaselineFixture(data []byte) (sharede2e.Fixture, error) {
 		}
 		versions[input.Name] = version
 	}
-	if versions[platformPredecessorName] != versions[substratePredecessorName] {
-		return sharede2e.Fixture{}, fmt.Errorf("platform and substrate predecessors must use the same version")
+	pairs := [][2]string{
+		{platformPredecessorName, substratePredecessorName},
+		{metalLBPlatformPredecessorName, metalLBSubstratePredecessorName},
+	}
+	for _, pair := range pairs {
+		if versions[pair[0]] != versions[pair[1]] {
+			return sharede2e.Fixture{}, fmt.Errorf("platform and substrate predecessors %s/%s must use the same version", pair[0], pair[1])
+		}
 	}
 	return fixture, nil
 }
@@ -274,8 +323,10 @@ func resolveTransitionBaselinesStage(t *testing.T, state *chartState) {
 		t.Fatalf("create transition baseline directory: %v", err)
 	}
 	environment := map[string]string{
-		platformPredecessorName:  "ITERABASE_E2E_PREDECESSOR_PLATFORM_ARCHIVE",
-		substratePredecessorName: "ITERABASE_E2E_PREDECESSOR_SUBSTRATE_ARCHIVE",
+		platformPredecessorName:         "ITERABASE_E2E_PREDECESSOR_PLATFORM_ARCHIVE",
+		substratePredecessorName:        "ITERABASE_E2E_PREDECESSOR_SUBSTRATE_ARCHIVE",
+		metalLBPlatformPredecessorName:  "ITERABASE_E2E_METALLB_PREDECESSOR_PLATFORM_ARCHIVE",
+		metalLBSubstratePredecessorName: "ITERABASE_E2E_METALLB_PREDECESSOR_SUBSTRATE_ARCHIVE",
 	}
 	for name, baseline := range baselines {
 		archive := os.Getenv(environment[name])
@@ -412,6 +463,361 @@ func enableObservabilityTLSStage(t *testing.T, state *chartState) {
 		state.writeValues(t, "feature-enabled", runtimePlatformValues(t)),
 	)
 	assertCandidateImages(t, state)
+}
+
+func singleNodeObservabilityValueFiles(t *testing.T, state *chartState, generation string, enablePrivate, injectFailure bool) []string {
+	t.Helper()
+	values := runtimePlatformValues(t)
+	// This transition isolates the chart-owned observability and ingress
+	// lifecycle. Runtime services have their own exact N-1 journeys and are not
+	// needed to reproduce either single-node failure boundary here.
+	values["control-plane"] = map[string]any{"enabled": false}
+	values["inference-gateway"] = map[string]any{"enabled": false}
+	values["redis"] = map[string]any{"enabled": false}
+	values["minio"] = map[string]any{"enabled": false}
+	values["ingress-nginx"] = map[string]any{
+		"enabled": true,
+		"controller": map[string]any{
+			"service": map[string]any{"type": "ClusterIP"},
+		},
+	}
+	observability := map[string]any{
+		"loki": map[string]any{
+			"gateway": map[string]any{
+				"podAnnotations": map[string]any{singleNodeGatewayGenerationKey: generation},
+			},
+		},
+	}
+	if injectFailure {
+		// Keep both admission controllers available while an unrelated workload
+		// deliberately cannot become Ready before the bounded Helm timeout. With
+		// --wait, post-upgrade admission patch hooks therefore do not run, matching
+		// the observed failed-gateway boundary without manufacturing a webhook
+		// endpoint outage outside HOR-506's recovery contract.
+		observability["kube-prometheus-stack"] = map[string]any{
+			"prometheusOperator": map[string]any{
+				"readinessProbe": map[string]any{"initialDelaySeconds": 600},
+			},
+		}
+	}
+	values["observability"] = observability
+	if enablePrivate {
+		values["internal-ingress-nginx"] = map[string]any{
+			"enabled": true,
+			"controller": map[string]any{
+				"service": map[string]any{"type": "ClusterIP"},
+			},
+		}
+	}
+	files := []string{
+		filepathFromCharts(state, "values-observability.yaml"),
+		filepathFromCharts(state, "values-tls.yaml"),
+	}
+	if enablePrivate {
+		files = append(files, filepath.Join(state.chartsRoot, "test", "e2e", "values-single-node-observability-ingress.yaml"))
+	}
+	return append(files, state.writeValues(t, "single-node-observability-"+generation, values))
+}
+
+func installPredecessorSingleNodeObservabilityStage(t *testing.T, state *chartState) {
+	t.Helper()
+	baseline := requireTransitionBaseline(t, state, platformPredecessorName)
+	args := []string{"upgrade", "--install", testRelease, "--namespace", testNamespace,
+		"--kubeconfig", state.cluster.Kubeconfig, "--wait", "--timeout", "22m"}
+	for _, values := range singleNodeObservabilityValueFiles(t, state, singleNodeGatewayPredecessor, false, false) {
+		args = append(args, "--values", values)
+	}
+	args = append(args, baseline.Archive)
+	state.process(t, 24*time.Minute, "helm", args...)
+	assertReleaseChartVersion(t, state, testRelease, baseline.Chart, baseline.Version)
+	assertSingleNodeGateway(t, state, "RollingUpdate", singleNodeGatewayPredecessor)
+	assertIngressAdmissionCA(t, state, "ingress-nginx")
+}
+
+func assertRollingUpdateOverrideBypassesRecoveryStage(t *testing.T, state *chartState) {
+	t.Helper()
+	values := singleNodeObservabilityValueFiles(t, state, singleNodeGatewayPredecessor, false, false)
+	values = append(values, state.writeValues(t, "rolling-update-override", map[string]any{
+		"observability": map[string]any{
+			"loki": map[string]any{
+				"gateway": map[string]any{
+					"deploymentStrategy": map[string]any{
+						"type": "RollingUpdate",
+						"rollingUpdate": map[string]any{
+							"maxSurge":       1,
+							"maxUnavailable": 0,
+						},
+					},
+				},
+			},
+		},
+	}))
+	args := []string{"upgrade", testRelease}
+	args = append(args, helmChartArgs(state.platform)...)
+	args = append(args, "--namespace", testNamespace, "--kubeconfig", state.cluster.Kubeconfig,
+		"--dry-run=server", "--hide-secret")
+	for _, valuesFile := range values {
+		args = append(args, "--values", valuesFile)
+	}
+	out := state.process(t, 4*time.Minute, "helm", args...)
+	hookName := testRelease + "-loki-gateway-rollout-recovery"
+	if strings.Contains(out, hookName) {
+		t.Fatalf("explicit RollingUpdate override rendered migration hook %q", hookName)
+	}
+	assertSingleNodeGateway(t, state, "RollingUpdate", singleNodeGatewayPredecessor)
+}
+
+func injectFailedSingleNodeIngressUpgradeStage(t *testing.T, state *chartState) {
+	t.Helper()
+	state.installSubstrate(t)
+	out, err := state.client.HelmUpgrade(state.ctx, kube.HelmOptions{
+		Release: testRelease, Namespace: testNamespace, Chart: state.platform,
+		ValueFiles: singleNodeObservabilityValueFiles(t, state, singleNodeGatewayCurrent, true, true),
+		Wait:       true, Timeout: 2 * time.Minute,
+	})
+	if err == nil {
+		t.Fatalf("injected pre-post-hook upgrade unexpectedly succeeded: %s", stateSafeBody([]byte(out)))
+	}
+	t.Logf("injected upgrade failed as intended: %s", stateSafeBody([]byte(out)))
+	entry, historyErr := currentHelmHistoryEntry([]byte(state.process(t, 60*time.Second, "helm", "history", testRelease,
+		"--namespace", testNamespace, "--kubeconfig", state.cluster.Kubeconfig, "--output", "json")))
+	if historyErr != nil {
+		t.Fatal(historyErr)
+	}
+	if entry.Revision != 2 || entry.Status != "failed" {
+		t.Fatalf("interrupted platform revision=%d status=%q want revision=2 failed", entry.Revision, entry.Status)
+	}
+}
+
+func assertInterruptedSingleNodeIngressUpgradeStage(t *testing.T, state *chartState) {
+	t.Helper()
+	assertSingleNodeGateway(t, state, "Recreate", singleNodeGatewayCurrent)
+	admissionName := testRelease + "-internal-ingress-nginx-admission"
+	caBundle := state.kubectl(t, 30*time.Second, "get", "validatingwebhookconfiguration/"+admissionName,
+		"-o", "jsonpath={.webhooks[0].clientConfig.caBundle}")
+	if caBundle != "" {
+		t.Fatalf("interrupted internal ingress webhook CA was already patched: %q", caBundle)
+	}
+	secretCA := state.kubectl(t, 30*time.Second, "get", "secret/"+admissionName, "-n", testNamespace,
+		"-o", "jsonpath={.data.ca}")
+	if secretCA == "" {
+		t.Fatal("interrupted upgrade did not retain the generated internal admission serving Secret")
+	}
+	if got := state.kubectl(t, 30*time.Second, "get", "validatingwebhookconfiguration/"+admissionName,
+		"-o", "jsonpath={.webhooks[0].failurePolicy}"); got != "Fail" {
+		t.Fatalf("interrupted internal webhook failurePolicy=%q want Fail", got)
+	}
+}
+
+func reapplySingleNodeIngressUpgradeStage(t *testing.T, state *chartState) {
+	state.installSubstrate(t)
+	state.installPlatform(t, 25*time.Minute,
+		singleNodeObservabilityValueFiles(t, state, singleNodeGatewayCurrent, true, false)...)
+}
+
+func assertRecoveredSingleNodeIngressUpgradeStage(t *testing.T, state *chartState) {
+	t.Helper()
+	assertReleaseRevision(t, state, testRelease, 3)
+	assertReleaseRevision(t, state, testRelease+"-cert-manager", 3)
+	assertSingleNodeGateway(t, state, "Recreate", singleNodeGatewayCurrent)
+	assertSingleNodeObservabilityReadiness(t, state)
+	assertIngressAdmissionCA(t, state, "ingress-nginx")
+	assertIngressAdmissionCA(t, state, "internal-ingress-nginx")
+	assertIngressAdmissionClasses(t, state)
+	assertPrivateObservabilityIngresses(t, state, true)
+	hooks := state.process(t, 60*time.Second, "helm", "get", "hooks", testRelease, "--namespace", testNamespace,
+		"--kubeconfig", state.cluster.Kubeconfig)
+	if !strings.Contains(hooks, testRelease+"-internal-ingress-nginx-admission-recovery") ||
+		!strings.Contains(hooks, "helm.sh/hook-weight: \"1\"") {
+		t.Fatalf("successful reapply did not record the pre-upgrade admission recovery hook: %s", stateSafeBody([]byte(hooks)))
+	}
+}
+
+func prepareSingleNodeLegacyRollbackStage(t *testing.T, state *chartState) {
+	t.Helper()
+	// Revision 1 predates DES-HOR-506-01 and stores RollingUpdate plus hard
+	// anti-affinity. Scale the one-replica gateway to zero before Helm restores
+	// that legacy manifest, making the inverse boundary explicit and bounded.
+	gateway := testRelease + "-loki-gateway"
+	state.kubectl(t, 30*time.Second, "scale", "deployment/"+gateway, "-n", testNamespace, "--replicas=0")
+	state.kubectl(t, 3*time.Minute, "wait", "--for=delete", "pod", "-n", testNamespace,
+		"-l", "app.kubernetes.io/name=loki,app.kubernetes.io/component=gateway", "--timeout=2m")
+}
+
+func rollbackSingleNodePredecessorStage(t *testing.T, state *chartState) {
+	rollbackRelease(t, state, testRelease, 1)
+	rollbackRelease(t, state, testRelease+"-cert-manager", 1)
+}
+
+func assertSingleNodeRollbackStage(t *testing.T, state *chartState) {
+	t.Helper()
+	platform := requireTransitionBaseline(t, state, platformPredecessorName)
+	substrate := requireTransitionBaseline(t, state, substratePredecessorName)
+	assertRollbackReleaseHistory(t, state, testRelease, platform.Chart, platform.Version, 4)
+	assertRollbackReleaseHistory(t, state, testRelease+"-cert-manager", substrate.Chart, substrate.Version, 4)
+	assertSingleNodeGateway(t, state, "RollingUpdate", singleNodeGatewayPredecessor)
+	assertIngressAdmissionCA(t, state, "ingress-nginx")
+	assertPrivateObservabilityIngresses(t, state, false)
+	if got := state.kubectl(t, 30*time.Second, "get", "validatingwebhookconfiguration/"+testRelease+"-internal-ingress-nginx-admission",
+		"--ignore-not-found", "-o", "name"); got != "" {
+		t.Fatalf("legacy rollback retained internal admission webhook %q", got)
+	}
+}
+
+func forwardSingleNodeRecoveryStage(t *testing.T, state *chartState) {
+	state.installSubstrate(t)
+	state.installPlatform(t, 25*time.Minute,
+		singleNodeObservabilityValueFiles(t, state, singleNodeGatewayCurrent, true, false)...)
+}
+
+func assertForwardSingleNodeRecoveryStage(t *testing.T, state *chartState) {
+	t.Helper()
+	assertReleaseRevision(t, state, testRelease, 5)
+	assertReleaseRevision(t, state, testRelease+"-cert-manager", 5)
+	assertSingleNodeGateway(t, state, "Recreate", singleNodeGatewayCurrent)
+	assertIngressAdmissionCA(t, state, "ingress-nginx")
+	assertIngressAdmissionCA(t, state, "internal-ingress-nginx")
+	assertIngressAdmissionClasses(t, state)
+	assertPrivateObservabilityIngresses(t, state, true)
+}
+
+func assertSingleNodeObservabilityReadiness(t *testing.T, state *chartState) {
+	t.Helper()
+	for _, selector := range []string{
+		"app.kubernetes.io/name=prometheus",
+		"app.kubernetes.io/name=grafana",
+		"app.kubernetes.io/name=loki,app.kubernetes.io/component=single-binary",
+		"app.kubernetes.io/name=alertmanager",
+		"app.kubernetes.io/name=promtail",
+		"app.kubernetes.io/name=ingress-nginx,app.kubernetes.io/component=controller",
+		"app.kubernetes.io/name=internal-ingress-nginx,app.kubernetes.io/component=controller",
+	} {
+		state.waitForPods(t, selector, 7*time.Minute)
+	}
+}
+
+func assertSingleNodeGateway(t *testing.T, state *chartState, strategy, generation string) {
+	t.Helper()
+	gateway := testRelease + "-loki-gateway"
+	state.kubectl(t, 6*time.Minute, "rollout", "status", "deployment/"+gateway, "-n", testNamespace, "--timeout=5m")
+	if got := state.kubectl(t, 30*time.Second, "get", "deployment/"+gateway, "-n", testNamespace,
+		"-o", "jsonpath={.spec.strategy.type}"); got != strategy {
+		t.Fatalf("Loki gateway strategy=%q want %q", got, strategy)
+	}
+	if got := state.kubectl(t, 30*time.Second, "get", "deployment/"+gateway, "-n", testNamespace,
+		"-o", `go-template={{index .spec.template.metadata.annotations "iterabase.com/e2e-gateway-generation"}}`); got != generation {
+		t.Fatalf("Loki gateway generation=%q want %q", got, generation)
+	}
+	if got := state.kubectl(t, 30*time.Second, "get", "deployment/"+gateway, "-n", testNamespace,
+		"-o", "jsonpath={.status.readyReplicas}"); got != "1" {
+		t.Fatalf("Loki gateway ready replicas=%q want 1", got)
+	}
+}
+
+func assertIngressAdmissionCA(t *testing.T, state *chartState, plane string) {
+	t.Helper()
+	admissionName := testRelease + "-" + plane + "-admission"
+	secretCA := state.kubectl(t, 30*time.Second, "get", "secret/"+admissionName, "-n", testNamespace,
+		"-o", "jsonpath={.data.ca}")
+	bundle := state.kubectl(t, 30*time.Second, "get", "validatingwebhookconfiguration/"+admissionName,
+		"-o", "jsonpath={.webhooks[0].clientConfig.caBundle}")
+	if secretCA == "" || bundle != secretCA {
+		t.Fatalf("%s admission CA bundle does not match serving Secret: bundle=%q secret-present=%t", plane, bundle, secretCA != "")
+	}
+	if got := state.kubectl(t, 30*time.Second, "get", "validatingwebhookconfiguration/"+admissionName,
+		"-o", "jsonpath={.webhooks[0].failurePolicy}"); got != "Fail" {
+		t.Fatalf("%s admission failurePolicy=%q want Fail", plane, got)
+	}
+	certificateData := state.kubectl(t, 30*time.Second, "get", "secret/"+admissionName, "-n", testNamespace,
+		"-o", "jsonpath={.data.cert}")
+	caPEM, err := base64.StdEncoding.DecodeString(secretCA)
+	if err != nil {
+		t.Fatalf("decode %s admission CA: %v", plane, err)
+	}
+	certificatePEM, err := base64.StdEncoding.DecodeString(certificateData)
+	if err != nil {
+		t.Fatalf("decode %s admission certificate: %v", plane, err)
+	}
+	caBlock, _ := pem.Decode(caPEM)
+	certificateBlock, _ := pem.Decode(certificatePEM)
+	if caBlock == nil || certificateBlock == nil {
+		t.Fatalf("%s admission Secret does not contain PEM CA/certificate", plane)
+	}
+	ca, err := x509.ParseCertificate(caBlock.Bytes)
+	if err != nil {
+		t.Fatalf("parse %s admission CA: %v", plane, err)
+	}
+	certificate, err := x509.ParseCertificate(certificateBlock.Bytes)
+	if err != nil {
+		t.Fatalf("parse %s admission certificate: %v", plane, err)
+	}
+	roots := x509.NewCertPool()
+	roots.AddCert(ca)
+	controllerService := testRelease + "-" + plane + "-controller-admission"
+	if _, err := certificate.Verify(x509.VerifyOptions{
+		Roots: roots, DNSName: controllerService + "." + testNamespace + ".svc",
+	}); err != nil {
+		t.Fatalf("%s admission serving certificate does not verify against its Secret CA: %v", plane, err)
+	}
+}
+
+func assertIngressAdmissionClasses(t *testing.T, state *chartState) {
+	t.Helper()
+	for _, class := range []string{"nginx", "nginx-internal"} {
+		name := strings.ReplaceAll(class, "nginx", "admission")
+		manifest := fmt.Sprintf(`apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: %s-valid
+  namespace: %s
+spec:
+  ingressClassName: %s
+  rules:
+    - host: %s.recovery.iterabase.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: %s-gateway
+                port:
+                  number: 8080
+`, name, testNamespace, class, name, testRelease)
+		path := state.writeManifest(t, name+"-valid-ingress.yaml", manifest)
+		state.kubectl(t, 30*time.Second, "apply", "--dry-run=server", "-f", path)
+
+		invalid := strings.Replace(manifest, "metadata:\n", "metadata:\n  annotations:\n    nginx.ingress.kubernetes.io/server-snippet: return 200;\n", 1)
+		invalid = strings.Replace(invalid, name+"-valid", name+"-invalid", 1)
+		path = state.writeManifest(t, name+"-invalid-ingress.yaml", invalid)
+		out, err := state.kubectlResult(30*time.Second, "apply", "--dry-run=server", "-f", path)
+		if err == nil {
+			t.Fatalf("%s admission accepted disabled server-snippet annotation", class)
+		}
+		lower := strings.ToLower(out + " " + err.Error())
+		if !strings.Contains(lower, "admission webhook") && !strings.Contains(lower, "snippet") {
+			t.Fatalf("%s invalid Ingress did not fail through admission validation: %v: %s", class, err, stateSafeBody([]byte(out)))
+		}
+	}
+}
+
+func assertPrivateObservabilityIngresses(t *testing.T, state *chartState, present bool) {
+	t.Helper()
+	for _, name := range []string{
+		testRelease + "-grafana",
+		kubePrometheusStackComponentName("prometheus"),
+		kubePrometheusStackComponentName("alertmanager"),
+		testRelease + "-loki-gateway",
+	} {
+		got := state.kubectl(t, 30*time.Second, "get", "ingress/"+name, "-n", testNamespace,
+			"--ignore-not-found", "-o", "jsonpath={.spec.ingressClassName}")
+		if present && got != "nginx-internal" {
+			t.Fatalf("private observability Ingress %s class=%q want nginx-internal", name, got)
+		}
+		if !present && got != "" {
+			t.Fatalf("legacy rollback retained private observability Ingress %s with class %q", name, got)
+		}
+	}
 }
 
 func seedPersistedStateStage(t *testing.T, state *chartState) {
@@ -778,6 +1184,49 @@ func selectBundledCRDs(raw string) (string, error) {
 	return strings.Join(manifests, "\n---\n") + "\n", nil
 }
 
+func selectMetalLBCRDs(raw string) (string, error) {
+	decoder := yaml.NewDecoder(strings.NewReader(raw))
+	var crds []string
+	for {
+		var document yaml.Node
+		if err := decoder.Decode(&document); err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return "", fmt.Errorf("decode MetalLB bundled CRDs: %w", err)
+		}
+		var header bundledCRDHeader
+		if err := document.Decode(&header); err != nil {
+			return "", fmt.Errorf("decode MetalLB bundled CRD header: %w", err)
+		}
+		if header.APIVersion != "apiextensions.k8s.io/v1" || header.Kind != "CustomResourceDefinition" {
+			continue
+		}
+		if !strings.HasSuffix(header.Metadata.Name, ".metallb.io") {
+			continue
+		}
+		var resource any
+		if err := document.Decode(&resource); err != nil {
+			return "", fmt.Errorf("decode MetalLB bundled CRD: %w", err)
+		}
+		encoded, err := yaml.Marshal(resource)
+		if err != nil {
+			return "", fmt.Errorf("encode MetalLB bundled CRD %s: %w", header.Metadata.Name, err)
+		}
+		crds = append(crds, strings.TrimSpace(string(encoded)))
+	}
+	// Filter only the MetalLB CRDs; every other CRD the chart ships in `crds/`
+	// directories or renders as an ordinary template is left entirely to Helm's
+	// own install path, which owns it correctly on a fresh install. Pre-applying
+	// those without Helm ownership makes a fresh `helm install` fail to import
+	// them ("invalid ownership metadata"), so only the MetalLB set is established
+	// before Helm (mirrors Forge's selectMetalLBCRDs, DES-HOR-511-03/04).
+	if len(crds) == 0 {
+		return "", nil
+	}
+	return strings.Join(crds, "\n---\n") + "\n", nil
+}
+
 func selectBundledCRD(existing, candidate bundledCRD) (bundledCRD, error) {
 	if existing.manifest == candidate.manifest {
 		return existing, nil
@@ -847,6 +1296,138 @@ func compareNumericVersions(left, right string) (int, error) {
 		}
 	}
 	return 0, nil
+}
+
+// bundledCRDNames returns the sorted, de-duplicated CRD names in raw YAML
+// (selecting the authoritative candidate on duplicate names), mirroring
+// selectBundledCRDs but returning names rather than manifests.
+func bundledCRDNames(raw string) ([]string, error) {
+	decoder := yaml.NewDecoder(strings.NewReader(raw))
+	seen := make(map[string]struct{})
+	for {
+		var document yaml.Node
+		if err := decoder.Decode(&document); err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return nil, fmt.Errorf("decode CRD names: %w", err)
+		}
+		var header bundledCRDHeader
+		if err := document.Decode(&header); err != nil {
+			return nil, fmt.Errorf("decode CRD header: %w", err)
+		}
+		if header.APIVersion != "apiextensions.k8s.io/v1" || header.Kind != "CustomResourceDefinition" || header.Metadata.Name == "" {
+			continue
+		}
+		seen[header.Metadata.Name] = struct{}{}
+	}
+	names := make([]string, 0, len(seen))
+	for name := range seen {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
+// markRenderedCRDsOwned injects the incoming release's Helm ownership metadata
+// into every rendered (template) CustomResourceDefinition so a fresh `helm
+// install` can adopt them (mirrors Forge's markHelmAdoptableCRDs, DES-HOR-511-04).
+// Scope is strict: only the rendered template MetalLB CRDs are marked for the
+// incoming release/namespace; crds/-directory CRDs install via Helm's own path.
+// Idempotent; preserves existing metadata.
+func markRenderedCRDsOwned(rendered, release, namespace string) (string, error) {
+	decoder := yaml.NewDecoder(strings.NewReader(rendered))
+	var manifests []string
+	for {
+		var document yaml.Node
+		if err := decoder.Decode(&document); err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return "", fmt.Errorf("decode rendered CRD for helm adoption: %w", err)
+		}
+		var header bundledCRDHeader
+		if err := document.Decode(&header); err != nil {
+			return "", fmt.Errorf("decode rendered CRD header: %w", err)
+		}
+		if header.APIVersion != "apiextensions.k8s.io/v1" || header.Kind != "CustomResourceDefinition" {
+			continue
+		}
+		// Strict founder scope (DES-HOR-511-04): only the nine MetalLB CRDs are
+		// marked Helm-adoptable; other rendered template CRDs are still included in
+		// the pre-apply set (established before Helm) but left unmarked.
+		if strings.HasSuffix(header.Metadata.Name, ".metallb.io") {
+			injectHelmOwnership(document.Content[0], release, namespace)
+		}
+		var resource any
+		if err := document.Decode(&resource); err != nil {
+			return "", fmt.Errorf("decode rendered CRD for helm adoption: %w", err)
+		}
+		manifest, err := yaml.Marshal(resource)
+		if err != nil {
+			return "", fmt.Errorf("encode rendered CRD for helm adoption: %w", err)
+		}
+		manifests = append(manifests, strings.TrimSpace(string(manifest)))
+	}
+	return strings.Join(manifests, "\n---\n") + "\n", nil
+}
+
+// injectHelmOwnership sets release-ownership annotations + managed-by label on a
+// CRD's metadata node, preserving existing metadata (idempotent).
+func injectHelmOwnership(root *yaml.Node, release, namespace string) {
+	var meta *yaml.Node
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		if root.Content[i].Value == "metadata" {
+			meta = root.Content[i+1]
+			break
+		}
+	}
+	if meta == nil {
+		meta = &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+		root.Content = append(root.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "metadata"}, meta)
+	}
+	ensureYAMLMapKeys(meta, "annotations", map[string]string{
+		"meta.helm.sh/release-name":      release,
+		"meta.helm.sh/release-namespace": namespace,
+	})
+	ensureYAMLMapKeys(meta, "labels", map[string]string{
+		"app.kubernetes.io/managed-by": "Helm",
+	})
+}
+
+// ensureYAMLMapKeys sets scalar key/value pairs on a mapping node, preserving
+// the existing node structure and other entries.
+func ensureYAMLMapKeys(mapNode *yaml.Node, key string, values map[string]string) {
+	var sub *yaml.Node
+	for i := 0; i+1 < len(mapNode.Content); i += 2 {
+		if mapNode.Content[i].Value == key {
+			sub = mapNode.Content[i+1]
+		}
+	}
+	if sub == nil {
+		sub = &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+		mapNode.Content = append(mapNode.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key}, sub)
+	}
+	if sub.Kind != yaml.MappingNode {
+		sub = &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+	}
+	for k, v := range values {
+		var set bool
+		for i := 0; i+1 < len(sub.Content); i += 2 {
+			if sub.Content[i].Value == k {
+				sub.Content[i+1].Value = v
+				if sub.Content[i+1].Kind != yaml.ScalarNode {
+					sub.Content[i+1] = &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: v}
+				}
+				set = true
+				break
+			}
+		}
+		if !set {
+			sub.Content = append(sub.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: k},
+				&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: v})
+		}
+	}
 }
 
 func assertEstablishedCRDsJSON(data []byte, required []string) error {
@@ -1037,8 +1618,14 @@ func TestUnitTransitionBaselineFixtureRejectsMutableOrMismatchedInputs(t *testin
 	for name, mutate := range map[string]func(string) string{
 		"latest":       func(value string) string { return strings.Replace(value, ":0.3.12", ":latest", 1) },
 		"bad checksum": func(value string) string { return strings.Replace(value, "86b0f230", "notahash", 1) },
+		"bad metallb checksum": func(value string) string {
+			return strings.Replace(value, "252e5fea", "notahash", 1)
+		},
 		"version mismatch": func(value string) string {
 			return strings.Replace(value, "cert-manager-substrate:0.3.12", "cert-manager-substrate:0.3.11", 1)
+		},
+		"metallb version mismatch": func(value string) string {
+			return strings.Replace(value, "cert-manager-substrate:0.3.19", "cert-manager-substrate:0.3.18", 1)
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -1158,7 +1745,7 @@ func TestUnitTransitionBaselineOrderIsStable(t *testing.T) {
 	for _, input := range fixture.Inputs {
 		names = append(names, input.Name)
 	}
-	if !slices.Equal(names, []string{platformPredecessorName, substratePredecessorName}) {
+	if !slices.Equal(names, []string{platformPredecessorName, substratePredecessorName, metalLBPlatformPredecessorName, metalLBSubstratePredecessorName}) {
 		t.Fatalf("transition baseline order=%v", names)
 	}
 }

@@ -22,6 +22,7 @@ import (
 const (
 	observabilityToolSourceName      = "observability-e2e"
 	observabilityToolServerNamespace = "flux-system"
+	gpuOperatorFixtureNamespace      = "gpu-operator"
 )
 
 func observabilityScenario() sharede2e.Definition {
@@ -31,7 +32,7 @@ func observabilityScenario() sharede2e.Definition {
 			"observability",
 			"Installs only the chart-owned observability composition and proves stack readiness, monitor discovery, disjoint endpoints, client paths, and unambiguous Prometheus/Loki persistence.",
 			"test-e2e-observability", 40,
-			[]string{"HOR-408", "HOR-414", "HOR-418", "HOR-416"},
+			[]string{"HOR-408", "HOR-414", "HOR-418", "HOR-416", "HOR-505"},
 			[]string{"control-plane-chart", "inference-gateway-chart", "iterabase-platform-chart"},
 		),
 		NewState: newChartState,
@@ -39,7 +40,8 @@ func observabilityScenario() sharede2e.Definition {
 			{Name: "create-kind", Run: createKindStage},
 			{Name: "install-certificate-substrate", DependsOn: []string{"create-kind"}, Run: installCertificateSubstrateStage},
 			{Name: "install-tool-source", DependsOn: []string{"install-certificate-substrate"}, Run: installObservabilityToolSourceStage},
-			{Name: "install-observability", DependsOn: []string{"install-tool-source"}, Run: installObservabilityStage},
+			{Name: "install-dcgm-exporter-fixture", DependsOn: []string{"install-tool-source"}, Run: installDCGMExporterFixtureStage},
+			{Name: "install-observability", DependsOn: []string{"install-dcgm-exporter-fixture"}, Run: installObservabilityStage},
 			{Name: "install-harness-worker", DependsOn: []string{"install-observability"}, Run: installObservabilityHarnessStage},
 			{Name: "assert-stack-readiness", DependsOn: []string{"install-harness-worker"}, Run: assertStackReadinessStage},
 			{Name: "assert-grafana-dashboards", DependsOn: []string{"assert-stack-readiness"}, Run: assertGrafanaDashboardsStage},
@@ -61,6 +63,104 @@ func installObservabilityStage(t *testing.T, state *chartState) {
 		state.writeValues(t, "observability-runtime", values),
 	)
 	assertCandidateImages(t, state)
+}
+
+func installDCGMExporterFixtureStage(t *testing.T, state *chartState) {
+	t.Helper()
+	manifest := `apiVersion: v1
+kind: Namespace
+metadata:
+  name: gpu-operator
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nvidia-dcgm-exporter-metrics
+  namespace: gpu-operator
+data:
+  metrics: |
+    # HELP DCGM_FI_DEV_GPU_UTIL GPU utilization (in %).
+    # TYPE DCGM_FI_DEV_GPU_UTIL gauge
+    DCGM_FI_DEV_GPU_UTIL{gpu="0",UUID="GPU-e2e",pci_bus_id="00000000:01:00.0",device="nvidia0",modelName="NVIDIA E2E GPU",Hostname="dcgm-e2e"} 42
+    # HELP DCGM_FI_DEV_FB_FREE Frame buffer memory free (in MiB).
+    # TYPE DCGM_FI_DEV_FB_FREE gauge
+    DCGM_FI_DEV_FB_FREE{gpu="0",UUID="GPU-e2e",pci_bus_id="00000000:01:00.0",device="nvidia0",modelName="NVIDIA E2E GPU",Hostname="dcgm-e2e"} 81920
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nvidia-dcgm-exporter
+  namespace: gpu-operator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nvidia-dcgm-exporter
+  template:
+    metadata:
+      labels:
+        app: nvidia-dcgm-exporter
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: exporter
+          image: busybox:1.37.0
+          command: ["sh", "-c"]
+          args:
+            - |
+              body="$(cat /www/metrics)"
+              while true; do
+                {
+                  printf 'HTTP/1.1 200 OK\r\n'
+                  printf 'Content-Type: text/plain; version=0.0.4; charset=utf-8\r\n'
+                  printf 'Content-Length: %s\r\n' "${#body}"
+                  printf 'Connection: close\r\n\r\n'
+                  printf '%s' "$body"
+                } | nc -l -p 9400
+              done
+          ports:
+            - name: gpu-metrics
+              containerPort: 9400
+          readinessProbe:
+            httpGet:
+              path: /metrics
+              port: gpu-metrics
+          resources:
+            requests: {cpu: 5m, memory: 4Mi}
+            limits: {cpu: 50m, memory: 16Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: ["ALL"]}
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65534
+            seccompProfile: {type: RuntimeDefault}
+          volumeMounts:
+            - name: metrics
+              mountPath: /www
+              readOnly: true
+      volumes:
+        - name: metrics
+          configMap:
+            name: nvidia-dcgm-exporter-metrics
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nvidia-dcgm-exporter
+  namespace: gpu-operator
+  labels:
+    app: nvidia-dcgm-exporter
+spec:
+  selector:
+    app: nvidia-dcgm-exporter
+  ports:
+    - name: gpu-metrics
+      port: 9400
+      targetPort: gpu-metrics
+`
+	state.kubectl(t, 30*time.Second, "apply", "-f", state.writeManifest(t, "dcgm-exporter-fixture.yaml", manifest))
+	state.kubectl(t, 3*time.Minute, "rollout", "status", "deployment/nvidia-dcgm-exporter", "-n", gpuOperatorFixtureNamespace, "--timeout=2m")
 }
 
 func observabilityPlatformValues(t *testing.T) map[string]any {
@@ -250,6 +350,66 @@ func assertGrafanaDashboardSuite(t *testing.T, client *http.Client, baseURL, use
 	}
 }
 
+func grafanaInferenceDashboardQueries(t *testing.T, client *http.Client, baseURL, username, password string) (string, string) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, baseURL+"/api/dashboards/uid/iterabase-inference-model-serving", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.SetBasicAuth(username, password)
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("Grafana inference dashboard status=%d", resp.StatusCode)
+	}
+	var payload struct {
+		Dashboard struct {
+			Panels []struct {
+				Title   string `json:"title"`
+				Targets []struct {
+					Expression string `json:"expr"`
+				} `json:"targets"`
+			} `json:"panels"`
+			Templating struct {
+				List []struct {
+					Name  string `json:"name"`
+					Query struct {
+						Expression string `json:"query"`
+					} `json:"query"`
+				} `json:"list"`
+			} `json:"templating"`
+		} `json:"dashboard"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	var variableQuery, panelQuery string
+	for _, variable := range payload.Dashboard.Templating.List {
+		if variable.Name == "namespace" {
+			variableQuery = variable.Query.Expression
+			break
+		}
+	}
+	for _, panel := range payload.Dashboard.Panels {
+		if panel.Title == "GPU utilization" && len(panel.Targets) == 1 {
+			panelQuery = panel.Targets[0].Expression
+			break
+		}
+	}
+	const variablePrefix = "label_values("
+	const variableSuffix = ", namespace)"
+	if !strings.HasPrefix(variableQuery, variablePrefix) || !strings.HasSuffix(variableQuery, variableSuffix) {
+		t.Fatalf("Grafana inference dashboard namespace variable has unsupported query %q", variableQuery)
+	}
+	if !strings.Contains(panelQuery, "$namespace") {
+		t.Fatalf("Grafana inference dashboard GPU utilization query does not use the namespace variable: %q", panelQuery)
+	}
+	return strings.TrimSuffix(strings.TrimPrefix(variableQuery, variablePrefix), variableSuffix), panelQuery
+}
+
 func assertEndpointSeparationStage(t *testing.T, state *chartState) {
 	t.Helper()
 	// Project only membership fields so shared evidence redaction cannot rewrite
@@ -284,12 +444,38 @@ func assertMonitorDiscoveryStage(t *testing.T, state *chartState) {
 			t.Fatalf("%s did not become 1: %v", metric, err)
 		}
 	}
+	for _, metric := range []struct {
+		query string
+		want  string
+	}{
+		{`count(up{namespace="gpu-operator",service="nvidia-dcgm-exporter",endpoint="gpu-metrics"} == 1)`, "1"},
+		{`DCGM_FI_DEV_GPU_UTIL{namespace="gpu-operator",UUID="GPU-e2e",device="nvidia0",modelName="NVIDIA E2E GPU"}`, "42"},
+		{`DCGM_FI_DEV_FB_FREE{namespace="gpu-operator",UUID="GPU-e2e",device="nvidia0",modelName="NVIDIA E2E GPU"}`, "81920"},
+	} {
+		if err := waitPrometheusValue(state.ctx, client, forward.URL, metric.query, metric.want, 5*time.Minute); err != nil {
+			t.Fatalf("representative DCGM metric %s did not become %s: %v", metric.query, metric.want, err)
+		}
+	}
+
+	username := string(decodeSecretValue(t, state, testRelease+"-grafana", "admin-user"))
+	password := string(decodeSecretValue(t, state, testRelease+"-grafana", "admin-password"))
+	state.redactor.Add(username, password)
+	grafanaForward := state.forward(t, "svc/"+testRelease+"-grafana", 80, "http")
+	namespaceSelector, panelQuery := grafanaInferenceDashboardQueries(t, &http.Client{Timeout: 15 * time.Second}, grafanaForward.URL, username, password)
+	state.stopForward(t, grafanaForward)
+	if err := requirePrometheusSeriesLabelValue(client, forward.URL, namespaceSelector, "namespace", gpuOperatorFixtureNamespace); err != nil {
+		t.Fatalf("Grafana inference dashboard namespace variable does not select the GPU Operator namespace: %v", err)
+	}
+	panelQuery = strings.ReplaceAll(panelQuery, "$namespace", gpuOperatorFixtureNamespace)
+	if err := waitPrometheusValue(state.ctx, client, forward.URL, panelQuery, "42", 5*time.Minute); err != nil {
+		t.Fatalf("shipped Grafana inference GPU panel query %s did not become 42: %v", panelQuery, err)
+	}
 	assertPlatformMetrics(t, state, client, forward.URL,
 		os.Getenv("HARNESS_IMAGE_REPO") != "" && os.Getenv("HARNESS_IMAGE_TAG") != "",
 		os.Getenv("TOOL_RUNNER_IMAGE_REPO") != "" && os.Getenv("TOOL_RUNNER_IMAGE_TAG") != "",
 	)
 	body := requireHTTP(t, client, http.MethodGet, forward.URL+"/api/v1/targets?state=active", nil, http.StatusOK)
-	targets := []string{"postgresql", "redis"}
+	targets := []string{"postgresql", "redis", "nvidia-dcgm-exporter"}
 	if os.Getenv("CONTROL_PLANE_IMAGE_REPO") != "" && os.Getenv("CONTROL_PLANE_IMAGE_TAG") != "" {
 		targets = append(targets, "control-plane")
 	}
@@ -447,6 +633,34 @@ func TestUnitFeatureRuntimeAssertionsMatchDisabledComponents(t *testing.T) {
 			t.Fatalf("enabled component %q missing from metric queries: %s", component, candidateQueries)
 		}
 	}
+}
+
+func requirePrometheusSeriesLabelValue(client *http.Client, baseURL, selector, label, want string) error {
+	endpoint := baseURL + "/api/v1/series?" + url.Values{"match[]": {selector}}.Encode()
+	resp, err := client.Get(endpoint)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("status %d", resp.StatusCode)
+	}
+	var payload struct {
+		Status string              `json:"status"`
+		Data   []map[string]string `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return err
+	}
+	if payload.Status != "success" {
+		return fmt.Errorf("series status=%q", payload.Status)
+	}
+	for _, series := range payload.Data {
+		if series[label] == want {
+			return nil
+		}
+	}
+	return fmt.Errorf("selector %q returned no series with %s=%q", selector, label, want)
 }
 
 func waitPrometheusValue(ctx context.Context, client *http.Client, baseURL, query, want string, timeout time.Duration) error {

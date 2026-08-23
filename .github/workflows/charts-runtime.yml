@@ -43,8 +43,12 @@ jobs:
             target: test-e2e-upgrade
           - name: feature enable on upgrade
             target: test-e2e-feature-enable
+          - name: single-node observability ingress recovery
+            target: test-e2e-observability-ingress-recovery
           - name: reapply rollback recovery
             target: test-e2e-reapply-rollback
+          - name: metalLB upgrade reapply
+            target: test-e2e-metallb-transition
           - name: observability
             target: test-e2e-observability
           - name: observability internal TLS

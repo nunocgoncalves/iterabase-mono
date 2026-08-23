@@ -462,6 +462,23 @@ func TestUninstall(t *testing.T) {
 	assert.Equal(t, "sudo /usr/local/bin/k3s-uninstall.sh", got)
 }
 
+func TestSelectMetalLBCRDs(t *testing.T) {
+	in := "apiVersion: apiextensions.k8s.io/v1\nkind: CustomResourceDefinition\nmetadata:\n  name: ipaddresspools.metallb.io\nspec:\n  group: metallb.io\n---\napiVersion: apiextensions.k8s.io/v1\nkind: CustomResourceDefinition\nmetadata:\n  name: agentpools.platform.iterabase.com\nspec:\n  group: platform.iterabase.com\n"
+	out, err := selectMetalLBCRDs(in)
+	require.NoError(t, err)
+	if !strings.Contains(out, "ipaddresspools.metallb.io") {
+		t.Fatalf("selectMetalLBCRDs dropped the MetalLB CRD:\n%s", out)
+	}
+	if strings.Contains(out, "agentpools.platform.iterabase.com") {
+		t.Fatalf("selectMetalLBCRDs kept a non-MetalLB CRD:\n%s", out)
+	}
+	// Empty input is the empty string, not a stray newline, so the pre-apply
+	// emptiness guard triggers when MetalLB is disabled.
+	empty, err := selectMetalLBCRDs("")
+	require.NoError(t, err)
+	require.Equal(t, "", empty)
+}
+
 func TestExtractChartCRDs(t *testing.T) {
 	const preamble = `Pulled: ghcr.io/example/chart:1.0.0
 Digest: sha256:abc123
@@ -559,6 +576,8 @@ func TestDeployer_Apply(t *testing.T) {
 			return "/usr/local/bin/helm\n", 0
 		case strings.Contains(cmd, "'show' 'crds'"):
 			return "", 0 // charts without CRDs are a no-op
+		case strings.Contains(cmd, "'template'"):
+			return "", 0 // no rendered CRDs
 		case strings.Contains(cmd, "kubectl"):
 			kubectlCalled = true
 			return "", 0
@@ -592,6 +611,8 @@ func TestDeployer_Apply_NoWait(t *testing.T) {
 			return "/usr/local/bin/helm\n", 0
 		case strings.Contains(cmd, "'show' 'crds'"):
 			return "", 0
+		case strings.Contains(cmd, "'template'"):
+			return "", 0
 		case strings.Contains(cmd, "'upgrade' '--install'"):
 			got = cmd
 			return "", 0
@@ -620,6 +641,8 @@ func TestDeployer_Apply_ReconcilesCRDsBeforeUpgrade(t *testing.T) {
 			return "/usr/local/bin/helm\n", 0
 		case strings.Contains(cmd, "'show' 'crds'"):
 			return crds, 0
+		case strings.Contains(cmd, "'template'"):
+			return "", 0
 		case strings.Contains(cmd, "'kubectl' 'apply'"):
 			return "customresourcedefinition.apiextensions.k8s.io/examples.example.com serverside-applied\n", 0
 		case strings.Contains(cmd, "'kubectl' 'wait'"):
@@ -637,17 +660,225 @@ func TestDeployer_Apply_ReconcilesCRDsBeforeUpgrade(t *testing.T) {
 		Release: "opo1", Repository: "oci://ghcr.io/nunocgoncalves/iterabase-platform",
 		Version: "0.1.27", Namespace: "iterabase-system",
 	}))
-
-	require.Len(t, commands, 5)
+	// Every crds/-directory CRD (surfaced by `helm show crds`) is preserved in
+	// the pre-apply set so an operator-feature-enable upgrade can introduce new
+	// dependency CRDs (DES-HOR-511-03); only rendered MetalLB CRDs receive Helm
+	// ownership. A non-MetalLB crds/-dir CRD therefore still triggers apply/wait.
+	require.Len(t, commands, 6)
 	assert.Equal(t, helmVerifyCommand, commands[0])
-	assert.Contains(t, commands[1], "'show' 'crds' 'oci://ghcr.io/nunocgoncalves/iterabase-platform' '--version' '0.1.27'")
-	assert.Contains(t, commands[2], "'kubectl' 'apply' '--server-side' '--force-conflicts' '-f' '-'")
-	assert.Contains(t, commands[3], "'kubectl' 'wait' '--for=condition=Established' '--timeout=2m' '-f' '-'")
-	assert.Contains(t, commands[4], "'upgrade' '--install'")
+	assert.Contains(t, commands[1], "'show' 'crds'")
+	assert.Contains(t, commands[2], "'template'")
+	assert.Contains(t, commands[3], "'kubectl' 'apply'")
+	assert.Contains(t, commands[4], "'kubectl' 'wait'")
+	assert.Contains(t, commands[5], "'upgrade' '--install'")
+}
+
+func TestDeployer_Apply_ReconcilesRenderedTemplateCRDs(t *testing.T) {
+	const renderedCRD = "apiVersion: apiextensions.k8s.io/v1\nkind: CustomResourceDefinition\nmetadata:\n  name: ipaddresspools.metallb.io\n"
+	var commands []string
+	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
+		commands = append(commands, cmd)
+		switch {
+		case cmd == helmVerifyCommand:
+			return "/usr/local/bin/helm\n", 0
+		case strings.Contains(cmd, "'show' 'crds'"):
+			return "", 0
+		case strings.Contains(cmd, "'template'"):
+			return renderedCRD, 0
+		case strings.Contains(cmd, "'kubectl' 'apply'"):
+			return "customresourcedefinition.apiextensions.k8s.io/ipaddresspools.metallb.io serverside-applied\n", 0
+		case strings.Contains(cmd, "'kubectl' 'wait'"):
+			return "customresourcedefinition.apiextensions.k8s.io/ipaddresspools.metallb.io condition met\n", 0
+		case strings.Contains(cmd, "'status'"):
+			// MetalLB already installed at the steady-state Fail policy => no bootstrap.
+			return `{"info":{"status":"deployed"},"chart":{"metadata":{"version":"0.3.19"}}}`, 0
+		case strings.Contains(cmd, "validatingwebhookconfiguration"):
+			return "Fail", 0
+		case strings.Contains(cmd, "'upgrade' '--install'"):
+			return "", 0
+		default:
+			return "", 1
+		}
+	})
+	defer cleanup()
+	p := newProvisioner(t, addr, cfg)
+	defer p.Close()
+	// Metallb CRDs render as ordinary template resources and are absent from
+	// `helm show crds`; the render-extract step must discover and establish them.
+	require.NoError(t, p.Apply(context.Background(), deployer.ApplyOpts{
+		Release: "opo1", Repository: "oci://ghcr.io/nunocgoncalves/iterabase-platform",
+		Version: "0.3.19", Namespace: "iterabase-system",
+		ValueFiles: []string{"/tmp/values.yaml"},
+		Values:     []string{"metallb.enabled=true"},
+	}))
+	require.Len(t, commands, 10)
+	assert.Contains(t, commands[2], "'template' 'oci://ghcr.io/nunocgoncalves/iterabase-platform' '--version' '0.3.19' '-n' 'iterabase-system' '-f' '/tmp/values.yaml' '--set' 'metallb.enabled=true'")
+	assert.Contains(t, commands[3], "'kubectl' 'apply' '--server-side' '--force-conflicts' '-f' '-'")
+	assert.Contains(t, commands[4], "'kubectl' 'wait' '--for=condition=Established'")
+	assert.Contains(t, commands[6], "'status'")
+	assert.Contains(t, commands[7], "validatingwebhookconfiguration")
+	assert.Contains(t, commands[8], "'upgrade' '--install'")
+	assert.Contains(t, commands[9], "validatingwebhookconfiguration")
+}
+
+func TestDeployer_Apply_MetalLBBootstrapConverges(t *testing.T) {
+	const renderedCRD = "apiVersion: apiextensions.k8s.io/v1\nkind: CustomResourceDefinition\nmetadata:\n  name: ipaddresspools.metallb.io\n"
+	var commands []string
+	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
+		commands = append(commands, cmd)
+		switch {
+		case cmd == helmVerifyCommand:
+			return "/usr/local/bin/helm\n", 0
+		case strings.Contains(cmd, "'show' 'crds'"):
+			return "", 0
+		case strings.Contains(cmd, "'template'"):
+			return renderedCRD, 0
+		case strings.Contains(cmd, "'kubectl' 'apply'"):
+			return "customresourcedefinition.apiextensions.k8s.io/ipaddresspools.metallb.io serverside-applied\n", 0
+		case strings.Contains(cmd, "'kubectl' 'wait'"):
+			return "customresourcedefinition.apiextensions.k8s.io/ipaddresspools.metallb.io condition met\n", 0
+		case strings.Contains(cmd, "'status'"):
+			return "", 1 // release not found => fresh install => bootstrap
+		case strings.Contains(cmd, "validatingwebhookconfiguration"):
+			// pre-bootstrap probe: no webhook yet => ""; final probe: converged Fail.
+			return "Fail", 0
+		case strings.Contains(cmd, "'get' 'deployment'"):
+			return "1", 0
+		case strings.Contains(cmd, "'endpoints'"):
+			return "10.0.0.5", 0
+		case strings.Contains(cmd, "'upgrade' '--install'"):
+			return "", 0
+		default:
+			return "", 1
+		}
+	})
+	defer cleanup()
+	p := newProvisioner(t, addr, cfg)
+	defer p.Close()
+	require.NoError(t, p.Apply(context.Background(), deployer.ApplyOpts{
+		Release: "opo1", Repository: "oci://ghcr.io/nunocgoncalves/iterabase-platform",
+		Version: "0.3.19", Namespace: "iterabase-system",
+		Values: []string{"metallb.enabled=true"},
+	}))
+	require.Len(t, commands, 13)
+	assert.Contains(t, commands[6], "'status'")
+	assert.Contains(t, commands[7], "validatingwebhookconfiguration")
+	assert.Contains(t, commands[8], "'upgrade' '--install'")
+	assert.Contains(t, commands[8], "metallb.crds.validationFailurePolicy=Ignore")
+	assert.Contains(t, commands[9], "'get' 'deployment'")
+	assert.Contains(t, commands[10], "'endpoints'")
+	assert.Contains(t, commands[11], "'upgrade' '--install'")
+	assert.NotContains(t, commands[11], "validationFailurePolicy=Ignore")
+	assert.Contains(t, commands[12], "validatingwebhookconfiguration")
+}
+
+func TestDeployer_Apply_MetalLBBootstrapTimeout(t *testing.T) {
+	const renderedCRD = "apiVersion: apiextensions.k8s.io/v1\nkind: CustomResourceDefinition\nmetadata:\n  name: ipaddresspools.metallb.io\n"
+	orig := metalLBBackendWaitTimeout
+	metalLBBackendWaitTimeout = 150 * time.Millisecond
+	defer func() { metalLBBackendWaitTimeout = orig }()
+	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
+		switch {
+		case cmd == helmVerifyCommand:
+			return "/usr/local/bin/helm\n", 0
+		case strings.Contains(cmd, "'show' 'crds'"):
+			return "", 0
+		case strings.Contains(cmd, "'template'"):
+			return renderedCRD, 0
+		case strings.Contains(cmd, "'kubectl' 'apply'"), strings.Contains(cmd, "'kubectl' 'wait'"):
+			return "", 0
+		case strings.Contains(cmd, "'status'"):
+			return "", 1
+		case strings.Contains(cmd, "validatingwebhookconfiguration"):
+			// Fresh install: the webhook configuration is absent (NotFound), not a
+			// read failure, so the bootstrap proceeds and then times out.
+			return "Error from server (NotFound): validatingwebhookconfigurations.admissionregistration.k8s.io \"metallb-webhook-configuration\" not found\n", 1
+		case strings.Contains(cmd, "'upgrade' '--install'"):
+			return "", 0
+		default:
+			return "", 1 // deployment/endpoints never ready => backend probe never succeeds
+		}
+	})
+	defer cleanup()
+	p := newProvisioner(t, addr, cfg)
+	defer p.Close()
+	err := p.Apply(context.Background(), deployer.ApplyOpts{
+		Release: "opo1", Repository: "oci://ghcr.io/nunocgoncalves/iterabase-platform",
+		Version: "0.3.19", Namespace: "iterabase-system",
+		Values: []string{"metallb.enabled=true"},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "metallb admission backend not ready")
+}
+
+func TestDeployer_Apply_MetalLBInterruptedBootstrapConverges(t *testing.T) {
+	// A reapply of an interrupted bootstrap: the release exists but is still at
+	// the bootstrap Ignore policy, so Apply must re-open admission, re-wait the
+	// backend, then converge to the steady-state Fail and assert it.
+	const renderedCRD = "apiVersion: apiextensions.k8s.io/v1\nkind: CustomResourceDefinition\nmetadata:\n  name: ipaddresspools.metallb.io\n"
+	var commands []string
+	var vwcReads int
+	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
+		commands = append(commands, cmd)
+		switch {
+		case cmd == helmVerifyCommand:
+			return "/usr/local/bin/helm\n", 0
+		case strings.Contains(cmd, "'show' 'crds'"):
+			return "", 0
+		case strings.Contains(cmd, "'template'"):
+			return renderedCRD, 0
+		case strings.Contains(cmd, "'kubectl' 'apply'"), strings.Contains(cmd, "'kubectl' 'wait'"):
+			return "", 0
+		case strings.Contains(cmd, "'status'"):
+			return `{"info":{"status":"deployed"},"chart":{"metadata":{"version":"0.3.19"}}}`, 0
+		case strings.Contains(cmd, "validatingwebhookconfiguration"):
+			vwcReads++
+			if vwcReads == 1 {
+				return "Ignore", 0 // interrupted bootstrap not yet converged
+			}
+			return "Fail", 0 // converged after the steady apply
+		case strings.Contains(cmd, "'get' 'deployment'"):
+			return "1", 0
+		case strings.Contains(cmd, "'endpoints'"):
+			return "10.0.0.5", 0
+		case strings.Contains(cmd, "'upgrade' '--install'"):
+			return "", 0
+		default:
+			return "", 1
+		}
+	})
+	defer cleanup()
+	p := newProvisioner(t, addr, cfg)
+	defer p.Close()
+	require.NoError(t, p.Apply(context.Background(), deployer.ApplyOpts{
+		Release: "opo1", Repository: "oci://ghcr.io/nunocgoncalves/iterabase-platform",
+		Version: "0.3.19", Namespace: "iterabase-system",
+		Values: []string{"metallb.enabled=true"},
+	}))
+	// The Ignore bootstrap apply runs, then the backend wait, then the steady
+	// apply, then the final assertion probe.
+	require.Len(t, commands, 13)
+	assert.Contains(t, commands[8], "validationFailurePolicy=Ignore")
+	assert.Contains(t, commands[11], "'upgrade' '--install'")
+	assert.NotContains(t, commands[11], "validationFailurePolicy=Ignore")
+}
+
+func TestMarkHelmAdoptableCRDs(t *testing.T) {
+	in := "apiVersion: apiextensions.k8s.io/v1\nkind: CustomResourceDefinition\nmetadata:\n  name: ipaddresspools.metallb.io\n  annotations:\n    controller-gen.kubebuilder.io/version: v0.19.0\nspec:\n  group: metallb.io\n"
+	out, err := markHelmAdoptableCRDs(in, "opo1", "iterabase-system")
+	require.NoError(t, err)
+	assert.Contains(t, out, "meta.helm.sh/release-name: opo1")
+	assert.Contains(t, out, "meta.helm.sh/release-namespace: iterabase-system")
+	assert.Contains(t, out, "app.kubernetes.io/managed-by: Helm")
+	assert.Contains(t, out, "controller-gen.kubebuilder.io/version: v0.19.0") // existing metadata preserved
+	// Idempotent.
+	out2, err := markHelmAdoptableCRDs(out, "opo1", "iterabase-system")
+	require.NoError(t, err)
+	assert.Equal(t, out, out2)
 }
 
 func TestDeployer_Apply_CRDFailuresStopBeforeUpgrade(t *testing.T) {
-	const crds = "apiVersion: apiextensions.k8s.io/v1\nkind: CustomResourceDefinition\nmetadata:\n  name: examples.example.com\n"
+	const crds = "apiVersion: apiextensions.k8s.io/v1\nkind: CustomResourceDefinition\nmetadata:\n  name: ipaddresspools.metallb.io\n"
 	tests := []struct {
 		name       string
 		failAt     string
@@ -670,6 +901,8 @@ func TestDeployer_Apply_CRDFailuresStopBeforeUpgrade(t *testing.T) {
 						return "", 1
 					}
 					return tt.showOutput, 0
+				case strings.Contains(cmd, "'template'"):
+					return "", 0
 				case strings.Contains(cmd, "'kubectl' 'apply'"):
 					if tt.failAt == "apply" {
 						return "", 1
@@ -739,7 +972,7 @@ func TestDeployer_Apply_HelmBootstrapFailuresStopBeforeChart(t *testing.T) {
 					return sshCommandResult{}
 				case cmd == "rm -f "+shellQuote(installerPath):
 					return sshCommandResult{}
-				case strings.Contains(cmd, "'show' 'crds'"), strings.Contains(cmd, "'upgrade' '--install'"):
+				case strings.Contains(cmd, "'show' 'crds'"), strings.Contains(cmd, "'template'"), strings.Contains(cmd, "'upgrade' '--install'"):
 					chartCalled = true
 					return sshCommandResult{}
 				default:
@@ -792,6 +1025,8 @@ func TestDeployer_Apply_EnsuresHelm(t *testing.T) {
 			return "", 0
 		case strings.Contains(cmd, "'show' 'crds'"):
 			return "", 0
+		case strings.Contains(cmd, "'template'"):
+			return "", 0
 		case strings.Contains(cmd, "'upgrade' '--install'"):
 			return "", 0
 		default:
@@ -806,7 +1041,7 @@ func TestDeployer_Apply_EnsuresHelm(t *testing.T) {
 		Version: "0.1.0", Namespace: "iterabase-system",
 	}))
 
-	require.Len(t, commands, 9)
+	require.Len(t, commands, 10)
 	assert.Equal(t, helmVerifyCommand, commands[0])
 	assert.Equal(t, helmInstallerTempCmd, commands[1])
 	assert.Contains(t, commands[2], "curl -fsSL -o '"+installerPath+"'")
@@ -817,7 +1052,8 @@ func TestDeployer_Apply_EnsuresHelm(t *testing.T) {
 	assert.Equal(t, helmVerifyCommand, commands[5])
 	assert.Equal(t, "rm -f "+shellQuote(installerPath), commands[6])
 	assert.Contains(t, commands[7], "'show' 'crds'")
-	assert.Contains(t, commands[8], "'upgrade' '--install'")
+	assert.Contains(t, commands[8], "'template'")
+	assert.Contains(t, commands[9], "'upgrade' '--install'")
 }
 
 func TestDeployer_Status(t *testing.T) {
@@ -1010,6 +1246,54 @@ func TestDeployer_TransferCertificateHookOwnership(t *testing.T) {
 		assert.Contains(t, annotate, "'helm.sh/hook-'")
 		assert.Contains(t, annotate, "'helm.sh/hook-weight-'")
 	}
+}
+
+func TestDeployer_TransferMetalLBHookOwnership(t *testing.T) {
+	var annotates []string
+	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
+		switch {
+		case strings.Contains(cmd, "'get' 'ipaddresspool'"):
+			return "ipaddresspool.metallb.io/opo1-edge\nipaddresspool.metallb.io/opo1-internal\n", 0
+		case strings.Contains(cmd, "'get' 'l2advertisement'"):
+			return "l2advertisement.metallb.io/opo1-edge\n", 0
+		case strings.Contains(cmd, "'annotate' '--overwrite'"):
+			annotates = append(annotates, cmd)
+			return "", 0
+		default:
+			return "", 1
+		}
+	})
+	defer cleanup()
+	p := newProvisioner(t, addr, cfg)
+	defer p.Close()
+	require.NoError(t, p.TransferMetalLBHookOwnership(context.Background(), "opo1", "iterabase-system"))
+	require.Len(t, annotates, 2)
+	for _, annotate := range annotates {
+		assert.Contains(t, annotate, "'-n' 'iterabase-system'")
+		assert.Contains(t, annotate, "'meta.helm.sh/release-name=opo1'")
+		assert.Contains(t, annotate, "'meta.helm.sh/release-namespace=iterabase-system'")
+		assert.Contains(t, annotate, "'helm.sh/hook-'")
+		assert.Contains(t, annotate, "'helm.sh/hook-weight-'")
+	}
+	assert.Contains(t, annotates[0], "'ipaddresspool.metallb.io/opo1-edge'")
+	assert.Contains(t, annotates[0], "'ipaddresspool.metallb.io/opo1-internal'")
+	assert.Contains(t, annotates[1], "'l2advertisement.metallb.io/opo1-edge'")
+}
+
+func TestDeployer_TransferMetalLBHookOwnership_NoObjectsNoCRDs(t *testing.T) {
+	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
+		if strings.Contains(cmd, "'get' 'ipaddresspool'") || strings.Contains(cmd, "'get' 'l2advertisement'") {
+			// no objects or no CRDs => empty output / unknown kind
+			return "", 1
+		}
+		return "", 1
+	})
+	defer cleanup()
+	p := newProvisioner(t, addr, cfg)
+	defer p.Close()
+	// Unknown-kind errors are tolerated as no-ops so cloud installs (where the
+	// MetalLB CRDs never existed) do not fail the platform apply.
+	require.NoError(t, p.TransferMetalLBHookOwnership(context.Background(), "opo1", "iterabase-system"))
 }
 
 func TestDeployer_TransferCRDOwnership(t *testing.T) {

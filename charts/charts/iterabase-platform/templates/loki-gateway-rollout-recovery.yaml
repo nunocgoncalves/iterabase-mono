@@ -1,0 +1,143 @@
+{{- /*
+Migrate an existing one-replica Loki gateway from the predecessor's
+RollingUpdate strategy only when the desired strategy remains Recreate.
+Kubernetes rejects a discriminator change while the old strategy.rollingUpdate
+fields remain owned, even when the desired YAML carries an explicit null. A
+JSON merge patch atomically replaces the strategy before the regular Deployment
+update changes its pod template. An explicit HA RollingUpdate override renders
+no migration hooks.
+
+A fresh install has no existing Deployment and renders no hooks. Rollback to a
+legacy stored revision cannot execute hooks introduced by the current chart;
+the documented inverse boundary therefore scales the gateway to zero first.
+DES-HOR-506-01 owns the Recreate/downtime behavior.
+*/ -}}
+{{- $observability := index .Values "observability" -}}
+{{- $recovery := index .Values "observabilityUpgradeRecovery" -}}
+{{- $loki := default (dict) (index $observability "loki") -}}
+{{- $gateway := default (dict) (index $loki "gateway") -}}
+{{- $desiredStrategy := dig "deploymentStrategy" "type" "" $gateway -}}
+{{- if and (index $observability "enabled") (index $recovery "enabled") (index $loki "enabled") (index $gateway "enabled") -}}
+{{- $name := default "loki" (index $loki "nameOverride") -}}
+{{- $fullname := "" -}}
+{{- if (index $loki "fullnameOverride") -}}
+  {{- $fullname = (index $loki "fullnameOverride") | trunc 63 | trimSuffix "-" -}}
+{{- else if contains $name .Release.Name -}}
+  {{- $fullname = .Release.Name | trunc 63 | trimSuffix "-" -}}
+{{- else -}}
+  {{- $fullname = printf "%s-%s" .Release.Name $name | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+{{- $gatewayName := printf "%s-gateway" $fullname | trunc 253 | trimSuffix "-" -}}
+{{- $namespace := default .Release.Namespace (index $loki "namespaceOverride") -}}
+{{- $existing := lookup "apps/v1" "Deployment" $namespace $gatewayName -}}
+{{- if and (eq $desiredStrategy "Recreate") $existing (ne (dig "spec" "strategy" "type" "RollingUpdate" $existing) "Recreate") -}}
+{{- $hookName := printf "%s-rollout-recovery" $gatewayName | trunc 63 | trimSuffix "-" -}}
+{{- $image := index $recovery "image" -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $hookName }}
+  namespace: {{ $namespace }}
+  annotations:
+    helm.sh/hook: pre-upgrade
+    helm.sh/hook-weight: "-3"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+  labels:
+    app.kubernetes.io/name: loki
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: gateway-rollout-recovery
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+automountServiceAccountToken: true
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $hookName }}
+  namespace: {{ $namespace }}
+  annotations:
+    helm.sh/hook: pre-upgrade
+    helm.sh/hook-weight: "-3"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+  labels:
+    app.kubernetes.io/name: loki
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: gateway-rollout-recovery
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    resourceNames: [{{ $gatewayName | quote }}]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $hookName }}
+  namespace: {{ $namespace }}
+  annotations:
+    helm.sh/hook: pre-upgrade
+    helm.sh/hook-weight: "-2"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+  labels:
+    app.kubernetes.io/name: loki
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: gateway-rollout-recovery
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $hookName }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $hookName }}
+    namespace: {{ $namespace }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $hookName }}
+  namespace: {{ $namespace }}
+  annotations:
+    helm.sh/hook: pre-upgrade
+    helm.sh/hook-weight: "-1"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+  labels:
+    app.kubernetes.io/name: loki
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: gateway-rollout-recovery
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+spec:
+  ttlSecondsAfterFinished: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: loki
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: gateway-rollout-recovery
+    spec:
+      restartPolicy: OnFailure
+      serviceAccountName: {{ $hookName }}
+      automountServiceAccountToken: true
+      containers:
+        - name: patch
+          image: {{ index $image "repository" }}:{{ index $image "tag" }}@{{ index $image "digest" }}
+          imagePullPolicy: {{ index $image "pullPolicy" }}
+          args:
+            - patch
+            - deployment
+            - {{ $gatewayName }}
+            - --namespace={{ $namespace }}
+            - --type=merge
+            # Use Helm's field-manager identity so the preparatory patch does
+            # not leave a competing owner that would block explicit rollback.
+            - --field-manager=helm
+            - --patch={"spec":{"strategy":{"type":"Recreate","rollingUpdate":null}}}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+            seccompProfile:
+              type: RuntimeDefault
+{{- end -}}
+{{- end -}}
