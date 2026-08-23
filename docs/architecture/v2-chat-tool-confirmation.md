@@ -121,6 +121,35 @@ The founder approved the following bounded decisions for HOR-456. The full appro
 - **Consequences:** No risky PVC transcript importer or split authority exists. Pre-cutover rollback may ignore untouched new tables. Post-cutover recovery rolls forward from database authority, never automatically replays a turn/write, and preserves uncertain effects as `outcome_unknown`.
 - **Evidence:** Founder approval recorded in HOR-456 on 2026-08-23.
 
+### DES-HOR-456-13 — Use a live content-free Chat inference workload projection
+
+- **Approved by:** Nuno Gonçalves
+- **Approved on:** 2026-08-23
+- **Scope:** V2 Chat model invocation, Inference Gateway workload authorization, and its shared-PostgreSQL grant.
+- **Decision:** Add content-free `chat.effective_workload_authority`, exposing only a currently eligible running Chat assignment/generation, principals, immutable profile, pool, and assigned-model fields. The Inference Gateway's existing dedicated PostgreSQL role receives exact `SELECT`, joins it on every V2 Chat workload request with no authority cache, preserves its already-approved exact routing/workload reads, and denies before backend inference on absence, ambiguity, or database failure.
+- **Consequences:** This is a bounded cross-component database contract. No transcript/context/raw identity data or broad/schema-default grant enters the gateway. Exact-grant and listener-isolation regressions are mandatory.
+- **Evidence:** Founder approval resolving PR #59 Standards finding [3839592870](https://github.com/nunocgoncalves/iterabase-mono/pull/59#discussion_r3839592870) is recorded in HOR-456 on 2026-08-23.
+
+### DES-HOR-456-14 — Use an internal mTLS workflow-start preparation service
+
+- **Approved by:** Nuno Gonçalves
+- **Approved on:** 2026-08-23
+- **Scope:** Chat workflow-start proposal preparation only.
+- **Decision:** The Control Plane hosts internal mTLS `ChatControlService.PrepareWorkflowStart`; only the trusted Harness supervisor may call it, while the per-turn child receives a non-secret stub and cannot connect directly. The service rechecks the active turn/generation/principals/profile/pool, resolves the exact Ready workflow/inputs/artifacts/presentation, and durably creates only the pending confirmation. Customer decision remains cookie-only through Product API, confirmation transactionally reuses `work.StartTx`, and this control never becomes a Tool Gateway invocation or customer bearer endpoint.
+- **Consequences:** Follow-on work must add a versioned RPC, workload identity/certificate, and network-policy boundary. Failures before confirmation create no work item. The service gains no general workflow-control surface.
+- **Evidence:** Founder approval resolving PR #59 Standards finding [3839593168](https://github.com/nunocgoncalves/iterabase-mono/pull/59#discussion_r3839593168) is recorded in HOR-456 on 2026-08-23.
+
+### DES-HOR-456-15 — Use two-phase Harness session preparation
+
+- **Approved by:** Nuno Gonçalves
+- **Approved on:** 2026-08-23
+- **Scope:** V2 pi-cache validation, PostgreSQL reconstruction, generation rotation, and assignment fencing.
+- **Decision:** Extend the existing trusted bidirectional `Harness.Work` stream with `PrepareChatSession` and `ChatSessionPrepared`. Dispatch sends a bounded checkpoint plus ordered later context through the base ordinal. The supervisor validates ownership/mode/session marker/format/ordinal/digest and runs reconstruction under the session UID without database/gateway credentials. Dispatch creates the assignment and sends `AssignTurn` only after `ready`. Missing, stale, incompatible, or corrupt cache creates a fresh preparing candidate that is atomically activated by generation compare-and-swap before use.
+- **Consequences:** The protocol is versioned and size-bounded. Checkpoint content remains execution-only, retired/preparing generations cannot invoke, and failure never automatically replays a turn or effect.
+- **Evidence:** Founder approval resolving PR #59 Standards finding [3839593584](https://github.com/nunocgoncalves/iterabase-mono/pull/59#discussion_r3839593584) is recorded in HOR-456 on 2026-08-23.
+
+The founder approved this review addendum exactly as recommended on 2026-08-23 after the three PR #59 findings above. HOR-456 is the canonical Linear evidence for the addendum.
+
 ## 2. Scope, non-goals, and hard invariants
 
 ### In scope
@@ -249,7 +278,7 @@ Trust rules:
 | Prompt requests forbidden capability | Forbidden tools/controls are absent from the explicit pin set. Workspace tools are false. Direct network and credentials do not exist in the child. |
 | Fabricated tool/version/scope | Gateway resolves active assignment, Chat execution, current generation, pool, principals, capability request, and immutable pin from PostgreSQL. |
 | Fabricated artifact | Resolve only artifact refs linked to the exact message/execution/proposal and recheck current security/extraction/compatibility state. |
-| Stale account/role/session | Re-evaluate current account, role, and initiating browser-session eligibility at dispatch/model/tool/decision boundaries; fail closed. Existing authorized effects are not described as reversed. |
+| Stale account/role/session | Re-evaluate current account/role at every boundary and browser-session eligibility for active-turn and decision requests; fail closed. An asynchronous confirmed command uses durable decision evidence and current account authority rather than requiring the originating session/assignment to remain live. Existing authorized effects are not described as reversed. |
 | Stale profile/policy/target | Snapshot for audit, re-evaluate current policy, and transition a pending confirmation to `stale` rather than executing changed intent. |
 | Compromised child invokes write | `InvokeTool` detects a V2 Chat turn and denies both write classes before `BeginInvocation`; only `PrepareChatConfirmation` may create a proposal. |
 | Unsafe read result | Validate and project through the immutable Chat output/citation contract before returning to the child or persisting customer-safe metadata. Raw gateway result remains operator-only. |
@@ -411,7 +440,7 @@ This is a transactional outbox only for confirmed tool writes:
 - lease owner/expiry, attempt count for **delivery to `BeginInvocation` only**, and resulting `invocation_id`.
 - no result, retryability, or effect outcome fields.
 
-The Tool Gateway consumer re-delivering a command calls `BeginInvocation` with the exact same key and attaches to the existing row. It does not dispatch a second effect. Once the invocation exists, `toolgateway.invocations` is the sole execution/outcome authority.
+The Tool Gateway consumer re-delivering a command calls `BeginInvocation` with the exact same key and attaches to the existing row. Immediately after `BeginInvocation` returns the invocation, the consumer stores its ID and marks the command `delivered`, before any later authorization, credential, runner, or outcome work. Recovery that finds the invocation performs the same link/delivery convergence and does not dispatch a second effect. Once the invocation exists, `toolgateway.invocations` is the sole execution/outcome authority; command state never tracks its result.
 
 Workflow start uses no command row: decision, `work.StartTx`, work item/attempt, source attribution, confirmation outcome link, and Chat event commit in one database transaction.
 
@@ -432,8 +461,8 @@ The customer query joins `conversations.owner_user_identity_id` before returning
 - `toolgateway.invocations.caller_scope` adds `chat_confirmation`; its scope ID is the confirmation UUID. Existing `turn|workflow_step` rows are unchanged. Every V2 Chat invocation also snapshots conversation/profile plus initiating-human, request-actor, and executing-identity IDs so retained gateway audit never depends on mutable or purged Chat/runtime rows.
 - Immutable tool descriptors add the Chat output/citation and full confirmation-template contract in section 10.
 - `work.work_items`/start source support `source.kind='chat'`, conversation/confirmation references, and the three principals from the authentication contract.
-- A content-free `chat.effective_workload_authority` projection returns only currently eligible V2 running turn, assignment/generation, principal, profile, and assigned-model fields. The Inference Gateway's existing dedicated PostgreSQL role receives exact `SELECT` on this projection—no Chat transcript/context/table-wide grant—and retains its current exact runtime/toolgateway workload reads.
-- Inference workload resolution joins that projection for V2 Chat while retaining existing workflow behavior. Any projection/database failure denies before backend inference.
+- Per `DES-HOR-456-13`, a content-free `chat.effective_workload_authority` projection returns only currently eligible V2 running turn, assignment/generation, principal, immutable profile, pool, and assigned-model fields. The Inference Gateway's existing dedicated PostgreSQL role receives exact `SELECT` on this projection—no Chat transcript/context/raw-identity/table-wide/default grant—and retains its approved exact runtime/toolgateway routing/workload reads.
+- Inference workload resolution joins that projection live for every V2 Chat request with no authority cache while retaining existing workflow behavior. Absence, ambiguity, or any projection/database failure denies before backend inference.
 
 All new cross-schema FKs are nullable for legacy compatibility. Application and database checks require them for new V2 rows.
 
@@ -541,7 +570,9 @@ Every Chat-eligible tool version adds an immutable `chat_contract`:
 
 ### Effective authorization algorithm
 
-For discover, model invocation, read invocation, write preparation, confirmed execution, and artifact access, resolve and intersect:
+The same policy authorities apply at active-turn and post-turn confirmation boundaries, but their liveness proofs differ.
+
+For discover, model invocation, read invocation, write preparation, and active-turn artifact access, resolve and intersect:
 
 ```text
 current active initiating human + role + initiating browser-session eligibility
@@ -551,12 +582,29 @@ current active initiating human + role + initiating browser-session eligibility
 ∩ active AgentPool grant/action ceiling
 ∩ current product action/resource authorization
 ∩ current credential-binding resource constraints
-∩ exact runtime assignment, conversation generation, and worker fence
+∩ exact live runtime assignment, conversation generation, and worker fence
 ∩ exact per-run tool version pin
 ∩ valid immutable Chat descriptor contract
 ```
 
-The current ChatProfile selection is not substituted into an active turn; the exact run snapshot applies. A changed active selection stales later confirmation, not the already-authorized model context. Infrastructure or malformed authority is `503`/failed closed, not a misleading broader fallback.
+A pending confirmation intentionally outlives its originating message run and live assignment. For the cookie-only decision and later command execution, resolve and intersect:
+
+```text
+current active initiating human + role + conversation ownership
+∩ trusted durable request-actor and preparation provenance
+∩ current active executing Chat identity
+∩ prepared immutable ChatProfile version still selected and capability still allowed
+∩ current AgentPool grant/action ceiling
+∩ current product action/resource authorization
+∩ current credential-binding resource constraints
+∩ exact originating execution/assignment/generation evidence and proposal digest
+∩ exact prepared tool/workflow/control version pin and descriptor contract
+∩ current target/resource/artifact readiness and version tokens
+```
+
+The decision request additionally requires the same human's current cookie session and CSRF. Asynchronous command execution relies on the durable confirmed decision evidence and rechecks current human/account plus every policy/resource authority above; it does **not** require the originating assignment or worker fence to remain live. The gateway verifies that preparation occurred under that then-live fence, but runtime settlement and assignment cleanup do not invalidate an otherwise current ten-minute proposal.
+
+The current ChatProfile selection is not substituted into an active turn; the exact run snapshot applies. A changed active selection stales a pending confirmation, not the already-authorized model context. Infrastructure or malformed authority is `503`/failed closed, not a misleading broader fallback.
 
 ### Read-only tool
 
@@ -598,22 +646,23 @@ The current ChatProfile selection is not substituted into an active turn; the ex
 
 ### State
 
-```text
-                         confirm + current checks
-pending ------------------------------------------------> confirmed
-  |                                                          |
-  | cancel                                                   | tool: enqueue one command
-  v                                                          | workflow: StartTx one work item
-canceled                                                     v
-                                                     effect outcome is separate
-  | clock >= expires_at
-  v
-expired
-  |
-  | later message or authority/profile/tool/version/
-  | resource/artifact/workflow drift
-  v
-stale
+```mermaid
+stateDiagram-v2
+    [*] --> pending
+    pending --> confirmed: confirm + current checks
+    pending --> canceled: cancel
+    pending --> expired: database clock >= expires_at
+    pending --> stale: later message or authority/profile/tool/version/resource/artifact/workflow drift
+    confirmed --> [*]
+    canceled --> [*]
+    expired --> [*]
+    stale --> [*]
+
+    note right of confirmed
+      tool: enqueue one command
+      workflow: StartTx one work item
+      effect outcome remains separate
+    end note
 ```
 
 Terminal decision states never return to `pending`. Expiry/staleness does not mutate prior proposal fields. A sweeper and every read/decision enforce expiry; clock comparisons use the database clock.
@@ -670,7 +719,7 @@ No cancellation copy says that a completed effect was undone.
 
 Workflow start is a reserved `workflow_start` Chat control. It is not a dynamic Tool Gateway descriptor, customer bearer action, or ordinary read/write gateway invocation.
 
-Preparation runs through an internal mTLS `ChatControlService.PrepareWorkflowStart` called by the trusted supervisor stub. It validates the same active turn/worker/generation/principal/profile boundary as the gateway and resolves:
+Per `DES-HOR-456-14`, preparation runs through the Control Plane's versioned internal mTLS `ChatControlService.PrepareWorkflowStart`, called only by the trusted Harness supervisor's non-secret child stub. The per-turn child cannot connect directly. The service validates the same active turn/worker/generation/principal/profile boundary as the gateway and resolves:
 
 - exact logical workflow key plus Ready immutable version/digest;
 - current customer authorization to view/start it through cookie Chat policy;
@@ -721,7 +770,7 @@ Current dispatch sends `SessionEnd` and releases the session UID when a run term
 
 ### Session preparation protocol
 
-Harness `Work` gains a two-phase Chat session preparation exchange before a V2 turn becomes running:
+Per `DES-HOR-456-15`, the existing trusted bidirectional Harness `Work` stream gains a versioned, size-bounded two-phase Chat session preparation exchange before a V2 turn becomes running:
 
 ```text
 Control: PrepareChatSession
@@ -855,13 +904,14 @@ sequenceDiagram
     DB->>DB: TX current checks + decision + one command
     G->>DB: lease command; verify exact confirmed static scope
     G->>DB: BeginInvocation exact unique key (not yet an effect)
+    G->>DB: link invocation ID + mark command delivered
     G->>DB: recheck current policy; pre-effect denial => failed
     G->>R: one dispatch attempt
     alt committed result
         R-->>G: succeeded/failed
-        G->>DB: terminal invocation + delivered command + safe event
+        G->>DB: terminal invocation + safe event
     else result uncertain
-        G->>DB: outcome_unknown; no redispatch
+        G->>DB: outcome_unknown + safe event; no redispatch
     end
     DB-->>B: durable tool outcome SSE
 ```
@@ -1036,7 +1086,14 @@ For every Chat route, test missing/expired/revoked/disabled cookie, Operator, Ad
 - Concurrent rotations select one winner; retired generation cannot receive new turn, inference, tool, or customer projection.
 - Crash before/after candidate preparation/swap/assignment/terminal projection has the documented state and no replay.
 - Context rebuilt from checkpoint/items yields the retained model-visible history without hidden thinking/credentials; pi/PVC deletion before every resume still passes.
+- Harness rejects unsupported protocol versions, oversized checkpoint/context transfer, wrong workload identity, malformed ordinals/digests, and any child attempt to acquire database/gateway authority.
 - Final assistant projection and runtime settlement are atomic; token-delta loss is harmless.
+
+### Inference workload
+
+- The dedicated role has exact `SELECT` on `chat.effective_workload_authority`, no Chat transcript/context/raw-identity or schema-wide/default grant, and preserves only the separately approved routing/workload reads.
+- Every V2 Chat inference request joins the live projection; absent, ambiguous, stale, or failed projection/database state denies before backend inference, while workflow workload behavior remains unchanged.
+- Wrong principal/profile/pool/model/assignment/generation or retired/preparing generation is denied; workload mTLS and customer/admin listener isolation remain intact.
 
 ### Gateway/tool
 
@@ -1045,12 +1102,15 @@ For every Chat route, test missing/expired/revoked/disabled cookie, Operator, Ad
 - Read safe-output schema/citation projection passes; malformed/oversized/raw-secret-shaped result fails closed and never reaches child/customer context.
 - Direct write `InvokeTool` for a V2 Chat turn never inserts an invocation.
 - Prepare validates templates/targets/references, is idempotent, and inserts no invocation.
-- Confirm command inserts exactly one existing-ledger row under duplicate workers/delivery/process crash; policy drift after decision terminalizes that row failed before runner dispatch.
+- After `assistant.final`, runtime settlement, and originating assignment cleanup, confirmation within the ten-minute window succeeds from durable preparation provenance/current policy and inserts exactly one existing-ledger row without requiring a live worker fence.
+- Duplicate workers/delivery/process crash converge on that row. Once `BeginInvocation` returns it, the command is linked and `delivered` before outcome work; a crash then cannot lease/redeliver it to track the invocation result.
+- Policy drift after decision terminalizes that invocation failed before runner dispatch.
 - Chat idempotent and non-idempotent writes both have one post-boundary dispatch attempt; orphaned `dispatching` rows fail without a runner call, while loss/restart from `running` yields `outcome_unknown` and no second runner call.
 - Unsupported/fabricated tool/digest/turn/generation/artifact/resource is denied with attributable safe evidence.
 
 ### Workflow/artifact
 
+- The versioned internal mTLS `ChatControlService` accepts only the trusted Harness supervisor identity; direct child, customer, bearer, wrong-workload, and unversioned calls fail before confirmation/work mutation.
 - Exact workflow version/payload/inputs/persona/first-step/consequence/reference card.
 - Cancel/expire/stale creates zero work items; confirm/replay creates one Chat-source work item with all principals/refs.
 - Workflow/profile/artifact drift between prepare and decision becomes stale.
