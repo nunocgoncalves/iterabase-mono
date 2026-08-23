@@ -28,7 +28,7 @@ The founder approved these decisions for HOR-451. Product behavior changes requi
 | `DES-HOR-451-11` | First Admin bootstrap and no-active-Admin recovery use the normal email setup channel and never print or create a bootstrap Admin API key. |
 | `DES-HOR-451-12` | The V2 authority epoch is an irreversible `expand → preflight/setup → maintenance cutover → verify/cleanup` transition. Post-epoch recovery is roll-forward or catastrophic full restore, never legacy-writer rollback. |
 | `DES-HOR-451-13` | Customer API access uses the complete fixed action catalogue in this record. Security/credential lifecycle is browser-only; consequence-sensitive bearer access is deferred; workload/internal and admin/debug surfaces are never customer actions. Customer model listing/chat invocation have separate actions, current per-request authority, operator-managed model/rate policy, and payload-free attributable usage. Delivery is split into HOR-514 and HOR-513. |
-| `DES-HOR-451-14` | Customer Inference Gateway authorization uses indexed live reads over its existing dedicated shared-PostgreSQL connection, with no request-authority cache. The gateway role has `SELECT` only on the bounded credential/catalogue projections and `INSERT` only on payload-free usage events; failures deny before backend invocation. A future Redis authorization-cache worker is deferred and requires a separate architecture decision preserving immediate revocation semantics. |
+| `DES-HOR-451-14` | Customer Inference Gateway authorization uses indexed live reads over its existing dedicated shared-PostgreSQL connection, with no request-authority cache. For the customer-authority surface, the existing role adds `SELECT` only on the bounded credential/catalogue projections and `INSERT` only on payload-free usage events; failures deny before backend invocation. The same role retains separately approved exact object-level routing/workload reads. A future Redis authorization-cache worker is deferred and requires a separate architecture decision preserving immediate revocation semantics. |
 
 The full approval metadata for `DES-HOR-451-14` is durable in Obsidian `HOR-451 — Direct PostgreSQL inference authority decision`: Nuno Gonçalves approved it on 2026-08-23 for the customer inference request path, with the exact transport, grants, failure/isolation consequences, deferred alternative, HOR-451 link, and PR #58 review evidence.
 
@@ -149,7 +149,7 @@ An automation request is authorized only while its current owner remains an acti
 | SMTP duplicate/unknown effect | Transactional hash-only outbox; leased sender; retry only before definite acceptance; explicit `outcome_unknown`; resend invalidates earlier unused tokens. |
 | Last Admin removed | Product APIs reject disable/demotion leaving zero active Admins; recovery command only when no active Admin exists. |
 | Legacy split-brain | Durable epoch, maintenance cutover, fingerprint preflight, one transaction, immediate writer/RBAC removal, inert compatibility only. |
-| Gateway DB compromise blast radius | Dedicated role may select only the bounded credential/catalogue projection and insert content-free usage events; no identity mutation grants. |
+| Gateway DB compromise blast radius | `DES-HOR-451-14` adds only the bounded customer credential/catalogue reads and content-free usage inserts. The same role retains separately approved exact object-level routing/workload reads, but no schema-wide/default read privilege, identity mutation grant, or customer-authority use of those internal objects. |
 | Prompt/response usage surveillance | `usage.inference_events` contains identifiers/counts/outcome only, never request or response payload. |
 
 ## 5. Credential and session security envelope
@@ -362,7 +362,15 @@ A bounded read projection for the dedicated Inference Gateway database role. It 
 
 It exposes no email, password/session/reset hash, security-event detail, ownership history, runtime credential, provider/backend route, or non-inference action payload beyond boolean action membership. It is backed by indexed base-key lookup and live joins; it is not a stale gateway snapshot. An automation row is effective only when its owner is currently an active Admin; owner demotion/disablement yields a suspended result before action evaluation.
 
-Per `DES-HOR-451-14`, every customer inference request reads this projection and the bounded model catalogue live through the gateway's existing dedicated shared-PostgreSQL connection. HOR-451 permits no successful-request, in-memory, Redis, or other request-authority cache. The gateway database role receives `SELECT` only on these two projections and `INSERT` only on the payload-free usage ledger. It receives no identity mutation, broad raw-table select, update, or delete privilege.
+Per `DES-HOR-451-14`, every customer inference request reads this projection and the bounded model catalogue live through the gateway's existing dedicated shared-PostgreSQL connection. HOR-451 permits no successful-request, in-memory, Redis, or other request-authority cache. For this customer-authority surface, the existing gateway role adds minimum schema `USAGE` on `identity`, `catalog`, and `usage`, exactly `SELECT` on `identity.inference_api_credentials` and `catalog.effective_api_catalog`, and exactly `INSERT` on the payload-free `usage.inference_events` ledger. It receives no schema `CREATE`.
+
+Those are not the role's complete grants. The gateway keeps its existing single PostgreSQL role/connection, minimum schema `USAGE` on `permissions`, `toolgateway`, and `runtime`, and these separately approved exact object-level reads for non-customer paths:
+
+- `catalog.effective_catalog` for internal backend routing.
+- `permissions.effective_capabilities` and `permissions.effective_rate_limits` for the workload scope's capability/rate pipeline.
+- `toolgateway.pools`, `runtime.turns`, `runtime.workflow_runs`, `runtime.run_pool_assignments`, and `runtime.turn_assignments` for live workload-mTLS pool/turn/assignment authorization.
+
+Customer bearer middleware cannot use those internal routing/workload objects as customer authority, and the internal data must not enter customer responses. The V2 grant migration revokes the legacy `identity.active_api_keys` customer lookup and schema-wide/default gateway read privileges, then materializes the exact union above. The role receives no identity mutation, broad raw-table select, update, or delete privilege. Workload-mTLS listener isolation and fail-closed authorization remain unchanged.
 
 ### 7.13 `catalog.effective_api_catalog`
 
@@ -644,7 +652,7 @@ Startup/chart validation must require or validate:
 - optional operator-mounted local GeoIP database path/version behavior.
 - verified-TLS SMTP host/port/mode/from address and Secret-backed credentials.
 - first-Admin Secret email/locale for fresh install; no synthetic default.
-- Inference Gateway dedicated database DSN/credentials with the `DES-HOR-451-14` bounded grants.
+- Inference Gateway dedicated database DSN/credentials with the `DES-HOR-451-14` customer-authority additions plus the retained exact routing/workload grants in section 7.12.
 - mandatory installation/customer actor/credential/model rate policy; absence cannot imply unlimited inference.
 - operator-managed customer API model exposure catalogue.
 - retention workers/settings for identity network/core events and access-request purge.
@@ -690,6 +698,7 @@ Block cutover on:
 - automation key whose owner is not a current active Admin, including an owner mapped or demoted to Operator.
 - wildcard/unknown action or legacy admin/token key not marked for revocation.
 - absent/malformed rate policy where required.
+- a gateway grant plan that leaves schema-wide/default customer-authority reads or removes any required exact routing/workload grant from section 7.12.
 - unresolved mapping into the fixed V2 action catalogue.
 - delegated JWT lifetime beyond the bounded drain.
 - source fingerprint drift.
@@ -721,8 +730,9 @@ Under one advisory lock and source fingerprint:
 1. Quiesce customer ingress and legacy identity consumers/writers.
 2. Verify backup/restore evidence.
 3. In one transaction, backfill V2 local roles/account state, API-key owners/actors/actions/rates/history, security audit, inert CR-derived evidence, retired-key revocations, removal of broad customer wildcard grants, and `identity.authority_state.epoch=v2`.
-4. Start only V2 consumers and verify current-authority reads.
-5. Remove legacy reconcilers/finalizers/writer RBAC immediately.
+4. Replace the gateway's legacy schema-wide/default reads and `identity.active_api_keys` customer lookup with the exact customer-authority plus retained routing/workload grant union in section 7.12.
+5. Start only V2 consumers and verify current-authority reads plus workload-mTLS model/chat authorization and routing.
+6. Remove legacy reconcilers/finalizers/writer RBAC immediately.
 
 There is no interval with two customer-authority writers.
 
@@ -781,6 +791,7 @@ There is no interval with two customer-authority writers.
 - Authority/catalogue/limiter outage fail closed.
 - Streaming/non-streaming disconnect, pre-header/mid-stream/backend uncertainty with exactly one inference attempt.
 - Usage key/owner/actor/action/alias/tokens/outcome and payload absence.
+- Exact database-grant regression: customer authority has only minimum schema `USAGE`, bounded projection reads, and payload-free ledger inserts with no schema `CREATE`; existing backend routing and workload-mTLS model/chat reads remain functional; legacy/default broad customer reads are absent.
 - Workload-mTLS and admin/debug listener isolation regressions.
 - Every unsupported OpenAI-compatible route denied.
 
@@ -799,9 +810,9 @@ There is no interval with two customer-authority writers.
 | --- | --- |
 | HOR-451 | This approved architecture/decision contract only. |
 | HOR-453 | Access request, verification/setup/reset, local password, browser session/CSRF, recent password evidence, auth email/bootstrap packaging and journeys. |
-| HOR-454 | Role/People enforcement, browser-only identity mutations, target authority schema/migration, key owner/actor/action substrate, inference credential projection/grants. |
+| HOR-454 | Role/People enforcement, browser-only identity mutations, target authority schema/migration, key owner/actor/action substrate, inference credential projection, and exact grant-union migration preserving routing/workload reads. |
 | HOR-514 | Personal/automation Settings and browser-only credential lifecycle, presets, one-time reveal, rotate/revoke/transfer/suspension UI/API. |
-| HOR-513 | Inference Gateway exact actions, `DES-HOR-451-14` live PostgreSQL lookup/bounded grants/no authority cache, model filter, mandatory rates, usage ledger, listener isolation, charts/tests. |
+| HOR-513 | Inference Gateway exact actions, `DES-HOR-451-14` live PostgreSQL lookup/bounded customer grants/no authority cache, model filter, mandatory rates, usage ledger, retained routing/workload regression, listener isolation, charts/tests. |
 | HOR-452/HOR-456 | Cookie-session-only Chat contract/implementation; no bearer Chat action. |
 | HOR-455 | Confirmed Chat effects plus personal/automation `workflows.start` handoff/attribution. |
 | HOR-459 | Routed shell, Settings slots, workflow/work/value role-safe projections. |
