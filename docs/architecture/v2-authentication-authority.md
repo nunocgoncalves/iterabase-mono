@@ -28,6 +28,9 @@ The founder approved these decisions for HOR-451. Product behavior changes requi
 | `DES-HOR-451-11` | First Admin bootstrap and no-active-Admin recovery use the normal email setup channel and never print or create a bootstrap Admin API key. |
 | `DES-HOR-451-12` | The V2 authority epoch is an irreversible `expand → preflight/setup → maintenance cutover → verify/cleanup` transition. Post-epoch recovery is roll-forward or catastrophic full restore, never legacy-writer rollback. |
 | `DES-HOR-451-13` | Customer API access uses the complete fixed action catalogue in this record. Security/credential lifecycle is browser-only; consequence-sensitive bearer access is deferred; workload/internal and admin/debug surfaces are never customer actions. Customer model listing/chat invocation have separate actions, current per-request authority, operator-managed model/rate policy, and payload-free attributable usage. Delivery is split into HOR-514 and HOR-513. |
+| `DES-HOR-451-14` | Customer Inference Gateway authorization uses indexed live reads over its existing dedicated shared-PostgreSQL connection, with no request-authority cache. The gateway role has `SELECT` only on the bounded credential/catalogue projections and `INSERT` only on payload-free usage events; failures deny before backend invocation. A future Redis authorization-cache worker is deferred and requires a separate architecture decision preserving immediate revocation semantics. |
+
+The full approval metadata for `DES-HOR-451-14` is durable in Obsidian `HOR-451 — Direct PostgreSQL inference authority decision`: Nuno Gonçalves approved it on 2026-08-23 for the customer inference request path, with the exact transport, grants, failure/isolation consequences, deferred alternative, HOR-451 link, and PR #58 review evidence.
 
 ## 2. Scope and non-goals
 
@@ -60,9 +63,9 @@ The founder approved these decisions for HOR-451. Product behavior changes requi
 | Human identity, email, role, account state | PostgreSQL `identity.identities` + `identity.local_users` | `IdentityMapping`, `PermissionPolicy`, browser claims, UI state |
 | Browser authentication | Hashed opaque `identity.browser_sessions` row + current local-user state | JWT browser cookie, cached role, user-supplied identity |
 | Customer API credential | Hashed `identity.api_keys` row + current owner/actor/account/role + immutable actions + API catalogue | Key-supplied scope, owner role snapshot, wildcard grant |
-| Automation accountability | Required active human owner + immutable service actor + permanent ownership history | Service actor alone, mutable audit text |
+| Automation accountability | Required active Admin owner + immutable service actor + permanent ownership history | Operator/inactive owner, service actor alone, mutable audit text |
 | Customer inference models | Operator-managed `catalog.effective_api_catalog` | Key-selected provider/backend, raw gateway snapshot alone |
-| Customer inference authority | Indexed per-request `identity.inference_api_credentials` read | Stale authorization snapshot, successful request cache entry |
+| Customer inference authority | Indexed live per-request PostgreSQL read from `identity.inference_api_credentials`; no request-authority cache | Stale authorization snapshot, successful request cache entry |
 | Workflow/agent execution capability | Existing Iterabase-operated workflow/AgentPool/tool/credential policy | Customer role or API action alone |
 | Work/tool effects | Work/runtime/tool ledgers | Identity security-event detail payload |
 
@@ -85,12 +88,12 @@ executing_identity = selected workflow/agent when work is delegated
 For an automation credential:
 
 ```text
-initiating_human = accountable owner at request time
+initiating_human = accountable active Admin owner at request time
 request_actor = immutable service actor
 executing_identity = selected workflow/agent when work is delegated
 ```
 
-Owner transfer changes future initiating-human accountability and appends permanent history. It never rewrites prior work, inference, audit, or ownership evidence.
+An automation request is authorized only while its current owner remains an active Admin. Owner disablement or Admin→Operator demotion makes every authority projection return the credential as suspended before evaluating its immutable actions. Owner transfer changes future initiating-human accountability and appends permanent history. It never rewrites prior work, inference, audit, or ownership evidence.
 
 ### 3.3 Trusted request boundaries
 
@@ -135,8 +138,8 @@ Owner transfer changes future initiating-human accountability and appends perman
 | Session fixation/theft | Login replaces any presented token; 256-bit opaque token stored only as hash; `__Host-iterabase_session`; current account/role read every request; immediate revocation. |
 | Cross-site mutation | `Secure`, `HttpOnly`, `SameSite=Lax`, `Path=/`, no `Domain`; exact configured origin; session-bound `X-CSRF-Token`; no credentialed CORS. |
 | Cookie/bearer privilege confusion | Authorization bearer path never falls back to cookies. Credential lifecycle/security routes reject bearer authentication even if a valid cookie is also present. |
-| Stale role after demotion/disable | Resolve current account/role each request. Revoke browser sessions on role change/disable. Clip/suspend keys on the next API request. |
-| Service actor inherits Admin | Evaluate automation action catalogue only; owner role supplies accountability, never service authority. |
+| Stale role after demotion/disable | Resolve current account/role each request. Revoke browser sessions on role change/disable. Clip/suspend personal keys on the next API request; every automation projection fails closed unless its owner is currently an active Admin. |
+| Service actor inherits Admin | Require an active Admin owner but evaluate only the automation action catalogue; owner role supplies accountability and eligibility, never service authority. |
 | Extra keys multiply inference limits | Most restrictive actor/credential/model policy; actor-keyed counters. Limiter failure is fail closed. |
 | Model/provider discovery | `/v1/models` returns only aliases in `effective_api_catalog`; responses/logs omit provider/backend/routing/credential details. |
 | Key manages keys/security | Lifecycle and identity-authority mutations are cookie + CSRF + recent-auth only; bearer returns the normal unauthorized/forbidden contract. |
@@ -193,6 +196,8 @@ Owner transfer changes future initiating-human accountability and appends perman
 - Disablement suspends every key owned by that human.
 - Admin→Operator demotion suspends any key containing an Admin-only action; an Operator-only personal key may continue.
 - Re-enable/promotion/catalogue growth never resumes or expands a suspended/existing key. Explicit recent-auth rotation/reissue is required.
+- Automation creation and owner transfer require a current active Admin owner in the same locked lifecycle transaction.
+- Every Product API and Inference Gateway authority projection derives an automation credential as suspended when its owner is disabled or no longer an Admin. Re-enable/promotion never resumes it automatically.
 - Owner transfer is available only for automation credentials, only between active Admins, never changes actor/actions, and appends permanent history.
 
 ## 6. Identity state machines
@@ -311,13 +316,14 @@ Each key/version requires:
 - UUID and credential family/version linkage.
 - type exactly `personal|automation`.
 - unique token hash and non-authenticating display prefix.
-- required `owner_user_identity_id` referencing a human local user.
+- required `owner_user_identity_id` referencing a human local user; personal issuance requires an active Operator/Admin, while automation creation/transfer requires an active Admin.
 - required `actor_identity_id`; equal to owner for personal, distinct service identity for automation.
 - immutable name/purpose, action array/set, creation actor/time, expiry, last-used coalescing, rotation predecessor, retiring deadline, revocation/suspension state and reason.
 - explicit credential-level rate policy reference/values; absence cannot mean unlimited for customer inference.
 - no wildcard action and no owner-role inheritance switch.
+- effective owner account/role state used by every authority projection; an automation version is eligible only when its owner is currently `active` with role `admin`.
 
-Constraints enforce personal owner=actor and automation owner≠actor/service kind. Application code and database checks reject actions outside the applicable catalogue.
+Constraints enforce personal owner=actor and automation owner≠actor/service kind. Locked creation/transfer transactions enforce an active Admin automation owner; projections independently re-check that mutable invariant and return fail-closed suspension after owner demotion/disablement. Application code and database checks reject actions outside the applicable catalogue.
 
 ### 7.8 `identity.api_key_ownership_history`
 
@@ -349,14 +355,14 @@ A bounded read projection for the dedicated Inference Gateway database role. It 
 
 - key hash/UUID/type/status/expiry.
 - immutable action membership for the two inference actions.
-- owner human UUID and current owner account state.
+- owner human UUID and current owner account state and role.
 - actor UUID/kind and current personal actor role where applicable.
 - effective suspension reason and credential/actor rate identifiers/limits.
 - authority epoch.
 
-It exposes no email, password/session/reset hash, security-event detail, ownership history, runtime credential, provider/backend route, or non-inference action payload beyond boolean action membership. It is backed by indexed base-key lookup and live joins; it is not a stale gateway snapshot.
+It exposes no email, password/session/reset hash, security-event detail, ownership history, runtime credential, provider/backend route, or non-inference action payload beyond boolean action membership. It is backed by indexed base-key lookup and live joins; it is not a stale gateway snapshot. An automation row is effective only when its owner is currently an active Admin; owner demotion/disablement yields a suspended result before action evaluation.
 
-The gateway database role receives `SELECT` only on this projection and the bounded model catalogue plus `INSERT` on the usage ledger. It receives no identity mutation, raw-table broad select, update, or delete privilege.
+Per `DES-HOR-451-14`, every customer inference request reads this projection and the bounded model catalogue live through the gateway's existing dedicated shared-PostgreSQL connection. HOR-451 permits no successful-request, in-memory, Redis, or other request-authority cache. The gateway database role receives `SELECT` only on these two projections and `INSERT` only on the payload-free usage ledger. It receives no identity mutation, broad raw-table select, update, or delete privilege.
 
 ### 7.13 `catalog.effective_api_catalog`
 
@@ -554,7 +560,7 @@ sequenceDiagram
   end
 ```
 
-The implementation may retain the repository's existing limiter substrate. Changing datastore/transport/isolation strategy requires separate architecture approval. Regardless of substrate, missing/failed customer limiter enforcement is denied, not unlimited or fail-open.
+The implementation may retain the repository's existing Redis limiter substrate solely for rate counters. Per `DES-HOR-451-14`, Redis is not customer authorization authority: credential and catalogue state are read live from PostgreSQL on every customer request, and failed reads or accepted-event inserts deny before backend invocation. A future Redis authorization-cache worker is explicitly deferred; adopting one requires a separate architecture decision and proof that revocation, disablement, demotion, expiry, and suspension still take effect on the next request. Any other datastore/transport/isolation change likewise requires separate approval.
 
 ## 10. Role, account, and credential transitions
 
@@ -566,7 +572,7 @@ The implementation may retain the repository's existing limiter substrate. Chang
 | Disabled → Active | None created | Remain suspended | Remain suspended |
 | Password reset completion | Revoke | No implicit revocation | No implicit revocation unless owner/account policy separately changes |
 | Key rotation | No change | New version; old version bounded retiring overlap | Same |
-| Automation owner transfer | No change | N/A | Future owner changes; actor/actions unchanged; history append |
+| Automation owner transfer | No change | N/A | Only to an active Admin; future owner changes, actor/actions unchanged, history append |
 | Key expiry/revocation | No change | Final for that version | Final for that version |
 
 ## 11. Identity security audit
@@ -611,20 +617,39 @@ A locked, RBAC-less `api bootstrap` init container:
 
 ## 13. Required configuration and secret boundary
 
+### 13.1 Public customer API channels
+
+The deployment operator, through repository-owned chart/configuration values, is the sole configuration owner for two independent non-secret channel records:
+
+- **Product API:** `enabled`, absolute public HTTPS `base_url`, and customer-safe availability `available|temporarily_unavailable`.
+- **OpenAI-compatible Inference API:** `enabled`, absolute public HTTPS `base_url`, and customer-safe availability `available|temporarily_unavailable`.
+
+The logical field names above are contract names; chart keys may follow established repository nesting. These rules are fixed:
+
+1. Either channel or both channels may be enabled. An enabled URL is absolute HTTPS, contains no userinfo/query/fragment, has one normalized base path, and routes only to that channel's public customer listener. It must not identify a health, metrics, workload, admin/debug, provider, backend, or database endpoint. The Product API may share the browser origin, but its base URL is still configured and validated independently.
+2. A disabled channel is omitted from Settings and one-time reveal examples. Its actions are absent from new-key selection and denied by the current API-channel catalogue for existing keys; disabling does not mutate immutable action lists. Re-enabling never widens or automatically resumes an existing credential.
+3. Chart/static validation and the owning component's startup validation reject an enabled record with an invalid URL, unknown availability value, or listener-class mismatch. Actual Internet reachability is not a startup requirement and a transient outage does not rewrite configuration.
+4. The control-plane Settings API returns only enabled customer-safe records: channel label, normalized public base URL, and availability. Reveal examples are additionally filtered to the APIs required by the selected actions. It never returns internal service names, raw health/readiness, routing, credentials, or configuration provenance.
+5. Availability is an operator-owned customer-safe channel state, not browser probing or an infrastructure-health feed. `temporarily_unavailable` keeps the URL visible with the approved “Requests to this base URL are failing right now. Nothing about your key has changed.” meaning. It neither revokes nor rotates a key; the owning public API returns its normal customer-safe unavailable response, while the other enabled channel and browser credential management continue independently.
+
+This contract covers the approved both-enabled, Product-only, Inference-only, and temporarily-unavailable Settings states without introducing a customer configuration surface.
+
+### 13.2 Other required configuration
+
 Startup/chart validation must require or validate:
 
-- exact public HTTPS origin.
+- exact public HTTPS browser origin, independently from the public API channel URLs.
 - session/CSRF and API-key hashing domain configuration where required by implementation.
 - trusted proxy CIDRs and one forwarded-address header/chain contract.
 - optional operator-mounted local GeoIP database path/version behavior.
 - verified-TLS SMTP host/port/mode/from address and Secret-backed credentials.
 - first-Admin Secret email/locale for fresh install; no synthetic default.
-- Inference Gateway dedicated database DSN/credentials with bounded grants.
+- Inference Gateway dedicated database DSN/credentials with the `DES-HOR-451-14` bounded grants.
 - mandatory installation/customer actor/credential/model rate policy; absence cannot imply unlimited inference.
 - operator-managed customer API model exposure catalogue.
 - retention workers/settings for identity network/core events and access-request purge.
 
-Normal customer Settings and APIs never reveal these values. Invalid security/email/model/rate prerequisites fail the owning startup/readiness boundary without flapping unrelated authenticated API health after a transient SMTP outage.
+Normal customer Settings and APIs never reveal secret or internal configuration values. Invalid security/email/model/rate/API-channel prerequisites fail the owning chart/startup/readiness boundary without flapping unrelated authenticated API health after a transient SMTP or public-channel outage.
 
 ## 14. Failure semantics
 
@@ -634,6 +659,8 @@ Normal customer Settings and APIs never reveal these values. Invalid security/em
 | Inference credential/catalogue read fails | Deny before backend call. |
 | Required inference limiter fails | Deny; never unlimited/fail-open. |
 | Accepted usage insert fails | Deny before backend invocation; do not retry inference. |
+| Enabled public API channel configuration is invalid | Reject chart/startup validation for the owning configuration; do not expose an unsafe or internal URL. |
+| Enabled public API channel is temporarily unavailable | Keep its safe public URL visible with bounded unavailable copy; do not change the credential; return the owning customer-safe unavailable response and keep the other channel/browser lifecycle independent. |
 | Terminal usage append is uncertain after backend/stream starts | Preserve the single accepted/inference attempt, emit bounded operational evidence/metric, return honest stream termination where possible, never retry. HOR-513 must make the exact phase sequence testable. |
 | SMTP unavailable before acceptance | Durable outbox retry; auth/API readiness remains honest and unrelated authenticated traffic can continue. |
 | SMTP acceptance ambiguous | `outcome_unknown`; no automatic resend; explicit resend rotates token. |
@@ -660,6 +687,7 @@ Block cutover on:
 - canonical email collisions or non-deliverable/synthetic active Admin identity.
 - no valid future active Admin/setup path.
 - active key without an accountable human owner or valid actor.
+- automation key whose owner is not a current active Admin, including an owner mapped or demoted to Operator.
 - wildcard/unknown action or legacy admin/token key not marked for revocation.
 - absent/malformed rate policy where required.
 - unresolved mapping into the fixed V2 action catalogue.
@@ -674,8 +702,8 @@ Legacy key disposition:
 - legacy `admin` and `token` keys: revoke.
 - legacy wildcard/unknown key: block until revoked or explicitly remapped.
 - legacy personal `work` key: preserve human owner/actor and map only the approved fixed work/start subset supported by its verified use; never infer Admin/security actions.
-- legacy service key: require an operator-supplied active human owner/actor manifest.
-- legacy `gateway` key: map only to `inference.models.read` and `inference.chat.invoke` with explicit owner/actor and materialized mandatory rates.
+- legacy service key: require an operator-supplied active Admin owner and distinct service-actor manifest.
+- legacy `gateway` key: map only to `inference.models.read` and `inference.chat.invoke` with an explicit active Admin owner, distinct service actor, and materialized mandatory rates.
 - when mapping is ambiguous, cutover blocks rather than widening.
 
 ### 15.3 Delegated JWT drain
@@ -737,16 +765,17 @@ There is no interval with two customer-authority writers.
 
 - Operator/Admin browser projection matrix and direct API negatives.
 - Personal and automation action/preset creation; arbitrary/wildcard/browser/deferred/internal/debug injection rejected.
-- Owner/actor constraints, ownership transfer/history, disable/re-enable/demotion/promotion behavior.
+- Owner/actor constraints, active-Admin automation creation/transfer/migration invariants, fail-closed projection after owner disablement/demotion, ownership history, and no resume after re-enable/promotion.
 - One-time reveal/no-store/log/analytics/crash-report exclusion.
 - Rotation overlap, expiry, revocation, suspended finality, and no automatic widening/resumption.
 - Every endpoint-family row in section 9, including prerequisites and no scope proliferation.
+- Product/Inference public base-URL validation, both/either-enabled projection, action clipping, temporarily-unavailable copy/failure isolation, and no internal endpoint disclosure.
 - Personal/automation API start idempotency and three-principal attribution.
 
 ### Inference tests
 
 - Separate models/chat actions; action confusion denied.
-- Current-authority next-request behavior after revoke/disable/demotion/expiry/suspension.
+- Current-authority next-request behavior after revoke/disable/demotion/expiry/suspension, using indexed live PostgreSQL reads with no request-authority cache.
 - Exposed/non-exposed/unknown alias behavior with no provider/backend leak.
 - Mandatory most-restrictive actor/credential/model rates; multiple keys cannot multiply actor limits.
 - Authority/catalogue/limiter outage fail closed.
@@ -772,7 +801,7 @@ There is no interval with two customer-authority writers.
 | HOR-453 | Access request, verification/setup/reset, local password, browser session/CSRF, recent password evidence, auth email/bootstrap packaging and journeys. |
 | HOR-454 | Role/People enforcement, browser-only identity mutations, target authority schema/migration, key owner/actor/action substrate, inference credential projection/grants. |
 | HOR-514 | Personal/automation Settings and browser-only credential lifecycle, presets, one-time reveal, rotate/revoke/transfer/suspension UI/API. |
-| HOR-513 | Inference Gateway exact actions, authoritative lookup, model filter, mandatory rates, usage ledger, listener isolation, charts/tests. |
+| HOR-513 | Inference Gateway exact actions, `DES-HOR-451-14` live PostgreSQL lookup/bounded grants/no authority cache, model filter, mandatory rates, usage ledger, listener isolation, charts/tests. |
 | HOR-452/HOR-456 | Cookie-session-only Chat contract/implementation; no bearer Chat action. |
 | HOR-455 | Confirmed Chat effects plus personal/automation `workflows.start` handoff/attribution. |
 | HOR-459 | Routed shell, Settings slots, workflow/work/value role-safe projections. |
