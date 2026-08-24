@@ -295,13 +295,14 @@ Validation computes a structured region assignment before accepting the immutabl
 1. Index every node, declared outcome, edge, terminal route, fork declaration, branch key, branch entry, and paired join.
 2. Require 2–16 unique branch keys and unique branch entries per fork. Require one unique paired join and reciprocal fork reference.
 3. Start a traversal at each branch entry, stopping at the paired join. Every visited non-join node is assigned to exactly one `(fork, branch)` region.
-4. Reject a node reached from two branch entries, a branch that cannot reach the join, an edge into a branch from outside, an edge from a branch to another branch/fork/unpaired join/root node, or a branch/global terminal before the join.
-5. Reject a fork or join encountered inside a branch. Because nesting/overlap is unsupported, every control node belongs to the root region.
-6. Classify every remaining ordinary node as root/sequential. Require all root nodes reachable from `entryNode` under implicit fork fan-out/join convergence.
-7. Run Tarjan/Kosaraju SCC analysis over ordinary edges plus the structural fork-to-entry and arrival-to-join arcs. A cyclic SCC is valid only when every member is ordinary and all members have the same region: root or one exact branch.
-8. Reject any SCC containing a fork/join, nodes from multiple branches, or both root and branch nodes. This rejects post-join-to-pre-fork loops and leave/re-enter branch loops explicitly.
-9. Preserve the existing rule that every node has a possible path to a graph terminal. For a branch, that path must first reach its paired join.
-10. Validate `maxTransitions` in the existing 1–10,000 range and apply it to each lane independently.
+4. Reject every ordinary graph edge whose destination is a `parallel_join` unless its source is assigned to one exact branch declared by that join's paired fork. The source outcome must be a valid terminal route for that branch. These branch-arrival routes are the only join ingress; a root-to-join edge and an edge from an unpaired fork's branch are invalid.
+5. Reject a node reached from two branch entries, a branch that cannot reach the join, an edge into a branch from outside, an edge from a branch to another branch/fork/unpaired join/root node, or a branch/global terminal before the join.
+6. Reject a fork or join encountered inside a branch. Because nesting/overlap is unsupported, every control node belongs to the root region.
+7. Classify every remaining ordinary node as root/sequential. Require all root nodes reachable from `entryNode` under implicit fork fan-out/join convergence.
+8. Run Tarjan/Kosaraju SCC analysis over ordinary edges plus the structural fork-to-entry and arrival-to-join arcs. A cyclic SCC is valid only when every member is ordinary and all members have the same region: root or one exact branch.
+9. Reject any SCC containing a fork/join, nodes from multiple branches, or both root and branch nodes. This rejects post-join-to-pre-fork loops and leave/re-enter branch loops explicitly.
+10. Preserve the existing rule that every node has a possible path to a graph terminal. For a branch, that path must first reach its paired join.
+11. Validate `maxTransitions` in the existing 1–10,000 range and apply it to each lane independently.
 
 ### 4.3 Explicit cyclic-review semantics
 
@@ -498,14 +499,15 @@ A crash before commit leaves the fork pending and reclaimable. A crash after com
 
 One branch-arrival transaction:
 
-1. locks attempt, activation, branch lane, terminal node, and branch record;
-2. verifies matching fences, successful source completion, and the paired-join route;
-3. writes the immutable arrival and marks branch/lane arrived;
-4. appends branch evidence;
-5. if arrivals remain, commits without creating a join visit;
-6. if this is the last arrival, locks the root lane, creates exactly one join aggregate and join control visit, marks activation joined/root runnable, emits `joined`, and routes to the next root visit or graph terminal in the same transaction.
+1. locks the attempt and paired activation first;
+2. locks both the arriving branch lane and root lane in stable UUID order before any node or branch row—the root lane is acquired for every arrival because the activation lock serializes the decision about whether this arrival completes the region;
+3. locks the terminal node and branch records in stable UUID order, then verifies matching fences, successful source completion, and the paired-join route;
+4. writes the immutable arrival and marks branch/lane arrived;
+5. appends branch evidence;
+6. if arrivals remain, commits without creating a join visit;
+7. if this is the last arrival, creates exactly one join aggregate and join control visit under the already-held root-lane lock, marks activation joined/root runnable, emits `joined`, and routes to the next root visit or graph terminal in the same transaction.
 
-A duplicate last-arrival race returns the existing arrival/join. No observer can see downstream eligibility without the complete aggregate.
+A duplicate last-arrival race returns the existing arrival/join. No observer can see downstream eligibility without the complete aggregate, and no arrival path inverts the global lane-before-node/branch lock order.
 
 ### 6.5 Transition bound
 
@@ -629,6 +631,15 @@ A Tool Gateway's existing same-invocation policy for proven-idempotent transport
 
 Queued/pending nodes, blockers, and assignments are terminalized in the stop transaction and are not network outbox targets.
 
+Target lifecycle and terminal evidence are exact:
+
+- `pending` and `leased` mean delivery has not converged. `delivered` means the exact control was accepted or deduplicated by its owner, but the target's safe terminal condition has not yet been proved. All three states are nonterminal for propagation.
+- A `turn` target is `settled` only after the exact child/turn is observed stopped and its assignment is terminal. It may be `unreachable` after bounded delivery only when the assignment is already terminal/fenced, the exact worker generation is no longer authoritative, and all later gateway/inference authorization for that turn fails closed. An unreachable child may produce after-terminal evidence but cannot advance or create a new effect.
+- A `tool_invocation` target is propagation-terminal only when its exact Tool Gateway row is `succeeded|failed|outcome_unknown`; a cancel acceptance alone is merely `delivered`. Bounded control-delivery failure may leave the target `unreachable`, but that state is aggregate-eligible only after the ledger independently reaches one of those terminal outcomes. `dispatching|running` is never eligible.
+- A `session` target is `settled` only when the approved session owner/reaper verifies the exact sandbox path absent and records the result. If its worker is unreachable and absence cannot be proved, the target may become `unreachable` only while the exact session ID remains never-reusable and its UID/GID allocation remains durably non-recyclable. That preserved isolation fence makes delivery terminal for restart while the leaked directory remains an alerted maintenance backlog; a later verified reap may advance the target to `settled`. Neither restart nor reset may delete or recycle that fence while the directory may exist.
+
+A reconciler sets `stop_intents.propagation_state='settled'` in one transaction if and only if the target set is complete under the attempt's terminal fence, no target is `pending|leased|delivered`, every `unreachable` target satisfies the kind-specific proof above, every exact work-scoped invocation is outside `dispatching|running`, and all invocation ambiguity has been classified by the Tool Gateway ledger. An intent with no targets may be created already `settled`. Otherwise it is `pending` until first lease and `propagating` until this full predicate holds. `unreachable` stops blind control redelivery; it never by itself claims that a turn, effect, or sandbox was canceled.
+
 ### 9.2 Customer cancellation sequence
 
 ```mermaid
@@ -703,7 +714,7 @@ A stopped/restart projection joins exact work-attempt node/turn identities to `t
 
 Cancellation never changes these states. A runner result committed after stop updates the consequence projection and appends a safe timeline event such as `consequence_succeeded_after_stop` or `consequence_outcome_unknown`; it does not mutate the stopped attempt.
 
-Restart eligibility requires stop propagation to have no `pending|leased` turn/invocation targets and no work-scoped invocation in `dispatching|running`. Lease recovery must settle an ambiguous write to `outcome_unknown` before the customer may confirm a restart. This prevents a restarted path from racing the original in-flight effect.
+For a `failed|canceled` source attempt, both restart proposal creation and confirmation require its unique `stop_intent` to satisfy the section 9.1 aggregate and have `propagation_state='settled'`; checking only for the absence of `pending|leased` targets is insufficient. A `succeeded` source must have no `pending|propagating` stop intent. Every source state additionally requires zero exact work-scoped invocation in `dispatching|running`. Confirmation repeats these checks under the attempt/proposal lock and returns stale if intent, target, invocation, or consequence evidence differs from the proposal. Lease recovery must classify an ambiguous write as `outcome_unknown` before either gate can pass. This prevents a restarted path from racing original in-flight execution or effect delivery while allowing an unreachable old session only under its preserved non-recycling isolation fence.
 
 ## 11. Browser authorization and confirmation
 
@@ -762,8 +773,8 @@ When a declared anchor edge commits:
 1. lock attempt/root lane/anchor execution;
 2. verify matching definition, outcome, and edge target;
 3. prove there is no `open` fork activation;
-4. resolve every declared source to an exact successful root/join execution at or before the anchor;
-5. re-read canonical artifact state/digests and output digests;
+4. resolve every declared source deterministically in the anchor's root lane: if the source is the anchor node, select that exact anchor execution; otherwise select the successful execution for the declared source node with the greatest lane execution sequence strictly less than the anchor execution sequence. A completed-join source selects that exact join control execution and aggregate. Lane sequence is unique, so ties are impossible; absence of a qualifying execution fails the transaction as an integrity incident rather than choosing another visit;
+5. re-read canonical artifact state/digests and output digests for those exact executions;
 6. insert the immutable attainment/manifest;
 7. create the normal resume target node in the same original attempt;
 8. append safe checkpoint evidence without presenting it as a new work item state.
@@ -937,6 +948,7 @@ Generate and shrink graph fixtures to prove:
 
 - 2 and 16 branches accepted; 1, 17, duplicate keys/entries rejected;
 - branch node-disjointness, paired join reciprocity, all-path-to-join, no branch terminal, and deterministic `joined` coverage;
+- a root-region edge directly into a paired join and an unpaired branch-to-join bypass are rejected by generated/shrunk property fixtures;
 - sequential `review -> address_review -> review -> terminal` accepted;
 - the same cycle inside one branch with terminal `review -> join` accepted;
 - cycle through fork/join, post-join-to-pre-fork, cross-branch, leave/re-enter, nested fork, and overlapping regions rejected;
@@ -974,6 +986,7 @@ Run at least two scheduler replicas and many goroutines with deterministic failp
 - `BeginInvocation` vs cancel lock-order tests prove insert-before-stop is captured and stop-before-insert denies.
 - Active assignment terminalization denies subsequent tool and inference boundaries.
 - Stop outbox re-delivery sends exact idempotent `AbortTurn`, invocation cancel, and `SessionEnd` only.
+- Target-state matrix tests prove `delivered` is nonterminal; turn/invocation `unreachable` requires its independent fence/ledger proof; session `unreachable` preserves the never-reusable session and UID/GID allocation; and the stop intent settles only under the complete section 9.1 predicate.
 - Late worker sequences append/dedup after-terminal evidence and never arrive/join.
 - Write cancellation after send preserves `succeeded|outcome_unknown`; no test accepts a fabricated failed/undone state.
 - Distinct branch sessions/UIDs can execute on separate workers over the approved RWX substrate and cannot read each other's live directories.
@@ -993,13 +1006,15 @@ Assert exact customer status, action-required flag/count, blocker order, stopped
 ### 18.6 Restart/checkpoint tests
 
 - attainment after normal root edge, after join, and on repeated root-cycle edge;
+- a root cycle in which both reusable source and anchor repeat proves each manifest selects the anchor execution exactly and the greatest successful source lane sequence before that anchor occurrence;
 - no attainment during an open activation or inside a branch;
 - newest applicable lineage selection and exact manifest integrity;
 - changed source JSON, guidance, artifact ID, digest, MIME, or consumption mode forces entry and zero reuse;
 - unavailable source record falls back deterministically;
 - reused output appears only in context/reference tables, never as a successful visit/invocation/value event;
 - reachable consequence computation excludes pre-checkpoint nodes and includes downstream branch/cycle paths;
-- running invocation blocks restart; terminal/unknown drift stales proposal;
+- proposal and confirmation both reject `pending|propagating` stop intent, nonterminal target evidence, or a running invocation; terminal/unknown drift stales the proposal;
+- an unreachable session permits restart only while its exact session/UID fence remains non-recyclable; deleting that fence is rejected;
 - duplicate confirm creates exactly one new attempt and wholly new sessions.
 
 ### 18.7 Crash/failure model tests
@@ -1008,18 +1023,20 @@ Use deterministic barriers before/after fork commit, turn creation, assignment c
 
 ### 18.8 OPO1 reset rehearsal
 
-On a disposable OPO1 database copy:
+On a disposable OPO1 database and RWX copy:
 
-1. seed current sequential/cyclic definitions, work items, attempts, blockers, assignments, sessions, and work-scoped invocations;
-2. prove cutover preflight rejects active runs, assignments, and pending/running/outcome-unknown work invocations;
-3. settle them and take/verify the cold snapshot;
-4. run the exact foreign-key-ordered reset with all writers down;
-5. verify identity, artifact bytes/metadata, value/configuration authorities, and declarative sources remain;
-6. deploy one V2 binary set and reconcile definitions afresh;
-7. reject an invalid cross-boundary cycle before starts reopen;
-8. pass sequential, root-cycle, branch-cycle, join-all, cancellation, and checkpoint restart smoke tests;
-9. rehearse pre-reopen old-release snapshot restore;
-10. document that post-reopen downgrade is restore-and-lose-new-work or roll-forward, never mixed binary operation.
+1. seed current sequential/cyclic definitions, work items, attempts, blockers, assignments, session UID fences/directories (including a leaked sandbox), and work-scoped invocations;
+2. prove cutover preflight rejects every authoritative nonterminal run state, including a blocked `runtime.workflow_runs.state='awaiting_approval'` row with its open `work.blockers` record and `runtime.node_executions.state='blocked'`, as well as active turns/assignments and `dispatching|running|outcome_unknown` work invocations;
+3. settle the workload, quiesce every PostgreSQL and retained-object mutation source, and prove the designated maintenance coordinator is the only remaining writer;
+4. enumerate every reset session and, while its allocation fence still exists, reap it through the approved owner-aware reaper and verify its directory absent; foreign-owned, symlinked, persistent-after-remove, or unreachable paths abort the rehearsal;
+5. disconnect the maintenance writer, verify the database/object stores remain quiescent, and take/verify the cold snapshot;
+6. run the exact foreign-key-ordered reset with all processes down, refusing to delete a session reference/allocation not present in the verified-absent manifest;
+7. assert no reset-session directory remains and no reset UID was made recyclable while its path existed;
+8. verify identity, artifact bytes/metadata, value/configuration authorities, and declarative sources remain;
+9. deploy one V2 binary set, reconcile definitions afresh, and reject an invalid cross-boundary cycle before starts reopen;
+10. pass sequential, root-cycle, branch-cycle, join-all, cancellation, and checkpoint restart smoke tests;
+11. rehearse pre-reopen old-release snapshot restore;
+12. document that post-reopen downgrade is restore-and-lose-new-work or roll-forward, never mixed binary operation.
 
 The rehearsal produces commands, versions, snapshot identity/checksum, row-count manifest, pre/post validation, and rollback evidence. It does not authorize a real deployment.
 
@@ -1035,21 +1052,21 @@ HOR-468/HOR-464/HOR-463 implementation must produce the exact migration and oper
 - Rehearse on a database copy and verify the cold-restore path.
 - Publish no mixed-version compatibility promise.
 
-### Phase B — maintenance preflight
+### Phase B — maintenance preflight and cold snapshot
 
-- Close Chat/API workflow starts and operational blocker/cancel/restart writes.
-- Drain or explicitly stop every workflow run/turn/assignment.
-- Require zero `pending|running|awaiting` workflow execution and zero active assignments.
+- Close every mutating Product API route—not only workflow starts and blocker/cancel/restart—and freeze Tool Gateway, identity/authentication, artifact metadata/bytes, value/configuration, controller/reconciliation, and operator/runbook mutation. Health and read-only serving may remain only when database roles and object-store policy prove it cannot write.
+- Drain or explicitly stop every workflow run/turn/assignment. Against the authoritative OPO1 schema, require zero `runtime.workflow_runs` row with `state IN ('pending','running','awaiting_approval')` or `finished_at IS NULL`, zero `runtime.turns` row with `state IN ('pending','running')` or `settled_at IS NULL`, and zero `runtime.turn_assignments.state='active'`. Any inconsistent timestamp/state pair fails closed.
 - Require zero `dispatching|running|outcome_unknown` work-scoped gateway invocation. Unknown effects must be reconciled; otherwise abort cutover.
-- Verify all process writers can be scaled to zero and no external controller will recreate rows during reset.
-- Take and verify one cold PostgreSQL snapshot. It is rollback protection, not a backfill source.
+- Activate a database/object-store maintenance fence for every application, gateway, worker, controller, reconciler, and human credential; wait for existing write transactions to drain. The audited maintenance coordinator is then the sole temporary writer and rechecks all zero-work predicates under the fence.
+- Before deleting any session reference or UID allocation, inventory every reset session's exact sandbox path and UID/GID. Use the existing owner/symlink/persist-after-remove safety contract (or an equivalent offline maintenance reaper) to reap each path, verify it absent on the approved RWX substrate, and only then mark its allocation releasable. A missing path is an idempotent success; a foreign-owned, symlinked, unreachable, or persistent path aborts cutover and leaves its allocation fence intact.
+- Disconnect the maintenance coordinator and prove no PostgreSQL write-capable session/transaction or retained-object mutation source remains. Then take and verify one cold PostgreSQL snapshot. It is rollback protection, not a backfill source; retained object mutation stays frozen so snapshot restore cannot produce metadata/byte divergence.
 
-### Phase C — writer stop and destructive reset
+### Phase C — process stop and destructive reset
 
-With Product API runtime writers, scheduler/dispatch, Tool Gateway work writers, harness workers, and reconcilers stopped:
+With every mutation source already fenced, scale Product API, runtime/scheduler/dispatch, Tool Gateway, harness workers, identity/artifact writers, controllers/reconcilers, and maintenance jobs to zero and verify none remains. Then:
 
 - clear work execution data: work items, attempts, blockers, feedback, execution-linked artifact references, timeline/value execution rows, checkpoints, reuse, and control proposals;
-- clear runtime workflow runs, lanes, activations, branches, node visits/routes/arrivals/joins, turns/events, assignments, run-pool bindings, stop outboxes, session references, and cleanup allocations belonging to reset sessions;
+- re-verify the reset-session manifest, then clear runtime workflow runs, lanes, activations, branches, node visits/routes/arrivals/joins, turns/events, assignments, run-pool bindings, stop outboxes, session references, and session UID/cleanup allocations only for sessions whose RWX paths are proved absent; if any proof is missing, abort and preserve the reference/fence;
 - clear work-attempt tool pins and work-scoped Tool Gateway invocations/related retained execution rows;
 - clear materialized workflow definitions and definition-owned pool bindings that will be reconciled from declarative configuration;
 - create/validate the V2 runtime/work schema in foreign-key-safe order.
