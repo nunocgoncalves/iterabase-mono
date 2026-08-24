@@ -1027,16 +1027,17 @@ On a disposable OPO1 database and RWX copy:
 
 1. seed current sequential/cyclic definitions, work items, attempts, blockers, assignments, session UID fences/directories (including a leaked sandbox), and work-scoped invocations;
 2. prove cutover preflight rejects every authoritative nonterminal run state, including a blocked `runtime.workflow_runs.state='awaiting_approval'` row with its open `work.blockers` record and `runtime.node_executions.state='blocked'`, as well as active turns/assignments and `dispatching|running|outcome_unknown` work invocations;
-3. settle the workload, quiesce every PostgreSQL and retained-object mutation source, and prove the designated maintenance coordinator is the only remaining writer;
-4. enumerate every reset session and, while its allocation fence still exists, reap it through the approved owner-aware reaper and verify its directory absent; foreign-owned, symlinked, persistent-after-remove, or unreachable paths abort the rehearsal;
-5. disconnect the maintenance writer, verify the database/object stores remain quiescent, and take/verify the cold snapshot;
-6. run the exact foreign-key-ordered reset with all processes down, refusing to delete a session reference/allocation not present in the verified-absent manifest;
-7. assert no reset-session directory remains and no reset UID was made recyclable while its path existed;
-8. verify identity, artifact bytes/metadata, value/configuration authorities, and declarative sources remain;
-9. deploy one V2 binary set, reconcile definitions afresh, and reject an invalid cross-boundary cycle before starts reopen;
-10. pass sequential, root-cycle, branch-cycle, join-all, cancellation, and checkpoint restart smoke tests;
-11. rehearse pre-reopen old-release snapshot restore;
-12. document that post-reopen downgrade is restore-and-lose-new-work or roll-forward, never mixed binary operation.
+3. activate an admission fence and prove it denies new starts, node/turn/assignment claims, invocation creation/effect admission, and unrelated customer/Admin mutation while exact pre-fence terminal reports, output/artifact commits, stop controls, session cleanup, and ledger reconciliation remain writable;
+4. under that bounded allowlist, settle or explicitly stop every workload and reconcile every invocation to the cutover-eligible zero predicates; abort when an unknown effect cannot be resolved rather than activating the full writer fence early;
+5. prove the full maintenance-fence transition is rejected while any zero predicate is false, then activate it after convergence and prove the designated maintenance coordinator is the only remaining writer;
+6. enumerate every reset session and, while its allocation fence still exists, reap it through the approved owner-aware reaper and verify its directory absent; foreign-owned, symlinked, persistent-after-remove, or unreachable paths abort the rehearsal;
+7. disconnect the maintenance writer, verify the database/object stores remain quiescent, and take/verify the cold snapshot;
+8. run the exact foreign-key-ordered reset with all processes down, refusing to delete a session reference/allocation not present in the verified-absent manifest;
+9. assert no reset-session directory remains and no reset UID was made recyclable while its path existed;
+10. verify identity, artifact bytes/metadata, value/configuration authorities, and declarative sources remain;
+11. deploy one V2 binary set, reconcile definitions afresh, and reject an invalid cross-boundary cycle before starts reopen;
+12. pass sequential, root-cycle, branch-cycle, join-all, cancellation, and checkpoint restart smoke tests;
+13. rehearse pre-reopen old-release snapshot restore and document that post-reopen downgrade is restore-and-lose-new-work or roll-forward, never mixed binary operation.
 
 The rehearsal produces commands, versions, snapshot identity/checksum, row-count manifest, pre/post validation, and rollback evidence. It does not authorize a real deployment.
 
@@ -1054,10 +1055,13 @@ HOR-468/HOR-464/HOR-463 implementation must produce the exact migration and oper
 
 ### Phase B — maintenance preflight and cold snapshot
 
-- Close every mutating Product API route—not only workflow starts and blocker/cancel/restart—and freeze Tool Gateway, identity/authentication, artifact metadata/bytes, value/configuration, controller/reconciliation, and operator/runbook mutation. Health and read-only serving may remain only when database roles and object-store policy prove it cannot write.
-- Drain or explicitly stop every workflow run/turn/assignment. Against the authoritative OPO1 schema, require zero `runtime.workflow_runs` row with `state IN ('pending','running','awaiting_approval')` or `finished_at IS NULL`, zero `runtime.turns` row with `state IN ('pending','running')` or `settled_at IS NULL`, and zero `runtime.turn_assignments.state='active'`. Any inconsistent timestamp/state pair fails closed.
-- Require zero `dispatching|running|outcome_unknown` work-scoped gateway invocation. Unknown effects must be reconciled; otherwise abort cutover.
-- Activate a database/object-store maintenance fence for every application, gateway, worker, controller, reconciler, and human credential; wait for existing write transactions to drain. The audited maintenance coordinator is then the sole temporary writer and rechecks all zero-work predicates under the fence.
+The cutover coordinator distinguishes a fail-closed **admission fence** from the later full **maintenance fence**; they are not interchangeable:
+
+- Activate the admission fence first. Deny new Chat/API workflow starts, restart/revision attempts, customer/Admin mutations unrelated to drain, scheduler claims that would start another node/turn/assignment, new artifact operations, and new Tool Gateway invocation/effect admission. Existing exact assignments and invocations receive no widened authority.
+- Keep only a cutover allowlist writable while draining: exact pre-fence turn/node/branch terminal reports and their atomic route/output/artifact/timeline evidence; assignment terminalization; stop-intent/target delivery and acknowledgement; dispatch/cancel/lease/result commits for an exact invocation whose ledger admission committed before the fence, plus fail-closed ledger recovery; session end/reap evidence; and coordinator audit. The allowlist may create a pending successor as part of today's atomic settlement transaction, but the admission fence forbids claiming it and the coordinator explicitly stops that run. It cannot create a new invocation, customer request, definition/configuration change, identity/value mutation, or unrelated reconciliation row.
+- With the required API, runtime/dispatch, Tool Gateway, artifact, harness, and bounded reconciliation writers still running under that allowlist, drain or explicitly stop every workflow run/turn/assignment and settle every stop target. This is the only phase allowed to turn already-authorized in-flight work into terminal evidence.
+- Against the authoritative OPO1 schema, require zero `runtime.workflow_runs` row with `state IN ('pending','running','awaiting_approval')` or `finished_at IS NULL`, zero `runtime.turns` row with `state IN ('pending','running')` or `settled_at IS NULL`, and zero `runtime.turn_assignments.state='active'`. Any inconsistent timestamp/state pair fails closed. Also require zero `dispatching|running|outcome_unknown` work-scoped gateway invocation; unknown effects must be definitively reconciled or the cutover aborts.
+- Only after all zero predicates pass may the coordinator CAS from `admission_fenced` to `maintenance_fenced`. Revoke/fence every application, gateway, worker, controller, reconciler, object-store, and human writer; wait for existing allowlisted transactions to drain. The audited maintenance coordinator is then the sole temporary writer and rechecks the zero predicates under the full fence. A premature transition is rejected rather than freezing work that still needs terminalization.
 - Before deleting any session reference or UID allocation, inventory every reset session's exact sandbox path and UID/GID. Use the existing owner/symlink/persist-after-remove safety contract (or an equivalent offline maintenance reaper) to reap each path, verify it absent on the approved RWX substrate, and only then mark its allocation releasable. A missing path is an idempotent success; a foreign-owned, symlinked, unreachable, or persistent path aborts cutover and leaves its allocation fence intact.
 - Disconnect the maintenance coordinator and prove no PostgreSQL write-capable session/transaction or retained-object mutation source remains. Then take and verify one cold PostgreSQL snapshot. It is rollback protection, not a backfill source; retained object mutation stays frozen so snapshot restore cannot produce metadata/byte divergence.
 
