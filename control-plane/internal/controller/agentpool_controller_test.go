@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	storagev1 "k8s.io/api/storage/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -133,6 +134,32 @@ func gwSelector(app string) v1alpha1.GatewayPodSelector {
 	return v1alpha1.GatewayPodSelector{PodSelector: metav1.LabelSelector{MatchLabels: map[string]string{"app.kubernetes.io/name": app}}}
 }
 
+func seedRWXContract(t *testing.T, c client.Client, ctx context.Context, namespace, className, provisioner string) {
+	t.Helper()
+	reclaim := corev1.PersistentVolumeReclaimRetain
+	expand := true
+	class := &storagev1.StorageClass{
+		ObjectMeta:           metav1.ObjectMeta{Name: className},
+		Provisioner:          provisioner,
+		ReclaimPolicy:        &reclaim,
+		AllowVolumeExpansion: &expand,
+	}
+	require.NoError(t, c.Create(ctx, class))
+	require.NoError(t, c.Get(ctx, types.NamespacedName{Name: className}, class))
+	require.NoError(t, c.Create(ctx, &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "platform-rwx-storage-contract", Namespace: namespace, Labels: map[string]string{storageContractLabel: "true"}},
+		Data:       map[string]string{"contractVersion": storageContractVersion, "mode": storageModeExternal, "storageClassName": className, "topology": ""},
+	}))
+	require.NoError(t, c.Create(ctx, &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "iterabase-rwx-conformance-test", Namespace: namespace, Labels: map[string]string{storageConformanceLabel: "true"}},
+		Data: map[string]string{
+			"contractVersion": storageContractVersion, "storageClassName": className,
+			"storageClassUID": string(class.UID), "provisioner": provisioner,
+			"result": "pass", "validatedAt": "2026-08-25T00:00:00Z",
+		},
+	}))
+}
+
 // TestAgentPoolReconcile exercises the full assembly UNDER RBAC: creating an
 // AgentPool materializes the RWX PVC, the deny-by-default NetworkPolicy, the
 // per-pod config ConfigMaps, and the warm-worker pods (with the cert-manager
@@ -153,6 +180,8 @@ func TestAgentPoolReconcile(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "graph-creds", Namespace: ns},
 		StringData: map[string]string{"token": "secret-value"},
 	}))
+
+	seedRWXContract(t, adminClient, ctx, ns, "rwx-fast", "example.csi.test")
 
 	pool := validAgentPool("walter-pool", ns)
 	require.NoError(t, adminClient.Create(ctx, pool))
@@ -230,14 +259,15 @@ func TestAgentPoolReconcile(t *testing.T) {
 	assert.Contains(t, cfg, "toolGateway:")
 	assert.Contains(t, cfg, "inferenceGateway:")
 
-	// Status observed generation advanced (Ready stays false: no kubelet).
+	// Storage remains fail-closed in envtest: there is no PVC binder/kubelet, so
+	// object assembly proceeds but the generation cannot claim runtime readiness.
 	require.Eventually(t, func() bool {
 		var got v1alpha1.AgentPool
 		if err := adminClient.Get(ctx, nn, &got); err != nil {
 			return false
 		}
-		return got.Status.ObservedGeneration == got.Generation
-	}, 15*time.Second, 200*time.Millisecond, "AgentPool status should reflect reconciliation")
+		return !got.Status.Ready && got.Status.ObservedGeneration == 0 && strings.Contains(got.Status.Message, "PVC")
+	}, 15*time.Second, 200*time.Millisecond, "AgentPool should report PVCProvisioning without claiming readiness")
 
 	// Delete the CR (finalizer cleanup must be authorized under RBAC).
 	require.NoError(t, adminClient.Delete(ctx, pool))
@@ -416,6 +446,7 @@ func TestAgentPoolTransientSecretReadRecovery(t *testing.T) {
 	pool.UID = types.UID("transient-secret-read-uid")
 	pool.Generation = 9
 	pool.Spec.Replicas = 0
+	pool.Spec.Sandbox.AccessMode = corev1.ReadWriteOnce
 	ca := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "platform-ca", Namespace: "default"}}
 	creds := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "graph-creds", Namespace: "default"}}
 	recorder := &recordingMaterializer{}
@@ -470,6 +501,7 @@ func TestAgentPoolLateSecretRecovery(t *testing.T) {
 	pool.UID = types.UID("late-secret-pool-uid")
 	pool.Generation = 7
 	pool.Spec.Replicas = 0
+	pool.Spec.Sandbox.AccessMode = corev1.ReadWriteOnce
 	recorder := &recordingMaterializer{}
 	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&v1alpha1.AgentPool{}).WithObjects(pool).Build()
 	r := &AgentPoolReconciler{Client: c, Scheme: scheme, APIReader: c, Store: recorder}
@@ -529,6 +561,7 @@ func TestAgentPoolGatewayMaterialization(t *testing.T) {
 
 	pool := validAgentPool("gw-pool", ns)
 	pool.Spec.Replicas = 0 // focus on gateway materialization, not pod assembly
+	pool.Spec.Sandbox.AccessMode = corev1.ReadWriteOnce
 	require.NoError(t, adminClient.Create(ctx, pool))
 
 	spiffe := "spiffe://iterabase.local/pools/" + string(pool.UID) + "/workers/gw-pool-worker-0"
@@ -612,6 +645,7 @@ func TestAgentPoolSpecRollout(t *testing.T) {
 
 	pool := validAgentPool("rollout-pool", ns)
 	pool.Spec.Replicas = 1
+	pool.Spec.Sandbox.AccessMode = corev1.ReadWriteOnce
 	pool.Spec.WorkspaceTools = false
 	require.NoError(t, adminClient.Create(ctx, pool))
 
@@ -711,6 +745,7 @@ func TestAgentPoolGatewayMaterializationRetry(t *testing.T) {
 
 	pool := validAgentPool("retry-pool", ns)
 	pool.Spec.Replicas = 0 // focus on materialization, not pod assembly
+	pool.Spec.Sandbox.AccessMode = corev1.ReadWriteOnce
 	require.NoError(t, adminClient.Create(ctx, pool))
 
 	poolNN := types.NamespacedName{Name: "retry-pool", Namespace: ns}
@@ -796,6 +831,7 @@ func TestAgentPoolGatewayRevocationIndependentOfAssembly(t *testing.T) {
 
 	pool := validAgentPool("revoke-pool", ns)
 	pool.Spec.Replicas = 0 // focus on authorization, not pod assembly
+	pool.Spec.Sandbox.AccessMode = corev1.ReadWriteOnce
 	require.NoError(t, adminClient.Create(ctx, pool))
 
 	poolNN := types.NamespacedName{Name: "revoke-pool", Namespace: ns}

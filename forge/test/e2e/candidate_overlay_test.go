@@ -136,12 +136,12 @@ func candidateOverlayValues(t *testing.T) string {
 		"INFERENCE_GATEWAY_IMAGE_REPO", "INFERENCE_GATEWAY_IMAGE_TAG", inferenceGatewayDigestEnv, "    ",
 	)
 
-	// These real-machine scenarios prove Forge/bootstrap and exact candidate
-	// installation. Portable dispatch behavior belongs to control-plane E2E and
-	// requires a customer-specific default model, so keep it out of every source,
-	// published, and release-candidate machine fixture.
+	// These real-machine scenarios prove Forge/bootstrap, managed-RWX storage
+	// readiness, and exact candidate installation. Dispatch is enabled only so
+	// two idle harness workers can establish real AgentPool readiness; the
+	// synthetic model permission is never used for a customer turn.
 	var values strings.Builder
-	values.WriteString("\n# Forge real-machine fixture values.\ncontrol-plane:\n  dispatch:\n    enabled: false\n")
+	values.WriteString("\n# Forge real-machine fixture values.\nstorage:\n  rwx:\n    mode: managed-longhorn\n    storageClassName: iterabase-rwx\n    managedLonghorn:\n      topology: single-node\ncontrol-plane:\n  dispatch:\n    enabled: true\n    defaultModel:\n      id: storage-readiness-fixture\n      api: openai-completions\n")
 	if controlPlane != "" {
 		values.WriteString("  image:\n")
 		values.WriteString(controlPlane)
@@ -176,9 +176,10 @@ func TestCandidateOverlayValues(t *testing.T) {
 		t.Fatalf("candidate plan must retain exact public Flux source: %+v", plan)
 	}
 	for expected := range map[string]struct{}{
-		"control-plane:": {},
-		"dispatch:":      {},
-		"enabled: false": {},
+		"control-plane:":            {},
+		"dispatch:":                 {},
+		"enabled: true":             {},
+		"storage-readiness-fixture": {},
 		"repository: \"ghcr.io/example/control-plane\"": {},
 		"tag: \"candidate-run@" + digest + "\"":         {},
 	} {
@@ -188,7 +189,7 @@ func TestCandidateOverlayValues(t *testing.T) {
 	}
 }
 
-func TestCandidateOverlayValuesAlwaysDisableCustomerSpecificDispatch(t *testing.T) {
+func TestCandidateOverlayValuesEnableOnlySyntheticStorageReadinessDispatch(t *testing.T) {
 	for _, fixture := range []struct {
 		name             string
 		mode             string
@@ -206,8 +207,8 @@ func TestCandidateOverlayValuesAlwaysDisableCustomerSpecificDispatch(t *testing.
 			t.Setenv(inferenceGatewayDigestEnv, "")
 
 			values := candidateOverlayValues(t)
-			if !strings.Contains(values, "control-plane:\n  dispatch:\n    enabled: false") {
-				t.Fatalf("%s machine fixture must disable customer-specific dispatch:\n%s", fixture.name, values)
+			if !strings.Contains(values, "control-plane:\n  dispatch:\n    enabled: true\n    defaultModel:\n      id: storage-readiness-fixture") {
+				t.Fatalf("%s machine fixture must use only the synthetic storage-readiness dispatch permission:\n%s", fixture.name, values)
 			}
 		})
 	}

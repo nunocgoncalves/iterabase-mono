@@ -12,6 +12,18 @@ global:
   internalTLS:
     enabled: false
 
+# --- Production AgentPool RWX storage contract (DES-HOR-424 / DES-HOR-469-01) ---
+# This umbrella records and validates the semantic selection. Managed Longhorn
+# is a same-version rwx-storage-substrate companion release installed first;
+# external mode installs no backend. The deliberately non-working external
+# class default keeps generic renders portable while requiring every production
+# overlay to select one exact conforming class. No default-class fallback or
+# auto-detection exists.
+storage:
+  rwx:
+    mode: external
+    storageClassName: external-rwx-required
+
 # --- Data deps (self-contained subcharts; disable + override to BYO) ---
 # Postgres is provided by the control-plane chart (pgvector); the gateway reads
 # the control-plane's schemas (catalog/identity/permissions) from it.

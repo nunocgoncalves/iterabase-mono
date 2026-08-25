@@ -115,6 +115,26 @@ tests:
         alertname: IterabaseHarnessDisconnected
         exp_alerts: []
 
+  - name: critical harness storage loss fires after one minute
+    interval: 1m
+    input_series:
+      - series: 'control_plane_harness_storage_ready{namespace="iterabase-system",pod="worker-0"}'
+        values: '0x4'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: IterabaseHarnessStorageUnavailable
+        exp_alerts:
+          - exp_labels:
+              namespace: iterabase-system
+              pod: worker-0
+              severity: critical
+              component: storage
+            exp_annotations:
+              summary: An AgentPool worker lost shared sandbox storage I/O
+              description: The supervisor failed its fsync/rename/unlink storage transaction and removed dispatch readiness.
+              first_action: Inspect the AgentPool StorageReady condition, PVC/PV events, Longhorn volume/share-manager/node health, and capacity before allowing fresh workers.
+              runbook_url: https://github.com/nunocgoncalves/iterabase-mono/blob/master/docs/runbooks/platform-alerts.md#iterabaseharnessstorageunavailable
+
   - name: warning manager reconciliation threshold fires after the five-minute hold
     interval: 1m
     input_series:

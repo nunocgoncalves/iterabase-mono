@@ -201,6 +201,12 @@ func TestPreflight(t *testing.T) {
 			return "", 0
 		case "test -d /usr/src/linux-headers-$(uname -r)":
 			return "", 0
+		case "command -v iscsiadm >/dev/null && systemctl is-active --quiet iscsid":
+			return "", 0
+		case "command -v mount.nfs >/dev/null":
+			return "", 0
+		case "findmnt -n -o PROPAGATION / | grep -Eq '(^|,)r?shared(,|$)'":
+			return "", 0
 		default:
 			return "", 1
 		}
@@ -219,6 +225,9 @@ func TestPreflight(t *testing.T) {
 	assert.True(t, r.HasIPv6)
 	assert.True(t, r.HasNVIDIAGPU)
 	assert.True(t, r.KernelHeadersInstalled)
+	assert.True(t, r.HasISCSI)
+	assert.True(t, r.HasNFSv4)
+	assert.True(t, r.HasMountPropagation)
 }
 
 func TestInstall_CommandShape(t *testing.T) {
@@ -1429,6 +1438,32 @@ func TestEnsureDriverBuildDeps_CommandShape(t *testing.T) {
 	require.NoError(t, p.EnsureDriverBuildDeps(context.Background()))
 	assert.Contains(t, got, "apt-get update")
 	assert.Contains(t, got, "apt-get install -y linux-headers-$(uname -r)")
+}
+
+func TestEnsureRWXStoragePrerequisites_CommandShape(t *testing.T) {
+	var got string
+	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
+		got = cmd
+		if strings.Contains(cmd, "apt-get install -y open-iscsi nfs-common") {
+			return "", 0
+		}
+		return "", 1
+	})
+	defer cleanup()
+	p := newProvisioner(t, addr, cfg)
+	defer p.Close()
+	require.NoError(t, p.EnsureRWXStoragePrerequisites(context.Background()))
+	for _, expected := range []string{
+		"systemctl enable --now iscsid",
+		"modprobe iscsi_tcp",
+		"command -v \"$tool\"",
+		"findmnt -n -o PROPAGATION /",
+		"findmnt -n -o FSTYPE --target /var/lib/longhorn",
+		"ext4|xfs",
+		"node.longhorn.io/create-default-disk=true",
+	} {
+		assert.Contains(t, got, expected)
+	}
 }
 
 func TestReadGPUReadiness(t *testing.T) {

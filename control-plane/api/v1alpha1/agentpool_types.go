@@ -385,9 +385,15 @@ type PoolProbeSpec struct {
 // AgentPoolStatus is the observed state reported by the reconciler.
 // +kubebuilder:object:generate=true
 type AgentPoolStatus struct {
+	// conditions expose stable storage/readiness reason families. StorageReady
+	// is fail-closed for RWX pools and identifies the exact class/PVC/PV/backend
+	// predicate or operator action without exposing session bytes.
+	// +optional
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
 	// ready is true once the warm-worker pods + PVC + NetworkPolicy are
-	// reconciled and at least one pod is Ready (envtest has no kubelet, so this
-	// stays false there — real readiness is validated on-cluster).
+	// reconciled, the RWX class/conformance/PVC/backend contract is healthy, and
+	// at least one pod is Ready (envtest has no kubelet, so this stays false).
 	// +optional
 	Ready bool `json:"ready,omitempty"`
 

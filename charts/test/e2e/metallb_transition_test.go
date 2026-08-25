@@ -261,7 +261,7 @@ func assertMetalLBRoute(t *testing.T, state *chartState, ip string) {
 	if err != nil {
 		t.Fatalf("internal LoadBalancer route is not reachable at %s: %v", ip, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 500 {
 		t.Fatalf("internal LoadBalancer route returned %s at %s", resp.Status, ip)
 	}
@@ -375,7 +375,7 @@ func (state *chartState) sampleMetalLBContinuity(svc, expectedVIP string, client
 	}
 	sample.RouteOK = resp.StatusCode < 500
 	sample.RouteStatus = resp.StatusCode
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if !sample.RouteOK {
 		return sample, fmt.Errorf("route unreachable during operation at %s: %s", sample.VIP, resp.Status)
 	}

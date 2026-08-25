@@ -38,7 +38,7 @@ intent; path selection may inform the proposal but cannot choose it.
 | `forge` | `forge/VERSION` | Linux/macOS × amd64/arm64 archives in one GitHub Release |
 | `control-plane-chart` | chart `Chart.yaml` | control-plane OCI chart |
 | `inference-gateway-chart` | chart `Chart.yaml` | inference-gateway OCI chart |
-| `iterabase-platform-chart` | chart `Chart.yaml` | platform chart and same-version certificate-substrate companion |
+| `iterabase-platform-chart` | chart `Chart.yaml` | platform chart plus same-version certificate and managed-RWX substrate companions |
 
 The protected Git tags remain `control-plane-v<version>`, `inference-gateway-v<version>`, `forge-v<version>`, and `<chart>-<version>`. Targets keep independent versions and namespaced releases, but one product change may release any coherent subset together. Forge's platform matrix is one target, not four releases.
 

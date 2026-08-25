@@ -42,13 +42,28 @@ When GPU support is enabled, apply accepts readiness only from one coherent oper
 
 Before each Helm apply, forge reads the CRDs bundled in the exact pinned chart artifact, server-side applies them, and waits for them to become `Established`. This permits an existing release to enable an operator-backed dependency later (for example, enabling observability adds the Prometheus Operator CRDs) despite Helm's limitation that `crds/` are installed only during a release's initial install. Charts without bundled CRDs are unchanged. CRDs are intentionally retained on rollback/uninstall to protect custom resources and their data.
 
+For `storage.rwx.mode: managed-longhorn`, Forge derives the selection from the
+overlay's platform values—there is no storage provider toggle in `forge.yaml`.
+On its supported single-node reference substrate it idempotently installs and
+verifies iSCSI, NFSv4, kernel/filesystem tools, shared mount propagation, and the
+Longhorn data path, then installs the same-version `rwx-storage-substrate`
+companion in `longhorn-system` before the platform. The companion's disposable
+two-worker conformance hook must pass and attest the exact StorageClass UID.
+`external` installs no backend and requires the customer class to be attested
+separately. Forge refuses managed `three-node` because multi-host bootstrap is
+not a Forge capability; direct chart operators use the approved three-node
+profile. Destroy preserves the cluster if the managed companion refuses active
+consumers or retained-volume disposition. See
+[`../docs/architecture/v2-rwx-storage.md`](../docs/architecture/v2-rwx-storage.md).
+
 See `forge.example.yaml` for the full substrate config schema.
 
 ## Development
 
 ```sh
 make test           # unit + fake-SSH integration tests
-make test-e2e       # composed DigitalOcean CPU e2e (needs DIGITALOCEAN_TOKEN)
+make test-e2e       # composed DigitalOcean single-node CPU e2e (needs DIGITALOCEAN_TOKEN)
+make test-e2e-rwx-three-node # three-node Longhorn loss/rebuild/lifecycle gate
 make test-e2e-unit  # compile + unit-test the separate E2E harness module
 make lint           # golangci-lint
 make fmt-check      # gofmt check

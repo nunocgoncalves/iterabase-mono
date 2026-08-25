@@ -108,6 +108,11 @@ func printApplyResult(out io.Writer, cfg *config.Cluster, res *lifecycle.Result)
 	if cfg.Spec.Chart.Version != "" {
 		fmt.Fprintf(out, "  chart:      %s\n", cfg.Spec.Chart.Version)
 		fmt.Fprintf(out, "  certificate substrate applied: %v\n", res.CertificateSubstrateApplied)
+		fmt.Fprintf(out, "  rwx storage mode: %s\n", res.RWXStorageMode)
+		if res.RWXStorageMode == "managed-longhorn" {
+			fmt.Fprintf(out, "  rwx storage prerequisites ready: %v\n", res.RWXStoragePrerequisitesReady)
+			fmt.Fprintf(out, "  rwx storage substrate applied: %v\n", res.RWXStorageSubstrateApplied)
+		}
 		fmt.Fprintf(out, "  chart applied: %v\n", res.ChartApplied)
 	}
 	if cfg.Spec.GPU.Enabled {
@@ -157,6 +162,7 @@ func printPlan(cmd *cobra.Command, plan *lifecycle.ReconcilePlan) {
 	fmt.Fprintf(out, "  want:      %s\n", plan.WantVersion)
 	if plan.ChartVersion != "" {
 		fmt.Fprintf(out, "  chart:     %s\n", plan.ChartVersion)
+		fmt.Fprintf(out, "  rwx host:  iscsi=%v nfsv4=%v mountPropagation=%v\n", plan.Preflight.HasISCSI, plan.Preflight.HasNFSv4, plan.Preflight.HasMountPropagation)
 	}
 	if plan.GPUEnabled {
 		fmt.Fprintf(out, "  gpu:       %s (enabled)\n", plan.GPUOperatorVersion)

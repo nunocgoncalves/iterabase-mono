@@ -75,6 +75,14 @@ child runs under the session UID with `no_new_privs` + all caps dropped
 `workspaceTools` switch (ARCH-016) exposes exactly pi's built-in
 `read`/`write`/`edit`/`bash` when enabled — no arbitrary local-tool catalogue.
 
+HOR-469 adds a runtime storage-health transaction every ten seconds under the
+root-only `.iterabase-storage-health` directory: revalidate mount-root
+ownership/mode and available blocks, then write, `fsync`, atomically rename,
+directory-`fsync`, and unlink a worker-scoped marker. An NFS/share-manager,
+capacity, ownership, or I/O failure removes probe readiness/health, drains the
+Work stream, and exits the worker. Dispatch fences worker loss; neither the
+supervisor nor operator silently replays a turn or effect.
+
 HOR-399 materializes only the canonical artifact references carried by
 `AssignTurn`, before child startup, under the session UID/GID. Size and SHA-256
 must match the service metadata or the turn fails. The reserved
@@ -134,6 +142,7 @@ streams (ARCH-011).
 - `ipc.ts` — framed discriminated-union IPC for fd 0/3/4/5 + runtime validation.
 - `launcher.ts` — the `setpriv` privilege-dropping launcher (full cap-drop + `no_new_privs`).
 - `sandbox.ts` — canonical paths + ownership/mode/cwd validation.
+- `storage-health.ts` — fail-closed runtime RWX fsync/rename/unlink health transaction.
 - `config.ts` — infra-only boot config loader/validator.
 - `probes.ts` — `/healthz` + `/readyz`.
 

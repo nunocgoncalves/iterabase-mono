@@ -12,7 +12,7 @@ done
 echo "OK: AgentPool and Workflow CRDs render"
 
 rbac=$(helm template manager-contract charts/control-plane --show-only templates/rbac.yaml)
-for resource in configmaps persistentvolumeclaims pods services secrets deployments networkpolicies agentpools identitymappings modelbackends models permissionpolicies workflows; do
+for resource in configmaps persistentvolumeclaims persistentvolumes pods services secrets storageclasses volumes deployments networkpolicies agentpools identitymappings modelbackends models permissionpolicies workflows; do
   if ! grep -q "^  - ${resource}$" <<<"$rbac"; then
     echo "ERROR: manager ClusterRole is missing ${resource}" >&2
     exit 1

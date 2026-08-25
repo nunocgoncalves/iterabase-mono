@@ -313,6 +313,16 @@ per-turn child as the session UID via `setpriv` (CAP_SETUID/SETGID, which PSS
 `restricted` forbids — hence `baseline`); the child (dropped groups,
 `no_new_privs`) cannot read the key.
 
+For RWX pools, readiness additionally requires the chart-owned installation
+storage contract, exact `Retain`/expandable StorageClass, a live `HOR-469/v1`
+conformance attestation bound to the current class UID/provisioner, a Bound RWX
+Filesystem CSI PVC/PV with usable requested capacity, and—on managed
+Longhorn—a healthy volume and active share-manager once mounted. Stable
+`StorageReady` condition reasons identify class, conformance, PVC/expansion,
+mount-root, backend, share-manager, capacity, and recovery failures. Storage
+loss removes worker pods/scheduling credit; recovery waits for backend health
+and creates fresh workers without automatic turn/effect replay.
+
 `spec.workspaceTools` is the deny-by-default local-tool switch (ARCH-016):
 `false` exposes none; `true` exposes exactly `read`/`write`/`edit`/`bash`.
 `spec.gatewayGrants`/`credentialBindings`/`resourceConstraints` declare the

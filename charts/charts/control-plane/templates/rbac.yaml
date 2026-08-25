@@ -18,6 +18,7 @@ rules:
   resources:
   - configmaps
   - persistentvolumeclaims
+  - persistentvolumes
   - pods
   - services
   verbs:
@@ -34,6 +35,22 @@ rules:
   - secrets
   verbs:
   - get
+- apiGroups:
+  - storage.k8s.io
+  resources:
+  - storageclasses
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - longhorn.io
+  resources:
+  - volumes
+  verbs:
+  - get
+  - list
+  - watch
 - apiGroups:
   - apps
   resources:

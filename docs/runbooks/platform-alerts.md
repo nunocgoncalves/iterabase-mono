@@ -66,6 +66,16 @@ Inspect worker restarts, node/network health, heartbeat delays, fencing generati
 
 Check the individual harness pod, dispatch DNS/port, certificate validity, and reconnect logs. A disconnected supervisor must not continue a child execution; confirm fail-closed termination and retained WAL behavior.
 
+## IterabaseHarnessStorageUnavailable
+
+Stop new AgentPool scheduling and inspect the pool's `StorageReady` reason,
+exact StorageClass/PVC/PV, CSI/mount events, available filesystem capacity, and
+managed Longhorn volume/replica/share-manager/node health. Restore backend
+health first; existing NFS clients are not trusted after an outage. Let the
+operator create fresh workers and verify committed files. Do not replay a lost
+turn or external effect automatically, expose session filenames/content, or
+claim seamless failover.
+
 ## IterabaseHarnessReplayBacklog
 
 Inspect harness WAL files/logs and dispatch event persistence/ACK logs. Verify cumulative ACK progress. Do not delete WAL state before confirming every durable event is committed or intentionally reconciled.

@@ -1,4 +1,4 @@
-.PHONY: build test test-unit test-e2e test-e2e-overlay test-e2e-secrets test-e2e-flux test-e2e-gpu test-e2e-gpu-broken-policy test-e2e-inference-gpu test-e2e-unit lint fmt fmt-check install-hooks clean
+.PHONY: build test test-unit test-e2e test-e2e-rwx-three-node test-e2e-overlay test-e2e-secrets test-e2e-flux test-e2e-gpu test-e2e-gpu-broken-policy test-e2e-inference-gpu test-e2e-unit lint fmt fmt-check install-hooks clean
 
 # Load .env if present (e.g. DIGITALOCEAN_TOKEN for e2e). .env is gitignored.
 -include .env
@@ -35,7 +35,10 @@ test-unit:
 # The E2E module has one top-level TestE2E runner. -run selects an isolated
 # scenario; -v is required so capacity skips and named stages remain visible.
 test-e2e:
-	cd test/e2e && ITERABASE_E2E_SOURCE_INPUTS="$(ITERABASE_E2E_SOURCE_INPUTS)" go test -v -race -count=1 -timeout 60m -run '^TestE2E$$/^digitalocean-cpu$$' .
+	cd test/e2e && ITERABASE_E2E_SOURCE_INPUTS="$(ITERABASE_E2E_SOURCE_INPUTS)" go test -v -race -count=1 -timeout 95m -run '^TestE2E$$/^digitalocean-cpu$$' .
+
+test-e2e-rwx-three-node:
+	cd test/e2e && ITERABASE_E2E_SOURCE_INPUTS="$(ITERABASE_E2E_SOURCE_INPUTS)" go test -v -race -count=1 -timeout 105m -run '^TestE2E$$/^digitalocean-rwx-three-node$$' .
 
 # Compatibility aliases: overlay, secret-sync, and Flux now compose on the one
 # CPU fixture instead of provisioning three additional droplets.

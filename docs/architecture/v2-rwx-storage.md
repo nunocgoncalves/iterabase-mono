@@ -78,6 +78,15 @@ decision rather than an implementation-local substitution.
 - **Consequences:** This decision has no production mutation or semantic publication. Unsupported backup restore, downgrade, forced uninstall, UI exposure, or reduced-privilege claims fail closed.
 - **Evidence:** Founder approval is durable in HOR-424; the product backup boundary is inherited from `v2-chat-tool-confirmation.md`.
 
+### DES-HOR-469-01 — Managed Longhorn companion release packaging
+
+- **Approved by:** Nuno Gonçalves
+- **Approved on:** 2026-08-25
+- **Scope:** Helm packaging and lifecycle ordering for managed Longhorn; bounded amendment to `DES-HOR-424-02` only.
+- **Decision:** Pinned Longhorn `1.12.1` is packaged as the same-version `rwx-storage-substrate` companion Helm release and installed before the platform only for `storage.rwx.mode: managed-longhorn`. The enum-only mode, exact class, and managed topology remain the complete semantic selection contract. `external` installs no backend.
+- **Consequences:** The companion consumes the unmodified upstream chart, renders the managed class and conformance/uninstall gates, and shares the platform chart version. Forge derives selection from overlay chart values and adds no provider field to `forge.yaml`. Direct operators use the same ordering. This amendment changes no backend, data engine, topology, failure model, backup authority, or customer responsibility.
+- **Evidence:** Canonical founder approval is durable in HOR-469.
+
 ## 2. Product and inherited runtime constraints
 
 The storage choice serves the existing runtime; it does not redefine it:
@@ -239,7 +248,10 @@ conforming customer-operated external class.
 
 ## 6. Stable chart and overlay values contract
 
-HOR-469 implements these exact semantic values in the platform chart:
+HOR-469 implements these exact semantic values in the platform chart. In
+managed mode, the same-version `rwx-storage-substrate` companion receives the
+same values files and completes before the platform release. In external mode,
+that companion is absent and the platform installs no backend:
 
 ```yaml
 storage:
@@ -407,11 +419,15 @@ HOR424_STORAGE_CLASS=iterabase-rwx \
   docs/architecture/validation/hor-424-rwx-conformance.sh
 ```
 
-Set `HOR424_NAMESPACE` to isolate repeated evidence, `HOR424_CLEANUP=true` to
-turn the successful disposable PV to `Delete` and verify cleanup, or
-`KUBECTL="sudo k3s kubectl"` on a direct K3s host. The script refuses to
-overwrite an existing evidence namespace and preserves all synthetic resources
-on failure while printing bounded diagnostics.
+Set `HOR424_NAMESPACE` to isolate repeated evidence,
+`HOR424_ATTEST_NAMESPACE` to the namespace containing AgentPools (default
+`iterabase-system`), `HOR424_CLEANUP=true` to turn the successful disposable PV
+to `Delete` and verify cleanup, or `KUBECTL="sudo k3s kubectl"` on a direct K3s
+host. On success the gate writes a `HOR-469/v1` ConfigMap attestation bound to
+the exact StorageClass UID and provisioner. Recreating or replacing the class
+invalidates that evidence. The script refuses to overwrite an existing evidence
+namespace and preserves all synthetic resources on failure while printing
+bounded diagnostics.
 
 This bounded collection is diagnostic evidence, not proof that a backend
 failure automatically emits actionable events. A backend-specific release
@@ -551,8 +567,10 @@ scenarios add bounded Longhorn diagnostics.
 1. Record exact topology, K3s/Longhorn or external backend version, node/disk
    inventory, capacity, encryption owner, maintenance owner, and rollback.
 2. Run host/CSI prerequisites before enabling the backend.
-3. Install/reconcile Longhorn `1.12.1` declaratively or verify the external
-   class; wait for controllers, node plugins, engines, and nodes/disks healthy.
+3. For managed mode, install the same-version `rwx-storage-substrate` companion
+   into `longhorn-system` before the platform release; for external mode, do not
+   install that companion. Wait for controllers, node plugins, engines, and
+   nodes/disks healthy.
 4. Render and verify the exact explicitly named StorageClass; managed
    `iterabase-rwx` remains non-default.
 5. Run the disposable conformance gate and store logs/resource identities.
@@ -752,7 +770,7 @@ slice:
 | Required implementation/evidence | Governing decision |
 | --- | --- |
 | Pin Longhorn `1.12.1`, K3s reference `v1.34.10+k3s1`, V1 engine, managed profiles, and exact images/chart | DES-HOR-424-01 |
-| Add semantic chart values, Longhorn dependency/namespace ordering, Forge host prerequisites, and overlay class propagation | DES-HOR-424-02 |
+| Add semantic chart values, same-version Longhorn companion/namespace ordering, Forge host prerequisites, and overlay class propagation | DES-HOR-424-02, DES-HOR-469-01 |
 | Render `iterabase-rwx`; implement external static/live conformance and fail-closed AgentPool class checks | DES-HOR-424-03 |
 | Enforce topology replica count, reserve/over-provisioning, hard capacity, `Retain`, expansion-only, and capacity alerts | DES-HOR-424-04 |
 | Gate readiness, surface stable reasons/events, run worker/share-manager/node-loss recovery without replay, and recycle clients | DES-HOR-424-05 |

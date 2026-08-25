@@ -9,6 +9,7 @@ Helm charts for the [iterabase](https://iterabase.com) platform. The `cert-manag
 | Chart | Description | Released individually |
 |---|---|---|
 | `cert-manager-substrate` | Ordered certificate operator, CRDs, webhook, and CSI substrate | ✅, alongside platform |
+| `rwx-storage-substrate` | Managed Longhorn 1.12.1 RWX substrate and conformance/uninstall gates | ✅, alongside platform when managed mode is selected |
 | `iterabase-platform` | Application umbrella — composes all platform components | ✅ |
 | `inference-gateway` | Model-access service | ✅ |
 | `control-plane` | Durable workflow/control APIs, operator, and immutable artifact service | ✅ |
@@ -169,6 +170,46 @@ helm rollback <release>-cert-manager <substrate-revision> -n <namespace> --wait
 a changed one-replica gateway, an injected failure before admission post-hooks,
 fail-closed reapply, the explicit legacy rollback above, and current forward
 recovery.
+
+### Production AgentPool RWX storage
+
+The platform values select exactly one storage mode and class. Managed mode also
+requires the same-version companion before the platform:
+
+```sh
+helm upgrade --install iterabase-rwx-storage \
+  oci://ghcr.io/nunocgoncalves/iterabase-charts/rwx-storage-substrate \
+  --version <platform-version> -n longhorn-system --create-namespace \
+  -f values-managed-rwx-single-node.yaml \
+  --set validation.attestationNamespace=iterabase-system --wait --timeout 30m
+helm upgrade --install iterabase \
+  oci://ghcr.io/nunocgoncalves/iterabase-charts/iterabase-platform \
+  --version <platform-version> -n iterabase-system --create-namespace \
+  -f values-managed-rwx-single-node.yaml --wait
+```
+
+Use `values-managed-rwx-three-node.yaml` only on at least three healthy storage
+nodes with dedicated SSD capacity. Three replicas do not remove the active
+share-manager interruption boundary. Forge supports the managed `single-node`
+reference substrate and derives it from these chart values; `forge.yaml` has no
+storage provider toggle.
+
+For a customer-operated class, install no RWX companion. Set the exact external
+class with `values-external-rwx.yaml`, run
+`docs/architecture/validation/hor-424-rwx-conformance.sh` with
+`HOR424_STORAGE_CLASS` and `HOR424_ATTEST_NAMESPACE`, then install/reconcile the
+platform. AgentPools remain storage-unready if the chart contract, class UID,
+static properties, live attestation, PVC/PV, mount, or backend health evidence
+is missing or stale.
+
+The managed companion runs the same disposable two-worker/isolation/expansion
+gate after install and upgrade. Its pre-delete hook refuses active consumers,
+retained PVs, or remaining Longhorn volumes; settle/reap sessions and record an
+explicit delete/sanitize or transfer disposition before uninstall. Session PVCs
+are not authoritative product DR data, and disk encryption remains customer
+infrastructure responsibility. See
+[`../docs/architecture/v2-rwx-storage.md`](../docs/architecture/v2-rwx-storage.md)
+and [`docs/rwx-storage-operations.md`](docs/rwx-storage-operations.md).
 
 ### Private control-plane ingress
 
@@ -402,7 +443,7 @@ resources first can fail during REST mapping before any chart hook executes.
 
 The chart-owned `test/e2e/transition-baselines.json` currently declares platform
 and substrate `0.3.12` as the checksum-pinned supported predecessor for current
-`0.3.22`, and a checksum-pinned `0.3.19` MetalLB hook predecessor transition
+`0.3.23`, and a checksum-pinned `0.3.19` MetalLB hook predecessor transition
 (DES-HOR-511) covers the hook→ordinary pool/VIP preservation path through
 upgrade and reapply. The supported inverse boundary is current → the declared
 predecessor within the post-0.3 companion-ownership model, followed by a current
