@@ -320,12 +320,13 @@ parameters:
   fromBackup: ""
   migratable: "false"
   numberOfReplicas: "1" # single-node; exactly "3" in three-node
-  staleReplicaTimeout: "2880"
 ```
 
-The chart does not modify Longhorn's default `longhorn` StorageClass and does
-not make any class the cluster default. StorageClass parameters affect new
-volumes only; a topology/profile change therefore cannot be applied to existing
+The class does not override `staleReplicaTimeout`; Longhorn `1.12.1`'s
+version default remains in force. The chart does not modify Longhorn's default
+`longhorn` StorageClass and does not make any class the cluster default.
+StorageClass parameters affect new volumes only; a topology/profile change
+therefore cannot be applied to existing
 claims by editing the class. Migration requires a separately reviewed copy,
 cutover, and rollback plan.
 
@@ -362,7 +363,9 @@ the release.
 
 ### 8.1 Static checks
 
-- The exact class exists and is not selected by implicit defaulting.
+- The exact class exists, and every disposable claim and AgentPool explicitly
+  sets its `storageClassName`; no class is selected by implicit defaulting. A
+  customer-supplied class may independently be the cluster default.
 - `reclaimPolicy` is `Retain`.
 - `allowVolumeExpansion` is `true`.
 - The provisioner/CSI driver and backend version, license/support owner, node
@@ -394,8 +397,8 @@ against the named class. It does not install a backend. It proves:
 8. a replacement worker sees committed data and retains sibling denial;
 9. online expansion completes at PVC and mounted-filesystem levels without
    changing existing bytes; and
-10. failure automatically emits PVC/PV/pod/StorageClass events and a bounded
-    diagnostic bundle.
+10. any assertion or timeout failure preserves the synthetic resources and
+    collects bounded generic Kubernetes resources, events, and job logs.
 
 Run it against the current Kubernetes context with an explicit class:
 
@@ -410,10 +413,12 @@ turn the successful disposable PV to `Delete` and verify cleanup, or
 overwrite an existing evidence namespace and preserves all synthetic resources
 on failure while printing bounded diagnostics.
 
-A backend-specific release scenario must additionally remove its active server
-or one storage node, prove AgentPool readiness fails, preserve committed data,
-and recover through backend health plus worker replacement. The generic script
-cannot safely invent a backend-specific failure operation.
+This bounded collection is diagnostic evidence, not proof that a backend
+failure automatically emits actionable events. A backend-specific release
+scenario must additionally remove its active server or one storage node, prove
+AgentPool readiness fails with actionable backend/Kubernetes events, preserve
+committed data, and recover through backend health plus worker replacement. The
+generic script cannot safely invent a backend-specific failure operation.
 
 ### 8.3 Root and identity requirements
 
@@ -548,7 +553,8 @@ scenarios add bounded Longhorn diagnostics.
 2. Run host/CSI prerequisites before enabling the backend.
 3. Install/reconcile Longhorn `1.12.1` declaratively or verify the external
    class; wait for controllers, node plugins, engines, and nodes/disks healthy.
-4. Render and verify the exact non-default StorageClass.
+4. Render and verify the exact explicitly named StorageClass; managed
+   `iterabase-rwx` remains non-default.
 5. Run the disposable conformance gate and store logs/resource identities.
 6. Reconcile AgentPools only after conformance. Verify every worker establishes
    `0711` root and reports ready before scheduling work.

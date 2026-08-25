@@ -123,9 +123,7 @@ fi
 PROVISIONER="$(k get storageclass "$STORAGE_CLASS" -o jsonpath='{.provisioner}')"
 RECLAIM="$(k get storageclass "$STORAGE_CLASS" -o jsonpath='{.reclaimPolicy}')"
 EXPANSION="$(k get storageclass "$STORAGE_CLASS" -o jsonpath='{.allowVolumeExpansion}')"
-DEFAULT_STABLE="$(k get storageclass "$STORAGE_CLASS" -o jsonpath='{.metadata.annotations.storageclass\.kubernetes\.io/is-default-class}')"
-DEFAULT_BETA="$(k get storageclass "$STORAGE_CLASS" -o jsonpath='{.metadata.annotations.storageclass\.beta\.kubernetes\.io/is-default-class}')"
-readonly PROVISIONER RECLAIM EXPANSION DEFAULT_STABLE DEFAULT_BETA
+readonly PROVISIONER RECLAIM EXPANSION
 
 [[ -n "$PROVISIONER" ]] || {
   echo "StorageClass ${STORAGE_CLASS} has no provisioner" >&2
@@ -139,11 +137,6 @@ readonly PROVISIONER RECLAIM EXPANSION DEFAULT_STABLE DEFAULT_BETA
   echo "StorageClass ${STORAGE_CLASS} allowVolumeExpansion must be true (got ${EXPANSION:-<empty>})" >&2
   exit 1
 }
-[[ "$DEFAULT_STABLE" != "true" && "$DEFAULT_BETA" != "true" ]] || {
-  echo "StorageClass ${STORAGE_CLASS} must not be a cluster default" >&2
-  exit 1
-}
-
 CONTEXT="$(k config current-context)"
 readonly CONTEXT
 echo "HOR-424 RWX conformance context=${CONTEXT} namespace=${NAMESPACE} storageClass=${STORAGE_CLASS} provisioner=${PROVISIONER}"
