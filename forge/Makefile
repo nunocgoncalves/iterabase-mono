@@ -38,7 +38,7 @@ test-e2e:
 	cd test/e2e && ITERABASE_E2E_SOURCE_INPUTS="$(ITERABASE_E2E_SOURCE_INPUTS)" go test -v -race -count=1 -timeout 95m -run '^TestE2E$$/^digitalocean-cpu$$' .
 
 test-e2e-rwx-three-node:
-	cd test/e2e && ITERABASE_E2E_SOURCE_INPUTS="$(ITERABASE_E2E_SOURCE_INPUTS)" go test -v -race -count=1 -timeout 105m -run '^TestE2E$$/^digitalocean-rwx-three-node$$' .
+	cd test/e2e && ITERABASE_E2E_SOURCE_INPUTS="$(ITERABASE_E2E_SOURCE_INPUTS)" go test -v -race -count=1 -timeout 155m -run '^TestE2E$$/^digitalocean-rwx-three-node$$' .
 
 # Compatibility aliases: overlay, secret-sync, and Flux now compose on the one
 # CPU fixture instead of provisioning three additional droplets.

@@ -169,6 +169,7 @@ func applyRWXStorageSubstrate(
 		Repository: repository,
 		Version:    cfg.Spec.Chart.Version,
 		Namespace:  rwxStorageNamespace,
+		Timeout:    "65m",
 		Values:     []string{"validation.attestationNamespace=" + cfg.Spec.Chart.Namespace},
 	}
 	if overlayDest != "" {

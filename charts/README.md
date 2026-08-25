@@ -181,7 +181,7 @@ helm upgrade --install iterabase-rwx-storage \
   oci://ghcr.io/nunocgoncalves/iterabase-charts/rwx-storage-substrate \
   --version <platform-version> -n longhorn-system --create-namespace \
   -f values-managed-rwx-single-node.yaml \
-  --set validation.attestationNamespace=iterabase-system --wait --timeout 30m
+  --set validation.attestationNamespace=iterabase-system --wait --timeout 65m
 helm upgrade --install iterabase \
   oci://ghcr.io/nunocgoncalves/iterabase-charts/iterabase-platform \
   --version <platform-version> -n iterabase-system --create-namespace \

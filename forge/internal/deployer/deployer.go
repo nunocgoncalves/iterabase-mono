@@ -26,6 +26,7 @@ type ApplyOpts struct {
 	Values     []string // --set inline values (e.g. GPU operator overrides)
 	ValueFiles []string // -f value files, applied in order (later wins); overlay values
 	NoWait     bool     // omit Helm --wait; used only to break the 0.2 -> 0.3 gateway-config rollout dependency
+	Timeout    string   // Helm operation timeout (default 10m); long stateful conformance gates set an explicit bound
 }
 
 // Deployer abstracts cluster-level manifest operations (Helm + kustomize). One

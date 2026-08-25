@@ -88,6 +88,7 @@ func TestApplyManagedRWXOrdersPrerequisitesAndCompanionBeforePlatform(t *testing
 	assert.Equal(t, rwxStorageNamespace, d.applyCalls[1].namespace)
 	assert.Equal(t, "oci://ghcr.io/nunocgoncalves/rwx-storage-substrate", d.applyCalls[1].repository)
 	assert.Equal(t, []string{"validation.attestationNamespace=iterabase-system"}, d.applyCalls[1].values)
+	assert.Equal(t, "65m", d.applyCalls[1].timeout)
 	assert.Equal(t, "opo1", d.applyCalls[2].release)
 }
 

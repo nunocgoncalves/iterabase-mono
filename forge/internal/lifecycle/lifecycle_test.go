@@ -285,6 +285,7 @@ type applyCall struct {
 	release, repository, version, namespace string
 	values, valueFiles                      []string
 	noWait                                  bool
+	timeout                                 string
 }
 type repoCall struct{ name, url string }
 type uninstallCall struct{ release, namespace string }
@@ -322,7 +323,7 @@ func (f *fakeDeployer) Apply(_ context.Context, opts deployer.ApplyOpts) error {
 	f.applyCalls = append(f.applyCalls, applyCall{
 		release: opts.Release, repository: opts.Repository,
 		version: opts.Version, namespace: opts.Namespace,
-		values: opts.Values, valueFiles: opts.ValueFiles, noWait: opts.NoWait,
+		values: opts.Values, valueFiles: opts.ValueFiles, noWait: opts.NoWait, timeout: opts.Timeout,
 	})
 	f.order = append(f.order, "apply")
 	if f.applyErr != nil {

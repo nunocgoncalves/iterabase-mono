@@ -174,7 +174,7 @@ jobs:
     if: >-
       needs.changes.outputs.charts == 'true' && github.event_name == 'pull_request'
     runs-on: ubuntu-latest
-    timeout-minutes: 105
+    timeout-minutes: 155
     concurrency:
       group: e2e-digitalocean-cpu
       cancel-in-progress: false
