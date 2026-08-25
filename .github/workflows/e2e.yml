@@ -168,6 +168,45 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  digitalocean-rwx-three-node:
+    name: digitalocean-rwx-three-node
+    needs: [changes, harness]
+    if: >-
+      needs.changes.outputs.charts == 'true' && github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 105
+    concurrency:
+      group: e2e-digitalocean-cpu
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup-go
+        with:
+          go-version: 1.26.5
+          cache-dependency-path: ${{ env.GO_CACHE_DEPENDENCIES }}
+          cache-scope: e2e-digitalocean-rwx-three-node
+      - uses: ./.github/actions/setup-kubernetes-tools
+      - name: Add external chart repositories
+        run: .github/scripts/add_helm_repositories.sh
+      - name: Three-node managed RWX loss/rebuild/lifecycle gate
+        run: make test-e2e-rwx-three-node
+        working-directory: forge
+        env:
+          DIGITALOCEAN_TOKEN: ${{ secrets.DIGITALOCEAN_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FORGE_E2E_REQUIRE_CAPACITY: "true"
+          ITERABASE_E2E_FIXTURE_MODE: source
+          ITERABASE_E2E_SOURCE_SHA: ${{ github.sha }}
+          ITERABASE_E2E_SOURCE_INPUTS: ${{ github.workspace }}/forge/test/e2e/published-fixture.json
+      - name: Upload three-node RWX failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: forge-diagnostics-digitalocean-rwx-three-node
+          path: ${{ runner.temp }}/forge-diagnostics/digitalocean-rwx-three-node
+          if-no-files-found: ignore
+          retention-days: 7
+
   digitalocean-gpu:
     name: digitalocean-gpu
     needs: [changes, harness]
@@ -437,6 +476,7 @@ jobs:
       - changes
       - harness
       - digitalocean-cpu
+      - digitalocean-rwx-three-node
       - digitalocean-gpu
       - control-plane-kind
       - control-plane-execution-kind

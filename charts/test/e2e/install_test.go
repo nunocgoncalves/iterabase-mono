@@ -75,7 +75,7 @@ func installMinimalPlatformEdgeStage(t *testing.T, state *chartState) {
 			"metallb.io/loadBalancerIPs": state.internalIngressIP,
 		}}},
 	}
-	applyCandidateImages(values)
+	applyRuntimeImages(t, values)
 	state.installPlatform(t, 15*time.Minute, state.writeValues(t, "fresh-install", values))
 	assertCandidateImages(t, state)
 }

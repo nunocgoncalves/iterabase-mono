@@ -35,9 +35,14 @@ func applyInferencePlatformStage(t *testing.T, state *digitalOceanGPUState) {
 		t, state.runID, state.vm.IP, state.privKeyPath, state.chartVersion, plan,
 	)
 	out := applyOnceArgs(t, state.forgeBin, state.forgeHome, candidateConfig, "--skip-gpu")
-	assertApplyMarkers(t, out, "action:     skip", "node ready: true", "certificate substrate applied: true",
-		"rwx storage mode: managed-longhorn", "rwx storage prerequisites ready: true", "rwx storage substrate applied: true",
-		"chart applied: true", "overlay applied: true", "flux installed: true", "gitrepository: ready=True")
+	markers := []string{"action:     skip", "node ready: true", "certificate substrate applied: true",
+		"chart applied: true", "overlay applied: true", "flux installed: true", "gitrepository: ready=True"}
+	if os.Getenv(storageChartArchiveEnv) != "" {
+		markers = append(markers, "rwx storage mode: managed-longhorn", "rwx storage prerequisites ready: true", "rwx storage substrate applied: true")
+	} else {
+		markers = append(markers, "rwx storage mode: external")
+	}
+	assertApplyMarkers(t, out, markers...)
 	t.Logf("apply output:\n%s", out)
 	candidateCluster := remotecluster.Use(t, filepath.Join(state.forgeHome, state.runID, "kubeconfig.yaml"))
 	assertCandidateImageDigests(t, candidateCluster, "iterabase-system",

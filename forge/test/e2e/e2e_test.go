@@ -71,6 +71,7 @@ type digitalOceanCPUState struct {
 	forgeBin            string
 	forgeHome           string
 	chartVersion        string
+	managedRWX          bool
 	storagePVCUID       string
 	storagePV           string
 	agentPoolPVCUID     string
@@ -99,6 +100,7 @@ func newDigitalOceanCPUState(t *testing.T) *digitalOceanCPUState {
 	state.pubKey, state.privKeyPath = generateKey(t)
 	state.forgeBin = buildForge(t)
 	state.chartVersion = platformChartVersion(t, "")
+	state.managedRWX = os.Getenv(storageChartArchiveEnv) != ""
 	t.Logf("run %s (keep=%v)", state.runID, state.keep)
 	return state
 }
@@ -173,7 +175,9 @@ func assertCurrentPlatformStage(t *testing.T, state *digitalOceanCPUState) {
 
 	assertRemoteHelmChartVersion(t, sc, state.runID, "iterabase-system", state.chartVersion)
 	assertRemoteHelmChartVersion(t, sc, state.runID+"-cert-manager", "iterabase-system", state.chartVersion)
-	assertRemoteHelmChartVersion(t, sc, state.runID+"-rwx-storage", "longhorn-system", state.chartVersion)
+	if state.managedRWX {
+		assertRemoteHelmChartVersion(t, sc, state.runID+"-rwx-storage", "longhorn-system", state.chartVersion)
+	}
 	owner := strings.TrimSpace(mustSSHOutput(t, sc,
 		`sudo k3s kubectl get crd certificates.cert-manager.io -o jsonpath='{.metadata.annotations.meta\.helm\.sh/release-name}'`))
 	wantOwner := state.runID + "-cert-manager"
@@ -185,13 +189,15 @@ func assertCurrentPlatformStage(t *testing.T, state *digitalOceanCPUState) {
 		t.Fatalf("current platform has no exact Ready Flux artifact: ready=%v revision=%q digest=%q", ready, revision, digest)
 	}
 	mustSSHOutput(t, sc, fmt.Sprintf("sudo k3s kubectl rollout status -n iterabase-system deployment/%s-tool-runner --timeout=300s", state.runID))
-	storageClass := strings.TrimSpace(mustSSHOutput(t, sc, `sudo k3s kubectl get storageclass iterabase-rwx -o jsonpath='{.provisioner}|{.reclaimPolicy}|{.allowVolumeExpansion}|{.parameters.dataEngine}|{.parameters.numberOfReplicas}'`))
-	if storageClass != "driver.longhorn.io|Retain|true|v1|1" {
-		t.Fatalf("managed RWX StorageClass contract = %q", storageClass)
-	}
-	attestations := strings.TrimSpace(mustSSHOutput(t, sc, `sudo k3s kubectl get configmap -n iterabase-system -l platform.iterabase.com/storage-conformance=true -o jsonpath='{range .items[*]}{.data.storageClassName}|{.data.contractVersion}|{.data.result}{"\n"}{end}'`))
-	if !strings.Contains(attestations, "iterabase-rwx|HOR-469/v1|pass") {
-		t.Fatalf("managed RWX conformance attestation missing: %q", attestations)
+	if state.managedRWX {
+		storageClass := strings.TrimSpace(mustSSHOutput(t, sc, `sudo k3s kubectl get storageclass iterabase-rwx -o jsonpath='{.provisioner}|{.reclaimPolicy}|{.allowVolumeExpansion}|{.parameters.dataEngine}|{.parameters.numberOfReplicas}'`))
+		if storageClass != "driver.longhorn.io|Retain|true|v1|1" {
+			t.Fatalf("managed RWX StorageClass contract = %q", storageClass)
+		}
+		attestations := strings.TrimSpace(mustSSHOutput(t, sc, `sudo k3s kubectl get configmap -n iterabase-system -l platform.iterabase.com/storage-conformance=true -o jsonpath='{range .items[*]}{.data.storageClassName}|{.data.contractVersion}|{.data.result}{"\n"}{end}'`))
+		if !strings.Contains(attestations, "iterabase-rwx|HOR-469/v1|pass") {
+			t.Fatalf("managed RWX conformance attestation missing: %q", attestations)
+		}
 	}
 
 	kcPath := filepath.Join(state.forgeHome, state.runID, "kubeconfig.yaml")
@@ -201,6 +207,10 @@ func assertCurrentPlatformStage(t *testing.T, state *digitalOceanCPUState) {
 
 func seedManagedRWXReapplyStage(t *testing.T, state *digitalOceanCPUState) {
 	t.Helper()
+	if !state.managedRWX {
+		t.Log("published platform baseline predates managed RWX; dedicated exact-candidate storage gates own this stage")
+		return
+	}
 	sc, err := sshDial(state.ip, state.privKeyPath)
 	if err != nil {
 		t.Fatalf("ssh dial %s: %v", state.ip, err)
@@ -250,6 +260,9 @@ YAML`
 
 func assertManagedRWXReapplyStage(t *testing.T, state *digitalOceanCPUState) {
 	t.Helper()
+	if !state.managedRWX {
+		return
+	}
 	sc, err := sshDial(state.ip, state.privKeyPath)
 	if err != nil {
 		t.Fatalf("ssh dial %s: %v", state.ip, err)
@@ -290,6 +303,9 @@ YAML`
 
 func setupManagedAgentPoolStage(t *testing.T, state *digitalOceanCPUState) {
 	t.Helper()
+	if !state.managedRWX {
+		return
+	}
 	repository, tag := os.Getenv("HARNESS_IMAGE_REPO"), os.Getenv("HARNESS_IMAGE_TAG")
 	if repository == "" || tag == "" {
 		t.Fatal("managed AgentPool readiness evidence requires an exact HARNESS_IMAGE_REPO/HARNESS_IMAGE_TAG fixture")
@@ -347,6 +363,9 @@ YAML`, repository, tag, state.runID, state.runID, state.runID, state.runID, stat
 
 func exerciseManagedShareManagerFailureStage(t *testing.T, state *digitalOceanCPUState) {
 	t.Helper()
+	if !state.managedRWX {
+		return
+	}
 	sc, err := sshDial(state.ip, state.privKeyPath)
 	if err != nil {
 		t.Fatalf("ssh dial %s: %v", state.ip, err)
@@ -384,6 +403,9 @@ func exerciseManagedShareManagerFailureStage(t *testing.T, state *digitalOceanCP
 
 func assertManagedStorageRecoveryStage(t *testing.T, state *digitalOceanCPUState) {
 	t.Helper()
+	if !state.managedRWX {
+		return
+	}
 	sc, err := sshDial(state.ip, state.privKeyPath)
 	if err != nil {
 		t.Fatalf("ssh dial %s: %v", state.ip, err)
@@ -417,9 +439,12 @@ func reapplyCurrentPlatformStage(t *testing.T, state *digitalOceanCPUState) {
 		t, state.runID, state.ip, state.privKeyPath, state.chartVersion, plan,
 	)
 	out := applyOnce(t, state.forgeBin, state.forgeHome, cfgPath)
-	markers := []string{"action:     skip", "node ready: true", "certificate substrate applied: true",
-		"rwx storage mode: managed-longhorn", "rwx storage prerequisites ready: true",
-		"rwx storage substrate applied: true", "chart applied: true", "overlay applied: true"}
+	markers := []string{"action:     skip", "node ready: true", "certificate substrate applied: true", "chart applied: true", "overlay applied: true"}
+	if state.managedRWX {
+		markers = append(markers, "rwx storage mode: managed-longhorn", "rwx storage prerequisites ready: true", "rwx storage substrate applied: true")
+	} else {
+		markers = append(markers, "rwx storage mode: external")
+	}
 	if plan.flux {
 		markers = append(markers, "flux installed: true")
 	}
