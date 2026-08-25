@@ -407,8 +407,12 @@ YAML`
 	mustSSHOutput(t, client, "sudo k3s kubectl wait -n iterabase-system --for=condition=complete job/three-node-replacement-reader --timeout=15m")
 
 	uninstall := "sudo helm --kubeconfig /etc/rancher/k3s/k3s.yaml uninstall rwx-three -n longhorn-system --wait"
-	if output, err := sshOutput(client, uninstall); err == nil || !strings.Contains(output+err.Error(), "refusing managed RWX uninstall") {
-		t.Fatalf("managed uninstall did not refuse retained consumers: err=%v output=%s", err, output)
+	if output, err := sshOutput(client, uninstall); err == nil {
+		t.Fatalf("managed uninstall unexpectedly accepted retained consumers: %s", output)
+	}
+	guardLogs := mustSSHOutput(t, client, "sudo k3s kubectl logs -n longhorn-system job/rwx-three-rwx-storage-substrate-uninstall-guard")
+	if !strings.Contains(guardLogs, "refusing managed RWX uninstall") {
+		t.Fatalf("managed uninstall failed without the required retained-consumer diagnosis: %s", guardLogs)
 	}
 
 	mustSSHOutput(t, client, "sudo k3s kubectl delete job three-node-writer three-node-replacement-reader -n iterabase-system --ignore-not-found")
