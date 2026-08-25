@@ -1141,11 +1141,15 @@ func (p *SSHProvisioner) waitMetalLBAdmissionBackend(ctx context.Context, releas
 // a bootstrap --set override when override is non-empty. A non-empty override is
 // appended last so it wins over any -f value-file / earlier --set on the same key.
 func applyArgs(opts deployer.ApplyOpts, override string) []string {
+	timeout := opts.Timeout
+	if timeout == "" {
+		timeout = "10m"
+	}
 	args := []string{"upgrade", "--install", opts.Release, opts.Repository,
 		"--version", opts.Version,
 		"-n", opts.Namespace,
 		"--create-namespace",
-		"--timeout", "10m",
+		"--timeout", timeout,
 	}
 	if !opts.NoWait {
 		args = append(args, "--wait")

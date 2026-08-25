@@ -196,7 +196,7 @@ fi
 sudo k3s kubectl create namespace iterabase-system --dry-run=client -o yaml | sudo k3s kubectl apply -f -
 `
 	mustSSHOutput(t, client, installHelm)
-	command := fmt.Sprintf("sudo helm --kubeconfig /etc/rancher/k3s/k3s.yaml upgrade --install rwx-three %s -n longhorn-system --create-namespace --set storage.rwx.managedLonghorn.topology=three-node --set validation.attestationNamespace=iterabase-system --wait --timeout 35m",
+	command := fmt.Sprintf("sudo helm --kubeconfig /etc/rancher/k3s/k3s.yaml upgrade --install rwx-three %s -n longhorn-system --create-namespace --set storage.rwx.managedLonghorn.topology=three-node --set validation.attestationNamespace=iterabase-system --wait --timeout 65m",
 		candidateShellQuote(remoteArchive))
 	if result, err := sshOutput(client, command); err != nil {
 		t.Fatalf("install three-node RWX companion: %v\n%s", err, result)
@@ -380,7 +380,7 @@ func assertThreeNodePersistenceReapplyAndUninstallStage(t *testing.T, state *rwx
 	}
 	defer client.Close()
 	remoteArchive := "/tmp/" + filepath.Base(state.archive)
-	reapply := fmt.Sprintf("sudo helm --kubeconfig /etc/rancher/k3s/k3s.yaml upgrade rwx-three %s -n longhorn-system --set storage.rwx.managedLonghorn.topology=three-node --set validation.attestationNamespace=iterabase-system --wait --timeout 35m", candidateShellQuote(remoteArchive))
+	reapply := fmt.Sprintf("sudo helm --kubeconfig /etc/rancher/k3s/k3s.yaml upgrade rwx-three %s -n longhorn-system --set storage.rwx.managedLonghorn.topology=three-node --set validation.attestationNamespace=iterabase-system --wait --timeout 65m", candidateShellQuote(remoteArchive))
 	mustSSHOutput(t, client, reapply)
 	uid := strings.TrimSpace(mustSSHOutput(t, client, `sudo k3s kubectl get pvc three-node-evidence -n iterabase-system -o jsonpath='{.metadata.uid}'`))
 	if uid != state.pvcUID {

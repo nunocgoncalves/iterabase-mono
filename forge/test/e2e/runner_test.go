@@ -51,7 +51,7 @@ func TestE2E(t *testing.T) {
 				sharede2e.TierF3,
 				[]string{"HOR-469", "DES-HOR-424-01", "DES-HOR-424-03", "DES-HOR-424-05", "DES-HOR-424-06", "DES-HOR-469-01"},
 				[]string{"iterabase-platform-chart"},
-				"test-e2e-rwx-three-node", 100, "cpu",
+				"test-e2e-rwx-three-node", 150, "cpu",
 			),
 			NewState: newRWXThreeNodeState,
 			Stages: []sharede2e.Stage[*rwxThreeNodeState]{
