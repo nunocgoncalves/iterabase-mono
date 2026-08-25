@@ -11,6 +11,7 @@ const (
 	platformChartArchiveEnv  = "FORGE_E2E_PLATFORM_CHART_ARCHIVE"
 	substrateChartArchiveEnv = "FORGE_E2E_SUBSTRATE_CHART_ARCHIVE"
 	storageChartArchiveEnv   = "FORGE_E2E_RWX_STORAGE_CHART_ARCHIVE"
+	forceExternalStorageEnv  = "FORGE_E2E_FORCE_EXTERNAL_STORAGE"
 )
 
 // prepareCandidateChart transfers the exact Actions-retained platform and

@@ -100,7 +100,7 @@ func newDigitalOceanCPUState(t *testing.T) *digitalOceanCPUState {
 	state.pubKey, state.privKeyPath = generateKey(t)
 	state.forgeBin = buildForge(t)
 	state.chartVersion = platformChartVersion(t, "")
-	state.managedRWX = os.Getenv(storageChartArchiveEnv) != ""
+	state.managedRWX = os.Getenv(storageChartArchiveEnv) != "" && os.Getenv(forceExternalStorageEnv) != "true"
 	t.Logf("run %s (keep=%v)", state.runID, state.keep)
 	return state
 }

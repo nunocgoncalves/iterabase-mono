@@ -20,7 +20,7 @@ while ((SECONDS < DEADLINE)); do
   kubernetes="$(kubectl get nodes -o json)"
   longhorn="$(kubectl -n "$LONGHORN_NAMESPACE" get nodes.longhorn.io -o json 2>/dev/null || printf '{"items":[]}')"
   ready_nodes="$(jq '[.items[] | select(.spec.unschedulable != true) | select(any(.status.conditions[]?; .type == "Ready" and .status == "True"))] | length' <<<"$kubernetes")"
-  storage_nodes="$(jq '[.items[] | select(.spec.allowScheduling != false) | select(any(.spec.disks[]?; (.path | rtrimstr("/")) == "/var/lib/longhorn" and .allowScheduling != false))] | length' <<<"$longhorn")"
+  storage_nodes="$(jq '[.items[] | select(.spec.allowScheduling != false) | select(any(.status.conditions[]?; .type == "Ready" and .status == "True")) | select(any(.status.conditions[]?; .type == "Schedulable" and .status == "True"))] | length' <<<"$longhorn")"
   last="topology=${TOPOLOGY} readyNodes=${ready_nodes} storageNodes=${storage_nodes} required=${required_nodes}"
   if [[ "$comparison" == eq && "$ready_nodes" -eq "$required_nodes" && "$storage_nodes" -eq "$required_nodes" ]]; then
     echo "managed-profile=pass $last"

@@ -156,6 +156,9 @@ type digitalOceanGPUState struct {
 }
 
 func newDigitalOceanGPUState(t *testing.T) *digitalOceanGPUState {
+	// GPU driver-transition evidence remains isolated from the managed storage
+	// baseline; storage has dedicated single-/three-node scenarios.
+	t.Setenv(forceExternalStorageEnv, "true")
 	token := os.Getenv("DIGITALOCEAN_TOKEN")
 	if token == "" {
 		if os.Getenv("FORGE_E2E_REQUIRE_CAPACITY") == "true" {

@@ -142,7 +142,7 @@ func candidateOverlayValues(t *testing.T) string {
 	// synthetic model permission is never used for a customer turn.
 	var values strings.Builder
 	values.WriteString("\n# Forge real-machine fixture values.\nstorage:\n  rwx:\n")
-	if os.Getenv(storageChartArchiveEnv) != "" {
+	if os.Getenv(storageChartArchiveEnv) != "" && os.Getenv(forceExternalStorageEnv) != "true" {
 		values.WriteString("    mode: managed-longhorn\n    storageClassName: iterabase-rwx\n    managedLonghorn:\n      topology: single-node\n")
 	} else {
 		// Ordinary PR source E2E intentionally composes with the published

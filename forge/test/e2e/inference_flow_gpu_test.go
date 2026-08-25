@@ -37,7 +37,7 @@ func applyInferencePlatformStage(t *testing.T, state *digitalOceanGPUState) {
 	out := applyOnceArgs(t, state.forgeBin, state.forgeHome, candidateConfig, "--skip-gpu")
 	markers := []string{"action:     skip", "node ready: true", "certificate substrate applied: true",
 		"chart applied: true", "overlay applied: true", "flux installed: true", "gitrepository: ready=True"}
-	if os.Getenv(storageChartArchiveEnv) != "" {
+	if os.Getenv(storageChartArchiveEnv) != "" && os.Getenv(forceExternalStorageEnv) != "true" {
 		markers = append(markers, "rwx storage mode: managed-longhorn", "rwx storage prerequisites ready: true", "rwx storage substrate applied: true")
 	} else {
 		markers = append(markers, "rwx storage mode: external")
