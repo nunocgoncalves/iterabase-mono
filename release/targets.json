@@ -56,7 +56,7 @@
       "chart": "iterabase-platform",
       "tag_prefix": "iterabase-platform-",
       "images": [],
-      "companions": ["cert-manager-substrate"]
+      "companions": ["cert-manager-substrate", "rwx-storage-substrate"]
     }
   }
 }

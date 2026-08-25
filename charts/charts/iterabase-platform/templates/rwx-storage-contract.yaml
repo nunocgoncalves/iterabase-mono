@@ -1,0 +1,36 @@
+{{- $rwx := required "storage.rwx is required" .Values.storage.rwx -}}
+{{- if not (has $rwx.mode (list "managed-longhorn" "external")) -}}
+{{- fail "storage.rwx.mode must be managed-longhorn or external" -}}
+{{- end -}}
+{{- if or (not $rwx.storageClassName) (gt (len $rwx.storageClassName) 253) (not (regexMatch "^[a-z0-9]([.a-z0-9-]*[a-z0-9])?$" $rwx.storageClassName)) -}}
+{{- fail "storage.rwx.storageClassName must be an explicit Kubernetes DNS subdomain" -}}
+{{- end -}}
+{{- $topology := "" -}}
+{{- if eq $rwx.mode "managed-longhorn" -}}
+  {{- if ne $rwx.storageClassName "iterabase-rwx" -}}
+    {{- fail "managed-longhorn requires storage.rwx.storageClassName=iterabase-rwx" -}}
+  {{- end -}}
+  {{- $managed := required "storage.rwx.managedLonghorn is required in managed-longhorn mode" $rwx.managedLonghorn -}}
+  {{- if not (has $managed.topology (list "single-node" "three-node")) -}}
+    {{- fail "storage.rwx.managedLonghorn.topology must be single-node or three-node" -}}
+  {{- end -}}
+  {{- $topology = $managed.topology -}}
+{{- else if hasKey $rwx "managedLonghorn" -}}
+  {{- fail "external mode rejects storage.rwx.managedLonghorn settings" -}}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-rwx-storage-contract
+  labels:
+    app.kubernetes.io/name: iterabase-platform
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    platform.iterabase.com/storage-contract: "true"
+  annotations:
+    platform.iterabase.com/storage-contract-version: HOR-469/v1
+data:
+  contractVersion: HOR-469/v1
+  mode: {{ $rwx.mode | quote }}
+  storageClassName: {{ $rwx.storageClassName | quote }}
+  topology: {{ $topology | quote }}

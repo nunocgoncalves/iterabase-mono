@@ -1,0 +1,12 @@
+Managed RWX substrate {{ .Chart.AppVersion }} is reconciled for {{ .Values.storage.rwx.managedLonghorn.topology }}.
+
+StorageClass: iterabase-rwx (non-default, Retain, expandable, V1 data engine)
+Longhorn namespace: {{ .Release.Namespace }}
+Conformance attestation namespace: {{ .Values.validation.attestationNamespace }}
+
+This topology does not promise seamless RWX failover. A share-manager or node
+outage can block/error active clients; restore backend health and use fresh
+workers without replaying turns or effects.
+
+Before uninstall, reach zero consumers and deliberately settle every retained
+PV/Longhorn volume. The pre-delete guard refuses unsafe or ambiguous removal.

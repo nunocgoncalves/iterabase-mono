@@ -25,7 +25,7 @@ func newInitCmd() *cobra.Command {
 	cmd.Flags().String("address", "", "target host address")
 	cmd.Flags().String("ssh-user", "forge", "SSH user (must have passwordless sudo)")
 	cmd.Flags().String("ssh-key", "~/.ssh/forge_ed25519", "SSH key path")
-	cmd.Flags().String("k3s-version", "v1.31.5+k3s1", "k3s version (full tag, e.g. v1.31.5+k3s1)")
+	cmd.Flags().String("k3s-version", "v1.34.10+k3s1", "k3s version (HOR-469 reference full tag, e.g. v1.34.10+k3s1)")
 	cmd.Flags().Bool("dual-stack", true, "enable dual-stack IPv4+IPv6")
 	cmd.Flags().String("overlay", "", "overlay repo URL (client fork; https:// or file://; empty => no overlay)")
 	cmd.Flags().String("overlay-ref", "master", "overlay ref (branch or tag)")

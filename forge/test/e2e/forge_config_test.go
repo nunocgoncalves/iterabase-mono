@@ -49,7 +49,7 @@ spec:
 `, spec.Name)
 	}
 	fmt.Fprintf(&cfg, `  k3s:
-    version: v1.31.5+k3s1
+    version: v1.34.10+k3s1
     clusterCIDR: 10.42.0.0/16
     serviceCIDR: 10.43.0.0/16
     dualStack: %t

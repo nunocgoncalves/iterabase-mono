@@ -1,0 +1,9 @@
+# Reference replicated managed RWX selection. Requires at least three healthy
+# storage nodes with dedicated SSD capacity; it does not promise seamless NFS
+# share-manager failover.
+storage:
+  rwx:
+    mode: managed-longhorn
+    storageClassName: iterabase-rwx
+    managedLonghorn:
+      topology: three-node

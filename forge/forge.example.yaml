@@ -14,7 +14,7 @@ spec:
       labels: {}               # verbatim at install; GPU labels come from the operator's gpu-feature-discovery (HOR-240)
       taints: []
   k3s:
-    version: v1.31.5+k3s1       # full k3s release tag (vX.Y.Z+k3sN); overridable
+    version: v1.34.10+k3s1      # HOR-469 reference baseline; full tag (vX.Y.Z+k3sN)
     clusterCIDR: 10.42.0.0/16
     serviceCIDR: 10.43.0.0/16
     dualStack: true

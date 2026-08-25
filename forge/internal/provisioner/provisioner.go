@@ -31,6 +31,9 @@ type PreflightResult struct {
 	HasIPv6                bool   // host has IPv6 (relevant when dualStack)
 	HasNVIDIAGPU           bool   // an NVIDIA GPU is on the PCI bus (GPU preflight; S11 passthrough precondition)
 	KernelHeadersInstalled bool   // linux-headers-$(uname -r) present (GPU driver build dep)
+	HasISCSI               bool   // iscsiadm exists and iscsid is active (managed Longhorn prerequisite)
+	HasNFSv4               bool   // mount.nfs exists (managed RWX client prerequisite)
+	HasMountPropagation    bool   // the host root mount is shared/rshared
 }
 
 // GPUReadiness is one coherent observation of the GPU operator and the
@@ -92,6 +95,11 @@ type Provisioner interface {
 	// via the GPU operator's driver container (installs matching linux-headers on
 	// Ubuntu). Idempotent. Only called when GPU is enabled.
 	EnsureDriverBuildDeps(ctx context.Context) error
+	// EnsureRWXStoragePrerequisites idempotently installs and verifies the
+	// iSCSI/NFSv4/kernel/filesystem/mount-propagation capabilities required by
+	// the approved managed Longhorn reference substrate. It is derived from the
+	// chart storage selection; forge.yaml does not gain a provider toggle.
+	EnsureRWXStoragePrerequisites(ctx context.Context) error
 	// ReadGPUReadiness returns one coherent ClusterPolicy/node observation,
 	// evaluated against the requested driver. Missing resources and transitional
 	// states return Ready=false; query/parse failures return an error. Polled as

@@ -1,0 +1,65 @@
+{{- include "rwx-storage-substrate.validate" . -}}
+{{- if .Values.validation.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "rwx-storage-substrate.fullname" . }}-uninstall-guard
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "rwx-storage-substrate.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-delete
+    helm.sh/hook-weight: "-20"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  activeDeadlineSeconds: 300
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        {{- include "rwx-storage-substrate.labels" . | nindent 8 }}
+        app.kubernetes.io/component: storage-uninstall-guard
+    spec:
+      serviceAccountName: {{ include "rwx-storage-substrate.fullname" . }}-validation
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: guard
+          image: "{{ .Values.validation.image.repository }}:{{ .Values.validation.image.tag }}@{{ .Values.validation.image.digest }}"
+          imagePullPolicy: {{ .Values.validation.image.pullPolicy }}
+          command: ["/bin/bash", "/contract/uninstall-guard.sh"]
+          env:
+            - name: LONGHORN_NAMESPACE
+              value: {{ .Release.Namespace | quote }}
+          volumeMounts:
+            - name: contract
+              mountPath: /contract
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+          resources:
+            requests:
+              cpu: 20m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+      volumes:
+        - name: contract
+          configMap:
+            name: {{ include "rwx-storage-substrate.fullname" . }}-validation
+            defaultMode: 0444
+        - name: tmp
+          emptyDir: {}
+{{- end }}

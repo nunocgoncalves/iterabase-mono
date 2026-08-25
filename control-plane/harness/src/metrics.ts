@@ -51,6 +51,17 @@ export class HarnessMetrics {
     labelNames: ["operation"] as const,
     registers: [this.registry],
   });
+  readonly storageReady = new Gauge({
+    name: "control_plane_harness_storage_ready",
+    help: "Whether the shared sandbox mount passed the latest fsync health transaction.",
+    registers: [this.registry],
+  });
+  readonly storageChecks = new Counter({
+    name: "control_plane_harness_storage_checks_total",
+    help: "Shared sandbox storage health transactions by bounded result.",
+    labelNames: ["result"] as const,
+    registers: [this.registry],
+  });
   readonly pendingReplays = new Gauge({
     name: "control_plane_harness_pending_replays",
     help: "Recovered or stream-loss event tails awaiting cumulative ACK.",
@@ -62,6 +73,7 @@ export class HarnessMetrics {
     this.buildInfo.labels(version).set(1);
     this.dispatchConnected.set(0);
     this.activeTurns.set(0);
+    this.storageReady.set(0);
     this.pendingReplays.set(0);
   }
 }

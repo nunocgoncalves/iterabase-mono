@@ -146,7 +146,7 @@ func buildObservabilityToolArchive() ([]byte, string, error) {
 	if err != nil {
 		return nil, "", fmt.Errorf("create gzip writer: %w", err)
 	}
-	compressor.Header.ModTime = time.Unix(0, 0)
+	compressor.ModTime = time.Unix(0, 0)
 	archive := tar.NewWriter(compressor)
 	files := []struct {
 		name string

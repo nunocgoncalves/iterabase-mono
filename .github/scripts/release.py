@@ -499,6 +499,7 @@ def make_plan(
             "inference-gateway",
             "iterabase-platform",
             "cert-manager-substrate",
+            "rwx-storage-substrate",
         )
     }
     fixtures = fixture_versions(root)
@@ -528,7 +529,17 @@ def make_plan(
         if chart:
             artifact_types.append("chart")
             dependencies = chart_dependencies(root / "charts" / "charts" / chart / "Chart.yaml")
-            selected_chart_dependencies.append({"target": target, "dependencies": dependencies})
+            selected_chart_dependencies.append({"target": target, "chart": chart, "dependencies": dependencies})
+            for companion in definition.get("companions", []):
+                selected_chart_dependencies.append(
+                    {
+                        "target": target,
+                        "chart": companion,
+                        "dependencies": chart_dependencies(
+                            root / "charts" / "charts" / companion / "Chart.yaml"
+                        ),
+                    }
+                )
             chart_matrix.append(
                 {
                     "target": target,

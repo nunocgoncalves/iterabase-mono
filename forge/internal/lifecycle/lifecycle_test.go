@@ -54,19 +54,21 @@ type installCall struct {
 
 // fakeProv is a controllable provisioner.Provisioner for lifecycle tests.
 type fakeProv struct {
-	pf                 provisioner.PreflightResult
-	state              provisioner.HostState
-	ready              bool
-	readyAfterInstall  bool
-	kubeconfig         []byte
-	installErr         error
-	installs           []installCall
-	ensureDepsErr      error
-	ensureDepsCalls    int
-	gpuReady           bool
-	gpuTerminal        bool
-	gpuReadinessReason string
-	gpuDriverRequests  []string
+	pf                     provisioner.PreflightResult
+	state                  provisioner.HostState
+	ready                  bool
+	readyAfterInstall      bool
+	kubeconfig             []byte
+	installErr             error
+	installs               []installCall
+	ensureDepsErr          error
+	ensureDepsCalls        int
+	ensureStorageErr       error
+	ensureStorageDepsCalls int
+	gpuReady               bool
+	gpuTerminal            bool
+	gpuReadinessReason     string
+	gpuDriverRequests      []string
 }
 
 func (f *fakeProv) Preflight(_ context.Context) (*provisioner.PreflightResult, error) {
@@ -99,6 +101,10 @@ func (f *fakeProv) NodeReady(_ context.Context) (bool, error) { return f.ready, 
 func (f *fakeProv) EnsureDriverBuildDeps(_ context.Context) error {
 	f.ensureDepsCalls++
 	return f.ensureDepsErr
+}
+func (f *fakeProv) EnsureRWXStoragePrerequisites(_ context.Context) error {
+	f.ensureStorageDepsCalls++
+	return f.ensureStorageErr
 }
 func (f *fakeProv) ReadGPUReadiness(_ context.Context, requestedDriverVersion string) (*provisioner.GPUReadiness, error) {
 	f.gpuDriverRequests = append(f.gpuDriverRequests, requestedDriverVersion)
@@ -306,6 +312,7 @@ type fakeDeployer struct {
 	crdsMigrationComplete           bool
 	applyErr                        error
 	applyManifestErr                error
+	uninstallErrors                 map[string]error
 	ownershipTransferErr            error
 	hookOwnershipTransferErr        error
 	metallbHookOwnershipTransferErr error
@@ -388,7 +395,7 @@ func (f *fakeDeployer) RestartDeployment(_ context.Context, selector, namespace 
 }
 func (f *fakeDeployer) UninstallChart(_ context.Context, release, ns string) error {
 	f.uninstallCalls = append(f.uninstallCalls, uninstallCall{release, ns})
-	return nil
+	return f.uninstallErrors[release]
 }
 
 // fakeOverlayer is a controllable overlayer.Overlayer for lifecycle overlay tests.
@@ -399,6 +406,8 @@ type fakeOverlayer struct {
 	cloneCalls      []cloneCall
 	removeCalls     []string
 	readFileContent string
+	readFileValues  map[string]string
+	readFileErrors  map[string]error
 	readFileErr     error
 	readFileCalls   []readFileCall
 }
@@ -424,8 +433,14 @@ func (f *fakeOverlayer) Remove(_ context.Context, dest string) error {
 }
 func (f *fakeOverlayer) ReadFile(_ context.Context, dest, relPath string) (string, error) {
 	f.readFileCalls = append(f.readFileCalls, readFileCall{dest, relPath})
+	if err := f.readFileErrors[relPath]; err != nil {
+		return "", err
+	}
 	if f.readFileErr != nil {
 		return "", f.readFileErr
+	}
+	if value, ok := f.readFileValues[relPath]; ok {
+		return value, nil
 	}
 	return f.readFileContent, nil
 }
@@ -1101,9 +1116,11 @@ func TestApply_Secrets(t *testing.T) {
 		}
 	}
 
-	// secrets.yaml was read from the cloned overlay.
-	require.Len(t, o.readFileCalls, 1)
+	// secrets plus the two semantic chart value files were read from the cloned overlay.
+	require.Len(t, o.readFileCalls, 3)
 	assert.Equal(t, "secrets.yaml", o.readFileCalls[0].relPath)
+	assert.Equal(t, "values.yaml", o.readFileCalls[1].relPath)
+	assert.Equal(t, "values.client.yaml", o.readFileCalls[2].relPath)
 
 	// secrets are applied AFTER the overlay clone + BEFORE the chart so
 	// cert-manager finds them on first reconcile.
@@ -1148,15 +1165,20 @@ func TestApply_SkipSecrets(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, res.SecretsApplied)
 	assert.Empty(t, d.applyManifestCalls, "SkipSecrets skips materialization")
-	assert.Empty(t, o.readFileCalls, "SkipSecrets skips reading secrets.yaml")
+	assert.Equal(t, []readFileCall{
+		{dest: overlayDestPath(testConfigWithOverlay()), relPath: "values.yaml"},
+		{dest: overlayDestPath(testConfigWithOverlay()), relPath: "values.client.yaml"},
+	}, o.readFileCalls, "SkipSecrets still resolves the independent storage selection but does not read secrets.yaml")
 }
 
 func TestApply_Secrets_NoSecretsFile(t *testing.T) {
 	useTempHome(t)
 	p := &fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig), readyAfterInstall: true}
 	d := &fakeDeployer{}
-	// overlay cloned but has no secrets.yaml (ReadFile returns not-found).
-	o := &fakeOverlayer{cloneCommit: "deadbeef", readFileErr: errors.New("overlay read secrets.yaml: No such file or directory")}
+	// overlay cloned but has no secrets.yaml; semantic values remain readable.
+	o := &fakeOverlayer{cloneCommit: "deadbeef", readFileErrors: map[string]error{
+		"secrets.yaml": errors.New("overlay read secrets.yaml: No such file or directory"),
+	}}
 	res, err := Apply(context.Background(), testConfigWithOverlay(), p, d, o, &fakeFluxer{}, ApplyOpts{
 		ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
 	})

@@ -181,6 +181,7 @@ class ReleaseContractTests(unittest.TestCase):
                 "control-plane/deployed-work-recovery",
                 "forge/digitalocean-cpu",
                 "forge/digitalocean-gpu",
+                "forge/digitalocean-rwx-three-node",
                 "charts/certificate-ownership-migration",
                 "charts/fresh-install",
                 "charts/feature-enable-upgrade",
@@ -195,38 +196,39 @@ class ReleaseContractTests(unittest.TestCase):
         )
 
     def test_component_versions_are_local_authorities(self) -> None:
-        self.assertEqual(release.read_version(ROOT / "control-plane" / "VERSION"), "0.0.30")
+        self.assertEqual(release.read_version(ROOT / "control-plane" / "VERSION"), "0.0.31")
         self.assertEqual(release.read_version(ROOT / "inference-gateway" / "VERSION"), "0.2.7")
-        self.assertEqual(release.read_version(ROOT / "forge" / "VERSION"), "0.8.5")
+        self.assertEqual(release.read_version(ROOT / "forge" / "VERSION"), "0.8.6")
         self.assertFalse((ROOT / "release" / "compatibility.json").exists())
 
     def test_active_release_intent_records_platform_pair_with_forge_baseline(self) -> None:
         # HOR-512 release intent: iterabase-platform-chart is the sole candidate.
-        # Forge v0.8.5 is already published, so it is recorded as an immutable
+        # Forge v0.8.6 is already published, so it is recorded as an immutable
         # baseline rather than a co-published member; platform and its same-version
-        # cert-manager-substrate companion remain the coordinated chart release.
-        # The compiled metadata must record the platform+substrate pair and the
+        # cert-manager and managed-RWX companions remain the coordinated chart release.
+        # The compiled metadata must record the platform+companion set and the
         # forge baseline so candidate preflight never co-publishes existing tags.
         plan = self.plan("iterabase-platform-chart")
         releases = {item["target"]: item["version"] for item in plan["releases"]}
-        self.assertEqual(releases, {"iterabase-platform-chart": "0.3.22"})
+        self.assertEqual(releases, {"iterabase-platform-chart": "0.3.23"})
         self.assertNotIn("forge", releases)
 
         repo_versions = plan["tested_with"]["repository_versions"]
-        self.assertEqual(repo_versions["forge"], "0.8.5")
-        self.assertEqual(repo_versions["iterabase-platform-chart"], "0.3.22")
+        self.assertEqual(repo_versions["forge"], "0.8.6")
+        self.assertEqual(repo_versions["iterabase-platform-chart"], "0.3.23")
 
         platform = next(
             item
             for item in plan["chart_matrix"]
             if item["chart"] == "iterabase-platform"
         )
-        self.assertEqual(platform["version"], "0.3.22")
-        self.assertEqual(platform["companions"], ["cert-manager-substrate"])
-        self.assertEqual(
-            plan["tested_with"]["chart_metadata"]["cert-manager-substrate"]["version"],
-            "0.3.22",
-        )
+        self.assertEqual(platform["version"], "0.3.23")
+        self.assertEqual(platform["companions"], ["cert-manager-substrate", "rwx-storage-substrate"])
+        for companion in ("cert-manager-substrate", "rwx-storage-substrate"):
+            self.assertEqual(
+                plan["tested_with"]["chart_metadata"][companion]["version"],
+                "0.3.23",
+            )
 
         # One coordinated validation exercises both the Forge real-machine matrix and
         # the chart MetalLB upgrade/rollback transition.
@@ -244,9 +246,9 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertEqual(
             [(item["target"], item["version"], item["production_tag"]) for item in plan["releases"]],
             [
-                ("control-plane", "0.0.30", "control-plane-v0.0.30"),
-                ("forge", "0.8.5", "forge-v0.8.5"),
-                ("control-plane-chart", "0.4.12", "control-plane-0.4.12"),
+                ("control-plane", "0.0.31", "control-plane-v0.0.31"),
+                ("forge", "0.8.6", "forge-v0.8.6"),
+                ("control-plane-chart", "0.4.13", "control-plane-0.4.13"),
             ],
         )
         self.assertEqual(
@@ -263,32 +265,35 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertEqual(plan["targets"], ["forge"])
         self.assertTrue(plan["forge"])
         self.assertTrue(plan["real_machine"])
-        self.assertEqual(plan["releases"][0]["production_tag"], "forge-v0.8.5")
+        self.assertEqual(plan["releases"][0]["production_tag"], "forge-v0.8.6")
         self.assertEqual(plan["image_matrix"], [])
         self.assertEqual(plan["chart_matrix"], [])
 
     def test_chart_version_and_dependencies_come_from_chart_source(self) -> None:
         plan = self.plan("iterabase-platform-chart")
-        self.assertEqual(plan["releases"][0]["version"], "0.3.22")
-        self.assertEqual(plan["chart_matrix"][0]["companions"], ["cert-manager-substrate"])
-        dependencies = {
-            item["name"]: item["version"]
-            for item in plan["tested_with"]["selected_chart_dependencies"][0]["dependencies"]
+        self.assertEqual(plan["releases"][0]["version"], "0.3.23")
+        self.assertEqual(plan["chart_matrix"][0]["companions"], ["cert-manager-substrate", "rwx-storage-substrate"])
+        selected_dependencies = {
+            item["chart"]: {dependency["name"]: dependency["version"] for dependency in item["dependencies"]}
+            for item in plan["tested_with"]["selected_chart_dependencies"]
+            if item["target"] == "iterabase-platform-chart"
         }
-        self.assertEqual(dependencies["control-plane"], "0.4.12")
+        dependencies = selected_dependencies["iterabase-platform"]
+        self.assertEqual(dependencies["control-plane"], "0.4.13")
         self.assertEqual(dependencies["inference-gateway"], "0.2.13")
         self.assertEqual(dependencies["ingress-nginx"], "4.15.1")
         self.assertEqual(dependencies["internal-ingress-nginx"], "4.15.1")
         self.assertEqual(dependencies["metallb-config"], "0.2.0")
+        self.assertEqual(selected_dependencies["rwx-storage-substrate"]["longhorn"], "1.12.1")
         self.assertEqual(
             plan["tested_with"]["chart_metadata"]["control-plane"]["appVersion"],
-            "0.0.30",
+            "0.0.31",
         )
         self.assertEqual(
             plan["tested_with"]["chart_metadata"]["inference-gateway"]["appVersion"],
             "0.2.7",
         )
-        self.assertEqual(plan["tested_with"]["repository_versions"]["control-plane"], "0.0.30")
+        self.assertEqual(plan["tested_with"]["repository_versions"]["control-plane"], "0.0.31")
         self.assertEqual(
             plan["tested_with"]["repository_versions"]["inference-gateway"], "0.2.7"
         )
@@ -298,9 +303,9 @@ class ReleaseContractTests(unittest.TestCase):
                 for item in plan["baseline_dependencies"]["images"]
             },
             {
-                "control-plane": "0.0.30",
-                "control-plane-harness": "0.0.30",
-                "control-plane-tool-runner": "0.0.30",
+                "control-plane": "0.0.31",
+                "control-plane-harness": "0.0.31",
+                "control-plane-tool-runner": "0.0.31",
                 "inference-gateway": "0.2.7",
             },
         )
@@ -510,7 +515,7 @@ class ReleaseContractTests(unittest.TestCase):
             assets = Path(directory) / "forge"
             assets.mkdir(parents=True)
             for platform in ("linux_amd64", "linux_arm64", "darwin_amd64", "darwin_arm64"):
-                (assets / f"forge_0.8.5_{platform}.tar.gz").write_bytes(platform.encode())
+                (assets / f"forge_0.8.6_{platform}.tar.gz").write_bytes(platform.encode())
             (assets / "checksums.txt").write_text("fixture\n", encoding="utf-8")
             release.validate_candidate_assets(plan, Path(directory))
             self.assertFalse(any(path.name == "forge" for path in assets.rglob("*")))
@@ -520,8 +525,9 @@ class ReleaseContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             assets = Path(directory) / "charts"
             assets.mkdir(parents=True)
-            (assets / "iterabase-platform-0.3.22.tgz").write_bytes(b"platform")
-            (assets / "cert-manager-substrate-0.3.22.tgz").write_bytes(b"substrate")
+            (assets / "iterabase-platform-0.3.23.tgz").write_bytes(b"platform")
+            (assets / "cert-manager-substrate-0.3.23.tgz").write_bytes(b"substrate")
+            (assets / "rwx-storage-substrate-0.3.23.tgz").write_bytes(b"rwx")
             (assets / "checksums-iterabase-platform.txt").write_text(
                 "fixture\n", encoding="utf-8"
             )
@@ -534,9 +540,10 @@ class ReleaseContractTests(unittest.TestCase):
             assets = root / "assets" / "charts"
             assets.mkdir(parents=True)
             for chart, version in (
-                ("control-plane", "0.4.12"),
-                ("iterabase-platform", "0.3.22"),
-                ("cert-manager-substrate", "0.3.22"),
+                ("control-plane", "0.4.13"),
+                ("iterabase-platform", "0.3.23"),
+                ("cert-manager-substrate", "0.3.23"),
+                ("rwx-storage-substrate", "0.3.23"),
             ):
                 (assets / f"{chart}-{version}.tgz").write_bytes(chart.encode())
             for chart in ("control-plane", "iterabase-platform"):
@@ -764,7 +771,7 @@ class ReleaseContractTests(unittest.TestCase):
                 "  *) printf 'unexpected --repo argument: %s\\n' \"$*\" >&2; exit 2 ;;\n"
                 "esac\n"
                 "if [ \"$2\" = view ]; then\n"
-                "  printf '%s\\n' '{\"tagName\":\"control-plane-v0.0.30\",\"assets\":[{\"name\":\"candidate-plan.json\"}]}'\n"
+                "  printf '%s\\n' '{\"tagName\":\"control-plane-v0.0.31\",\"assets\":[{\"name\":\"candidate-plan.json\"}]}'\n"
                 "elif [ \"$2\" = download ]; then\n"
                 "  destination=''\n"
                 "  while [ $# -gt 0 ]; do case \"$1\" in --dir) destination=$2; shift 2;; *) shift;; esac; done\n"
@@ -814,11 +821,15 @@ class ReleaseContractTests(unittest.TestCase):
         result, commands = self.check_availability(self.plan("iterabase-platform-chart"))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(
-            "helm show chart oci://ghcr.io/nunocgoncalves/iterabase-charts/iterabase-platform --version 0.3.22",
+            "helm show chart oci://ghcr.io/nunocgoncalves/iterabase-charts/iterabase-platform --version 0.3.23",
             commands,
         )
         self.assertIn(
-            "helm show chart oci://ghcr.io/nunocgoncalves/iterabase-charts/cert-manager-substrate --version 0.3.22",
+            "helm show chart oci://ghcr.io/nunocgoncalves/iterabase-charts/cert-manager-substrate --version 0.3.23",
+            commands,
+        )
+        self.assertIn(
+            "helm show chart oci://ghcr.io/nunocgoncalves/iterabase-charts/rwx-storage-substrate --version 0.3.23",
             commands,
         )
 
@@ -955,15 +966,16 @@ class ReleaseContractTests(unittest.TestCase):
             assets = Path(directory) / "charts"
             assets.mkdir(parents=True)
             for chart, version in (
-                ("control-plane", "0.4.12"),
-                ("iterabase-platform", "0.3.22"),
-                ("cert-manager-substrate", "0.3.22"),
+                ("control-plane", "0.4.13"),
+                ("iterabase-platform", "0.3.23"),
+                ("cert-manager-substrate", "0.3.23"),
+                ("rwx-storage-substrate", "0.3.23"),
             ):
                 (assets / f"{chart}-{version}.tgz").write_bytes(chart.encode())
             for chart in ("control-plane", "iterabase-platform"):
                 (assets / f"checksums-{chart}.txt").write_text("fixture\n", encoding="utf-8")
             release.validate_candidate_assets(plan, Path(directory))
-            (assets / "control-plane-0.4.12.tgz").unlink()
+            (assets / "control-plane-0.4.13.tgz").unlink()
             with self.assertRaisesRegex(release.ReleaseError, "control-plane"):
                 release.validate_candidate_assets(plan, Path(directory))
 

@@ -13,6 +13,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -100,7 +101,10 @@ type AgentPoolReconciler struct {
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=persistentvolumes,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get
+// +kubebuilder:rbac:groups=storage.k8s.io,resources=storageclasses,verbs=get;list;watch
+// +kubebuilder:rbac:groups=longhorn.io,resources=volumes,verbs=get;list;watch
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
 
 // PoolMaterializer is the contract by which the AgentPool reconciler
@@ -199,24 +203,73 @@ func (r *AgentPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		_ = r.patchStatus(ctx, &pool, false, 0, fmt.Sprintf("ensure PVC: %v", err), false)
 		return ctrl.Result{}, err
 	}
+
+	storage := r.assessAgentPoolStorage(ctx, &pool)
+	if !storage.CanMount {
+		hadWorkers := r.countReadyWorkers(ctx, &pool) > 0 || storageWasReady(&pool)
+		if err := r.quiesceWorkers(ctx, &pool); err != nil {
+			return ctrl.Result{}, err
+		}
+		if hadWorkers {
+			storage.Message += "; workers were removed to stop scheduling credit, and recovery requires healthy storage plus fresh workers without automatic turn/effect replay"
+		}
+		_ = r.patchStatus(ctx, &pool, false, 0, storage.Message, false, &storage)
+		return ctrl.Result{RequeueAfter: healthRequeueInterval}, nil
+	}
 	if err := r.ensureNetworkPolicy(ctx, &pool); err != nil {
-		_ = r.patchStatus(ctx, &pool, false, 0, fmt.Sprintf("ensure NetworkPolicy: %v", err), false)
+		_ = r.patchStatus(ctx, &pool, false, 0, fmt.Sprintf("ensure NetworkPolicy: %v", err), false, &storage)
 		return ctrl.Result{}, err
 	}
 	if err := r.reconcileWorkers(ctx, &pool); err != nil {
-		_ = r.patchStatus(ctx, &pool, false, 0, fmt.Sprintf("ensure workers: %v", err), false)
+		_ = r.patchStatus(ctx, &pool, false, 0, fmt.Sprintf("ensure workers: %v", err), false, &storage)
 		return ctrl.Result{}, err
 	}
 
 	readyReplicas := r.countReadyWorkers(ctx, &pool)
-	ready := readyReplicas > 0 || pool.Spec.Replicas == 0
-	msg := ""
-	if pool.Spec.Replicas == 0 {
-		msg = "scaled to zero"
-	} else if !ready {
-		msg = "waiting for worker pods to become Ready"
+	storage = r.assessAgentPoolStorage(ctx, &pool)
+	if !storage.Ready {
+		if storageWasReady(&pool) || !storage.CanMount {
+			if err := r.quiesceWorkers(ctx, &pool); err != nil {
+				return ctrl.Result{}, err
+			}
+			readyReplicas = 0
+			storage.Reason = storageReasonRecoveryPending
+			storage.Message += "; existing workers were removed to stop scheduling credit and recovery requires healthy storage plus fresh workers"
+		}
+		_ = r.patchStatus(ctx, &pool, false, readyReplicas, storage.Message, false, &storage)
+		return ctrl.Result{RequeueAfter: healthRequeueInterval}, nil
 	}
-	if err := r.patchStatus(ctx, &pool, ready, readyReplicas, msg, true); err != nil {
+	if storage.Mode == storageModeManagedLonghorn && (readyReplicas > 0 || storageWasReady(&pool)) {
+		if failure := r.managedLonghornVolumeHealth(ctx, storage.VolumeHandle, true); failure != nil {
+			failure.Mode = storage.Mode
+			failure.ClassName = storage.ClassName
+			failure.PVName = storage.PVName
+			failure.VolumeHandle = storage.VolumeHandle
+			if err := r.quiesceWorkers(ctx, &pool); err != nil {
+				return ctrl.Result{}, err
+			}
+			failure.Reason = storageReasonRecoveryPending
+			failure.Message += "; workers were removed and no turn/effect will be replayed automatically"
+			_ = r.patchStatus(ctx, &pool, false, 0, failure.Message, false, failure)
+			return ctrl.Result{RequeueAfter: healthRequeueInterval}, nil
+		}
+	}
+
+	ready := readyReplicas > 0 || pool.Spec.Replicas == 0
+	msg := storage.Message
+	if pool.Spec.Replicas == 0 {
+		msg = "scaled to zero; " + storage.Message
+	} else if !ready {
+		if reason := workerStorageFailure(ctx, r.Client, &pool); reason != "" {
+			storage.Ready = false
+			storage.Reason = storageReasonMountRootUnsafe
+			storage.Message = reason
+			msg = reason
+		} else {
+			msg = "storage predicates pass; waiting for worker pods to mount, validate root ownership/mode, and become Ready"
+		}
+	}
+	if err := r.patchStatus(ctx, &pool, ready, readyReplicas, msg, true, &storage); err != nil {
 		return ctrl.Result{}, err
 	}
 	logger.Info("reconciled AgentPool", "replicas", pool.Spec.Replicas, "ready", readyReplicas)
@@ -524,9 +577,25 @@ func (r *AgentPoolReconciler) ensurePVC(ctx context.Context, pool *v1alpha1.Agen
 		}
 		sc := pool.Spec.Sandbox.StorageClassName
 		access := []corev1.PersistentVolumeAccessMode{pool.Spec.Sandbox.AccessMode}
-		pvc.Spec.AccessModes = access
-		pvc.Spec.StorageClassName = &sc
-		pvc.Spec.Resources.Requests = corev1.ResourceList{corev1.ResourceStorage: pool.Spec.Sandbox.Size}
+		if !pvc.CreationTimestamp.IsZero() {
+			if pvc.Spec.StorageClassName == nil || *pvc.Spec.StorageClassName != sc {
+				return fmt.Errorf("immutable sandbox PVC storageClassName is %v, requested %q; migrate through a separately reviewed copy/cutover plan instead of recreating the claim", pointerValue(pvc.Spec.StorageClassName), sc)
+			}
+			if len(pvc.Spec.AccessModes) != 1 || pvc.Spec.AccessModes[0] != pool.Spec.Sandbox.AccessMode {
+				return fmt.Errorf("immutable sandbox PVC accessModes are %v, requested %s; do not recreate the claim", pvc.Spec.AccessModes, pool.Spec.Sandbox.AccessMode)
+			}
+			current := pvc.Spec.Resources.Requests[corev1.ResourceStorage]
+			if current.Cmp(pool.Spec.Sandbox.Size) > 0 {
+				return fmt.Errorf("PVCExpansionFailed: sandbox PVC shrink from %s to %s is unsupported; create/copy/cut over under a reviewed migration plan", current.String(), pool.Spec.Sandbox.Size.String())
+			}
+		} else {
+			pvc.Spec.AccessModes = access
+			pvc.Spec.StorageClassName = &sc
+		}
+		if pvc.Spec.Resources.Requests == nil {
+			pvc.Spec.Resources.Requests = corev1.ResourceList{}
+		}
+		pvc.Spec.Resources.Requests[corev1.ResourceStorage] = pool.Spec.Sandbox.Size
 		return nil
 	})
 	return err
@@ -989,10 +1058,23 @@ func podIsReady(p *corev1.Pod) bool {
 	return false
 }
 
-func (r *AgentPoolReconciler) patchStatus(ctx context.Context, pool *v1alpha1.AgentPool, ready bool, readyReplicas int32, message string, recordObserved bool) error {
+func (r *AgentPoolReconciler) patchStatus(ctx context.Context, pool *v1alpha1.AgentPool, ready bool, readyReplicas int32, message string, recordObserved bool, storage ...*agentPoolStorageAssessment) error {
 	base := pool.DeepCopy()
 	pool.Status.Ready = ready
 	pool.Status.ReadyReplicas = readyReplicas
+	if len(storage) > 0 && storage[0] != nil {
+		condition := metav1.Condition{
+			Type:               "StorageReady",
+			Status:             metav1.ConditionFalse,
+			Reason:             storage[0].Reason,
+			Message:            storage[0].Message,
+			ObservedGeneration: pool.Generation,
+		}
+		if storage[0].Ready {
+			condition.Status = metav1.ConditionTrue
+		}
+		meta.SetStatusCondition(&pool.Status.Conditions, condition)
+	}
 	// ObservedGeneration is advanced only on definitive outcomes: a successful
 	// reconcile or a structural validation rejection (no retry until the spec
 	// changes). Transient errors (PVC/NetworkPolicy/gateway/workers) MUST NOT

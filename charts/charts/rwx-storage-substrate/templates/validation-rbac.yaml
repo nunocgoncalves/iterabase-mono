@@ -1,0 +1,54 @@
+{{- include "rwx-storage-substrate.validate" . -}}
+{{- if .Values.validation.enabled }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "rwx-storage-substrate.fullname" . }}-validation
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "rwx-storage-substrate.labels" . | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "rwx-storage-substrate.fullname" . }}-validation
+  labels:
+    {{- include "rwx-storage-substrate.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["create", "delete", "get"]
+  - apiGroups: [""]
+    resources: ["configmaps", "nodes", "persistentvolumeclaims", "pods"]
+    verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/log", "events"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["get", "list", "patch", "watch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["longhorn.io"]
+    resources: ["settings", "volumes"]
+    verbs: ["get", "list", "patch", "update", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "rwx-storage-substrate.fullname" . }}-validation
+  labels:
+    {{- include "rwx-storage-substrate.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "rwx-storage-substrate.fullname" . }}-validation
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "rwx-storage-substrate.fullname" . }}-validation
+    namespace: {{ .Release.Namespace }}
+{{- end }}

@@ -14,19 +14,20 @@ import { loadConfig } from "./config.js";
 import { Probes } from "./probes.js";
 import { Supervisor } from "./supervisor.js";
 import { createChildFactory } from "./child-process.js";
-import { ensureSandboxMountRoot } from "./sandbox.js";
 import { HarnessMetrics } from "./metrics.js";
+import { checkSandboxStorageHealth } from "./storage-health.js";
 
 /** The compiled pi child entry, sibling to this module's output. */
 const CHILD_SCRIPT = join(dirname(fileURLToPath(import.meta.url)), "child.js");
 
 export async function runWorker(): Promise<void> {
   const cfg = loadConfig();
-  // Ensure the shared RWX sandbox mount root is 0711 root-owned so only the
-  // supervisor (root) can create per-session sandbox entries — a session-UID
-  // child can reach its own 0700 root but cannot forge a sibling (HOR-245).
-  ensureSandboxMountRoot(cfg.sandboxRoot);
   const metrics = new HarnessMetrics();
+  // Ensure the shared RWX sandbox mount root is 0711 root-owned and prove a
+  // complete filesystem transaction before opening dispatch credit.
+  checkSandboxStorageHealth(cfg.sandboxRoot, cfg.worker.workerId);
+  metrics.storageChecks.labels("pass").inc();
+  metrics.storageReady.set(1);
   const probes = new Probes(metrics.registry);
   await probes.start(cfg.probe.port);
 
@@ -60,9 +61,35 @@ export async function runWorker(): Promise<void> {
   process.on("SIGTERM", () => void drain("SIGTERM"));
   process.on("SIGINT", () => void drain("SIGINT"));
 
+  let storageFailure: Error | undefined;
+  const storageMonitor = setInterval(() => {
+    if (storageFailure || draining) return;
+    try {
+      checkSandboxStorageHealth(cfg.sandboxRoot, cfg.worker.workerId);
+      metrics.storageChecks.labels("pass").inc();
+      metrics.storageReady.set(1);
+    } catch (error) {
+      storageFailure = error as Error;
+      console.error(`sandbox storage became unavailable: ${storageFailure.message}`);
+      metrics.storageChecks.labels("fail").inc();
+      metrics.storageReady.set(0);
+      probes.setReady(false);
+      probes.setHealthy(false);
+      clearInterval(storageMonitor);
+      // Drain closes dispatch credit and aborts/fences an active turn. The
+      // process then exits non-zero below so Kubernetes replaces this client
+      // only after the operator observes healthy backend storage.
+      void sup.drain().catch((drainError) => {
+        console.error(`storage-failure drain failed: ${(drainError as Error).message}`);
+      });
+    }
+  }, 10_000);
+
   try {
     await sup.run();
+    if (storageFailure) throw storageFailure;
   } finally {
+    clearInterval(storageMonitor);
     await probes.stop();
   }
 }

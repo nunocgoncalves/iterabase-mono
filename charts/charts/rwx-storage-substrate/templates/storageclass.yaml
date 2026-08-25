@@ -1,0 +1,21 @@
+{{- include "rwx-storage-substrate.validate" . -}}
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: iterabase-rwx
+  labels:
+    {{- include "rwx-storage-substrate.labels" . | nindent 4 }}
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "false"
+    platform.iterabase.com/storage-contract-version: HOR-469/v1
+    platform.iterabase.com/managed-topology: {{ .Values.storage.rwx.managedLonghorn.topology | quote }}
+provisioner: driver.longhorn.io
+allowVolumeExpansion: true
+reclaimPolicy: Retain
+volumeBindingMode: Immediate
+parameters:
+  dataEngine: v1
+  fsType: ext4
+  fromBackup: ""
+  migratable: "false"
+  numberOfReplicas: {{ ternary "1" "3" (eq .Values.storage.rwx.managedLonghorn.topology "single-node") | quote }}

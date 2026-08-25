@@ -1,0 +1,396 @@
+# Rendered by hor-424-rwx-conformance.sh. This installs no storage backend.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ${HOR424_NAMESPACE}
+  labels:
+    app.kubernetes.io/name: hor-424-rwx-conformance
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: sessions
+  namespace: ${HOR424_NAMESPACE}
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: ${HOR424_STORAGE_CLASS}
+  volumeMode: Filesystem
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: setup
+  namespace: ${HOR424_NAMESPACE}
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: setup
+          image: debian:13-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132
+          command: [bash, -ceu]
+          args:
+            - |
+              chown 0:0 /sessions
+              chmod 0711 /sessions
+              install -d -m 1777 -o 0 -g 0 /sessions/.conformance
+              install -d -m 0700 -o 10001 -g 10001 /sessions/session-a
+              install -d -m 0700 -o 10002 -g 10002 /sessions/session-b
+              printf seed-a > /sessions/session-a/secret
+              printf seed-b > /sessions/session-b/secret
+              chown 10001:10001 /sessions/session-a/secret
+              chown 10002:10002 /sessions/session-b/secret
+              chmod 0600 /sessions/session-a/secret /sessions/session-b/secret
+              test "$(stat -c %u:%g:%a /sessions)" = 0:0:711
+              test "$(stat -c %u:%g:%a /sessions/session-a)" = 10001:10001:700
+              test "$(stat -c %u:%g:%a /sessions/session-b)" = 10002:10002:700
+              echo setup=pass root=0:0:711 session_a=10001:10001:700 session_b=10002:10002:700
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+          volumeMounts:
+            - name: sessions
+              mountPath: /sessions
+      volumes:
+        - name: sessions
+          persistentVolumeClaim:
+            claimName: sessions
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: worker-a
+  namespace: ${HOR424_NAMESPACE}
+spec:
+  suspend: true
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      initContainers:
+        - name: establish-root
+          image: debian:13-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132
+          command: [bash, -ceu]
+          args:
+            - |
+              chown 0:0 /sessions
+              chmod 0711 /sessions
+              test "$(stat -c %u:%g:%a /sessions)" = 0:0:711
+              test "$(stat -c %u:%g:%a /sessions/session-a)" = 10001:10001:700
+              test "$(stat -c %u:%g:%a /sessions/session-b)" = 10002:10002:700
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+          volumeMounts:
+            - name: sessions
+              mountPath: /sessions
+      containers:
+        - name: worker
+          image: debian:13-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132
+          command: [bash, -ceu]
+          args:
+            - |
+              test "$(cat /sessions/session-a/secret)" = seed-a
+              if ls /sessions >/dev/null 2>&1; then
+                echo parent_listing=unexpected
+                exit 10
+              fi
+              if cat /sessions/session-b/secret >/dev/null 2>&1; then
+                echo sibling_read=unexpected
+                exit 11
+              fi
+              if printf intrusion 2>/dev/null > /sessions/session-b/intrusion; then
+                echo sibling_write=unexpected
+                exit 12
+              fi
+              touch /sessions/.conformance/worker-a-ready
+              for _ in $(seq 1 120); do
+                test -f /sessions/.conformance/worker-b-ready && break
+                sleep 1
+              done
+              test -f /sessions/.conformance/worker-b-ready
+
+              printf atomic-a > /sessions/session-a/atomic.tmp
+              sync -f /sessions/session-a/atomic.tmp
+              mv /sessions/session-a/atomic.tmp /sessions/session-a/atomic.final
+              sync -d /sessions/session-a
+              test "$(cat /sessions/session-a/atomic.final)" = atomic-a
+              printf remove-a > /sessions/session-a/remove-me
+              rm /sessions/session-a/remove-me
+              test ! -e /sessions/session-a/remove-me
+
+              start=$(date +%s%N)
+              dd if=/dev/zero of=/sessions/session-a/stream.bin bs=1M count=32 conv=fsync status=none
+              end=$(date +%s%N)
+              stream_ms=$(( (end-start)/1000000 ))
+              start=$(date +%s%N)
+              for i in $(seq 1 250); do
+                dd if=/dev/zero of="/sessions/session-a/small-$i" bs=4096 count=1 status=none
+              done
+              sync
+              end=$(date +%s%N)
+              small_ms=$(( (end-start)/1000000 ))
+              sha256sum /sessions/session-a/stream.bin | cut -d" " -f1 > /sessions/session-a/stream.sha256
+              echo "worker=a isolation=pass atomic_rename=pass fsync=pass unlink=pass stream_bytes=33554432 stream_ms=$stream_ms small_files=250 small_bytes=1024000 small_ms=$small_ms"
+          securityContext:
+            runAsUser: 10001
+            runAsGroup: 10001
+            allowPrivilegeEscalation: false
+          volumeMounts:
+            - name: sessions
+              mountPath: /sessions
+      volumes:
+        - name: sessions
+          persistentVolumeClaim:
+            claimName: sessions
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: worker-b
+  namespace: ${HOR424_NAMESPACE}
+spec:
+  suspend: true
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      initContainers:
+        - name: establish-root
+          image: debian:13-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132
+          command: [bash, -ceu]
+          args:
+            - |
+              chown 0:0 /sessions
+              chmod 0711 /sessions
+              test "$(stat -c %u:%g:%a /sessions)" = 0:0:711
+              test "$(stat -c %u:%g:%a /sessions/session-a)" = 10001:10001:700
+              test "$(stat -c %u:%g:%a /sessions/session-b)" = 10002:10002:700
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+          volumeMounts:
+            - name: sessions
+              mountPath: /sessions
+      containers:
+        - name: worker
+          image: debian:13-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132
+          command: [bash, -ceu]
+          args:
+            - |
+              test "$(cat /sessions/session-b/secret)" = seed-b
+              if ls /sessions >/dev/null 2>&1; then
+                echo parent_listing=unexpected
+                exit 10
+              fi
+              if cat /sessions/session-a/secret >/dev/null 2>&1; then
+                echo sibling_read=unexpected
+                exit 11
+              fi
+              if printf intrusion 2>/dev/null > /sessions/session-a/intrusion; then
+                echo sibling_write=unexpected
+                exit 12
+              fi
+              touch /sessions/.conformance/worker-b-ready
+              for _ in $(seq 1 120); do
+                test -f /sessions/.conformance/worker-a-ready && break
+                sleep 1
+              done
+              test -f /sessions/.conformance/worker-a-ready
+
+              printf atomic-b > /sessions/session-b/atomic.tmp
+              sync -f /sessions/session-b/atomic.tmp
+              mv /sessions/session-b/atomic.tmp /sessions/session-b/atomic.final
+              sync -d /sessions/session-b
+              test "$(cat /sessions/session-b/atomic.final)" = atomic-b
+              printf remove-b > /sessions/session-b/remove-me
+              rm /sessions/session-b/remove-me
+              test ! -e /sessions/session-b/remove-me
+
+              start=$(date +%s%N)
+              dd if=/dev/zero of=/sessions/session-b/stream.bin bs=1M count=32 conv=fsync status=none
+              end=$(date +%s%N)
+              stream_ms=$(( (end-start)/1000000 ))
+              start=$(date +%s%N)
+              for i in $(seq 1 250); do
+                dd if=/dev/zero of="/sessions/session-b/small-$i" bs=4096 count=1 status=none
+              done
+              sync
+              end=$(date +%s%N)
+              small_ms=$(( (end-start)/1000000 ))
+              sha256sum /sessions/session-b/stream.bin | cut -d" " -f1 > /sessions/session-b/stream.sha256
+              echo "worker=b isolation=pass atomic_rename=pass fsync=pass unlink=pass stream_bytes=33554432 stream_ms=$stream_ms small_files=250 small_bytes=1024000 small_ms=$small_ms"
+          securityContext:
+            runAsUser: 10002
+            runAsGroup: 10002
+            allowPrivilegeEscalation: false
+          volumeMounts:
+            - name: sessions
+              mountPath: /sessions
+      volumes:
+        - name: sessions
+          persistentVolumeClaim:
+            claimName: sessions
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: verifier
+  namespace: ${HOR424_NAMESPACE}
+spec:
+  suspend: true
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      initContainers:
+        - name: establish-root
+          image: debian:13-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132
+          command: [bash, -ceu]
+          args:
+            - |
+              chown 0:0 /sessions
+              chmod 0711 /sessions
+              test "$(stat -c %u:%g:%a /sessions)" = 0:0:711
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+          volumeMounts:
+            - name: sessions
+              mountPath: /sessions
+      containers:
+        - name: verifier
+          image: debian:13-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132
+          command: [bash, -ceu]
+          args:
+            - |
+              test "$(find /sessions/session-a -name 'small-*' | wc -l)" -eq 250
+              test "$(find /sessions/session-b -name 'small-*' | wc -l)" -eq 250
+              (cd /sessions/session-a && echo "$(cat stream.sha256)  stream.bin" | sha256sum -c -)
+              (cd /sessions/session-b && echo "$(cat stream.sha256)  stream.bin" | sha256sum -c -)
+              test "$(cat /sessions/session-a/atomic.final)" = atomic-a
+              test "$(cat /sessions/session-b/atomic.final)" = atomic-b
+              test "$(stat -c %u:%g:%a /sessions)" = 0:0:711
+              test "$(stat -c %u:%g:%a /sessions/session-a)" = 10001:10001:700
+              test "$(stat -c %u:%g:%a /sessions/session-b)" = 10002:10002:700
+              initial_kib=$(df -Pk /sessions | awk 'NR==2 {print $2}')
+              test "$initial_kib" -ge 900000
+              test "$initial_kib" -le 1400000
+              echo "cross_mount_visibility=pass ownership=pass requested_capacity=pass initial_kib=$initial_kib"
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+          volumeMounts:
+            - name: sessions
+              mountPath: /sessions
+      volumes:
+        - name: sessions
+          persistentVolumeClaim:
+            claimName: sessions
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: replacement
+  namespace: ${HOR424_NAMESPACE}
+spec:
+  suspend: true
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      initContainers:
+        - name: establish-root
+          image: debian:13-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132
+          command: [bash, -ceu]
+          args:
+            - |
+              chown 0:0 /sessions
+              chmod 0711 /sessions
+              test "$(stat -c %u:%g:%a /sessions)" = 0:0:711
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+          volumeMounts:
+            - name: sessions
+              mountPath: /sessions
+      containers:
+        - name: worker
+          image: debian:13-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132
+          command: [bash, -ceu]
+          args:
+            - |
+              (cd /sessions/session-a && echo "$(cat stream.sha256)  stream.bin" | sha256sum -c -)
+              if ls /sessions >/dev/null 2>&1; then exit 10; fi
+              if cat /sessions/session-b/secret >/dev/null 2>&1; then exit 11; fi
+              if printf intrusion 2>/dev/null > /sessions/session-b/intrusion; then exit 12; fi
+              printf replacement-ok > /sessions/session-a/replacement-marker
+              sync -f /sessions/session-a/replacement-marker
+              echo replacement_persistence=pass isolation=pass
+          securityContext:
+            runAsUser: 10001
+            runAsGroup: 10001
+            allowPrivilegeEscalation: false
+          volumeMounts:
+            - name: sessions
+              mountPath: /sessions
+      volumes:
+        - name: sessions
+          persistentVolumeClaim:
+            claimName: sessions
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: post-expansion
+  namespace: ${HOR424_NAMESPACE}
+spec:
+  suspend: true
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      initContainers:
+        - name: establish-root
+          image: debian:13-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132
+          command: [bash, -ceu]
+          args:
+            - |
+              chown 0:0 /sessions
+              chmod 0711 /sessions
+              test "$(stat -c %u:%g:%a /sessions)" = 0:0:711
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+          volumeMounts:
+            - name: sessions
+              mountPath: /sessions
+      containers:
+        - name: verifier
+          image: debian:13-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132
+          command: [bash, -ceu]
+          args:
+            - |
+              (cd /sessions/session-a && echo "$(cat stream.sha256)  stream.bin" | sha256sum -c -)
+              (cd /sessions/session-b && echo "$(cat stream.sha256)  stream.bin" | sha256sum -c -)
+              test "$(cat /sessions/session-a/replacement-marker)" = replacement-ok
+              expanded_kib=$(df -Pk /sessions | awk 'NR==2 {print $2}')
+              test "$expanded_kib" -ge 1800000
+              test "$expanded_kib" -le 2700000
+              test "$(stat -c %u:%g:%a /sessions)" = 0:0:711
+              echo "online_expansion=pass persisted_data=pass expanded_kib=$expanded_kib"
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+          volumeMounts:
+            - name: sessions
+              mountPath: /sessions
+      volumes:
+        - name: sessions
+          persistentVolumeClaim:
+            claimName: sessions

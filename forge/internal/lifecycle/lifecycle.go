@@ -68,19 +68,22 @@ type ReconcilePlan struct {
 
 // Result is the outcome of a mutating apply.
 type Result struct {
-	Plan                        *ReconcilePlan
-	KubeconfigPath              string
-	NodeReady                   bool
-	CertificateSubstrateApplied bool
-	ChartApplied                bool
-	GPUOperatorApplied          bool   // nvidia/gpu-operator release installed/upgraded
-	GPUDriverVersion            string // nvidia driver version pinned via driver.version (empty => chart default)
-	GPUReady                    bool   // operator conditions and live node evidence passed the GPU readiness gate
-	OverlayApplied              bool   // overlay cloned + chart applied with overlay values + CRD instances applied
-	OverlayCommit               string // resolved overlay commit SHA
-	SecretsApplied              bool   // declared Secrets materialized from operator env vars
-	FluxInstalled               bool   // Flux components installed + GitRepository/Kustomization applied
-	GitRepositoryStatus         string // gated Ready revision/digest of the forge-applied GitRepository
+	Plan                         *ReconcilePlan
+	KubeconfigPath               string
+	NodeReady                    bool
+	CertificateSubstrateApplied  bool
+	RWXStorageMode               string
+	RWXStoragePrerequisitesReady bool
+	RWXStorageSubstrateApplied   bool
+	ChartApplied                 bool
+	GPUOperatorApplied           bool   // nvidia/gpu-operator release installed/upgraded
+	GPUDriverVersion             string // nvidia driver version pinned via driver.version (empty => chart default)
+	GPUReady                     bool   // operator conditions and live node evidence passed the GPU readiness gate
+	OverlayApplied               bool   // overlay cloned + chart applied with overlay values + CRD instances applied
+	OverlayCommit                string // resolved overlay commit SHA
+	SecretsApplied               bool   // declared Secrets materialized from operator env vars
+	FluxInstalled                bool   // Flux components installed + GitRepository/Kustomization applied
+	GitRepositoryStatus          string // gated Ready revision/digest of the forge-applied GitRepository
 }
 
 // ApplyOpts configures an apply run.
@@ -240,7 +243,7 @@ func Apply(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner, 
 	// Overlay delivery is deliberately phased: clone + secrets, certificate
 	// substrate, exact Flux source artifact, platform chart, CR instances, then
 	// enable continuous Flux reconciliation.
-	if err := applyOverlayPhase(ctx, cfg, o, f, d, opts, res); err != nil {
+	if err := applyOverlayPhase(ctx, cfg, p, o, f, d, opts, res); err != nil {
 		return res, err
 	}
 
@@ -470,7 +473,7 @@ func applyCRDInstances(ctx context.Context, d deployer.Deployer, overlayDest str
 // secrets → certificate substrate → Flux source → platform → CRs → Flux
 // Kustomization. The source precedes Helm because the chart-managed tool runner
 // is intentionally unready until it loads a valid generation.
-func applyOverlayPhase(ctx context.Context, cfg *config.Cluster, o overlayer.Overlayer, f fluxer.Fluxer, d deployer.Deployer, opts ApplyOpts, res *Result) error {
+func applyOverlayPhase(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner, o overlayer.Overlayer, f fluxer.Fluxer, d deployer.Deployer, opts ApplyOpts, res *Result) error {
 	overlayDest, overlayCommit, err := cloneOverlay(ctx, cfg, o, opts)
 	if err != nil {
 		auditFail(cfg, "apply-overlay", err)
@@ -504,6 +507,9 @@ func applyOverlayPhase(ctx context.Context, cfg *config.Cluster, o overlayer.Ove
 		return err
 	}
 	if err := applyCertificateSubstrate(ctx, cfg, d, opts, res, overlayDest); err != nil {
+		return err
+	}
+	if err := applyRWXStorageSubstrate(ctx, cfg, p, d, o, opts, res, overlayDest); err != nil {
 		return err
 	}
 	if err := applyFluxSourcePhase(ctx, cfg, f, d, opts, res, overlayCommit); err != nil {
@@ -772,6 +778,15 @@ func Destroy(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner
 	if d != nil && cfg.Spec.Chart.Version != "" {
 		ch := cfg.Spec.Chart
 		_ = d.UninstallChart(ctx, ch.Release, ch.Namespace)
+		if required, err := rwxStorageSubstrateRequired(ch.Version); err == nil && required {
+			// The companion pre-delete guard refuses active PVC consumers,
+			// retained PVs/volumes without disposition, or missing deletion
+			// confirmation. Never wipe k3s after that refusal: doing so would
+			// bypass the approved retained-data lifecycle boundary.
+			if err := d.UninstallChart(ctx, rwxStorageSubstrateRelease(ch.Release), rwxStorageNamespace); err != nil {
+				return fmt.Errorf("managed RWX storage uninstall refused; cluster preserved: %w", err)
+			}
+		}
 		if required, err := certificateSubstrateRequired(ch.Version); err == nil && required {
 			_ = d.UninstallChart(ctx, certificateSubstrateRelease(ch.Release), ch.Namespace)
 		}

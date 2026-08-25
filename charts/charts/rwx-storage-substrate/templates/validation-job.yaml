@@ -1,0 +1,79 @@
+{{- include "rwx-storage-substrate.validate" . -}}
+{{- if .Values.validation.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "rwx-storage-substrate.fullname" . }}-validation
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "rwx-storage-substrate.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "20"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  activeDeadlineSeconds: 1800
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        {{- include "rwx-storage-substrate.labels" . | nindent 8 }}
+        app.kubernetes.io/component: storage-validation
+    spec:
+      serviceAccountName: {{ include "rwx-storage-substrate.fullname" . }}-validation
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: validate
+          image: "{{ .Values.validation.image.repository }}:{{ .Values.validation.image.tag }}@{{ .Values.validation.image.digest }}"
+          imagePullPolicy: {{ .Values.validation.image.pullPolicy }}
+          command: ["/bin/bash", "/contract/managed-profile-gate.sh"]
+          env:
+            - name: ITERABASE_MANAGED_TOPOLOGY
+              value: {{ .Values.storage.rwx.managedLonghorn.topology | quote }}
+            - name: LONGHORN_NAMESPACE
+              value: {{ .Release.Namespace | quote }}
+            - name: HOR424_STORAGE_CLASS
+              value: iterabase-rwx
+            - name: HOR424_NAMESPACE
+              value: {{ printf "%s-rwx-conformance" .Release.Name | trunc 63 | trimSuffix "-" | quote }}
+            - name: HOR424_ATTEST_NAMESPACE
+              value: {{ required "validation.attestationNamespace is required" .Values.validation.attestationNamespace | quote }}
+            - name: HOR424_TIMEOUT
+              value: {{ .Values.validation.timeout | quote }}
+            - name: HOR424_CLEANUP
+              value: "true"
+            - name: HOR424_CONTEXT
+              value: {{ printf "managed-longhorn/%s/%s" .Values.storage.rwx.managedLonghorn.topology .Release.Revision | quote }}
+          volumeMounts:
+            - name: contract
+              mountPath: /contract
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+      volumes:
+        - name: contract
+          configMap:
+            name: {{ include "rwx-storage-substrate.fullname" . }}-validation
+            defaultMode: 0444
+        - name: tmp
+          emptyDir: {}
+{{- end }}
