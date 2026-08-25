@@ -251,21 +251,30 @@ echo "HOR-424 RWX conformance PASS context=${CONTEXT} class=${STORAGE_CLASS} pv=
 write_attestation "$STORAGE_CLASS_UID" "$PROVISIONER" "$CONTEXT"
 echo "Backend-specific server/node failure and AgentPool readiness evidence remain required by HOR-469."
 
-if [[ "$CLEANUP" == "true" ]]; then
+if [[ "$CLEANUP" == "true" || "$CLEANUP" == "async" ]]; then
   echo "Cleaning the disposable successful run by deliberately changing only its PV to Delete."
   k patch pv "$PV" --type=merge -p '{"spec":{"persistentVolumeReclaimPolicy":"Delete"}}' >/dev/null
-  k delete namespace "$NAMESPACE" --wait=true >/dev/null
-  deadline=$((SECONDS + 300))
-  while ((SECONDS < deadline)); do
-    if ! k get pv "$PV" >/dev/null 2>&1; then
-      echo "cleanup=pass pv=${PV}"
-      break
+  if [[ "$CLEANUP" == "async" ]]; then
+    # Helm hooks must not remain blocked by a CSI/backend deletion that can take
+    # tens of minutes after all conformance assertions and attestation pass.
+    # The revision-scoped namespace prevents collision with a later run; release
+    # E2E/uninstall still fail if the requested cleanup does not converge.
+    k delete namespace "$NAMESPACE" --wait=false >/dev/null
+    echo "cleanup=requested namespace=${NAMESPACE} pv=${PV}"
+  else
+    k delete namespace "$NAMESPACE" --wait=true >/dev/null
+    deadline=$((SECONDS + 300))
+    while ((SECONDS < deadline)); do
+      if ! k get pv "$PV" >/dev/null 2>&1; then
+        echo "cleanup=pass pv=${PV}"
+        break
+      fi
+      sleep 2
+    done
+    if k get pv "$PV" >/dev/null 2>&1; then
+      echo "cleanup failed: PV ${PV} still exists" >&2
+      exit 1
     fi
-    sleep 2
-  done
-  if k get pv "$PV" >/dev/null 2>&1; then
-    echo "cleanup failed: PV ${PV} still exists" >&2
-    exit 1
   fi
 else
   echo "Synthetic evidence is preserved in namespace ${NAMESPACE}."

@@ -42,13 +42,13 @@ spec:
             - name: HOR424_STORAGE_CLASS
               value: iterabase-rwx
             - name: HOR424_NAMESPACE
-              value: {{ printf "%s-rwx-conformance" .Release.Name | trunc 63 | trimSuffix "-" | quote }}
+              value: {{ printf "r%s-%s-rwx-conformance" (toString .Release.Revision) .Release.Name | trunc 63 | trimSuffix "-" | quote }}
             - name: HOR424_ATTEST_NAMESPACE
               value: {{ required "validation.attestationNamespace is required" .Values.validation.attestationNamespace | quote }}
             - name: HOR424_TIMEOUT
               value: {{ .Values.validation.timeout | quote }}
             - name: HOR424_CLEANUP
-              value: "true"
+              value: "async"
             - name: HOR424_CONTEXT
               value: {{ printf "managed-longhorn/%s/%s" .Values.storage.rwx.managedLonghorn.topology .Release.Revision | quote }}
           volumeMounts:
