@@ -762,13 +762,17 @@ func gpuOperatorValues(g config.GPU) []string {
 
 func isUbuntu(os string) bool { return strings.HasPrefix(os, "Ubuntu") }
 
-// Destroy removes the overlay clone (host cleanup), the platform chart (if
-// configured), and then uninstalls k3s. Removal is best-effort so destroy always
-// proceeds to substrate removal (k3s-uninstall wipes all cluster resources,
-// including overlay CRD instances).
+// Destroy removes the managed stateful substrate only after its strict
+// retained-data guard passes, then removes the stateless/control-plane layers
+// and finally uninstalls k3s. Best-effort cleanup is permitted only after the
+// storage boundary has proved zero consumers and explicit disposition.
 func Destroy(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner, d deployer.Deployer, o overlayer.Overlayer, f fluxer.Fluxer) error {
-	// Flux first (stop the reconciler before tearing down — reverse of apply's
-	// flux-last). Best-effort; k3s-uninstall wipes the cluster regardless.
+	if err := uninstallRWXStorageBeforeDestroy(ctx, cfg, d); err != nil {
+		return err
+	}
+
+	// Flux is now safe to stop (reverse of apply's flux-last). Remaining chart
+	// cleanup is best-effort because the stateful guard has already converged.
 	if f != nil && cfg.Spec.Flux.Enabled {
 		_ = f.UninstallFlux(ctx)
 	}
@@ -778,15 +782,6 @@ func Destroy(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner
 	if d != nil && cfg.Spec.Chart.Version != "" {
 		ch := cfg.Spec.Chart
 		_ = d.UninstallChart(ctx, ch.Release, ch.Namespace)
-		if required, err := rwxStorageSubstrateRequired(ch.Version); err == nil && required {
-			// The companion pre-delete guard refuses active PVC consumers,
-			// retained PVs/volumes without disposition, or missing deletion
-			// confirmation. Never wipe k3s after that refusal: doing so would
-			// bypass the approved retained-data lifecycle boundary.
-			if err := d.UninstallChart(ctx, rwxStorageSubstrateRelease(ch.Release), rwxStorageNamespace); err != nil {
-				return fmt.Errorf("managed RWX storage uninstall refused; cluster preserved: %w", err)
-			}
-		}
 		if required, err := certificateSubstrateRequired(ch.Version); err == nil && required {
 			_ = d.UninstallChart(ctx, certificateSubstrateRelease(ch.Release), ch.Namespace)
 		}

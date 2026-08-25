@@ -113,6 +113,17 @@ func TestGPUProvisioningAndCleanupFailuresRetainReaperOwnership(t *testing.T) {
 	}
 }
 
+func TestDedicatedRWXVolumeRequestRegistersReaperOwnership(t *testing.T) {
+	t.Parallel()
+	request := newRWXVolumeRequest("fixture-run", "fixture-node")
+	if request.Name != "fixture-node-ssd" || !hasResourceTag(request.Tags, "forge-e2e") || !hasResourceTag(request.Tags, "fixture-run") {
+		t.Fatalf("RWX volume request does not preserve tagged reaper ownership: name=%q tags=%v", request.Name, request.Tags)
+	}
+	if request.SizeGigaBytes != 25 || request.Region != region {
+		t.Fatalf("RWX volume request does not preserve dedicated capacity/region: %+v", request)
+	}
+}
+
 func TestProvisioningRequestsRegisterReaperOwnership(t *testing.T) {
 	t.Parallel()
 	const runID = "fixture-run"

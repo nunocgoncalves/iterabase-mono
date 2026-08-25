@@ -2,6 +2,7 @@
 set -euo pipefail
 
 base=$(helm template alert-contract charts/observability --show-only templates/iterabase-alerts.yaml)
+longhorn_monitor=$(helm template alert-contract charts/observability --show-only templates/longhorn-servicemonitor.yaml)
 configured=$(helm template alert-contract charts/observability --show-only templates/iterabase-alerts.yaml \
   --set alerts.performance.apiP95Seconds=2 \
   --set alerts.performance.inferenceP95Seconds=30 \
@@ -41,4 +42,12 @@ grep -Fq 'controller_runtime_reconcile_total{result="error",component="manager"}
   echo 'ERROR: manager reconciliation alert must target the stable component="manager" scrape identity' >&2
   exit 1
 }
-echo "OK: $alerts invariant alerts carry runbooks/actions; six performance alerts are threshold-gated; recording rules render"
+grep -Fq 'name: alert-contract-longhorn-manager' <<<"$longhorn_monitor" || {
+  echo 'ERROR: Longhorn backend alerts have no manager ServiceMonitor' >&2
+  exit 1
+}
+grep -Fq 'matchNames: [longhorn-system]' <<<"$longhorn_monitor" || {
+  echo 'ERROR: Longhorn manager ServiceMonitor must select the backend namespace explicitly' >&2
+  exit 1
+}
+echo "OK: $alerts invariant alerts carry runbooks/actions; six performance alerts are threshold-gated; recording rules and Longhorn scrape render"

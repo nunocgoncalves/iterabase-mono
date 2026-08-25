@@ -71,7 +71,10 @@ func TestApplyManagedRWXOrdersPrerequisitesAndCompanionBeforePlatform(t *testing
 	p := &fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig), readyAfterInstall: true}
 	d := &fakeDeployer{}
 	o := &fakeOverlayer{cloneCommit: "deadbeef", readFileValues: map[string]string{
-		"values.yaml": managedSingleNodeValues, "values.client.yaml": "", "secrets.yaml": "",
+		"values.yaml": managedSingleNodeValues + `longhorn:
+  defaultSettings:
+    concurrentReplicaRebuildPerNodeLimit: 99
+`, "values.client.yaml": "", "secrets.yaml": "",
 	}}
 
 	res, err := Apply(context.Background(), cfg, p, d, o, &fakeFluxer{}, ApplyOpts{
@@ -87,7 +90,13 @@ func TestApplyManagedRWXOrdersPrerequisitesAndCompanionBeforePlatform(t *testing
 	assert.Equal(t, "opo1-rwx-storage", d.applyCalls[1].release)
 	assert.Equal(t, rwxStorageNamespace, d.applyCalls[1].namespace)
 	assert.Equal(t, "oci://ghcr.io/nunocgoncalves/rwx-storage-substrate", d.applyCalls[1].repository)
-	assert.Equal(t, []string{"validation.attestationNamespace=iterabase-system"}, d.applyCalls[1].values)
+	assert.Equal(t, []string{
+		"storage.rwx.mode=managed-longhorn",
+		"storage.rwx.storageClassName=iterabase-rwx",
+		"storage.rwx.managedLonghorn.topology=single-node",
+		"validation.attestationNamespace=iterabase-system",
+	}, d.applyCalls[1].values)
+	assert.Empty(t, d.applyCalls[1].valueFiles, "customer overlays must never reach the Longhorn dependency")
 	assert.Equal(t, "65m", d.applyCalls[1].timeout)
 	assert.Equal(t, "opo1", d.applyCalls[2].release)
 }
@@ -129,9 +138,8 @@ func TestDestroyManagedRWXRefusalPreservesCluster(t *testing.T) {
 	require.ErrorContains(t, err, "cluster preserved")
 	assert.True(t, p.state.Installed)
 	require.Equal(t, []uninstallCall{
-		{release: "opo1", namespace: "iterabase-system"},
 		{release: "opo1-rwx-storage", namespace: rwxStorageNamespace},
-	}, d.uninstallCalls)
+	}, d.uninstallCalls, "storage refusal must happen before any platform teardown")
 }
 
 func TestDestroyManagedRWXAfterDispositionUsesReverseCompanionOrder(t *testing.T) {
@@ -144,8 +152,8 @@ func TestDestroyManagedRWXAfterDispositionUsesReverseCompanionOrder(t *testing.T
 	require.NoError(t, Destroy(context.Background(), cfg, p, d, nil, nil))
 	assert.False(t, p.state.Installed)
 	require.Equal(t, []uninstallCall{
-		{release: "opo1", namespace: "iterabase-system"},
 		{release: "opo1-rwx-storage", namespace: rwxStorageNamespace},
+		{release: "opo1", namespace: "iterabase-system"},
 		{release: "opo1-cert-manager", namespace: "iterabase-system"},
 	}, d.uninstallCalls)
 }

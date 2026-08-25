@@ -9,12 +9,15 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -206,6 +209,85 @@ func TestEnsurePVCRefusesShrinkWithoutRecreation(t *testing.T) {
 	assert.Equal(t, types.UID("pvc-uid"), preserved.UID)
 	preservedRequest := preserved.Spec.Resources.Requests[corev1.ResourceStorage]
 	assert.Equal(t, "10Gi", preservedRequest.String())
+}
+
+func TestReconcileReadyPoolRejectsPVCMutationWithCurrentStorageCondition(t *testing.T) {
+	tests := []struct {
+		name       string
+		mutatePool func(*v1alpha1.AgentPool)
+		wantReason string
+	}{
+		{
+			name: "shrink",
+			mutatePool: func(pool *v1alpha1.AgentPool) {
+				pool.Spec.Sandbox.Size = resource.MustParse("5Gi")
+			},
+			wantReason: storageReasonPVCExpansionFailed,
+		},
+		{
+			name: "immutable class change",
+			mutatePool: func(pool *v1alpha1.AgentPool) {
+				pool.Spec.Sandbox.StorageClassName = "replacement-class"
+			},
+			wantReason: storageReasonClassMismatch,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pool := validAgentPool("mutation", "platform")
+			pool.Spec.CredentialBindings = nil
+			pool.Spec.GatewayGrants = nil
+			pool.Spec.Sandbox.Size = resource.MustParse("10Gi")
+			pool.Finalizers = []string{agentPoolFinalizer}
+			pool.Generation = 2
+			pool.Status.Ready = true
+			pool.Status.ReadyReplicas = 1
+			pool.Status.Conditions = []metav1.Condition{{
+				Type: "StorageReady", Status: metav1.ConditionTrue, Reason: storageReasonReady,
+				ObservedGeneration: 1,
+			}}
+			class := pool.Spec.Sandbox.StorageClassName
+			pvc := &corev1.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: sandboxPVCName(pool), Namespace: pool.Namespace, UID: "pvc-uid",
+					CreationTimestamp: metav1.NewTime(time.Now()),
+				},
+				Spec: corev1.PersistentVolumeClaimSpec{
+					StorageClassName: &class,
+					AccessModes:      []corev1.PersistentVolumeAccessMode{pool.Spec.Sandbox.AccessMode},
+					Resources:        corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("10Gi")}},
+				},
+			}
+			worker := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: workerName(pool, 0), Namespace: pool.Namespace, Labels: poolLabels(pool)},
+				Status: corev1.PodStatus{Conditions: []corev1.PodCondition{{
+					Type: corev1.PodReady, Status: corev1.ConditionTrue,
+				}}},
+			}
+			ca := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: pool.Spec.Identity.CASecretRef.Name, Namespace: pool.Namespace}}
+			tt.mutatePool(pool)
+			r := storageTestReconciler(t, pool, pvc, worker, ca)
+
+			result, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: pool.Name, Namespace: pool.Namespace}})
+			require.NoError(t, err)
+			assert.False(t, result.Requeue)
+
+			var got v1alpha1.AgentPool
+			require.NoError(t, r.Get(context.Background(), types.NamespacedName{Name: pool.Name, Namespace: pool.Namespace}, &got))
+			assert.False(t, got.Status.Ready)
+			assert.Zero(t, got.Status.ReadyReplicas)
+			assert.Equal(t, got.Generation, got.Status.ObservedGeneration)
+			condition := meta.FindStatusCondition(got.Status.Conditions, "StorageReady")
+			require.NotNil(t, condition)
+			assert.Equal(t, metav1.ConditionFalse, condition.Status)
+			assert.Equal(t, tt.wantReason, condition.Reason)
+			assert.Contains(t, condition.Message, "workers were removed")
+
+			var removed corev1.Pod
+			err = r.Get(context.Background(), types.NamespacedName{Name: worker.Name, Namespace: worker.Namespace}, &removed)
+			assert.True(t, apierrors.IsNotFound(err), "ready worker must be quiesced after a rejected storage mutation")
+		})
+	}
 }
 
 func TestQuiesceWorkersDeletesSchedulingCreditAfterStorageLoss(t *testing.T) {

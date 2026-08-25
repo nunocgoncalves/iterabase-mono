@@ -21,6 +21,8 @@ for profile in single-node three-node; do
   rendered="$tmp/${profile}.yaml"
   grep -Fq 'app.kubernetes.io/version: v1.12.1' "$rendered"
   grep -Fq 'kind: NetworkPolicy' "$rendered"
+  grep -Fq 'manager-metrics' "$rendered"
+  grep -Fq 'app.kubernetes.io/name: prometheus' "$rendered"
   grep -Fq 'create-default-disk-labeled-nodes: true' "$rendered"
   grep -Fq 'default-data-path: "/var/lib/longhorn"' "$rendered"
   grep -Fq 'replica-soft-anti-affinity: false' "$rendered"
@@ -76,6 +78,14 @@ if helm template invalid "$chart" --set storage.rwx.mode=external >/dev/null 2>&
 fi
 if helm template invalid "$chart" --set longhorn.defaultSettings.v2DataEngine=true >/dev/null 2>&1; then
   echo "managed companion accepted Longhorn V2 data engine" >&2
+  exit 1
+fi
+if helm template invalid "$chart" --set longhorn.defaultSettings.concurrentReplicaRebuildPerNodeLimit=99 >/dev/null 2>&1; then
+  echo "managed companion accepted an arbitrary Longhorn tuning value" >&2
+  exit 1
+fi
+if helm template invalid "$chart" --set longhorn.defaultSettings.nodeDownPodDeletionPolicy=delete-both-statefulset-and-deployment-pod >/dev/null 2>&1; then
+  echo "managed companion accepted an arbitrary Longhorn lifecycle policy" >&2
   exit 1
 fi
 
