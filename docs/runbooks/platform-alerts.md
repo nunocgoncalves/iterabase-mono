@@ -76,6 +76,50 @@ operator create fresh workers and verify committed files. Do not replay a lost
 turn or external effect automatically, expose session filenames/content, or
 claim seamless failover.
 
+## IterabaseLonghornNodeCapacityLow
+
+Stop unbounded new claim growth. Compare Longhorn node capacity, usage, reservation, and scheduled bytes with the topology multiplier and required rebuild/snapshot reserve. Add reviewed physical capacity or reap explicitly eligible data; do not raise over-provisioning or count requested-but-unusable expansion as capacity.
+
+## IterabaseLonghornDiskCapacityLow
+
+Identify the dedicated disk and its node, then inspect used, reserved, scheduled, snapshot, and rebuilding replica bytes. Verify the fixed data-path mount still targets the approved SSD. Add capacity under the maintenance procedure rather than reducing the minimum-free reserve.
+
+## IterabaseLonghornDiskUnschedulable
+
+Inspect the Longhorn disk `Schedulable` condition/reason, node readiness, fixed data-path mount source/UUID, filesystem health, and free capacity. Keep new starts closed until the exact dedicated disk is mounted and Longhorn reports it schedulable again; never substitute the root disk silently.
+
+## IterabaseLonghornVolumeCapacityHigh
+
+Map the volume to its PVC and AgentPool. Check requested versus actual allocation and physical capacity for every replica plus rebuild reserve. If growth is approved, close or bound starts, prove backend health/headroom, expand the PVC monotonically, and wait for controller plus filesystem capacity before reopening.
+
+## IterabaseLonghornVolumeDegraded
+
+Stop unsafe new scheduling credit for the affected pool. Inspect volume robustness, engine, every replica, failed node/disk, rebuild events, share-manager, and committed-data evidence. Restore or rebuild to the profile's required replica count before creating fresh workers; do not claim uninterrupted RWX service or replay a lost turn.
+
+## IterabaseLonghornReplicaRebuildStalled
+
+Inspect the starting replica and its source/destination nodes, engines, network, destination disk schedulability, and capacity. Do not delete healthy source replicas or force a second maintenance operation while the volume lacks the approved replica count.
+
+## IterabasePVCExpansionStalled
+
+Compare PVC request, PVC status capacity, PV capacity, and mounted filesystem `df`. Inspect resizer and node-plugin logs plus PVC/PV/mount events. Keep the pool unready when usable capacity trails the request; retry only supported growth after physical-headroom proof and never attempt shrink.
+
+## IterabaseRWXConformanceStale
+
+Confirm the attestation still names the exact live StorageClass UID/provisioner. Record backend/CSI/Kubernetes/node-image/network identities, then rerun the same-release disposable two-worker conformance gate. A recreated class or changed backend requires fresh evidence rather than relabeling the old ConfigMap.
+
+## IterabaseLonghornShareManagerUnavailable
+
+Stop scheduling the affected AgentPool and identify the exact PVC/PV/volume/share-manager. Inspect its Service/endpoints, pod events/logs, attached engine, replicas, DNS, and node. Restore backend and share-manager health first, terminate stale clients, and use fresh workers; never treat a Ready replacement Service as proof that old NFS clients recovered.
+
+## IterabaseLonghornCSIUnavailable
+
+Identify nodes missing `longhorn-csi-plugin` readiness. Inspect CSINode driver registration, plugin/controller pods, mount propagation, iSCSI/NFS packages and services, kubelet/containerd, and attach/mount/expand events. Restore CSI on every required worker/storage node before replacing workers or starting expansion.
+
+## IterabaseRetainedRwxPVRequiresDisposition
+
+Find the former AgentPool/PVC, Longhorn volume, owner, and approved recovery need. Settle/reap sessions, then follow an explicit transfer or delete/sanitize plan. Verify PV and backend-volume removal plus reclaimed physical capacity, and retain only content-free audit evidence. Never auto-adopt or force-uninstall a retained volume.
+
 ## IterabaseHarnessReplayBacklog
 
 Inspect harness WAL files/logs and dispatch event persistence/ACK logs. Verify cumulative ACK progress. Do not delete WAL state before confirming every durable event is committed or intentionally reconciled.

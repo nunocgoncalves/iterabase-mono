@@ -51,6 +51,13 @@ func (e *secretDependencyReadError) Unwrap() error {
 	return e.err
 }
 
+type agentPoolStorageMutationError struct {
+	reason  string
+	message string
+}
+
+func (e *agentPoolStorageMutationError) Error() string { return e.message }
+
 const (
 	agentPoolFinalizer = "platform.iterabase.com/agentpool-finalizer"
 
@@ -200,6 +207,23 @@ func (r *AgentPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, err
 	}
 	if err := r.ensurePVC(ctx, &pool); err != nil {
+		var mutationErr *agentPoolStorageMutationError
+		if stderrors.As(err, &mutationErr) {
+			assessment := &agentPoolStorageAssessment{
+				Reason:    mutationErr.reason,
+				Message:   mutationErr.message,
+				ClassName: pool.Spec.Sandbox.StorageClassName,
+			}
+			hadWorkers := r.countReadyWorkers(ctx, &pool) > 0 || storageWasReady(&pool)
+			if err := r.quiesceWorkers(ctx, &pool); err != nil {
+				return ctrl.Result{}, err
+			}
+			if hadWorkers {
+				assessment.Message += "; workers were removed to stop scheduling credit, and recovery requires a reviewed storage migration or a corrected declarative value without automatic turn/effect replay"
+			}
+			_ = r.patchStatus(ctx, &pool, false, 0, assessment.Message, true, assessment)
+			return ctrl.Result{}, nil
+		}
 		_ = r.patchStatus(ctx, &pool, false, 0, fmt.Sprintf("ensure PVC: %v", err), false)
 		return ctrl.Result{}, err
 	}
@@ -579,14 +603,23 @@ func (r *AgentPoolReconciler) ensurePVC(ctx context.Context, pool *v1alpha1.Agen
 		access := []corev1.PersistentVolumeAccessMode{pool.Spec.Sandbox.AccessMode}
 		if !pvc.CreationTimestamp.IsZero() {
 			if pvc.Spec.StorageClassName == nil || *pvc.Spec.StorageClassName != sc {
-				return fmt.Errorf("immutable sandbox PVC storageClassName is %v, requested %q; migrate through a separately reviewed copy/cutover plan instead of recreating the claim", pointerValue(pvc.Spec.StorageClassName), sc)
+				return &agentPoolStorageMutationError{
+					reason:  storageReasonClassMismatch,
+					message: fmt.Sprintf("immutable sandbox PVC storageClassName is %v, requested %q; migrate through a separately reviewed copy/cutover plan instead of recreating the claim", pointerValue(pvc.Spec.StorageClassName), sc),
+				}
 			}
 			if len(pvc.Spec.AccessModes) != 1 || pvc.Spec.AccessModes[0] != pool.Spec.Sandbox.AccessMode {
-				return fmt.Errorf("immutable sandbox PVC accessModes are %v, requested %s; do not recreate the claim", pvc.Spec.AccessModes, pool.Spec.Sandbox.AccessMode)
+				return &agentPoolStorageMutationError{
+					reason:  storageReasonClassMismatch,
+					message: fmt.Sprintf("immutable sandbox PVC accessModes are %v, requested %s; do not recreate the claim", pvc.Spec.AccessModes, pool.Spec.Sandbox.AccessMode),
+				}
 			}
 			current := pvc.Spec.Resources.Requests[corev1.ResourceStorage]
 			if current.Cmp(pool.Spec.Sandbox.Size) > 0 {
-				return fmt.Errorf("PVCExpansionFailed: sandbox PVC shrink from %s to %s is unsupported; create/copy/cut over under a reviewed migration plan", current.String(), pool.Spec.Sandbox.Size.String())
+				return &agentPoolStorageMutationError{
+					reason:  storageReasonPVCExpansionFailed,
+					message: fmt.Sprintf("PVCExpansionFailed: sandbox PVC shrink from %s to %s is unsupported; create/copy/cut over under a reviewed migration plan", current.String(), pool.Spec.Sandbox.Size.String()),
+				}
 			}
 		} else {
 			pvc.Spec.AccessModes = access

@@ -58,7 +58,22 @@ The validation/uninstall hook uses the multi-architecture
 
 The UI stays ClusterIP-only, internal NetworkPolicies remain enabled, V2 engine
 and experimental RWX fast failover remain disabled, and no storage credential
-enters workers.
+enters workers. Forge forwards only `mode`, `storageClassName`, managed
+`topology`, and the chart-owned attestation namespace to the companion. The
+complete `longhorn.*` value tree is digest-sealed; customer overlays cannot tune
+backend plumbing through the supported contract.
+
+## External/BYO reference gate
+
+External mode installs no backend and creates no alias class. The mandatory
+reference scenario installs a customer-operated, exactly versioned Longhorn
+`1.11.3` fixture independently, exposes `customer-reference-rwx`, and selects
+that class through an external-mode installation contract. It runs the generic
+live gate through expansion and replacement, writes class-UID-bound
+`HOR-469/v1` evidence, and then runs the production AgentPool reconciler with
+two concurrently mounted workers. The fixture deliberately proves the BYO
+ownership/path mechanics; it does not make customer-operated Longhorn another
+Iterabase-managed backend or widen the supported semantic values.
 
 ## Capacity and monitoring
 
@@ -95,9 +110,13 @@ copy/cutover.
 Exact reapply must preserve claim/PV UIDs and committed bytes. Upgrade only
 through an upstream-supported same-minor patch or adjacent minor after
 Kubernetes compatibility, important/known issues, health, capacity, system
-backup metadata, and exact image review. Close starts, upgrade the companion,
-rerun conformance/replacement/expansion/failure gates, then upgrade/reconcile
-the platform. Downgrade is not promised.
+backup metadata, and exact image review. The mandatory three-node gate installs
+Longhorn `1.11.3`, commits data to a three-replica claim, writes a real Longhorn
+system backup to an ephemeral pinned S3-compatible target, upgrades the same
+Helm release to the candidate `1.12.1` companion, and re-verifies PVC UID,
+committed bytes, image digest, and full conformance before node-loss/rebuild.
+Close starts, upgrade the companion, rerun conformance/replacement/expansion/
+failure gates, then upgrade/reconcile the platform. Downgrade is not promised.
 
 ## Decommission and uninstall
 
@@ -106,11 +125,14 @@ the platform. Downgrade is not promised.
    data disposition.
 3. Reap eligible sessions, then deliberately delete/sanitize or transfer each
    retained volume and verify physical capacity/data handling.
-4. Uninstall the platform, then the RWX companion. Its pre-delete guard refuses
-   any selected PVC, retained PV, or Longhorn volume and sets deletion
-   confirmation only after all are absent.
-5. Verify Longhorn CRDs/webhooks/pods/host mounts and the data path are removed,
-   then remove the remaining substrate under the installation's rollback plan.
+4. Run the RWX companion uninstall first, before Flux, overlay, platform, or
+   cluster teardown. Its strict pre-delete guard refuses any selected PVC,
+   retained PV, or Longhorn volume and sets deletion confirmation only after all
+   are absent; Forge propagates that refusal and preserves the complete cluster.
+5. After the companion uninstall succeeds, remove the platform and remaining
+   stateless/certificate/GPU layers. Verify Longhorn CRDs/webhooks/pods/host
+   mounts and the data path are removed, then remove k3s under the installation's
+   rollback plan.
 
 Deleting a values key, namespace, release, or AgentPool is never authorization
 to destroy or abandon retained customer session bytes. Session volumes remain

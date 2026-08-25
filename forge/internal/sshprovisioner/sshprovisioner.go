@@ -1444,13 +1444,26 @@ func (p *SSHProvisioner) RestartDeployment(ctx context.Context, labelSelector, n
 	return nil
 }
 
-// UninstallChart implements deployer.Deployer. Best-effort: a missing release
-// (or absent helm) is not an error so destroy always proceeds to k3s removal.
+// UninstallChart implements deployer.Deployer. A missing release is an
+// idempotent success, but Helm absence, status failures, failed hooks, and
+// uninstall failures are propagated so stateful callers can preserve the
+// cluster instead of bypassing a retained-data refusal.
 func (p *SSHProvisioner) UninstallChart(ctx context.Context, release, namespace string) error {
 	if _, err := p.run(ctx, "command -v helm"); err != nil {
-		return nil // helm absent => nothing to remove
+		return fmt.Errorf("uninstall Helm release %s/%s: helm is unavailable: %w", namespace, release, err)
 	}
-	_, _ = p.run(ctx, helmCmd("uninstall", release, "-n", namespace)) // best-effort
+	statusOutput, err := p.run(ctx, helmCmd("status", release, "-n", namespace))
+	if err != nil {
+		detail := strings.ToLower(statusOutput + "\n" + err.Error())
+		if strings.Contains(detail, "release: not found") || strings.Contains(detail, "release not found") {
+			return nil
+		}
+		return fmt.Errorf("read Helm release %s/%s before uninstall: %w", namespace, release, err)
+	}
+	output, err := p.run(ctx, helmCmd("uninstall", release, "-n", namespace, "--wait"))
+	if err != nil {
+		return fmt.Errorf("uninstall Helm release %s/%s: %w; output: %s", namespace, release, err, output)
+	}
 	return nil
 }
 

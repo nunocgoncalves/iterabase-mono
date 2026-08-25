@@ -126,6 +126,27 @@ func validateStorageSelection(selection storageSelection) error {
 	return nil
 }
 
+func uninstallRWXStorageBeforeDestroy(ctx context.Context, cfg *config.Cluster, d deployer.Deployer) error {
+	if d == nil || cfg.Spec.Chart.Version == "" {
+		return nil
+	}
+	ch := cfg.Spec.Chart
+	required, err := rwxStorageSubstrateRequired(ch.Version)
+	if err != nil {
+		return fmt.Errorf("determine managed RWX storage lifecycle: %w", err)
+	}
+	if !required {
+		return nil
+	}
+	// This must precede Flux, overlay, platform, certificate, GPU, and cluster
+	// teardown. A failed pre-delete hook is a hard refusal: the complete
+	// installation remains available for operator disposition.
+	if err := d.UninstallChart(ctx, rwxStorageSubstrateRelease(ch.Release), rwxStorageNamespace); err != nil {
+		return fmt.Errorf("managed RWX storage uninstall refused; cluster preserved before platform teardown: %w", err)
+	}
+	return nil
+}
+
 func applyRWXStorageSubstrate(
 	ctx context.Context,
 	cfg *config.Cluster,
@@ -164,16 +185,22 @@ func applyRWXStorageSubstrate(
 	if err != nil {
 		return err
 	}
+	// The companion receives only the approved semantic selection. Passing the
+	// complete overlay here would expose the upstream longhorn.* namespace as an
+	// unsupported customer tuning surface even though the platform release may
+	// legitimately consume those same files for unrelated product values.
 	dopts := deployer.ApplyOpts{
 		Release:    rwxStorageSubstrateRelease(cfg.Spec.Chart.Release),
 		Repository: repository,
 		Version:    cfg.Spec.Chart.Version,
 		Namespace:  rwxStorageNamespace,
 		Timeout:    "65m",
-		Values:     []string{"validation.attestationNamespace=" + cfg.Spec.Chart.Namespace},
-	}
-	if overlayDest != "" {
-		dopts.ValueFiles = overlayValueFiles(overlayDest)
+		Values: []string{
+			"storage.rwx.mode=" + selection.Mode,
+			"storage.rwx.storageClassName=" + selection.StorageClassName,
+			"storage.rwx.managedLonghorn.topology=" + selection.Topology,
+			"validation.attestationNamespace=" + cfg.Spec.Chart.Namespace,
+		},
 	}
 	if err := d.Apply(ctx, dopts); err != nil {
 		auditFail(cfg, "apply-rwx-storage-substrate", err)

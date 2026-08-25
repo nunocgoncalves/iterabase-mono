@@ -1,0 +1,24 @@
+{{- include "rwx-storage-substrate.validate" . -}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "rwx-storage-substrate.fullname" . }}-manager-metrics
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "rwx-storage-substrate.labels" . | nindent 4 }}
+    app.kubernetes.io/component: monitoring
+spec:
+  podSelector:
+    matchLabels:
+      app: longhorn-manager
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ required "validation.attestationNamespace is required" .Values.validation.attestationNamespace | quote }}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+      ports:
+        - {protocol: TCP, port: 9500}

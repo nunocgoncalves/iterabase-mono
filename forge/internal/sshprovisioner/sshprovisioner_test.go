@@ -1352,7 +1352,9 @@ func TestDeployer_UninstallChart(t *testing.T) {
 		switch {
 		case cmd == "command -v helm":
 			return "/usr/local/bin/helm\n", 0
-		case strings.Contains(cmd, "uninstall"):
+		case strings.Contains(cmd, "'status'"):
+			return "STATUS: deployed\n", 0
+		case strings.Contains(cmd, "'uninstall'"):
 			return "", 0
 		default:
 			return "", 1
@@ -1362,6 +1364,43 @@ func TestDeployer_UninstallChart(t *testing.T) {
 	p := newProvisioner(t, addr, cfg)
 	defer p.Close()
 	require.NoError(t, p.UninstallChart(context.Background(), "opo1", "iterabase-system"))
+}
+
+func TestDeployer_UninstallChart_PropagatesHookRefusal(t *testing.T) {
+	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
+		switch {
+		case cmd == "command -v helm":
+			return "/usr/local/bin/helm\n", 0
+		case strings.Contains(cmd, "'status'"):
+			return "STATUS: deployed\n", 0
+		case strings.Contains(cmd, "'uninstall'"):
+			return "refusing managed RWX uninstall: retained PV remains\n", 1
+		default:
+			return "", 1
+		}
+	})
+	defer cleanup()
+	p := newProvisioner(t, addr, cfg)
+	defer p.Close()
+	err := p.UninstallChart(context.Background(), "opo1-rwx-storage", "longhorn-system")
+	require.ErrorContains(t, err, "uninstall Helm release")
+	require.ErrorContains(t, err, "refusing managed RWX uninstall")
+}
+
+func TestDeployer_UninstallChart_MissingReleaseIsIdempotent(t *testing.T) {
+	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
+		if cmd == "command -v helm" {
+			return "/usr/local/bin/helm\n", 0
+		}
+		if strings.Contains(cmd, "'status'") {
+			return "Error: release: not found\n", 1
+		}
+		return "", 1
+	})
+	defer cleanup()
+	p := newProvisioner(t, addr, cfg)
+	defer p.Close()
+	require.NoError(t, p.UninstallChart(context.Background(), "absent", "iterabase-system"))
 }
 
 func TestDeployer_UninstallChart_HelmAbsent(t *testing.T) {
@@ -1374,7 +1413,7 @@ func TestDeployer_UninstallChart_HelmAbsent(t *testing.T) {
 	defer cleanup()
 	p := newProvisioner(t, addr, cfg)
 	defer p.Close()
-	require.NoError(t, p.UninstallChart(context.Background(), "opo1", "iterabase-system"))
+	require.ErrorContains(t, p.UninstallChart(context.Background(), "opo1", "iterabase-system"), "helm is unavailable")
 }
 
 func TestPreflight_NoGPU(t *testing.T) {

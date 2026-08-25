@@ -145,6 +145,108 @@ spec:
             first_action: "Inspect artifact digest, archive bounds, manifests, and materializer logs."
             runbook_url: {{ printf "%s#iterabasetoolmaterializationfailures" $runbook | quote }}
 
+    - name: iterabase-storage
+      rules:
+        - alert: IterabaseLonghornNodeCapacityLow
+          expr: (longhorn_node_storage_capacity_bytes - longhorn_node_storage_usage_bytes - longhorn_node_storage_reservation_bytes) / longhorn_node_storage_capacity_bytes < 0.20
+          for: 15m
+          labels: {severity: warning, component: storage}
+          annotations:
+            summary: "Longhorn node {{ `{{ $labels.node }}` }} has less than 20% schedulable capacity"
+            description: "Physical node headroom is below the rebuild and expansion safety threshold."
+            first_action: "Close new storage growth and inspect node scheduled, used, reserved, and physical capacity before expanding or rebuilding."
+            runbook_url: {{ printf "%s#iterabaselonghornnodecapacitylow" $runbook | quote }}
+        - alert: IterabaseLonghornDiskCapacityLow
+          expr: (longhorn_disk_capacity_bytes - longhorn_disk_usage_bytes - longhorn_disk_reservation_bytes) / longhorn_disk_capacity_bytes < 0.20
+          for: 15m
+          labels: {severity: warning, component: storage}
+          annotations:
+            summary: "Longhorn disk {{ `{{ $labels.disk }}` }} on {{ `{{ $labels.node }}` }} has less than 20% free capacity"
+            description: "A managed data disk is approaching the minimum reserve before claim exhaustion."
+            first_action: "Inspect replica/snapshot allocation and add reviewed dedicated capacity; do not raise over-provisioning."
+            runbook_url: {{ printf "%s#iterabaselonghorndiskcapacitylow" $runbook | quote }}
+        - alert: IterabaseLonghornDiskUnschedulable
+          expr: longhorn_disk_capacity_bytes unless on(node,disk) (longhorn_disk_status{condition="schedulable"} == 1)
+          for: 10m
+          labels: {severity: critical, component: storage}
+          annotations:
+            summary: "Longhorn disk {{ `{{ $labels.disk }}` }} on {{ `{{ $labels.node }}` }} is not schedulable"
+            description: "The expected managed data disk no longer reports a true schedulable condition."
+            first_action: "Inspect Longhorn disk conditions, node readiness, mount identity, filesystem, and remaining capacity."
+            runbook_url: {{ printf "%s#iterabaselonghorndiskunschedulable" $runbook | quote }}
+        - alert: IterabaseLonghornVolumeCapacityHigh
+          expr: max by (pvc_namespace,pvc,volume) (longhorn_volume_actual_size_bytes) / max by (pvc_namespace,pvc,volume) (longhorn_volume_capacity_bytes) > 0.80
+          for: 15m
+          labels: {severity: warning, component: storage}
+          annotations:
+            summary: "Longhorn volume {{ `{{ $labels.volume }}` }} actual/requested use exceeds 80%"
+            description: "Replica allocation is approaching the PVC-requested capacity boundary."
+            first_action: "Identify the AgentPool claim, close unbounded growth, and prove physical replica headroom before monotonic expansion."
+            runbook_url: {{ printf "%s#iterabaselonghornvolumecapacityhigh" $runbook | quote }}
+        - alert: IterabaseLonghornVolumeDegraded
+          expr: max by (pvc_namespace,pvc,volume,state) (longhorn_volume_robustness{state=~"degraded|faulted"} == 1) > 0
+          for: 5m
+          labels: {severity: critical, component: storage}
+          annotations:
+            summary: "Longhorn volume {{ `{{ $labels.volume }}` }} is {{ `{{ $labels.state }}` }}"
+            description: "A managed volume has lost healthy replica evidence."
+            first_action: "Stop unsafe new AgentPool capacity and inspect volume, replica, engine, node, disk, and rebuild events."
+            runbook_url: {{ printf "%s#iterabaselonghornvolumedegraded" $runbook | quote }}
+        - alert: IterabaseLonghornReplicaRebuildStalled
+          expr: longhorn_replica_state{state="starting"} == 1
+          for: 20m
+          labels: {severity: warning, component: storage}
+          annotations:
+            summary: "Longhorn replica {{ `{{ $labels.replica }}` }} rebuild has remained starting"
+            description: "Replica reconstruction has not reached running state within twenty minutes."
+            first_action: "Inspect replica/engine events, source replica health, network, and destination disk schedulable capacity."
+            runbook_url: {{ printf "%s#iterabaselonghornreplicarebuildstalled" $runbook | quote }}
+        - alert: IterabasePVCExpansionStalled
+          expr: kube_persistentvolumeclaim_resource_requests_storage_bytes > on(namespace,persistentvolumeclaim) kube_persistentvolumeclaim_status_capacity_bytes
+          for: 15m
+          labels: {severity: warning, component: storage}
+          annotations:
+            summary: "PVC {{ `{{ $labels.namespace }}` }}/{{ `{{ $labels.persistentvolumeclaim }}` }} expansion is incomplete"
+            description: "Requested storage remains above controller/filesystem-reported usable capacity."
+            first_action: "Inspect PVC/PV conditions, CSI resizer/node plugin, mount events, and physical capacity; never report or attempt shrink."
+            runbook_url: {{ printf "%s#iterabasepvcexpansionstalled" $runbook | quote }}
+        - alert: IterabaseRWXConformanceStale
+          expr: time() - max by (namespace,configmap) (kube_configmap_created{configmap=~"iterabase-rwx-conformance-.*"}) > 604800
+          for: 30m
+          labels: {severity: warning, component: storage}
+          annotations:
+            summary: "RWX conformance attestation {{ `{{ $labels.namespace }}` }}/{{ `{{ $labels.configmap }}` }} is older than seven days"
+            description: "The exact class/backend evidence is too old for continued release confidence."
+            first_action: "Re-run the same-release disposable conformance gate after confirming backend, CSI, node image, and class identity."
+            runbook_url: {{ printf "%s#iterabaserwxconformancestale" $runbook | quote }}
+        - alert: IterabaseLonghornShareManagerUnavailable
+          expr: min by (namespace,pod) (kube_pod_status_ready{namespace="longhorn-system",pod=~"share-manager-.*",condition="true"}) == 0
+          for: 2m
+          labels: {severity: critical, component: storage}
+          annotations:
+            summary: "Longhorn share-manager {{ `{{ $labels.pod }}` }} is unavailable"
+            description: "The singular NFS server for an RWX volume is not Ready."
+            first_action: "Stop AgentPool scheduling, restore volume/share-manager health, then recycle affected workers without replay."
+            runbook_url: {{ printf "%s#iterabaselonghornsharemanagerunavailable" $runbook | quote }}
+        - alert: IterabaseLonghornCSIUnavailable
+          expr: kube_daemonset_status_desired_number_scheduled{namespace="longhorn-system",daemonset="longhorn-csi-plugin"} > kube_daemonset_status_number_ready{namespace="longhorn-system",daemonset="longhorn-csi-plugin"}
+          for: 5m
+          labels: {severity: critical, component: storage}
+          annotations:
+            summary: "Longhorn CSI node plugin is unavailable on one or more nodes"
+            description: "The CSI DaemonSet does not have every desired node plugin Ready."
+            first_action: "Inspect CSI plugin pods, CSINodes, mount propagation, iSCSI/NFS packages, and node events before replacing workers."
+            runbook_url: {{ printf "%s#iterabaselonghorncsiunavailable" $runbook | quote }}
+        - alert: IterabaseRetainedRwxPVRequiresDisposition
+          expr: kube_persistentvolume_status_phase{phase="Released"} == 1 and on(persistentvolume) kube_persistentvolume_info{storageclass="iterabase-rwx"}
+          for: 1h
+          labels: {severity: warning, component: storage}
+          annotations:
+            summary: "Retained Iterabase RWX PV {{ `{{ $labels.persistentvolume }}` }} requires disposition"
+            description: "A released Retain volume still consumes backend capacity and cannot be silently adopted or destroyed."
+            first_action: "Identify the pool and approved recovery need, then explicitly transfer or delete/sanitize the PV and backend volume with audit evidence."
+            runbook_url: {{ printf "%s#iterabaseretainedrwxpvrequiresdisposition" $runbook | quote }}
+
     - name: iterabase-execution
       rules:
         - alert: IterabaseDispatchWithoutWorkers

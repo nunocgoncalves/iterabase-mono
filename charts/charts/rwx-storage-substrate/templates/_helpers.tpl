@@ -29,6 +29,11 @@ platform.iterabase.com/storage-mode: managed-longhorn
 {{- if not .Values.longhorn.enabled -}}
 {{- fail "the managed companion requires its pinned longhorn dependency" -}}
 {{- end -}}
+{{- $longhornValuesSHA256 := sha256sum (toJson .Values.longhorn) -}}
+{{- /* Helm lint coalesces dependency globals before this helper while install/template use the release render tree; both canonical trees are sealed. */ -}}
+{{- if not (has $longhornValuesSHA256 (list "bc752ab97cf9977ded9be99d836f05b20cc722840482af6722101243b35feeff" "b952711d9f17bb4656fc94b660078b634a2e3ab7b5cb9d8aee18fb9a73a96170")) -}}
+{{- fail (printf "longhorn.* is a sealed chart-owned configuration surface (observed values digest %s)" $longhornValuesSHA256) -}}
+{{- end -}}
 {{- if .Values.longhorn.persistence.createStorageClass -}}
 {{- fail "the upstream longhorn StorageClass must remain disabled; iterabase-rwx is chart-owned" -}}
 {{- end -}}
@@ -67,6 +72,9 @@ platform.iterabase.com/storage-mode: managed-longhorn
 {{- end -}}
 {{- if or (ne .Values.validation.image.repository "docker.io/alpine/k8s") (ne (toString .Values.validation.image.tag) "1.34.1") (ne .Values.validation.image.digest "sha256:ec714df3813b5405292860f8a1c55c5727bf8c33c88992f1e981efad8065547f") -}}
 {{- fail "managed RWX validation image identity is chart-owned" -}}
+{{- end -}}
+{{- if or (ne .Values.validation.timeout "15m") (ne .Values.validation.image.pullPolicy "IfNotPresent") -}}
+{{- fail "managed RWX validation timeout and pull policy are chart-owned" -}}
 {{- end -}}
 {{- if not .Values.longhorn.networkPolicies.enabled -}}
 {{- fail "Longhorn internal NetworkPolicies must remain enabled" -}}

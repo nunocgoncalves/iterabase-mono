@@ -72,7 +72,8 @@ type Deployer interface {
 	// RestartDeployment rolls Deployments selected by label and waits for the
 	// rollout. Used by the 0.2 -> 0.3 migration after publishing gateway config.
 	RestartDeployment(ctx context.Context, labelSelector, namespace string) error
-	// UninstallChart removes the Helm release. A missing release is not an error.
+	// UninstallChart removes the Helm release. A missing release is an
+	// idempotent success; command, hook, and uninstall failures are propagated.
 	UninstallChart(ctx context.Context, release, namespace string) error
 	// ApplyKustomize runs `kubectl apply -k dir` against the k3s kubeconfig on
 	// the host. Used for overlay CRD instances (kubectl apply -k crds/client/),
