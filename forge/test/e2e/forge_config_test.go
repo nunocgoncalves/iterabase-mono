@@ -28,6 +28,13 @@ type forgeConfigSpec struct {
 	Flux             bool
 }
 
+func e2eK3sVersion() string {
+	if os.Getenv(storageChartArchiveEnv) != "" && os.Getenv(forceExternalStorageEnv) != "true" {
+		return "v1.34.10+k3s1"
+	}
+	return "v1.31.5+k3s1"
+}
+
 func writeForgeConfigSpec(t *testing.T, spec forgeConfigSpec) string {
 	t.Helper()
 	var cfg strings.Builder
@@ -49,11 +56,11 @@ spec:
 `, spec.Name)
 	}
 	fmt.Fprintf(&cfg, `  k3s:
-    version: v1.34.10+k3s1
+    version: %s
     clusterCIDR: 10.42.0.0/16
     serviceCIDR: 10.43.0.0/16
     dualStack: %t
-`, spec.DualStack)
+`, e2eK3sVersion(), spec.DualStack)
 	if spec.DualStack {
 		cfg.WriteString(`    clusterCIDRv6: fd42::/48
     serviceCIDRv6: fd43::/112

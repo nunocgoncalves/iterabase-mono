@@ -446,6 +446,7 @@ func (state *rwxThreeNodeState) diagnostics(t *testing.T) {
 	}
 	defer client.Close()
 	for _, command := range []string{
+		"sudo k3s kubectl logs -n longhorn-system -l app.kubernetes.io/component=storage-validation --all-containers --tail=500",
 		"sudo k3s kubectl get nodes -o wide",
 		"sudo k3s kubectl get storageclass,pv -o wide",
 		"sudo k3s kubectl get pvc,pod,job -A -o wide",
