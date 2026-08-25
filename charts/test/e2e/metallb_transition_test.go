@@ -68,8 +68,10 @@ func resolveMetalLBSubnet(t *testing.T, state *chartState) {
 	state.internalPoolInternal = fmt.Sprintf("%s.%s.255.100-%s.%s.255.120", parts[0], parts[1], parts[0], parts[1])
 }
 
-func metalLBTransitionValues(state *chartState) map[string]any {
+func metalLBTransitionValues(t *testing.T, state *chartState) map[string]any {
+	t.Helper()
 	values := basePlatformValues()
+	applyRuntimeImages(t, values)
 	values["metallb"] = map[string]any{"enabled": true}
 	values["metallb-config"] = map[string]any{
 		"enabled":   true,
@@ -101,7 +103,7 @@ func installMetalLBPredecessorStage(t *testing.T, state *chartState) {
 	t.Helper()
 	resolveMetalLBSubnet(t, state)
 	baseline := requireTransitionBaseline(t, state, metalLBPlatformPredecessorName)
-	values := state.writeValues(t, "metallb-predecessor", metalLBTransitionValues(state))
+	values := state.writeValues(t, "metallb-predecessor", metalLBTransitionValues(t, state))
 	args := []string{"upgrade", "--install", testRelease, "--namespace", testNamespace,
 		"--kubeconfig", state.cluster.Kubeconfig, "--wait", "--timeout", "18m",
 		"--values", values, baseline.Archive}
@@ -129,7 +131,7 @@ func upgradeCurrentMetalLBStage(t *testing.T, state *chartState) {
 	// service LoadBalancer status, and route reachability) rather than sampled
 	// only before and after.
 	state.installMetalLBObserved(t, 15*time.Minute,
-		[]string{state.writeValues(t, "metallb-current", metalLBTransitionValues(state))}, state.metalLB.InternalLBIP)
+		[]string{state.writeValues(t, "metallb-current", metalLBTransitionValues(t, state))}, state.metalLB.InternalLBIP)
 }
 
 func assertMetalLBSignalsPreservedStage(t *testing.T, state *chartState) {
@@ -157,7 +159,7 @@ func reapplyMetalLBStage(t *testing.T, state *chartState) {
 	t.Helper()
 	before := state.metalLB
 	state.installMetalLBObserved(t, 10*time.Minute,
-		[]string{state.writeValues(t, "metallb-reapply", metalLBTransitionValues(state))}, before.InternalLBIP)
+		[]string{state.writeValues(t, "metallb-reapply", metalLBTransitionValues(t, state))}, before.InternalLBIP)
 	if got := metalLBPoolUID(t, state, testRelease+"-edge"); got != before.EdgePoolUID {
 		t.Fatalf("reapply changed edge pool UID: %s -> %s", before.EdgePoolUID, got)
 	}
@@ -218,7 +220,7 @@ func metalLBPredecessorRollbackForwardStage(t *testing.T, state *chartState) {
 	// Safe predecessor reapply / forward recovery: re-upgrade to the current chart
 	// under continuous observation and re-assert every preserved signal.
 	state.installMetalLBObserved(t, 15*time.Minute,
-		[]string{state.writeValues(t, "metallb-forward", metalLBTransitionValues(state))}, before.InternalLBIP)
+		[]string{state.writeValues(t, "metallb-forward", metalLBTransitionValues(t, state))}, before.InternalLBIP)
 	assertMetalLBSignalsPreservedStage(t, state)
 }
 

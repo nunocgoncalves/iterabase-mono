@@ -141,7 +141,16 @@ func candidateOverlayValues(t *testing.T) string {
 	// two idle harness workers can establish real AgentPool readiness; the
 	// synthetic model permission is never used for a customer turn.
 	var values strings.Builder
-	values.WriteString("\n# Forge real-machine fixture values.\nstorage:\n  rwx:\n    mode: managed-longhorn\n    storageClassName: iterabase-rwx\n    managedLonghorn:\n      topology: single-node\ncontrol-plane:\n  dispatch:\n    enabled: true\n    defaultModel:\n      id: storage-readiness-fixture\n      api: openai-completions\n")
+	values.WriteString("\n# Forge real-machine fixture values.\nstorage:\n  rwx:\n")
+	if os.Getenv(storageChartArchiveEnv) != "" {
+		values.WriteString("    mode: managed-longhorn\n    storageClassName: iterabase-rwx\n    managedLonghorn:\n      topology: single-node\n")
+	} else {
+		// Ordinary PR source E2E intentionally composes with the published
+		// platform baseline, which predates DES-HOR-469-01. Exact-candidate and
+		// dedicated storage scenarios provide the managed companion archive.
+		values.WriteString("    mode: external\n    storageClassName: external-rwx-required\n")
+	}
+	values.WriteString("control-plane:\n  dispatch:\n    enabled: true\n    defaultModel:\n      id: storage-readiness-fixture\n      api: openai-completions\n")
 	if controlPlane != "" {
 		values.WriteString("  image:\n")
 		values.WriteString(controlPlane)
@@ -180,11 +189,22 @@ func TestCandidateOverlayValues(t *testing.T) {
 		"dispatch:":                 {},
 		"enabled: true":             {},
 		"storage-readiness-fixture": {},
+		"mode: external":            {},
 		"repository: \"ghcr.io/example/control-plane\"": {},
 		"tag: \"candidate-run@" + digest + "\"":         {},
 	} {
 		if !strings.Contains(plan.values, expected) {
 			t.Fatalf("candidate values missing %q:\n%s", expected, plan.values)
+		}
+	}
+}
+
+func TestCandidateOverlayValuesSelectManagedStorageOnlyWithExactCompanion(t *testing.T) {
+	t.Setenv(storageChartArchiveEnv, "/tmp/rwx-storage-substrate.tgz")
+	values := candidateOverlayValues(t)
+	for _, expected := range []string{"mode: managed-longhorn", "storageClassName: iterabase-rwx", "topology: single-node"} {
+		if !strings.Contains(values, expected) {
+			t.Fatalf("managed exact-candidate values missing %q:\n%s", expected, values)
 		}
 	}
 }
