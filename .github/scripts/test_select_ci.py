@@ -116,6 +116,8 @@ class ChangedPathCollectionFixtures(unittest.TestCase):
             "\n  digitalocean-rwx-three-node:\n", 1
         )[0]
         for contract in (
+            "needs.changes.outputs.charts == 'true' ||",
+            "needs.changes.outputs.forge_real_e2e == 'true') &&",
             "ref: ${{ github.event.pull_request.head.sha || github.sha }}",
             "timeout-minutes: 70",
             "group: e2e-digitalocean-rwx-tls",
@@ -125,6 +127,14 @@ class ChangedPathCollectionFixtures(unittest.TestCase):
             "ITERABASE_E2E_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}",
         ):
             self.assertIn(contract, job)
+        for path in (
+            "forge/test/e2e/overlay_test.go",
+            "forge/internal/lifecycle/storage.go",
+        ):
+            with self.subTest(managed_tls_path=path):
+                result = selection([path])
+                self.assertTrue(result["forge_real_e2e"])
+                self.assertFalse(result["charts"])
         required = workflow.split("  required:\n", 1)[1]
         self.assertIn("- digitalocean-rwx-tls", required)
         helper = (
