@@ -508,7 +508,7 @@ YAML`
 	mustSSHOutput(t, client, "sudo k3s kubectl apply -f /tmp/agentpool-crd.yaml")
 	mustSSHOutput(t, client, "sudo install -m 0755 /tmp/agentpool-storage-controller /usr/local/bin/agentpool-storage-controller")
 	mustSSHOutput(t, client, `sudo sh -c 'KUBECONFIG=/etc/rancher/k3s/k3s.yaml nohup /usr/local/bin/agentpool-storage-controller >/var/log/agentpool-storage-controller.log 2>&1 & echo $! >/run/agentpool-storage-controller.pid'`)
-	mustSSHOutput(t, client, "sudo k3s kubectl apply -f /tmp/external-storage-contract.yaml")
+	mustSSHOutput(t, client, "sudo k3s kubectl apply -n iterabase-system -f /tmp/external-storage-contract.yaml")
 	contractAndPool := fmt.Sprintf(`cat <<'YAML' | sudo k3s kubectl apply -f -
 apiVersion: platform.iterabase.com/v1alpha1
 kind: AgentPool
