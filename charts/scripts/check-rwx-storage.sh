@@ -7,7 +7,7 @@ platform="$root/charts/iterabase-platform"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
-helm dependency build "$chart" >/dev/null
+"$root/scripts/build-rwx-storage-dependency.sh" >/dev/null
 
 render_profile() {
   local topology="$1"

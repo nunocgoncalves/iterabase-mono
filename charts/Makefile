@@ -84,7 +84,7 @@ build-deps:
 	helm dependency build $(CHARTS_DIR)/$(CONTROLPLANE)
 	helm dependency build $(CHARTS_DIR)/$(OBSERVABILITY)
 	helm dependency build $(CHARTS_DIR)/$(CERT_MANAGER_SUBSTRATE)
-	helm dependency build $(CHARTS_DIR)/$(RWX_STORAGE_SUBSTRATE)
+	./scripts/build-rwx-storage-dependency.sh
 	helm dependency build $(CHARTS_DIR)/$(UMBRELLA)
 
 lint: build-deps
