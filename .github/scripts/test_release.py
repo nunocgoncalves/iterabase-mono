@@ -182,6 +182,7 @@ class ReleaseContractTests(unittest.TestCase):
                 "forge/digitalocean-cpu",
                 "forge/digitalocean-gpu",
                 "forge/digitalocean-rwx-three-node",
+                "forge/digitalocean-rwx-tls",
                 "charts/certificate-ownership-migration",
                 "charts/fresh-install",
                 "charts/feature-enable-upgrade",
@@ -235,7 +236,7 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertEqual(
             {item["name"] for item in plan["real_machine_matrix"]}, {"cpu", "gpu"}
         )
-        for scenario in ("forge/digitalocean-cpu", "forge/digitalocean-gpu", "charts/metallb-upgrade-reapply"):
+        for scenario in ("forge/digitalocean-cpu", "forge/digitalocean-gpu", "forge/digitalocean-rwx-tls", "charts/metallb-upgrade-reapply"):
             self.assertIn(scenario, plan["selected_scenarios"])
 
     def test_candidate_accepts_and_canonicalizes_an_explicit_target_set(self) -> None:
@@ -1013,7 +1014,7 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertNotIn("FORGE_E2E_USE_LATEST_RELEASE", workflow)
         self.assertNotIn("published-latest", workflow)
         self.assertIn("ITERABASE_E2E_FIXTURE_MODE: source", workflow)
-        self.assertEqual(workflow.count("ITERABASE_E2E_SOURCE_INPUTS:"), 4)
+        self.assertEqual(workflow.count("ITERABASE_E2E_SOURCE_INPUTS:"), 5)
         self.assertNotIn("ITERABASE_E2E_FIXTURE_MODE: published", workflow)
         self.assertIn("forge/test/e2e/published-fixture.json", workflow)
         candidate = (ROOT / ".github" / "workflows" / "release-candidate.yml").read_text()

@@ -63,6 +63,7 @@ See `forge.example.yaml` for the full substrate config schema.
 ```sh
 make test           # unit + fake-SSH integration tests
 make test-e2e       # composed DigitalOcean single-node CPU e2e (needs DIGITALOCEAN_TOKEN)
+make test-e2e-rwx-tls # exact-companion single-node Longhorn internal-CA mTLS gate
 make test-e2e-rwx-three-node # three-node Longhorn loss/rebuild/lifecycle gate
 make test-e2e-unit  # compile + unit-test the separate E2E harness module
 make lint           # golangci-lint

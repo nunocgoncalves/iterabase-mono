@@ -110,20 +110,22 @@ class ChangedPathCollectionFixtures(unittest.TestCase):
                 self.assertNotIn("git diff --name-only", workflow)
                 self.assertIn(f"name: {workflow_name} / required", workflow)
 
-    def test_pr_cpu_requires_exact_head_managed_storage_with_internal_tls(self) -> None:
+    def test_pr_has_required_exact_head_managed_storage_internal_tls_job(self) -> None:
         workflow = (ROOT / ".github/workflows/e2e.yml").read_text()
-        job = workflow.split("  digitalocean-cpu:\n", 1)[1].split(
+        job = workflow.split("  digitalocean-rwx-tls:\n", 1)[1].split(
             "\n  digitalocean-rwx-three-node:\n", 1
         )[0]
         for contract in (
             "ref: ${{ github.event.pull_request.head.sha || github.sha }}",
-            "timeout-minutes: 100",
+            "timeout-minutes: 70",
             ".github/scripts/prepare_pr_managed_runtime.sh",
+            "run: make test-e2e-rwx-tls",
             'FORGE_E2E_REQUIRE_CAPACITY: "true"',
-            'FORGE_E2E_REQUIRE_MANAGED_TLS: "true"',
             "ITERABASE_E2E_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}",
         ):
             self.assertIn(contract, job)
+        required = workflow.split("  required:\n", 1)[1]
+        self.assertIn("- digitalocean-rwx-tls", required)
         helper = (
             ROOT / ".github/scripts/prepare_pr_managed_runtime.sh"
         ).read_text()

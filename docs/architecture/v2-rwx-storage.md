@@ -833,9 +833,10 @@ The implementation is incomplete until all of these pass:
    recreation or data loss;
 10. disable/uninstall refusing active consumers, then deliberate retained-volume
     disposition and complete cleanup;
-11. a mandatory exact-head PR CPU scenario that packages and selects the current
-    platform, certificate, and RWX companion charts with TLS-on managed
-    single-node values, then proves the platform CA issued `longhorn-grpc-tls`,
+11. a mandatory exact-head PR real-machine single-node scenario that packages
+    and selects the current platform, certificate, and RWX companion charts with
+    TLS-on managed single-node values, then proves the platform CA issued
+    `longhorn-grpc-tls`,
     every current instance-manager service uses mutual TLS, unauthenticated
     TLS/plaintext gRPC are rejected, and compact Longhorn panels render in
     `50 — Data and Storage`; and

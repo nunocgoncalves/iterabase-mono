@@ -1,4 +1,4 @@
-.PHONY: build test test-unit test-e2e test-e2e-rwx-three-node test-e2e-overlay test-e2e-secrets test-e2e-flux test-e2e-gpu test-e2e-gpu-broken-policy test-e2e-inference-gpu test-e2e-unit lint fmt fmt-check install-hooks clean
+.PHONY: build test test-unit test-e2e test-e2e-rwx-tls test-e2e-rwx-three-node test-e2e-overlay test-e2e-secrets test-e2e-flux test-e2e-gpu test-e2e-gpu-broken-policy test-e2e-inference-gpu test-e2e-unit lint fmt fmt-check install-hooks clean
 
 # Load .env if present (e.g. DIGITALOCEAN_TOKEN for e2e). .env is gitignored.
 -include .env
@@ -36,6 +36,11 @@ test-unit:
 # scenario; -v is required so capacity skips and named stages remain visible.
 test-e2e:
 	cd test/e2e && ITERABASE_E2E_SOURCE_INPUTS="$(ITERABASE_E2E_SOURCE_INPUTS)" go test -v -race -count=1 -timeout 95m -run '^TestE2E$$/^digitalocean-cpu$$' .
+
+test-e2e-rwx-tls:
+	cd test/e2e && FORGE_E2E_REQUIRE_MANAGED_TLS=true FORGE_E2E_STORAGE_TLS_ONLY=true \
+		ITERABASE_E2E_SOURCE_INPUTS="$(ITERABASE_E2E_SOURCE_INPUTS)" \
+		go test -v -race -count=1 -timeout 70m -run '^TestE2E$$/^digitalocean-rwx-tls$$' .
 
 test-e2e-rwx-three-node:
 	cd test/e2e && ITERABASE_E2E_SOURCE_INPUTS="$(ITERABASE_E2E_SOURCE_INPUTS)" go test -v -race -count=1 -timeout 155m -run '^TestE2E$$/^digitalocean-rwx-three-node$$' .

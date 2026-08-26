@@ -44,6 +44,22 @@ func TestE2E(t *testing.T) {
 			},
 			Diagnostics: cpuScenarioDiagnostics(), Cleanup: cpuScenarioCleanup(),
 		}),
+		sharede2e.Define(sharede2e.Scenario[*digitalOceanCPUState]{
+			Metadata: forgeScenarioMetadata(
+				"digitalocean-rwx-tls",
+				"Provisions a fresh single-node host, packages the exact platform/certificate/RWX companions, establishes the platform internal CA before Longhorn, and proves every current instance-manager gRPC service accepts mTLS while rejecting unauthenticated TLS and plaintext.",
+				sharede2e.TierF3,
+				[]string{"HOR-469", "DES-HOR-424-01", "DES-HOR-469-01", "DES-HOR-469-02"},
+				[]string{"iterabase-platform-chart"},
+				"test-e2e-rwx-tls", 70, "cpu",
+			),
+			NewState: newDigitalOceanRWXTLSState,
+			Stages: []sharede2e.Stage[*digitalOceanCPUState]{
+				{Name: "provision-single-node", Run: cpuDiagnosticStage(failureDomainProvisioning, provisionCPUStage)},
+				{Name: "install-and-prove-managed-internal-tls", DependsOn: []string{"provision-single-node"}, Run: cpuDiagnosticStage(failureDomainForgeHandoff, runOverlayStage)},
+			},
+			Diagnostics: cpuScenarioDiagnostics(), Cleanup: cpuScenarioCleanup(),
+		}),
 		sharede2e.Define(sharede2e.Scenario[*rwxThreeNodeState]{
 			Metadata: forgeScenarioMetadata(
 				"digitalocean-rwx-three-node",

@@ -143,6 +143,10 @@ func candidateOverlayValues(t *testing.T) string {
 	var values strings.Builder
 	values.WriteString("\n# Forge real-machine fixture values.\n")
 	managedStorage := os.Getenv(storageChartArchiveEnv) != "" && os.Getenv(forceExternalStorageEnv) != "true"
+	storageTLSOnly := os.Getenv(storageTLSOnlyEnv) == "true"
+	if storageTLSOnly && !managedStorage {
+		t.Fatalf("%s=true requires the exact managed storage companion", storageTLSOnlyEnv)
+	}
 	if managedStorage {
 		// The exact-candidate single-node path is the mandatory combined proof for
 		// DES-HOR-469-02: the ordered certificate substrate establishes the
@@ -159,18 +163,25 @@ func candidateOverlayValues(t *testing.T) string {
 		// dedicated storage scenarios provide the managed companion archive.
 		values.WriteString("    mode: external\n    storageClassName: external-rwx-required\n")
 	}
-	values.WriteString("control-plane:\n  dispatch:\n    enabled: true\n    defaultModel:\n      id: storage-readiness-fixture\n      api: openai-completions\n")
-	if controlPlane != "" {
-		values.WriteString("  image:\n")
-		values.WriteString(controlPlane)
-	}
-	if toolRunner != "" {
-		values.WriteString("  toolRunner:\n    image:\n")
-		values.WriteString(toolRunner)
-	}
-	if inference != "" {
-		values.WriteString("inference-gateway:\n  image:\n")
-		values.WriteString(inference)
+	if storageTLSOnly {
+		// The dedicated DES-HOR-469-02 gate exercises the exact certificate and
+		// storage companions without depending on unpublished product images.
+		// The ordinary CPU scenario retains the complete platform/Forge journey.
+		values.WriteString("redis: {enabled: false}\nminio: {enabled: false}\ninference-gateway: {enabled: false}\ncontrol-plane: {enabled: false}\ningress-nginx: {enabled: false}\ninternal-ingress-nginx: {enabled: false}\nmetallb: {enabled: false}\nmetallb-config: {enabled: false}\ncert-issuers: {enabled: false}\nexternal-dns: {enabled: false}\nobservability: {enabled: false}\n")
+	} else {
+		values.WriteString("control-plane:\n  dispatch:\n    enabled: true\n    defaultModel:\n      id: storage-readiness-fixture\n      api: openai-completions\n")
+		if controlPlane != "" {
+			values.WriteString("  image:\n")
+			values.WriteString(controlPlane)
+		}
+		if toolRunner != "" {
+			values.WriteString("  toolRunner:\n    image:\n")
+			values.WriteString(toolRunner)
+		}
+		if inference != "" {
+			values.WriteString("inference-gateway:\n  image:\n")
+			values.WriteString(inference)
+		}
 	}
 	return values.String()
 }
@@ -215,6 +226,20 @@ func TestCandidateOverlayValuesSelectManagedStorageOnlyWithExactCompanion(t *tes
 		if !strings.Contains(values, expected) {
 			t.Fatalf("managed exact-candidate values missing %q:\n%s", expected, values)
 		}
+	}
+}
+
+func TestCandidateOverlayValuesSelectStorageTLSOnlyRuntime(t *testing.T) {
+	t.Setenv(storageChartArchiveEnv, "/tmp/rwx-storage-substrate.tgz")
+	t.Setenv(storageTLSOnlyEnv, "true")
+	values := candidateOverlayValues(t)
+	for _, expected := range []string{"internalTLS:\n    enabled: true", "mode: managed-longhorn", "control-plane: {enabled: false}", "inference-gateway: {enabled: false}", "cert-issuers: {enabled: false}"} {
+		if !strings.Contains(values, expected) {
+			t.Fatalf("managed TLS-only values missing %q:\n%s", expected, values)
+		}
+	}
+	if strings.Contains(values, "storage-readiness-fixture") {
+		t.Fatalf("managed TLS-only values must not enable unpublished product workloads:\n%s", values)
 	}
 }
 
