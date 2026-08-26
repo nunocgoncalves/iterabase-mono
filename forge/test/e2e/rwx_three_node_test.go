@@ -316,9 +316,13 @@ YAML`
 	}
 	for i, droplet := range state.droplets[:3] {
 		volume := state.volumeByNodeID[droplet.ID]
-		identity := strings.TrimSpace(mustSSHOutput(t, client, fmt.Sprintf(`sudo k3s kubectl get nodes.longhorn.io %s -n longhorn-system -o json | jq -r '.spec.disks | to_entries[] | select(.value.path=="/var/lib/longhorn") | .value.path'`, candidateShellQuote(droplet.Name))))
-		if identity != "/var/lib/longhorn" || volume == nil {
-			t.Fatalf("storage node %d lacks its dedicated SSD-backed Longhorn path", i)
+		if volume == nil {
+			t.Fatalf("storage node %d has no DigitalOcean SSD volume identity", i)
+		}
+		waitForDisk := fmt.Sprintf(`for i in $(seq 1 120); do path=$(sudo k3s kubectl get nodes.longhorn.io %s -n longhorn-system -o json 2>/dev/null | jq -r '.spec.disks | to_entries[] | select(.value.path=="/var/lib/longhorn") | .value.path'); if test "$path" = /var/lib/longhorn; then printf '%%s\n' "$path"; exit 0; fi; sleep 5; done; sudo k3s kubectl get nodes.longhorn.io %s -n longhorn-system -o yaml >&2; exit 1`, candidateShellQuote(droplet.Name), candidateShellQuote(droplet.Name))
+		identity := strings.TrimSpace(mustSSHOutput(t, client, waitForDisk))
+		if identity != "/var/lib/longhorn" {
+			t.Fatalf("storage node %d lacks its dedicated SSD-backed Longhorn path: %q", i, identity)
 		}
 	}
 }
