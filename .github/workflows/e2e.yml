@@ -174,7 +174,8 @@ jobs:
     name: digitalocean-rwx-tls
     needs: [changes, harness]
     if: >-
-      needs.changes.outputs.charts == 'true' &&
+      (needs.changes.outputs.charts == 'true' ||
+      needs.changes.outputs.forge_real_e2e == 'true') &&
       (github.event_name == 'pull_request' ||
       (github.event_name == 'workflow_dispatch' && inputs.complete_catalogue != true))
     runs-on: ubuntu-latest
