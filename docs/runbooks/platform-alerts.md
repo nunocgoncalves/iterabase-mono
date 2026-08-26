@@ -10,6 +10,13 @@ These alerts describe internal operator health. They never assert customer-resul
 4. Do not repeat a consequential tool action when its outcome is unknown.
 5. Prefer disabling new work or rolling back immutable pins over deleting durable state.
 
+For managed storage, `50 — Data and Storage` is a quick-glance orientation view,
+not a replacement for PromQL or the alert-specific evidence below. Its compact
+Longhorn panels cover manager scrape availability, unhealthy volumes, minimum
+node/disk headroom, unavailable CSI nodes/share-managers, and active replica
+rebuilds. Empty panels in external mode do not assert a customer backend is
+healthy.
+
 ## IterabasePlatformTargetDown
 
 Confirm the target pod exists and is Ready, the named metrics port is present, and the ServiceMonitor/PodMonitor selects it. Validate `/metrics` from inside the cluster. Roll back the affected image/chart pin if the listener failed after rollout.

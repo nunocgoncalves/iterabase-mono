@@ -170,6 +170,16 @@ underlying Longhorn block volume; they do not create three active NFS servers.
 DNS, the share-manager, the attached engine, node mounts, and client recovery
 remain in the I/O path.
 
+`global.internalTLS` has a deliberately bounded Longhorn meaning:
+
+| Longhorn path | Transport boundary |
+| --- | --- |
+| manager ↔ current V1 instance-manager gRPC services | Mutual TLS with the `longhorn-grpc-tls` client/server leaf issued by the Iterabase internal CA; unauthenticated TLS and plaintext are rejected |
+| Longhorn ↔ Kubernetes API | Kubernetes API server TLS and service-account authorization |
+| manager API/UI and `/metrics` on port 9500 | Upstream HTTP inside ClusterIP/restricted NetworkPolicies; UI has no customer ingress and Prometheus receives only the metrics exception |
+| single-node worker ↔ share-manager NFSv4.1 | Unencrypted same-host data plane, accepted only as the bounded single-node exposure |
+| host iSCSI/CSI sockets and V1 engine/replica/share-manager data paths | Not directly secured by the Iterabase CA; future production inter-node traffic requires the HOR-519 encrypted-network gate |
+
 The managed installation pins:
 
 - Longhorn chart and application `1.12.1`;
@@ -801,6 +811,7 @@ slice:
 | Enforce topology replica count, reserve/over-provisioning, hard capacity, `Retain`, expansion-only, and capacity alerts | DES-HOR-424-04 |
 | Gate readiness, surface stable reasons/events, run worker/share-manager/node-loss recovery without replay, and recycle clients | DES-HOR-424-05 |
 | Enable internal NetworkPolicies; keep UI private; document encryption owner; validate upgrade, re-apply, decommission, and deletion confirmation | DES-HOR-424-06 |
+| Provision the internal-CA Longhorn gRPC leaf before startup, reject unauthenticated/plaintext current services, document the same-host NFS boundary, gate multi-node production on HOR-519, and add compact operator dashboard signals | DES-HOR-469-02 |
 
 The implementation is incomplete until all of these pass:
 
@@ -809,7 +820,8 @@ The implementation is incomplete until all of these pass:
 2. Forge prerequisite idempotency and negative missing-iSCSI/NFS/mount-
    propagation checks;
 3. fresh managed single-node install and exact managed StorageClass;
-4. three-node, three-replica healthy creation and one-node replica rebuild;
+4. reference three-node, three-replica healthy creation and one-node replica
+   rebuild without treating it as encrypted-network production qualification;
 5. the generic conformance script against managed and at least one maintained
    external reference class;
 6. actual AgentPool two-worker mount/session isolation and worker replacement;
@@ -820,8 +832,12 @@ The implementation is incomplete until all of these pass:
 9. chart/Forge re-apply and supported patch/adjacent-minor upgrade without PVC
    recreation or data loss;
 10. disable/uninstall refusing active consumers, then deliberate retained-volume
-    disposition and complete cleanup; and
-11. exact release evidence for versions, images/digests, settings, nodes/disks,
+    disposition and complete cleanup;
+11. TLS-on managed single-node evidence that the platform CA issued
+    `longhorn-grpc-tls`, every current instance-manager service uses mutual TLS,
+    and unauthenticated TLS/plaintext gRPC are rejected; compact Longhorn panels
+    render in `50 — Data and Storage`; and
+12. exact release evidence for versions, images/digests, settings, nodes/disks,
     class, claims, results, timings, and accepted single-point-of-failure limits.
 
 ### Explicit non-goals

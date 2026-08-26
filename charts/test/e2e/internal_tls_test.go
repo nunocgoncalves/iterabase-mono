@@ -18,13 +18,13 @@ func internalTLSScenario() sharede2e.Definition {
 			"internal-tls",
 			"Installs the minimal internal-TLS platform and proves issued identities, distinct verified control-plane edge/backend TLS, gateway dependency readiness, and real Redis/PostgreSQL transport enforcement.",
 			"test-e2e-internal-tls", 30,
-			[]string{"HOR-371", "HOR-416", "HOR-475", "HOR-507"},
+			[]string{"HOR-371", "HOR-416", "HOR-469", "HOR-475", "HOR-507"},
 			[]string{"control-plane", "inference-gateway", "control-plane-chart", "inference-gateway-chart", "iterabase-platform-chart"},
 		),
 		NewState: newChartState,
 		Stages: []sharede2e.Stage[*chartState]{
 			{Name: "create-kind", Run: createKindStage},
-			{Name: "install-certificate-substrate", DependsOn: []string{"create-kind"}, Run: installCertificateSubstrateStage},
+			{Name: "install-certificate-substrate", DependsOn: []string{"create-kind"}, Run: installInternalTLSCertificateSubstrateStage},
 			{Name: "install-internal-tls-platform", DependsOn: []string{"install-certificate-substrate"}, Run: installInternalTLSPlatformStage},
 			{Name: "assert-internal-identities", DependsOn: []string{"install-internal-tls-platform"}, Run: assertInternalIdentitiesStage},
 			{Name: "assert-gateway-dependencies", DependsOn: []string{"assert-internal-identities"}, Run: assertGatewayDependenciesStage},
@@ -37,6 +37,20 @@ func internalTLSScenario() sharede2e.Definition {
 		Diagnostics: diagnostics,
 		Cleanup:     cleanup,
 	})
+}
+
+func installInternalTLSCertificateSubstrateStage(t *testing.T, state *chartState) {
+	t.Helper()
+	state.installSubstrate(t, filepathFromCharts(state, "values-tls.yaml"))
+	state.kubectl(t, 4*time.Minute, "wait", "--for=condition=Ready", "clusterissuer/internal-ca", "--timeout=3m")
+	state.kubectl(t, 4*time.Minute, "wait", "--for=condition=Ready", "certificate/"+testRelease+"-internal-ca-root", "-n", testNamespace, "--timeout=3m")
+	state.internalCARootUID = state.kubectl(t, 30*time.Second, "get", "certificate/"+testRelease+"-internal-ca-root", "-n", testNamespace,
+		"-o", "jsonpath={.metadata.uid}")
+	owner := state.kubectl(t, 30*time.Second, "get", "certificate/"+testRelease+"-internal-ca-root", "-n", testNamespace,
+		"-o", "jsonpath={.metadata.annotations.meta\\.helm\\.sh/release-name}")
+	if owner != testRelease {
+		t.Fatalf("ordered internal CA owner=%q want future platform release %q", owner, testRelease)
+	}
 }
 
 func installInternalTLSPlatformStage(t *testing.T, state *chartState) {
@@ -68,6 +82,11 @@ func installInternalTLSPlatformStage(t *testing.T, state *chartState) {
 func assertInternalIdentitiesStage(t *testing.T, state *chartState) {
 	t.Helper()
 	state.kubectl(t, 4*time.Minute, "wait", "--for=condition=Ready", "clusterissuer/internal-ca", "--timeout=3m")
+	currentRootUID := state.kubectl(t, 30*time.Second, "get", "certificate/"+testRelease+"-internal-ca-root", "-n", testNamespace,
+		"-o", "jsonpath={.metadata.uid}")
+	if state.internalCARootUID == "" || currentRootUID != state.internalCARootUID {
+		t.Fatalf("platform did not adopt the ordered internal CA in place: before=%q after=%q", state.internalCARootUID, currentRootUID)
+	}
 	for _, certificate := range []string{
 		testRelease + "-postgresql-tls", testRelease + "-redis-tls", testRelease + "-control-plane-api-tls",
 	} {

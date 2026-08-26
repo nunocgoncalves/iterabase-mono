@@ -2,7 +2,7 @@
 
 > Canonical source: [`iterabase-mono/charts`](https://github.com/nunocgoncalves/iterabase-mono/tree/master/charts). The former standalone source repository is historical and read-only; the existing `ghcr.io/nunocgoncalves/iterabase-charts` package namespace remains the stable artifact identity.
 
-Helm charts for the [iterabase](https://iterabase.com) platform. The `cert-manager-substrate` release establishes certificate CRDs, webhook, controller, and CSI driver before the `iterabase-platform` umbrella deploys application workloads. [Forge](https://github.com/nunocgoncalves/iterabase-mono/tree/master/forge) enforces this release ordering automatically; direct Helm users install the two same-version artifacts in order.
+Helm charts for the [iterabase](https://iterabase.com) platform. The `cert-manager-substrate` release establishes certificate CRDs, webhook, controller, CSI driver, and—when internal TLS is selected—the platform-owned internal CA before dependent workloads. Managed storage then installs the same-version `rwx-storage-substrate`; the `iterabase-platform` umbrella follows. [Forge](https://github.com/nunocgoncalves/iterabase-mono/tree/master/forge) enforces this ordering automatically; direct Helm users preserve the same order.
 
 ## Charts
 
@@ -173,24 +173,40 @@ recovery.
 
 ### Production AgentPool RWX storage
 
-The platform values select exactly one storage mode and class. Managed mode also
-requires the same-version companion before the platform:
+The platform values select exactly one storage mode and class. Managed mode with
+internal TLS uses certificate substrate → RWX substrate → platform ordering. The
+first release creates/verifies platform-owned CA resources; the second waits for
+the CA-backed `longhorn-grpc-tls` leaf before Longhorn starts:
 
 ```sh
+helm upgrade --install iterabase-cert-manager \
+  oci://ghcr.io/nunocgoncalves/iterabase-charts/cert-manager-substrate \
+  --version <platform-version> -n iterabase-system --create-namespace \
+  -f values-tls.yaml -f values-managed-rwx-single-node.yaml \
+  --set global.internalTLS.platformRelease=iterabase --wait --timeout 15m
 helm upgrade --install iterabase-rwx-storage \
   oci://ghcr.io/nunocgoncalves/iterabase-charts/rwx-storage-substrate \
   --version <platform-version> -n longhorn-system --create-namespace \
   -f values-managed-rwx-single-node.yaml \
+  --set global.internalTLS.enabled=true \
   --set validation.attestationNamespace=iterabase-system --wait --timeout 65m
 helm upgrade --install iterabase \
   oci://ghcr.io/nunocgoncalves/iterabase-charts/iterabase-platform \
   --version <platform-version> -n iterabase-system --create-namespace \
-  -f values-managed-rwx-single-node.yaml --wait
+  -f values-tls.yaml -f values-managed-rwx-single-node.yaml --wait
 ```
 
-Use `values-managed-rwx-three-node.yaml` only on at least three healthy storage
-nodes with dedicated SSD capacity. Three replicas do not remove the active
-share-manager interruption boundary. Forge supports the managed `single-node`
+The managed single-node NFSv4.1 hop is a bounded unencrypted same-host data-plane
+exposure. The Iterabase CA secures Longhorn manager-to-instance-manager gRPC; it
+does not secure NFS, iSCSI, CSI, engine, share-manager, or replica traffic. The
+install gate proves every current instance-manager service accepts authenticated
+mTLS and rejects unauthenticated TLS and plaintext before conformance runs.
+
+`values-managed-rwx-three-node.yaml` remains a reference/qualification profile
+for at least three healthy storage nodes with dedicated SSD capacity. It is not
+production-qualified until HOR-519 selects encrypted inter-node networking and
+proves both NFS and replica traffic traverse it. Three replicas do not remove the
+active share-manager interruption boundary. Forge supports the managed `single-node`
 reference substrate and derives it from these chart values; `forge.yaml` has no
 storage provider toggle.
 

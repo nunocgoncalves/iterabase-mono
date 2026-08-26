@@ -1,9 +1,11 @@
 apiVersion: v2
 name: cert-manager-substrate
-description: Iterabase certificate substrate — cert-manager operator, CRDs, webhook, and CSI driver.
+description: Iterabase certificate substrate — cert-manager operator, CRDs, webhook, CSI driver, and ordered internal CA bootstrap.
 type: application
 version: 0.3.23
 appVersion: "v1.21.0"
+annotations:
+  iterabase.com/architecture-decision: DES-HOR-469-02
 dependencies:
   - name: cert-manager
     version: v1.21.0

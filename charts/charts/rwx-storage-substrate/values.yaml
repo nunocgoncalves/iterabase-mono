@@ -2,6 +2,14 @@
 # The same semantic storage values file is passed to this release and the
 # platform release; longhorn.* and validation.* are chart-owned plumbing, not a
 # supported customer tuning surface.
+# DES-HOR-469-02: this global switch requests an Iterabase-internal-CA
+# longhorn-grpc-tls leaf before Longhorn starts and enables the mandatory mTLS
+# rejection gate. It does not claim that the CA secures NFS or storage data.
+global:
+  internalTLS:
+    enabled: false
+    issuerName: internal-ca
+
 storage:
   rwx:
     mode: managed-longhorn
@@ -12,6 +20,11 @@ storage:
 longhorn:
   enabled: true
   namespaceOverride: ""
+  # Reloader restarts the chart-owned manager DaemonSet after leaf renewal.
+  # Instance-manager certificate activation remains part of the guarded
+  # companion reapply/maintenance gate because those pods are Longhorn-CR-owned.
+  annotations:
+    secret.reloader.stakater.com/reload: longhorn-grpc-tls
   # Chart-owned image identities: tags retain Longhorn's version parsing while
   # multi-architecture index digests prevent registry tag drift.
   image:

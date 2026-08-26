@@ -1,6 +1,6 @@
 # Managed RWX storage operations
 
-This runbook implements `DES-HOR-424-01`–`06` and `DES-HOR-469-01`. The
+This runbook implements `DES-HOR-424-01`–`06` and `DES-HOR-469-01`–`02`. The
 architecture and responsibility authority remains
 [`../../docs/architecture/v2-rwx-storage.md`](../../docs/architecture/v2-rwx-storage.md).
 
@@ -46,21 +46,37 @@ The validation/uninstall hook uses the multi-architecture
    maintenance owner, and rollback.
 2. Verify iSCSI, `iscsid`, NFSv4, shared mount propagation, ext4/XFS data path,
    required tools, and the `node.longhorn.io/create-default-disk=true` label.
-3. Install the same-version companion in `longhorn-system` with the selected
-   managed values file and exact platform attestation namespace.
-4. Wait for the post-install hook. It requires exactly one eligible storage
+3. With internal TLS enabled, install/update `cert-manager-substrate` first
+   with the platform release identity and managed values. Its ordered gate
+   creates or verifies the platform-owned internal CA and waits for it to be
+   Ready before returning.
+4. Install the same-version companion in `longhorn-system` with the selected
+   managed values file, `global.internalTLS.enabled=true`, and exact platform
+   attestation namespace. Its pre-install gate issues `longhorn-grpc-tls` from
+   `internal-ca` before Longhorn starts. A transition from pre-mTLS components
+   deterministically restarts stale manager/instance-manager pods.
+5. Wait for the post-install hook. It proves each current V1 instance-manager
+   service accepts the CA-backed client/server leaf, rejects TLS without the
+   client leaf, rejects plaintext HTTP/2 gRPC, and has no plaintext startup log.
+   It then requires exactly one eligible storage
    node for `single-node`, or at least three for `three-node`; then it proves
    two simultaneous mounts, UID/GID sibling isolation, rename/fsync/unlink,
    replacement persistence, hard claim capacity, expansion, and cleanup.
-5. Verify the `HOR-469/v1` attestation and install the platform with the same
-   semantic values. AgentPools remain unready until their exact class/PVC/PV
+6. Verify the `HOR-469/v1` conformance attestation plus the labeled
+   `longhorn-grpc-mtls` rejection attestation, and install the platform with the
+   same semantic values. AgentPools remain unready until their exact class/PVC/PV
    and backend predicates pass.
 
 The UI stays ClusterIP-only, internal NetworkPolicies remain enabled, V2 engine
 and experimental RWX fast failover remain disabled, and no storage credential
-enters workers. Forge forwards only `mode`, `storageClassName`, managed
-`topology`, and the chart-owned attestation namespace to the companion. The
-complete `longhorn.*` value tree is digest-sealed; customer overlays cannot tune
+enters workers. Longhorn's manager API/UI and `/metrics` port remain upstream
+HTTP inside that restricted boundary; the UI has no ingress and the companion
+adds only the named Prometheus metrics exception. The Iterabase CA guarantee is
+manager-to-instance-manager gRPC mTLS, not blanket Longhorn HTTP/data-plane TLS.
+Forge forwards only `mode`, `storageClassName`, managed
+`topology`, the global internal-TLS boolean, and the chart-owned attestation
+namespace to the companion. The complete `longhorn.*` value tree is
+fully digest-sealed; customer overlays cannot tune
 backend plumbing through the supported contract.
 
 ## External/BYO reference gate
@@ -78,14 +94,27 @@ Iterabase-managed backend or widen the supported semantic values.
 ## Capacity and monitoring
 
 - `single-node`: one replica, minimum 25% unallocated/free root-disk reserve,
-  explicitly no node/disk/storage HA.
-- `three-node`: three distinct replicas on at least three storage nodes and
-  dedicated SSD-backed `/var/lib/longhorn`; plan three physical copies plus
-  snapshot/rebuild/free-space headroom.
+  explicitly no node/disk/storage HA. Its NFSv4.1 client/share-manager hop is an
+  accepted unencrypted same-host data-plane exposure. The Iterabase CA protects
+  manager/instance-manager gRPC, not NFS/iSCSI/CSI/volume data.
+- `three-node`: a retained reference profile with three distinct replicas on at
+  least three storage nodes and dedicated SSD-backed `/var/lib/longhorn`; plan
+  three physical copies plus snapshot/rebuild/free-space headroom. It is not
+  production-qualified until HOR-519 approves encrypted inter-node networking
+  and proves NFS plus replica traffic traverse that tunnel.
 - Alert on Longhorn node/disk schedulability and capacity, volume robustness,
   replica rebuild, share-manager/CSI readiness, PVC expansion, full filesystems,
   conformance age, and retained PVs. A full volume fails writes and readiness;
   it never spills to local or artifact storage.
+- Use `50 — Data and Storage` only for quick orientation: manager scrape
+  availability, unhealthy volumes, minimum node/disk headroom, unavailable CSI
+  nodes/share-managers, and replicas rebuilding. Continue investigation with
+  the linked alert/runbook PromQL and bounded Kubernetes/Longhorn evidence.
+- The gRPC leaf is 90 days and renews 15 days early. Reloader restarts the
+  manager DaemonSet after Secret renewal. During the same maintenance window,
+  reapply the companion: its gate compares every manager/instance-manager pod
+  start time with the Certificate `notBefore`, restarts stale components, and
+  reruns authenticated/negative transport evidence before the old leaf expires.
 
 ## Failure and recovery
 
@@ -110,7 +139,7 @@ copy/cutover.
 Exact reapply must preserve claim/PV UIDs and committed bytes. Upgrade only
 through an upstream-supported same-minor patch or adjacent minor after
 Kubernetes compatibility, important/known issues, health, capacity, system
-backup metadata, and exact image review. The mandatory three-node gate installs
+backup metadata, and exact image review. The reference three-node gate installs
 Longhorn `1.11.3`, commits data to a three-replica claim, writes a real Longhorn
 system backup to an ephemeral pinned S3-compatible target, upgrades the same
 Helm release to the candidate `1.12.1` companion, explicitly upgrades the

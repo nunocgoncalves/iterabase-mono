@@ -348,6 +348,55 @@ func assertGrafanaDashboardSuite(t *testing.T, client *http.Client, baseURL, use
 	if len(want) != 0 {
 		t.Fatalf("Grafana missing organized platform dashboards: %v", want)
 	}
+	assertGrafanaDataStoragePanels(t, client, baseURL, username, password)
+}
+
+func assertGrafanaDataStoragePanels(t *testing.T, client *http.Client, baseURL, username, password string) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, baseURL+"/api/dashboards/uid/iterabase-data-storage", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.SetBasicAuth(username, password)
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("Grafana data/storage dashboard status=%d", resp.StatusCode)
+	}
+	var payload struct {
+		Dashboard struct {
+			Panels []struct {
+				Title   string `json:"title"`
+				Targets []struct {
+					Expression string `json:"expr"`
+				} `json:"targets"`
+			} `json:"panels"`
+		} `json:"dashboard"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"Longhorn managers available":         "longhorn-manager-.*",
+		"Longhorn unhealthy volumes":          "longhorn_volume_robustness",
+		"Longhorn minimum node/disk headroom": "longhorn_disk_capacity_bytes",
+		"Longhorn CSI unavailable nodes":      "longhorn-csi-plugin",
+		"Longhorn share-managers unavailable": "share-manager-.*",
+		"Longhorn replicas rebuilding":        "longhorn_replica_state",
+	}
+	for _, panel := range payload.Dashboard.Panels {
+		fragment, ok := want[panel.Title]
+		if !ok || len(panel.Targets) != 1 || !strings.Contains(panel.Targets[0].Expression, fragment) {
+			continue
+		}
+		delete(want, panel.Title)
+	}
+	if len(want) != 0 {
+		t.Fatalf("Grafana data/storage dashboard missing Longhorn orientation panels: %v", want)
+	}
 }
 
 func grafanaInferenceDashboardQueries(t *testing.T, client *http.Client, baseURL, username, password string) (string, string) {

@@ -3,6 +3,7 @@ package e2e
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/nunocgoncalves/iterabase-mono/forge/test/e2e/internal/remotecluster"
@@ -43,6 +44,9 @@ func runOverlayStage(t *testing.T, state *digitalOceanCPUState) {
 	candidateCluster := remotecluster.Use(t, filepath.Join(state.forgeHome, state.runID, "kubeconfig.yaml"))
 	assertCandidateImageDigests(t, candidateCluster, "iterabase-system",
 		controlPlaneDigestEnv, inferenceGatewayDigestEnv, toolRunnerDigestEnv)
+	if state.managedRWX {
+		assertManagedLonghornInternalTLS(t, candidateCluster, state.runID)
+	}
 
 	// The cloned overlay dir exists on the host (a real clone happened).
 	overlayDir := "/var/lib/forge/overlay/" + state.runID
@@ -54,6 +58,43 @@ func runOverlayStage(t *testing.T, state *digitalOceanCPUState) {
 	if _, err := sshOutput(sc, "test -d "+overlayDir+"/.git && test -f "+overlayDir+"/values.yaml"); err != nil {
 		t.Fatalf("overlay clone not present on host at %s: %v", overlayDir, err)
 	}
+}
+
+func assertManagedLonghornInternalTLS(t *testing.T, cluster *remotecluster.Cluster, platformRelease string) {
+	t.Helper()
+	const storageNamespace = "longhorn-system"
+	issuer := strings.TrimSpace(cluster.Kubectl(t, "get", "certificate/longhorn-grpc-tls", "-n", storageNamespace, "-o", "jsonpath={.spec.issuerRef.name}"))
+	if issuer != "internal-ca" {
+		t.Fatalf("Longhorn gRPC leaf issuer=%q want internal-ca", issuer)
+	}
+	rootCA := strings.TrimSpace(cluster.Kubectl(t, "get", "secret/"+platformRelease+"-internal-ca-root", "-n", "iterabase-system", "-o", `jsonpath={.data.ca\.crt}`))
+	leafCA := strings.TrimSpace(cluster.Kubectl(t, "get", "secret/longhorn-grpc-tls", "-n", storageNamespace, "-o", `jsonpath={.data.ca\.crt}`))
+	if rootCA == "" || leafCA != rootCA {
+		t.Fatal("Longhorn gRPC leaf is not chained to the platform internal CA")
+	}
+
+	attestation := strings.TrimSpace(cluster.Kubectl(t, "get", "configmap", "-n", storageNamespace,
+		"-l", "platform.iterabase.com/evidence=longhorn-grpc-mtls", "-o",
+		`jsonpath={.items[0].data.result}{"|"}{.items[0].data.authenticatedServices}{"|"}{.items[0].data.unauthenticatedTLSRejected}{"|"}{.items[0].data.plaintextRejected}`))
+	parts := strings.Split(attestation, "|")
+	if len(parts) != 4 || parts[0] != "pass" || parts[1] == "0" || parts[1] != parts[2] || parts[1] != parts[3] {
+		t.Fatalf("Longhorn gRPC mTLS rejection attestation=%q", attestation)
+	}
+
+	pods := strings.Fields(cluster.Kubectl(t, "get", "pods", "-n", storageNamespace,
+		"-l", "longhorn.io/component=instance-manager", "-o", `jsonpath={range .items[*]}{.metadata.name}{"\n"}{end}`))
+	if len(pods) == 0 {
+		t.Fatal("no current Longhorn instance-manager pod")
+	}
+	for _, pod := range pods {
+		logs := cluster.PodLogs(t, storageNamespace, pod, "")
+		if !strings.Contains(logs, "Creating gRPC server with mtls auth") ||
+			strings.Contains(logs, "Creating gRPC server with no auth") ||
+			strings.Contains(logs, "starting without TLS") {
+			t.Fatalf("instance-manager %s does not prove mTLS-only startup", pod)
+		}
+	}
+	t.Logf("verified internal-CA Longhorn gRPC mTLS and %s authenticated/plaintext rejection probes", parts[1])
 }
 
 // writeCurrentOverlayForgeConfig uses the public exact-Flux fixture. Candidate

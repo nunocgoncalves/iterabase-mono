@@ -74,6 +74,7 @@ type chartState struct {
 	internalPool         string
 	internalPoolInternal string
 	metalLB              *metalLBSnapshot
+	internalCARootUID    string
 }
 
 func newChartState(t *testing.T) *chartState {
@@ -409,11 +410,11 @@ func TestUnitSourceRuntimeImagesRemainConstantAcrossChartTransitions(t *testing.
 	}
 }
 
-func (state *chartState) installSubstrate(t *testing.T) {
+func (state *chartState) installSubstrate(t *testing.T, valueFiles ...string) {
 	t.Helper()
 	out, err := state.client.HelmUpgrade(state.ctx, kube.HelmOptions{
 		Release: testRelease + "-cert-manager", Namespace: testNamespace, Chart: state.substrate,
-		CreateNamespace: true, Wait: true, Timeout: 8 * time.Minute,
+		CreateNamespace: true, Wait: true, Timeout: 8 * time.Minute, ValueFiles: valueFiles,
 	})
 	if err != nil {
 		t.Fatalf("install certificate substrate: %v\n%s", err, out)

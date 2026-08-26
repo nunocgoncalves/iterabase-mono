@@ -16,11 +16,24 @@ if [[ "$platform_version" != "$substrate_version" ]]; then
 fi
 
 substrate_render=$(helm template release-cert-manager "$substrate" -n iterabase-system)
+substrate_tls_render=$(helm template release-cert-manager "$substrate" -n iterabase-system \
+  --set global.internalTLS.enabled=true \
+  --set global.internalTLS.platformRelease=release)
 platform_render=$(helm template release "$platform" -n iterabase-system)
 
 grep -q '^kind: CustomResourceDefinition$' <<<"$substrate_render"
 grep -q 'app.kubernetes.io/name: cert-manager' <<<"$substrate_render"
 ! grep -Eq '^kind: (Certificate|Issuer|ClusterIssuer)$' <<<"$substrate_render"
+
+# The TLS-on companion still owns only cert-manager runtime resources. Its
+# ordered hook bootstraps the future platform release's existing CA resources,
+# waits for all Ready conditions, and labels them for normal platform adoption.
+grep -Fq 'app.kubernetes.io/component: internal-ca-bootstrap' <<<"$substrate_tls_render"
+grep -Fq 'owner_release="release"' <<<"$substrate_tls_render"
+grep -Fq 'meta.helm.sh/release-name: release' <<<"$substrate_tls_render"
+grep -Fq 'kubectl wait --for=condition=Ready clusterissuer/internal-ca' <<<"$substrate_tls_render"
+grep -Fq 'internal-ca-bootstrap=pass' <<<"$substrate_tls_render"
+grep -Fq 'docker.io/alpine/k8s:1.34.1@sha256:ec714df3813b5405292860f8a1c55c5727bf8c33c88992f1e981efad8065547f' <<<"$substrate_tls_render"
 
 grep -q '^kind: ClusterIssuer$' <<<"$platform_render"
 grep -q '^kind: Certificate$' <<<"$platform_render"
@@ -37,4 +50,4 @@ if grep -R -q 'helm.sh/hook' \
   exit 1
 fi
 
-echo "OK: same-version certificate substrate owns the operator; platform owns hook-free issuers and leaves"
+echo "OK: same-version certificate substrate orders the platform-owned internal CA before managed storage; platform owns hook-free issuers and leaves"
