@@ -138,7 +138,7 @@ jobs:
       (github.event_name == 'pull_request' ||
       (github.event_name == 'workflow_dispatch' && inputs.complete_catalogue != true))
     runs-on: ubuntu-latest
-    timeout-minutes: 100
+    timeout-minutes: 65
     concurrency:
       group: e2e-digitalocean-cpu
       cancel-in-progress: false
@@ -151,20 +151,12 @@ jobs:
           go-version: 1.26.5
           cache-dependency-path: ${{ env.GO_CACHE_DEPENDENCIES }}
           cache-scope: e2e-digitalocean-cpu
-      - uses: ./.github/actions/setup-kubernetes-tools
-      - name: Package exact-head platform and managed-storage companions
-        run: >-
-          .github/scripts/prepare_pr_managed_runtime.sh
-          '${{ runner.temp }}/managed-runtime'
-          "$GITHUB_ENV"
-      - name: Composed CPU E2E with mandatory managed storage and internal TLS
+      - name: Composed CPU E2E
         run: make test-e2e
         working-directory: forge
         env:
           DIGITALOCEAN_TOKEN: ${{ secrets.DIGITALOCEAN_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          FORGE_E2E_REQUIRE_CAPACITY: "true"
-          FORGE_E2E_REQUIRE_MANAGED_TLS: "true"
           ITERABASE_E2E_FIXTURE_MODE: source
           ITERABASE_E2E_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           ITERABASE_E2E_SOURCE_INPUTS: ${{ github.workspace }}/forge/test/e2e/published-fixture.json
@@ -175,6 +167,53 @@ jobs:
         with:
           name: forge-diagnostics-digitalocean-cpu
           path: ${{ runner.temp }}/forge-diagnostics/digitalocean-cpu
+          if-no-files-found: ignore
+          retention-days: 7
+
+  digitalocean-rwx-tls:
+    name: digitalocean-rwx-tls
+    needs: [changes, harness]
+    if: >-
+      needs.changes.outputs.charts == 'true' &&
+      (github.event_name == 'pull_request' ||
+      (github.event_name == 'workflow_dispatch' && inputs.complete_catalogue != true))
+    runs-on: ubuntu-latest
+    timeout-minutes: 70
+    concurrency:
+      group: e2e-digitalocean-cpu
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: ./.github/actions/setup-go
+        with:
+          go-version: 1.26.5
+          cache-dependency-path: ${{ env.GO_CACHE_DEPENDENCIES }}
+          cache-scope: e2e-digitalocean-rwx-tls
+      - uses: ./.github/actions/setup-kubernetes-tools
+      - name: Package exact-head platform and managed-storage companions
+        run: >-
+          .github/scripts/prepare_pr_managed_runtime.sh
+          '${{ runner.temp }}/managed-runtime'
+          "$GITHUB_ENV"
+      - name: Exact-head managed single-node internal-TLS gate
+        run: make test-e2e-rwx-tls
+        working-directory: forge
+        env:
+          DIGITALOCEAN_TOKEN: ${{ secrets.DIGITALOCEAN_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FORGE_E2E_REQUIRE_CAPACITY: "true"
+          ITERABASE_E2E_FIXTURE_MODE: source
+          ITERABASE_E2E_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          ITERABASE_E2E_SOURCE_INPUTS: ${{ github.workspace }}/forge/test/e2e/published-fixture.json
+          ITERABASE_E2E_DIAGNOSTICS: ${{ runner.temp }}/forge-diagnostics
+      - name: Upload managed TLS failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: forge-diagnostics-digitalocean-rwx-tls
+          path: ${{ runner.temp }}/forge-diagnostics/digitalocean-rwx-tls
           if-no-files-found: ignore
           retention-days: 7
 
@@ -454,6 +493,12 @@ jobs:
           cache-dependency-path: ${{ env.GO_CACHE_DEPENDENCIES }}
           cache-scope: e2e-nightly-real-${{ matrix.capacity }}
       - uses: ./.github/actions/setup-kubernetes-tools
+      - name: Package exact-source managed TLS runtime
+        if: matrix.target == 'test-e2e-rwx-tls'
+        run: >-
+          .github/scripts/prepare_pr_managed_runtime.sh
+          '${{ runner.temp }}/managed-runtime'
+          "$GITHUB_ENV"
       - name: Require mandatory capacity credentials
         env:
           DIGITALOCEAN_TOKEN: ${{ secrets.DIGITALOCEAN_TOKEN }}
@@ -486,6 +531,7 @@ jobs:
       - changes
       - harness
       - digitalocean-cpu
+      - digitalocean-rwx-tls
       - digitalocean-rwx-three-node
       - digitalocean-gpu
       - control-plane-kind

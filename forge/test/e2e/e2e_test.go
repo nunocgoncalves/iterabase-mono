@@ -89,6 +89,14 @@ type digitalOceanCPUState struct {
 }
 
 func newDigitalOceanCPUState(t *testing.T) *digitalOceanCPUState {
+	return newDigitalOceanCPUStateForScenario(t, "digitalocean-cpu")
+}
+
+func newDigitalOceanRWXTLSState(t *testing.T) *digitalOceanCPUState {
+	return newDigitalOceanCPUStateForScenario(t, "digitalocean-rwx-tls")
+}
+
+func newDigitalOceanCPUStateForScenario(t *testing.T, scenario string) *digitalOceanCPUState {
 	token := os.Getenv("DIGITALOCEAN_TOKEN")
 	if token == "" {
 		if os.Getenv("FORGE_E2E_REQUIRE_CAPACITY") == "true" {
@@ -106,7 +114,7 @@ func newDigitalOceanCPUState(t *testing.T) *digitalOceanCPUState {
 		keep:        os.Getenv("FORGE_E2E_KEEP") != "",
 		forgeHome:   t.TempDir(),
 		managedRWX:  managedRWX,
-		diagnostics: newForgeDiagnostics(t, "digitalocean-cpu"),
+		diagnostics: newForgeDiagnostics(t, scenario),
 	}
 	state.pubKey, state.privKeyPath = generateKey(t)
 	state.forgeBin = buildForge(t)

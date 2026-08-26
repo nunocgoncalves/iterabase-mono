@@ -32,7 +32,11 @@ func runOverlayStage(t *testing.T, state *digitalOceanCPUState) {
 		t, state.runID, state.ip, state.privKeyPath, state.chartVersion, plan,
 	)
 	out := applyOnce(t, state.forgeBin, state.forgeHome, candidateConfig)
-	markers := []string{"action:     skip", "node ready: true", "certificate substrate applied: true",
+	actionMarker := "action:     skip"
+	if os.Getenv(storageTLSOnlyEnv) == "true" {
+		actionMarker = "action:     install"
+	}
+	markers := []string{actionMarker, "node ready: true", "certificate substrate applied: true",
 		"chart applied: true", "overlay applied: true", "overlay commit:", "flux installed: true", "gitrepository: ready=True"}
 	if state.managedRWX {
 		markers = append(markers, "rwx storage mode: managed-longhorn", "rwx storage prerequisites ready: true", "rwx storage substrate applied: true")
