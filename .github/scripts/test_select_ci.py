@@ -117,6 +117,7 @@ class ChangedPathCollectionFixtures(unittest.TestCase):
         )[0]
         for contract in (
             "ref: ${{ github.event.pull_request.head.sha || github.sha }}",
+            "timeout-minutes: 100",
             ".github/scripts/prepare_pr_managed_runtime.sh",
             'FORGE_E2E_REQUIRE_CAPACITY: "true"',
             'FORGE_E2E_REQUIRE_MANAGED_TLS: "true"',

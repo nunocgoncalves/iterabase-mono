@@ -124,6 +124,16 @@ func TestDedicatedRWXVolumeRequestRegistersReaperOwnership(t *testing.T) {
 	}
 }
 
+func TestCPUScenarioSizeReservesManagedStorageHeadroom(t *testing.T) {
+	t.Parallel()
+	if got := cpuScenarioSize(false); got != size {
+		t.Fatalf("external CPU scenario size=%q want=%q", got, size)
+	}
+	if got := cpuScenarioSize(true); got != managedSize {
+		t.Fatalf("managed CPU scenario size=%q want=%q", got, managedSize)
+	}
+}
+
 func TestProvisioningRequestsRegisterReaperOwnership(t *testing.T) {
 	t.Parallel()
 	const runID = "fixture-run"
