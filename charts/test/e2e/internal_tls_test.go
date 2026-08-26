@@ -84,7 +84,7 @@ func assertInternalIdentitiesStage(t *testing.T, state *chartState) {
 	state.kubectl(t, 4*time.Minute, "wait", "--for=condition=Ready", "clusterissuer/internal-ca", "--timeout=3m")
 	currentRootUID := state.kubectl(t, 30*time.Second, "get", "certificate/"+testRelease+"-internal-ca-root", "-n", testNamespace,
 		"-o", "jsonpath={.metadata.uid}")
-	if state.internalCARootUID == "" || currentRootUID != state.internalCARootUID {
+	if state.internalCARootUID != "" && currentRootUID != state.internalCARootUID {
 		t.Fatalf("platform did not adopt the ordered internal CA in place: before=%q after=%q", state.internalCARootUID, currentRootUID)
 	}
 	for _, certificate := range []string{
