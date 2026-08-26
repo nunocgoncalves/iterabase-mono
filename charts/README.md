@@ -218,6 +218,11 @@ platform. AgentPools remain storage-unready if the chart contract, class UID,
 static properties, live attestation, PVC/PV, mount, or backend health evidence
 is missing or stale.
 
+The exact reviewed Longhorn `1.12.1` chart archive is repository-owned under
+`charts/vendor/` and copied into the companion only after its approved SHA-256
+and metadata pass. This keeps builds deterministic after the upstream chart
+release URL disappeared without modifying or repacking the dependency.
+
 The managed companion runs the same disposable two-worker/isolation/expansion
 gate after install and upgrade. Its pre-delete hook refuses active consumers,
 retained PVs, or remaining Longhorn volumes; settle/reap sessions and record an

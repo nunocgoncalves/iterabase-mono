@@ -203,7 +203,8 @@ func packageRWXCompanion(t *testing.T) string {
 		t.Fatal(err)
 	}
 	chart := filepath.Join(root, "charts", "charts", "rwx-storage-substrate")
-	if output, err := exec.Command("helm", "dependency", "build", chart).CombinedOutput(); err != nil {
+	dependency := filepath.Join(root, "charts", "scripts", "build-rwx-storage-dependency.sh")
+	if output, err := exec.Command(dependency).CombinedOutput(); err != nil {
 		t.Fatalf("build RWX companion dependency: %v\n%s", err, output)
 	}
 	destination := t.TempDir()

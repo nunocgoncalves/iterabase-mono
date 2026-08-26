@@ -12,6 +12,11 @@ architecture and responsibility authority remains
   `d70764e2d6cce673482da4d91da5b44a9791cda842c1914f77e7806ad1cd94bb`.
 - The dependency is consumed unmodified by `rwx-storage-substrate`; the
   companion's `Chart.yaml` and generated candidate SBOM retain its identity.
+- The reviewed upstream archive is preserved byte-for-byte at
+  `charts/vendor/longhorn-1.12.1.tgz` because the upstream chart index still
+  references a release URL that now returns 404. The repository build copies it
+  only after verifying the approved SHA-256 and chart/application versions; it
+  never substitutes a repacked or floating dependency.
 - Upstream source/license: <https://github.com/longhorn/longhorn/tree/v1.12.1>.
 
 All runtime image tags retain upstream version identity and are pinned to their
