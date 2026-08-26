@@ -87,6 +87,15 @@ decision rather than an implementation-local substitution.
 - **Consequences:** The companion consumes the unmodified upstream chart, renders the managed class and conformance/uninstall gates, and shares the platform chart version. Forge derives selection from overlay chart values and adds no provider field to `forge.yaml`. Direct operators use the same ordering. This amendment changes no backend, data engine, topology, failure model, backup authority, or customer responsibility.
 - **Evidence:** Canonical founder approval is durable in HOR-469.
 
+### DES-HOR-469-02 — Internal TLS and managed-storage transport boundary
+
+- **Approved by:** Nuno Gonçalves
+- **Approved on:** 2026-08-26
+- **Scope:** `global.internalTLS` integration for the pinned Longhorn managed path and the production qualification boundary for managed multi-node networking.
+- **Decision:** When `global.internalTLS.enabled=true`, the existing Iterabase internal CA issues the `longhorn-grpc-tls` client/server leaf required by Longhorn `1.12.1`. The leaf Secret must exist before the Longhorn manager and instance managers start, or every component that started without it must be deterministically restarted. Release validation must prove valid manager-to-instance-manager gRPC mutual TLS and prove the current instance-manager services reject clients without the leaf and plaintext gRPC, so Longhorn's compatibility fallback cannot carry current traffic. The single-node profile accepts the RWX NFSv4.1 hop only as a bounded same-host data-plane exposure; the internal CA does not secure NFS, iSCSI, CSI, engine/replica, or share-manager data transport. Any future managed multi-node production topology requires encrypted inter-node networking and evidence that NFS and replica traffic traverse it. K3s Flannel `wireguard-native` is the leading design, but its selection and implementation belong to provisional HOR-519 rather than HOR-469.
+- **Consequences:** HOR-469 provisions and validates the internal-CA-backed Longhorn gRPC leaf, makes the single-node exposure and multi-node prerequisite explicit, validates internal TLS and managed storage together, and adds compact Longhorn health panels to the existing operator dashboard. The existing three-node storage scenario remains implementation/reference evidence, not production qualification for unencrypted multi-node networking. HOR-469 does not implement full-platform HA, Forge multi-node lifecycle, service replicas, or inter-node encryption and makes no claim that the Iterabase CA directly secures NFS.
+- **Evidence:** Founder response in the continuing PR #63 remediation session: reject a blanket storage exclusion; use Longhorn's supported `longhorn-grpc-tls` Secret from the Iterabase internal CA, prove no plaintext fallback, accept only the same-host single-node NFS exposure, and require future multi-node encrypted networking under HOR-519.
+
 ## 2. Product and inherited runtime constraints
 
 The storage choice serves the existing runtime; it does not redefine it:
@@ -170,6 +179,9 @@ The managed installation pins:
 - NFSv4 client support on every worker node;
 - internal Longhorn NetworkPolicies enabled with `type: k3s` and internal
   traffic restriction enabled;
+- an Iterabase-internal-CA `longhorn-grpc-tls` leaf whenever
+  `global.internalTLS.enabled=true`, with current instance-manager gRPC services
+  rejecting plaintext and unauthenticated clients;
 - no customer ingress for the Longhorn UI;
 - default Longhorn StorageClass disabled; only the Iterabase class is consumed;
 - RWX fast failover disabled because upstream marks it experimental;
@@ -212,6 +224,9 @@ provide node prerequisites required by its CSI driver.
 
 - Exactly one K3s control-plane/worker/storage node.
 - Longhorn V1 volume replica count: `1`.
+- The RWX NFSv4.1 client-to-share-manager hop stays on this one host. It is a
+  bounded unencrypted same-host data-plane exposure: the internal CA protects
+  manager-to-instance-manager gRPC, not NFS, iSCSI, CSI, or volume data traffic.
 - The root disk may be used only with at least 25% minimal free-space reserve,
   over-provisioning at 100% or less, and explicit capacity monitoring. A
   dedicated SSD mounted at the fixed Longhorn data path is preferred.
@@ -224,7 +239,13 @@ provide node prerequisites required by its CSI driver.
 This profile supports customer-controlled single-node installations honestly;
 it must never be marketed as redundant or continuously available.
 
-### 5.2 `three-node`
+### 5.2 `three-node` reference profile
+
+This chart and test profile preserves the approved three-replica storage
+contract and its implementation evidence. It is not production-qualified until
+HOR-519 selects and validates encrypted inter-node networking. That future gate
+must prove both RWX NFS and Longhorn replica traffic traverse the encrypted
+tunnel; K3s Flannel `wireguard-native` is the leading, not yet approved, design.
 
 - At least three schedulable Linux storage/worker nodes.
 - Longhorn V1 volume replica count: `3`, with replica soft anti-affinity false
@@ -457,7 +478,8 @@ shared session tree.
 | Backend/chart version and configuration | Iterabase chart contract | Customer, recorded before conformance |
 | Host/node prerequisites | Forge on the reference substrate; customer provides hardware | Customer |
 | StorageClass and validation job | Iterabase | Customer class; Iterabase conformance |
-| Physical disks/network/capacity | Customer infrastructure under Iterabase preflight | Customer |
+| Physical disks/network/capacity | Customer infrastructure under Iterabase preflight; production multi-node networking is HOR-519-gated | Customer |
+| Transport encryption | Iterabase internal CA protects Longhorn manager-to-instance-manager gRPC; single-node NFSv4.1 is a bounded same-host exposure; future production multi-node NFS/replica traffic requires an HOR-519-approved encrypted tunnel | Customer records backend and transport encryption before conformance |
 | AgentPool PVC/session isolation | Iterabase operator/supervisor | Iterabase operator/supervisor |
 | Backend monitoring/repair | Shared: Iterabase product diagnostics, customer infrastructure response | Customer, with Iterabase diagnostics at the claim boundary |
 | Encryption at rest and key custody | Customer infrastructure | Customer |
@@ -567,14 +589,18 @@ scenarios add bounded Longhorn diagnostics.
 1. Record exact topology, K3s/Longhorn or external backend version, node/disk
    inventory, capacity, encryption owner, maintenance owner, and rollback.
 2. Run host/CSI prerequisites before enabling the backend.
-3. For managed mode, install the same-version `rwx-storage-substrate` companion
+3. When internal TLS is enabled, wait for the Iterabase internal CA and issue
+   `longhorn-grpc-tls` before the managed components start. If an existing
+   component predates the leaf, deterministically restart it before validation.
+4. For managed mode, install the same-version `rwx-storage-substrate` companion
    into `longhorn-system` before the platform release; for external mode, do not
    install that companion. Wait for controllers, node plugins, engines, and
-   nodes/disks healthy.
-4. Render and verify the exact explicitly named StorageClass; managed
+   nodes/disks healthy, then prove mutual TLS succeeds while unauthenticated TLS
+   and plaintext gRPC fail against every current instance-manager service.
+5. Render and verify the exact explicitly named StorageClass; managed
    `iterabase-rwx` remains non-default.
-5. Run the disposable conformance gate and store logs/resource identities.
-6. Reconcile AgentPools only after conformance. Verify every worker establishes
+6. Run the disposable conformance gate and store logs/resource identities.
+7. Reconcile AgentPools only after conformance. Verify every worker establishes
    `0711` root and reports ready before scheduling work.
 
 ### Routine operations
