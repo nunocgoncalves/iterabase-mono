@@ -31,10 +31,11 @@ import (
 )
 
 const (
-	region  = "fra1"
-	size    = "s-2vcpu-4gb" // full stack + MetalLB needs headroom; s-1vcpu-2gb timed out on helm --wait
-	image   = "ubuntu-24-04-x64"
-	k3sPort = 6443
+	region      = "fra1"
+	size        = "s-2vcpu-4gb" // published/external baseline; s-1vcpu-2gb timed out on helm --wait
+	managedSize = "s-4vcpu-8gb" // full platform plus Longhorn's approved 4-vCPU minimum needs independent headroom
+	image       = "ubuntu-24-04-x64"
+	k3sPort     = 6443
 )
 
 type cpuVMProvisioner interface {
@@ -43,10 +44,18 @@ type cpuVMProvisioner interface {
 	Destroy(context.Context, int) error
 }
 
-type doCPUVMProvisioner struct{ client *godo.Client }
+type doCPUVMProvisioner struct {
+	client *godo.Client
+	size   string
+}
 
 func (provisioner *doCPUVMProvisioner) Create(ctx context.Context, runID, pubKey string) (*godo.Droplet, error) {
-	return createDroplet(ctx, provisioner.client, runID, pubKey)
+	request := newCPUDropletRequest(runID, pubKey)
+	if provisioner.size != "" {
+		request.Size = provisioner.size
+	}
+	droplet, _, err := provisioner.client.Droplets.Create(ctx, request)
+	return droplet, err
 }
 
 func (provisioner *doCPUVMProvisioner) PublicIP(ctx context.Context, id int) (string, error) {
@@ -88,24 +97,32 @@ func newDigitalOceanCPUState(t *testing.T) *digitalOceanCPUState {
 		t.Skip("DIGITALOCEAN_TOKEN not set; skipping DigitalOcean CPU scenario")
 	}
 
+	managedRWX := os.Getenv(storageChartArchiveEnv) != "" && os.Getenv(forceExternalStorageEnv) != "true"
 	state := &digitalOceanCPUState{
 		ctx:         context.Background(),
-		provisioner: &doCPUVMProvisioner{client: godo.NewFromToken(token)},
+		provisioner: &doCPUVMProvisioner{client: godo.NewFromToken(token), size: cpuScenarioSize(managedRWX)},
 		ready:       waitForHostReady,
 		runID:       fmt.Sprintf("forge-e2e-%d", time.Now().Unix()),
 		keep:        os.Getenv("FORGE_E2E_KEEP") != "",
 		forgeHome:   t.TempDir(),
+		managedRWX:  managedRWX,
 		diagnostics: newForgeDiagnostics(t, "digitalocean-cpu"),
 	}
 	state.pubKey, state.privKeyPath = generateKey(t)
 	state.forgeBin = buildForge(t)
 	state.chartVersion = platformChartVersion(t, "")
-	state.managedRWX = os.Getenv(storageChartArchiveEnv) != "" && os.Getenv(forceExternalStorageEnv) != "true"
 	if os.Getenv(requireManagedTLSEnv) == "true" && !state.managedRWX {
 		t.Fatalf("mandatory managed-storage/internal-TLS evidence requires %s and forbids %s=true", storageChartArchiveEnv, forceExternalStorageEnv)
 	}
 	t.Logf("run %s (keep=%v managedRWX=%v)", state.runID, state.keep, state.managedRWX)
 	return state
+}
+
+func cpuScenarioSize(managedRWX bool) string {
+	if managedRWX {
+		return managedSize
+	}
+	return size
 }
 
 func provisionCPUStage(t *testing.T, state *digitalOceanCPUState) {
