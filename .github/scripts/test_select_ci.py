@@ -110,6 +110,35 @@ class ChangedPathCollectionFixtures(unittest.TestCase):
                 self.assertNotIn("git diff --name-only", workflow)
                 self.assertIn(f"name: {workflow_name} / required", workflow)
 
+    def test_pr_cpu_requires_exact_head_managed_storage_with_internal_tls(self) -> None:
+        workflow = (ROOT / ".github/workflows/e2e.yml").read_text()
+        job = workflow.split("  digitalocean-cpu:\n", 1)[1].split(
+            "\n  digitalocean-rwx-three-node:\n", 1
+        )[0]
+        for contract in (
+            "ref: ${{ github.event.pull_request.head.sha || github.sha }}",
+            ".github/scripts/prepare_pr_managed_runtime.sh",
+            'FORGE_E2E_REQUIRE_CAPACITY: "true"',
+            'FORGE_E2E_REQUIRE_MANAGED_TLS: "true"',
+            "ITERABASE_E2E_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}",
+        ):
+            self.assertIn(contract, job)
+        helper = (
+            ROOT / ".github/scripts/prepare_pr_managed_runtime.sh"
+        ).read_text()
+        for chart in (
+            "iterabase-platform",
+            "cert-manager-substrate",
+            "rwx-storage-substrate",
+        ):
+            self.assertIn(chart, helper)
+        for variable in (
+            "FORGE_E2E_PLATFORM_CHART_ARCHIVE",
+            "FORGE_E2E_SUBSTRATE_CHART_ARCHIVE",
+            "FORGE_E2E_RWX_STORAGE_CHART_ARCHIVE",
+        ):
+            self.assertIn(variable, helper)
+
     def test_control_plane_deployed_scenarios_are_required_when_selected(self) -> None:
         workflow = (ROOT / ".github/workflows/e2e.yml").read_text()
         job = workflow.split("  control-plane-kind:\n", 1)[1].split(

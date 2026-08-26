@@ -101,7 +101,10 @@ func newDigitalOceanCPUState(t *testing.T) *digitalOceanCPUState {
 	state.forgeBin = buildForge(t)
 	state.chartVersion = platformChartVersion(t, "")
 	state.managedRWX = os.Getenv(storageChartArchiveEnv) != "" && os.Getenv(forceExternalStorageEnv) != "true"
-	t.Logf("run %s (keep=%v)", state.runID, state.keep)
+	if os.Getenv(requireManagedTLSEnv) == "true" && !state.managedRWX {
+		t.Fatalf("mandatory managed-storage/internal-TLS evidence requires %s and forbids %s=true", storageChartArchiveEnv, forceExternalStorageEnv)
+	}
+	t.Logf("run %s (keep=%v managedRWX=%v)", state.runID, state.keep, state.managedRWX)
 	return state
 }
 
