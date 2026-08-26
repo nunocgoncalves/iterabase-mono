@@ -68,6 +68,11 @@ grep -Fq 'ITERABASE_INTERNAL_TLS_ENABLED' "$tls_render"
 grep -Fq 'longhorn-grpc-mtls=pass' "$tls_render"
 grep -Fq 'unauthenticatedTLSRejected=' "$tls_render"
 grep -Fq 'plaintextRejected=' "$tls_render"
+grep -Fq "'.items[0].metadata.name // empty'" "$chart/files/managed-profile-gate.sh"
+if grep -Fq "jsonpath='{.items[0].metadata.name}'" "$chart/files/managed-profile-gate.sh"; then
+  echo "managed mTLS validation exits before its documented instance-manager pod fallback" >&2
+  exit 1
+fi
 grep -Fq 'secret.reloader.stakater.com/reload: longhorn-grpc-tls' "$tls_render"
 
 # Forge release names remain within Helm's 53-character boundary but can make
