@@ -720,8 +720,8 @@ YAML`
 	mustSSHOutput(t, client, backupTarget)
 	mustSSHOutput(t, client, "sudo k3s kubectl wait -n longhorn-system --for=condition=Ready pod/hor469-minio --timeout=5m")
 	mustSSHOutput(t, client, "sudo k3s kubectl wait -n longhorn-system --for=condition=complete job/hor469-create-backup-bucket --timeout=5m")
-	mustSSHOutput(t, client, `sudo k3s kubectl patch settings.longhorn.io backup-target -n longhorn-system --type=merge -p '{"value":"s3://hor469@us-east-1/"}'`)
-	mustSSHOutput(t, client, `sudo k3s kubectl patch settings.longhorn.io backup-target-credential-secret -n longhorn-system --type=merge -p '{"value":"hor469-backup-credentials"}'`)
+	mustSSHOutput(t, client, `sudo k3s kubectl patch backuptargets.longhorn.io default -n longhorn-system --type=merge -p '{"spec":{"backupTargetURL":"s3://hor469@us-east-1/","credentialSecret":"hor469-backup-credentials"}}'`)
+	mustSSHOutput(t, client, `sudo k3s kubectl wait backuptargets.longhorn.io/default -n longhorn-system --for=jsonpath='{.status.available}'=true --timeout=5m`)
 	systemBackup := `cat <<'YAML' | sudo k3s kubectl apply -f -
 apiVersion: longhorn.io/v1beta2
 kind: SystemBackup
