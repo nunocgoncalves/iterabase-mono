@@ -6,6 +6,18 @@
 {{- printf "%s-%s" .Release.Name (include "rwx-storage-substrate.name" .) | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
+{{- define "rwx-storage-substrate.validationName" -}}
+{{- printf "%s-validation" (include "rwx-storage-substrate.fullname" . | trunc 52 | trimSuffix "-") -}}
+{{- end -}}
+
+{{- define "rwx-storage-substrate.grpcBootstrapName" -}}
+{{- printf "%s-grpc-bootstrap" (include "rwx-storage-substrate.fullname" . | trunc 48 | trimSuffix "-") -}}
+{{- end -}}
+
+{{- define "rwx-storage-substrate.uninstallGuardName" -}}
+{{- printf "%s-uninstall-guard" (include "rwx-storage-substrate.fullname" . | trunc 47 | trimSuffix "-") -}}
+{{- end -}}
+
 {{- define "rwx-storage-substrate.labels" -}}
 app.kubernetes.io/name: {{ include "rwx-storage-substrate.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}

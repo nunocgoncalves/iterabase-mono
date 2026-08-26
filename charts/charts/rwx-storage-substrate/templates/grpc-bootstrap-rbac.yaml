@@ -1,6 +1,6 @@
 {{- include "rwx-storage-substrate.validate" . -}}
 {{- if eq (include "rwx-storage-substrate.internalTLSEnabled" .) "true" }}
-{{- $name := printf "%s-grpc-bootstrap" (include "rwx-storage-substrate.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- $name := include "rwx-storage-substrate.grpcBootstrapName" . }}
 apiVersion: v1
 kind: ServiceAccount
 metadata:

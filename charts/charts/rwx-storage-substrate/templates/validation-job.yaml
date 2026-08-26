@@ -3,7 +3,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: {{ include "rwx-storage-substrate.fullname" . }}-validation
+  name: {{ include "rwx-storage-substrate.validationName" . }}
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "rwx-storage-substrate.labels" . | nindent 4 }}
@@ -20,7 +20,7 @@ spec:
         {{- include "rwx-storage-substrate.labels" . | nindent 8 }}
         app.kubernetes.io/component: storage-validation
     spec:
-      serviceAccountName: {{ include "rwx-storage-substrate.fullname" . }}-validation
+      serviceAccountName: {{ include "rwx-storage-substrate.validationName" . }}
       restartPolicy: Never
       securityContext:
         runAsNonRoot: true
@@ -81,7 +81,7 @@ spec:
       volumes:
         - name: contract
           configMap:
-            name: {{ include "rwx-storage-substrate.fullname" . }}-validation
+            name: {{ include "rwx-storage-substrate.validationName" . }}
             defaultMode: 0444
         - name: tmp
           emptyDir: {}
