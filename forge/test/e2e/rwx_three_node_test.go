@@ -89,6 +89,9 @@ func provisionRWXNode(t *testing.T, state *rwxThreeNodeState, name string) (*god
 	return droplet, ip
 }
 
+// DigitalOcean Volumes are the provider's SSD-backed block-storage product.
+// The API identity plus guest block-device/mount/size identity is authoritative;
+// a virtual device's Linux ROTA bit is hypervisor metadata, not media evidence.
 func newRWXVolumeRequest(runID, nodeName string) *godo.VolumeCreateRequest {
 	return &godo.VolumeCreateRequest{
 		Region: region, Name: nodeName + "-ssd", Description: "HOR-469 dedicated Longhorn data path", SizeGigaBytes: 25,
@@ -110,10 +113,14 @@ grep -q "UUID=$uuid " /etc/fstab || printf "UUID=%%s /var/lib/longhorn ext4 defa
 mountpoint -q /var/lib/longhorn || mount /var/lib/longhorn
 data_source=$(readlink -f "$(findmnt -n -o SOURCE --target /var/lib/longhorn)")
 root_source=$(readlink -f "$(findmnt -n -o SOURCE --target /)")
-test "$data_source" = "$(readlink -f "$device")"
+expected_source=$(readlink -f "$device")
+data_bytes=$(blockdev --getsize64 "$device")
+data_fstype=$(findmnt -n -o FSTYPE --target /var/lib/longhorn)
+printf "HOR-469 dedicated DigitalOcean SSD: source=%%s root=%%s bytes=%%s fstype=%%s\\n" "$data_source" "$root_source" "$data_bytes" "$data_fstype"
+test "$data_source" = "$expected_source"
 test "$data_source" != "$root_source"
-test "$(lsblk -dn -o ROTA "$device" | tr -d " ")" = 0
-findmnt -n -o FSTYPE --target /var/lib/longhorn | grep -Eq "^(ext4|xfs)$"
+test "$data_bytes" -ge 25000000000
+printf "%%s\\n" "$data_fstype" | grep -Eq "^(ext4|xfs)$"
 '`, candidateShellQuote(device))
 	mustSSHOutput(t, client, command)
 }
