@@ -498,7 +498,7 @@ YAML`
 	mustSSHOutput(t, client, "sudo k3s kubectl wait --for=condition=Ready certificate/platform-spiffe-ca -n cert-manager --timeout=5m")
 	mustSSHOutput(t, client, `sudo k3s kubectl get secret platform-ca -n cert-manager -o json | jq 'del(.metadata.creationTimestamp,.metadata.resourceVersion,.metadata.uid,.metadata.ownerReferences) | .metadata.namespace="iterabase-system"' | sudo k3s kubectl apply -f -`)
 
-	conformance := `sudo env HOR424_STORAGE_CLASS=customer-reference-rwx HOR424_NAMESPACE=hor469-external-reference HOR424_ATTEST_NAMESPACE=iterabase-system HOR424_CLEANUP=true HOR424_CONTEXT=external-reference/longhorn-1.11.3 KUBECTL="sudo k3s kubectl" /bin/bash /tmp/hor-424-rwx-conformance.sh`
+	conformance := `env HOR424_STORAGE_CLASS=customer-reference-rwx HOR424_NAMESPACE=hor469-external-reference HOR424_ATTEST_NAMESPACE=iterabase-system HOR424_CLEANUP=true HOR424_CONTEXT=external-reference/longhorn-1.11.3 KUBECTL="sudo k3s kubectl" /bin/bash /tmp/hor-424-rwx-conformance.sh`
 	mustSSHOutput(t, client, conformance)
 	attestation := strings.TrimSpace(mustSSHOutput(t, client, `sudo k3s kubectl get configmap -n iterabase-system -l platform.iterabase.com/storage-conformance=true -o json | jq -r '.items[] | select(.data.storageClassName=="customer-reference-rwx") | "\(.data.result)|\(.data.contractVersion)|\(.data.context)"'`))
 	if attestation != "pass|HOR-469/v1|external-reference/longhorn-1.11.3" {
