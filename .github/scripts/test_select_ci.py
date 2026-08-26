@@ -118,6 +118,7 @@ class ChangedPathCollectionFixtures(unittest.TestCase):
         for contract in (
             "ref: ${{ github.event.pull_request.head.sha || github.sha }}",
             "timeout-minutes: 70",
+            "group: e2e-digitalocean-rwx-tls",
             ".github/scripts/prepare_pr_managed_runtime.sh",
             "run: make test-e2e-rwx-tls",
             'FORGE_E2E_REQUIRE_CAPACITY: "true"',
