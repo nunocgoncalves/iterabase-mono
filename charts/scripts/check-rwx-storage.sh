@@ -91,6 +91,7 @@ fi
 
 cmp "$root/../docs/architecture/validation/hor-424-rwx-conformance.sh" "$chart/files/rwx-conformance.sh"
 cmp "$root/../docs/architecture/validation/hor-424-rwx-conformance.yaml" "$chart/files/rwx-conformance.yaml"
+grep -Fq "delete configmap \"\$name\" --ignore-not-found --wait=true" "$chart/files/rwx-conformance.sh"
 
 grep -Fq 'managed-profile-gate.sh' "$tmp/single-node.yaml"
 grep -Fq 'helm.sh/hook: post-install,post-upgrade' "$tmp/single-node.yaml"

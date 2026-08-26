@@ -113,8 +113,11 @@ Kubernetes compatibility, important/known issues, health, capacity, system
 backup metadata, and exact image review. The mandatory three-node gate installs
 Longhorn `1.11.3`, commits data to a three-replica claim, writes a real Longhorn
 system backup to an ephemeral pinned S3-compatible target, upgrades the same
-Helm release to the candidate `1.12.1` companion, and re-verifies PVC UID,
-committed bytes, image digest, and full conformance before node-loss/rebuild.
+Helm release to the candidate `1.12.1` companion, explicitly upgrades the
+retained volume's desired/current V1 engine image, and recreates its predecessor
+share-manager under the pinned `1.12.1` image. It re-verifies the PVC UID,
+active engine identity/state, fresh-client committed bytes, and full conformance
+before node-loss/rebuild.
 Close starts, upgrade the companion, rerun conformance/replacement/expansion/
 failure gates, then upgrade/reconcile the platform. Downgrade is not promised.
 

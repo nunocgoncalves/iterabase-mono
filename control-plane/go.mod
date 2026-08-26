@@ -26,7 +26,12 @@ require (
 	sigs.k8s.io/yaml v1.6.0
 )
 
-require github.com/kylelemons/godebug v1.1.0 // indirect
+require (
+	github.com/go-logr/zapr v1.3.0 // indirect
+	github.com/kylelemons/godebug v1.1.0 // indirect
+	go.uber.org/multierr v1.11.0 // indirect
+	go.uber.org/zap v1.27.1 // indirect
+)
 
 require (
 	cel.dev/expr v0.25.1 // indirect

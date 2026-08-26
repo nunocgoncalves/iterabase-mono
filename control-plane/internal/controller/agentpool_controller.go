@@ -215,13 +215,17 @@ func (r *AgentPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 				ClassName: pool.Spec.Sandbox.StorageClassName,
 			}
 			hadWorkers := r.countReadyWorkers(ctx, &pool) > 0 || storageWasReady(&pool)
-			if err := r.quiesceWorkers(ctx, &pool); err != nil {
+			if hadWorkers {
+				assessment.Message += "; scheduling credit was removed before worker quiescing, and recovery requires a reviewed storage migration or a corrected declarative value without automatic turn/effect replay"
+			}
+			// Publish the fail-closed condition independently of pod deletion. A
+			// transient list/delete error must not leave Ready or StorageReady=True
+			// visible while the immutable storage mutation is being rejected.
+			statusErr := r.patchStatus(ctx, &pool, false, 0, assessment.Message, true, assessment)
+			quiesceErr := r.quiesceWorkers(ctx, &pool)
+			if err := stderrors.Join(statusErr, quiesceErr); err != nil {
 				return ctrl.Result{}, err
 			}
-			if hadWorkers {
-				assessment.Message += "; workers were removed to stop scheduling credit, and recovery requires a reviewed storage migration or a corrected declarative value without automatic turn/effect replay"
-			}
-			_ = r.patchStatus(ctx, &pool, false, 0, assessment.Message, true, assessment)
 			return ctrl.Result{}, nil
 		}
 		_ = r.patchStatus(ctx, &pool, false, 0, fmt.Sprintf("ensure PVC: %v", err), false)

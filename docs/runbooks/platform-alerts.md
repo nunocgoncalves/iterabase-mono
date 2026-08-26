@@ -106,7 +106,7 @@ Compare PVC request, PVC status capacity, PV capacity, and mounted filesystem `d
 
 ## IterabaseRWXConformanceStale
 
-Confirm the attestation still names the exact live StorageClass UID/provisioner. Record backend/CSI/Kubernetes/node-image/network identities, then rerun the same-release disposable two-worker conformance gate. A recreated class or changed backend requires fresh evidence rather than relabeling the old ConfigMap.
+Confirm the attestation still names the exact live StorageClass UID/provisioner. Record backend/CSI/Kubernetes/node-image/network identities, then rerun the same-release disposable two-worker conformance gate. A successful run deliberately recreates the deterministic attestation ConfigMap so `metadata.creationTimestamp` and `data.validatedAt` both advance; verify those timestamps and that the alert resolves. A recreated class or changed backend requires fresh evidence rather than relabeling the old ConfigMap.
 
 ## IterabaseLonghornShareManagerUnavailable
 
