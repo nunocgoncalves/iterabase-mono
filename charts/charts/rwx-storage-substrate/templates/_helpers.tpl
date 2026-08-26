@@ -14,6 +14,59 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" }}
 platform.iterabase.com/storage-mode: managed-longhorn
 {{- end -}}
 
+{{- define "rwx-storage-substrate.internalTLSEnabled" -}}
+{{- dig "internalTLS" "enabled" false (.Values.global | default (dict)) -}}
+{{- end -}}
+
+{{- define "rwx-storage-substrate.grpcCertificate" -}}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: longhorn-grpc-tls
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "rwx-storage-substrate.labels" . | nindent 4 }}
+    app.kubernetes.io/component: grpc-mtls
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name | quote }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace | quote }}
+spec:
+  secretName: longhorn-grpc-tls
+  commonName: longhorn-backend
+  duration: 2160h
+  renewBefore: 360h
+  usages: ["server auth", "client auth"]
+  dnsNames:
+    - longhorn-backend
+    - longhorn-backend.longhorn-system
+    - longhorn-backend.longhorn-system.svc
+    - longhorn-backend.longhorn-system.svc.cluster.local
+    - longhorn-frontend
+    - longhorn-frontend.longhorn-system
+    - longhorn-frontend.longhorn-system.svc
+    - longhorn-frontend.longhorn-system.svc.cluster.local
+    - longhorn-engine-manager
+    - longhorn-engine-manager.longhorn-system
+    - longhorn-engine-manager.longhorn-system.svc
+    - longhorn-engine-manager.longhorn-system.svc.cluster.local
+    - longhorn-replica-manager
+    - longhorn-replica-manager.longhorn-system
+    - longhorn-replica-manager.longhorn-system.svc
+    - longhorn-replica-manager.longhorn-system.svc.cluster.local
+    - longhorn-csi
+    - longhorn-csi.longhorn-system
+    - longhorn-csi.longhorn-system.svc
+    - longhorn-csi.longhorn-system.svc.cluster.local
+  ipAddresses: ["127.0.0.1"]
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+  issuerRef:
+    name: {{ dig "internalTLS" "issuerName" "internal-ca" (.Values.global | default (dict)) | quote }}
+    kind: ClusterIssuer
+{{- end -}}
+
 {{- define "rwx-storage-substrate.validate" -}}
 {{- $rwx := required "storage.rwx is required" .Values.storage.rwx -}}
 {{- if ne $rwx.mode "managed-longhorn" -}}
@@ -29,9 +82,17 @@ platform.iterabase.com/storage-mode: managed-longhorn
 {{- if not .Values.longhorn.enabled -}}
 {{- fail "the managed companion requires its pinned longhorn dependency" -}}
 {{- end -}}
+{{- if eq (include "rwx-storage-substrate.internalTLSEnabled" .) "true" -}}
+{{- if ne .Release.Namespace "longhorn-system" -}}
+{{- fail "managed Longhorn internal TLS requires namespace longhorn-system because the upstream peer identity is fixed" -}}
+{{- end -}}
+{{- if ne (dig "internalTLS" "issuerName" "internal-ca" (.Values.global | default (dict))) "internal-ca" -}}
+{{- fail "managed Longhorn internal TLS must use the Iterabase internal-ca ClusterIssuer" -}}
+{{- end -}}
+{{- end -}}
 {{- $longhornValuesSHA256 := sha256sum (toJson .Values.longhorn) -}}
-{{- /* Helm lint coalesces dependency globals before this helper while install/template use the release render tree; both canonical trees are sealed. */ -}}
-{{- if not (has $longhornValuesSHA256 (list "bc752ab97cf9977ded9be99d836f05b20cc722840482af6722101243b35feeff" "b952711d9f17bb4656fc94b660078b634a2e3ab7b5cb9d8aee18fb9a73a96170")) -}}
+{{- /* Helm lint coalesces dependency globals before this helper while install/template use the release render tree. The four canonical hashes are lint/template × internal TLS off/on; every tree remains fully sealed. */ -}}
+{{- if not (has $longhornValuesSHA256 (list "0ee7ea9f0ed2685d4fff6626cf1ab9873e60641881116409d4b8c59b9e14e47d" "c9affcd2cf14fb55c8890ac7644e557fe1cf2b43b62827750d294a10978083de" "fc59574df7aa4a82f5b501a2a2bf1345f7f722b50e10265841e5abb8448f8f23" "d0102b83a339a4fcc6374f5f56d7b6fdf15be9da8f397725eaa2ef0d2320b378")) -}}
 {{- fail (printf "longhorn.* is a sealed chart-owned configuration surface (observed values digest %s)" $longhornValuesSHA256) -}}
 {{- end -}}
 {{- if .Values.longhorn.persistence.createStorageClass -}}

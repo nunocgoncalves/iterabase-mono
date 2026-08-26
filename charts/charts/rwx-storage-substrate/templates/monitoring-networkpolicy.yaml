@@ -22,3 +22,35 @@ spec:
               app.kubernetes.io/name: prometheus
       ports:
         - {protocol: TCP, port: 9500}
+{{- if eq (include "rwx-storage-substrate.internalTLSEnabled" .) "true" }}
+---
+# The upstream restricted instance-manager policy admits only Longhorn control
+# components. NetworkPolicy ingress is additive, so this narrow companion rule
+# admits the one-shot, Secret-mounted validation pod solely to the four current
+# V1 gRPC service ports used for authenticated/plaintext rejection evidence.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "rwx-storage-substrate.fullname" . }}-grpc-mtls-validation
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "rwx-storage-substrate.labels" . | nindent 4 }}
+    app.kubernetes.io/component: grpc-mtls
+spec:
+  podSelector:
+    matchLabels:
+      longhorn.io/component: instance-manager
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ include "rwx-storage-substrate.name" . }}
+              app.kubernetes.io/instance: {{ .Release.Name }}
+              app.kubernetes.io/component: storage-validation
+      ports:
+        - {protocol: TCP, port: 8500}
+        - {protocol: TCP, port: 8501}
+        - {protocol: TCP, port: 8502}
+        - {protocol: TCP, port: 8503}
+{{- end }}

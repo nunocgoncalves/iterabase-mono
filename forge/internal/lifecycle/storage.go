@@ -3,6 +3,7 @@ package lifecycle
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -23,9 +24,10 @@ const (
 )
 
 type storageSelection struct {
-	Mode             string
-	StorageClassName string
-	Topology         string
+	Mode               string
+	StorageClassName   string
+	Topology           string
+	InternalTLSEnabled bool
 }
 
 func defaultStorageSelection() storageSelection {
@@ -68,6 +70,17 @@ func resolveStorageSelection(ctx context.Context, o overlayer.Overlayer, overlay
 			return selection, fmt.Errorf("decode storage values from %s: %w", path, err)
 		}
 		mergeValues(merged, values)
+	}
+
+	global, _ := merged["global"].(map[string]any)
+	if internalTLS, _ := global["internalTLS"].(map[string]any); internalTLS != nil {
+		if enabled, exists := internalTLS["enabled"]; exists {
+			value, ok := enabled.(bool)
+			if !ok {
+				return selection, fmt.Errorf("global.internalTLS.enabled must be a boolean")
+			}
+			selection.InternalTLSEnabled = value
+		}
 	}
 
 	storage, _ := merged["storage"].(map[string]any)
@@ -199,6 +212,7 @@ func applyRWXStorageSubstrate(
 			"storage.rwx.mode=" + selection.Mode,
 			"storage.rwx.storageClassName=" + selection.StorageClassName,
 			"storage.rwx.managedLonghorn.topology=" + selection.Topology,
+			"global.internalTLS.enabled=" + strconv.FormatBool(selection.InternalTLSEnabled),
 			"validation.attestationNamespace=" + cfg.Spec.Chart.Namespace,
 		},
 	}

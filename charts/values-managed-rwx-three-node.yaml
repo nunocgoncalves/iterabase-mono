@@ -1,6 +1,7 @@
-# Reference replicated managed RWX selection. Requires at least three healthy
-# storage nodes with dedicated SSD capacity; it does not promise seamless NFS
-# share-manager failover.
+# Reference replicated managed RWX qualification profile. Requires at least
+# three healthy storage nodes with dedicated SSD capacity; it does not promise
+# seamless NFS share-manager failover and is not production-qualified until
+# HOR-519 proves NFS and replica traffic use approved encrypted networking.
 storage:
   rwx:
     mode: managed-longhorn

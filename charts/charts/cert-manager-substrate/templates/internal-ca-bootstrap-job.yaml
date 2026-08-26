@@ -1,0 +1,159 @@
+{{- include "cert-manager-substrate.validate" . -}}
+{{- if dig "internalTLS" "enabled" false (.Values.global | default (dict)) }}
+{{- $name := printf "%s-internal-ca-bootstrap" (include "cert-manager-substrate.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- $platformRelease := include "cert-manager-substrate.platformRelease" . }}
+{{- $root := printf "%s-internal-ca-root" $platformRelease }}
+{{- $bootstrap := printf "%s-internal-ca-bootstrap" $platformRelease }}
+{{- $issuer := include "cert-manager-substrate.internalTLSIssuer" . }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "cert-manager-substrate.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "20"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  activeDeadlineSeconds: 900
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        {{- include "cert-manager-substrate.labels" . | nindent 8 }}
+        app.kubernetes.io/component: internal-ca-bootstrap
+    spec:
+      serviceAccountName: {{ $name }}
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: bootstrap
+          image: "{{ .Values.internalCABootstrap.image.repository }}:{{ .Values.internalCABootstrap.image.tag }}@{{ .Values.internalCABootstrap.image.digest }}"
+          imagePullPolicy: {{ .Values.internalCABootstrap.image.pullPolicy }}
+          command: [/bin/bash, -ceu]
+          args:
+            - |
+              owner_release={{ $platformRelease | quote }}
+              owner_namespace={{ .Release.Namespace | quote }}
+
+              check_owner() {
+                kind="$1"
+                name="$2"
+                namespace="$3"
+                get_args=("$kind/$name")
+                if [[ -n "$namespace" ]]; then
+                  get_args+=(--namespace "$namespace")
+                fi
+                if ! kubectl get "${get_args[@]}" >/dev/null 2>&1; then
+                  return
+                fi
+                observed_release="$(kubectl get "${get_args[@]}" -o jsonpath='{.metadata.annotations.meta\.helm\.sh/release-name}')"
+                observed_namespace="$(kubectl get "${get_args[@]}" -o jsonpath='{.metadata.annotations.meta\.helm\.sh/release-namespace}')"
+                if [[ "$observed_release" != "$owner_release" || "$observed_namespace" != "$owner_namespace" ]]; then
+                  printf 'refusing internal CA ownership collision for %s/%s: observed %s/%s, required %s/%s\n' \
+                    "$kind" "$name" "${observed_release:-<none>}" "${observed_namespace:-<none>}" "$owner_release" "$owner_namespace" >&2
+                  exit 1
+                fi
+              }
+
+              check_owner clusterissuer {{ $bootstrap | quote }} ""
+              check_owner certificate {{ $root | quote }} {{ .Release.Namespace | quote }}
+              check_owner clusterissuer {{ $issuer | quote }} ""
+
+              manifest=/tmp/internal-ca.yaml
+              cat >"$manifest" <<'YAML'
+              apiVersion: cert-manager.io/v1
+              kind: ClusterIssuer
+              metadata:
+                name: {{ $bootstrap }}
+                labels:
+                  app.kubernetes.io/name: cert-issuers
+                  app.kubernetes.io/instance: {{ $platformRelease }}
+                  app.kubernetes.io/managed-by: Helm
+                annotations:
+                  meta.helm.sh/release-name: {{ $platformRelease }}
+                  meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+              spec:
+                selfSigned: {}
+              ---
+              apiVersion: cert-manager.io/v1
+              kind: Certificate
+              metadata:
+                name: {{ $root }}
+                namespace: {{ .Release.Namespace }}
+                labels:
+                  app.kubernetes.io/name: cert-issuers
+                  app.kubernetes.io/instance: {{ $platformRelease }}
+                  app.kubernetes.io/managed-by: Helm
+                annotations:
+                  meta.helm.sh/release-name: {{ $platformRelease }}
+                  meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+              spec:
+                isCA: true
+                duration: 87600h
+                secretName: {{ $root }}
+                commonName: iterabase-internal-ca
+                issuerRef:
+                  name: {{ $bootstrap }}
+                  kind: ClusterIssuer
+              ---
+              apiVersion: cert-manager.io/v1
+              kind: ClusterIssuer
+              metadata:
+                name: {{ $issuer }}
+                labels:
+                  app.kubernetes.io/name: cert-issuers
+                  app.kubernetes.io/instance: {{ $platformRelease }}
+                  app.kubernetes.io/managed-by: Helm
+                annotations:
+                  meta.helm.sh/release-name: {{ $platformRelease }}
+                  meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+              spec:
+                ca:
+                  secretName: {{ $root }}
+              YAML
+
+              for attempt in $(seq 1 120); do
+                if kubectl apply -f "$manifest"; then
+                  break
+                fi
+                if [[ "$attempt" -eq 120 ]]; then
+                  echo "cert-manager webhook did not accept the internal CA resources" >&2
+                  exit 1
+                fi
+                sleep 2
+              done
+              kubectl wait --for=condition=Ready clusterissuer/{{ $bootstrap }} --timeout=5m
+              kubectl wait --for=condition=Ready --namespace {{ .Release.Namespace }} certificate/{{ $root }} --timeout=5m
+              kubectl wait --for=condition=Ready clusterissuer/{{ $issuer }} --timeout=5m
+              for key in 'ca.crt' 'tls.crt' 'tls.key'; do
+                value="$(kubectl get secret/{{ $root }} --namespace {{ .Release.Namespace }} -o "jsonpath={.data.${key//./\\.}}")"
+                [[ -n "$value" ]] || { echo "internal CA Secret is missing $key" >&2; exit 1; }
+              done
+              echo "internal-ca-bootstrap=pass owner=${owner_release}/${owner_namespace} issuer={{ $issuer }}"
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              cpu: 250m
+              memory: 128Mi
+      volumes:
+        - name: tmp
+          emptyDir: {}
+{{- end }}

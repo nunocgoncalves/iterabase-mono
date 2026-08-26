@@ -39,6 +39,10 @@ spec:
               value: {{ .Values.storage.rwx.managedLonghorn.topology | quote }}
             - name: LONGHORN_NAMESPACE
               value: {{ .Release.Namespace | quote }}
+            - name: ITERABASE_INTERNAL_TLS_ENABLED
+              value: {{ include "rwx-storage-substrate.internalTLSEnabled" . | quote }}
+            - name: ITERABASE_RELEASE_NAME
+              value: {{ .Release.Name | quote }}
             - name: HOR424_STORAGE_CLASS
               value: iterabase-rwx
             - name: HOR424_NAMESPACE
@@ -57,6 +61,11 @@ spec:
               readOnly: true
             - name: tmp
               mountPath: /tmp
+            {{- if eq (include "rwx-storage-substrate.internalTLSEnabled" .) "true" }}
+            - name: longhorn-grpc-tls
+              mountPath: /etc/longhorn-grpc-tls
+              readOnly: true
+            {{- end }}
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
@@ -76,4 +85,9 @@ spec:
             defaultMode: 0444
         - name: tmp
           emptyDir: {}
+        {{- if eq (include "rwx-storage-substrate.internalTLSEnabled" .) "true" }}
+        - name: longhorn-grpc-tls
+          secret:
+            secretName: longhorn-grpc-tls
+        {{- end }}
 {{- end }}

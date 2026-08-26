@@ -1,8 +1,10 @@
 # TLS-on preset for the iterabase-platform umbrella (CI: static kubeconform via
-# `make check-tls` + the live `install-tls` kind e2e). Flips the single
-# internalTLS switch so every component enables in-cluster TLS off the internal
-# CA. kind/E2E stays plaintext by default (this file is opt-in). For the live
-# e2e, pair with the kind-edge MetalLB pool (computed in CI, like values-kind.yaml).
+# `make check-tls` + the live `install-tls` kind e2e). Flips the shared switch
+# for every supported internal-CA service link. Managed Longhorn additionally
+# uses the CA for manager-to-instance-manager gRPC mTLS; it does not use this CA
+# for NFS/iSCSI/CSI/replica traffic. The single-node NFS hop is a bounded
+# same-host exposure, while production multi-node storage is HOR-519-gated on
+# encrypted networking. kind/E2E stays plaintext by default (this file is opt-in).
 global:
   internalTLS:
     enabled: true

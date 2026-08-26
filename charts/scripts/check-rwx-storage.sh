@@ -16,6 +16,8 @@ render_profile() {
 }
 render_profile single-node
 render_profile three-node
+helm template rwx "$chart" --namespace longhorn-system \
+  --set global.internalTLS.enabled=true >"$tmp/single-node-tls.yaml"
 
 for profile in single-node three-node; do
   rendered="$tmp/${profile}.yaml"
@@ -52,6 +54,26 @@ done
 grep -Fq 'numberOfReplicas: "1"' "$tmp/single-node.yaml"
 grep -Fq 'numberOfReplicas: "3"' "$tmp/three-node.yaml"
 
+# DES-HOR-469-02: TLS-on rendering must issue the fixed upstream Secret before
+# Longhorn starts and make authenticated, unauthenticated, and plaintext probes
+# part of the post-install gate. Plain rendering must not invent the leaf.
+tls_render="$tmp/single-node-tls.yaml"
+grep -Fq 'kind: Certificate' "$tls_render"
+grep -Fq 'name: longhorn-grpc-tls' "$tls_render"
+grep -Fq 'commonName: longhorn-backend' "$tls_render"
+grep -Fq 'name: "internal-ca"' "$tls_render"
+grep -Fq 'helm.sh/hook: pre-install,pre-upgrade' "$tls_render"
+grep -Fq 'longhorn-grpc-bootstrap=pass' "$tls_render"
+grep -Fq 'ITERABASE_INTERNAL_TLS_ENABLED' "$tls_render"
+grep -Fq 'longhorn-grpc-mtls=pass' "$tls_render"
+grep -Fq 'unauthenticatedTLSRejected=' "$tls_render"
+grep -Fq 'plaintextRejected=' "$tls_render"
+grep -Fq 'secret.reloader.stakater.com/reload: longhorn-grpc-tls' "$tls_render"
+if grep -Fq 'kind: Certificate' "$tmp/single-node.yaml"; then
+  echo "plaintext managed mode unexpectedly rendered the Longhorn gRPC leaf" >&2
+  exit 1
+fi
+
 helm template platform "$platform" -f "$root/values-managed-rwx-single-node.yaml" >"$tmp/platform-managed.yaml"
 helm template platform "$platform" -f "$root/values-external-rwx.yaml" >"$tmp/platform-external.yaml"
 grep -Fq 'mode: "managed-longhorn"' "$tmp/platform-managed.yaml"
@@ -86,6 +108,14 @@ if helm template invalid "$chart" --set longhorn.defaultSettings.concurrentRepli
 fi
 if helm template invalid "$chart" --set longhorn.defaultSettings.nodeDownPodDeletionPolicy=delete-both-statefulset-and-deployment-pod >/dev/null 2>&1; then
   echo "managed companion accepted an arbitrary Longhorn lifecycle policy" >&2
+  exit 1
+fi
+if helm template invalid "$chart" --namespace longhorn-system --set global.internalTLS.enabled=true --set global.internalTLS.issuerName=other-ca >/dev/null 2>&1; then
+  echo "managed companion accepted a non-Iterabase gRPC issuer" >&2
+  exit 1
+fi
+if helm template invalid "$chart" --namespace other-system --set global.internalTLS.enabled=true >/dev/null 2>&1; then
+  echo "managed companion accepted internal TLS outside the upstream longhorn-system peer identity" >&2
   exit 1
 fi
 

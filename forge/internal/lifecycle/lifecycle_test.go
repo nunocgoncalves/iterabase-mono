@@ -493,7 +493,10 @@ func TestApply_Chart(t *testing.T) {
 	assert.Equal(t, "0.3.0", substrate.version)
 	assert.Equal(t, "opo1-cert-manager", substrate.release)
 	assert.Equal(t, "oci://ghcr.io/nunocgoncalves/cert-manager-substrate", substrate.repository)
-	assert.Equal(t, []string{"cert-manager.prometheus.servicemonitor.enabled=false"}, substrate.values)
+	assert.Equal(t, []string{
+		"cert-manager.prometheus.servicemonitor.enabled=false",
+		"global.internalTLS.platformRelease=opo1",
+	}, substrate.values)
 	assert.Equal(t, "0.3.0", platform.version)
 	assert.Equal(t, "opo1", platform.release)
 	assert.Equal(t, "iterabase-system", platform.namespace)

@@ -12,7 +12,10 @@ import (
 	"github.com/nunocgoncalves/iterabase-mono/forge/internal/config"
 )
 
-const managedSingleNodeValues = `storage:
+const managedSingleNodeValues = `global:
+  internalTLS:
+    enabled: true
+storage:
   rwx:
     mode: managed-longhorn
     storageClassName: iterabase-rwx
@@ -41,6 +44,7 @@ func TestResolveStorageSelectionMergesClientOverride(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, storageSelection{
 		Mode: storageModeManagedLonghorn, StorageClassName: managedStorageClass, Topology: config.ModeSingleNode,
+		InternalTLSEnabled: true,
 	}, selection)
 }
 
@@ -53,6 +57,7 @@ func TestResolveStorageSelectionRejectsContradictoryValues(t *testing.T) {
 		{name: "managed wrong class", values: `storage: {rwx: {mode: managed-longhorn, storageClassName: wrong, managedLonghorn: {topology: single-node}}}`, want: "storageClassName=iterabase-rwx"},
 		{name: "external topology", values: `storage: {rwx: {mode: external, storageClassName: customer, managedLonghorn: {topology: single-node}}}`, want: "rejects"},
 		{name: "unknown mode", values: `storage: {rwx: {mode: automatic, storageClassName: customer}}`, want: "managed-longhorn or external"},
+		{name: "non-boolean internal TLS", values: `global: {internalTLS: {enabled: "true"}}`, want: "must be a boolean"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -94,6 +99,7 @@ func TestApplyManagedRWXOrdersPrerequisitesAndCompanionBeforePlatform(t *testing
 		"storage.rwx.mode=managed-longhorn",
 		"storage.rwx.storageClassName=iterabase-rwx",
 		"storage.rwx.managedLonghorn.topology=single-node",
+		"global.internalTLS.enabled=true",
 		"validation.attestationNamespace=iterabase-system",
 	}, d.applyCalls[1].values)
 	assert.Empty(t, d.applyCalls[1].valueFiles, "customer overlays must never reach the Longhorn dependency")

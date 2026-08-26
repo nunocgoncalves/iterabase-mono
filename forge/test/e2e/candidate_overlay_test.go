@@ -141,8 +141,17 @@ func candidateOverlayValues(t *testing.T) string {
 	// two idle harness workers can establish real AgentPool readiness; the
 	// synthetic model permission is never used for a customer turn.
 	var values strings.Builder
-	values.WriteString("\n# Forge real-machine fixture values.\nstorage:\n  rwx:\n")
-	if os.Getenv(storageChartArchiveEnv) != "" && os.Getenv(forceExternalStorageEnv) != "true" {
+	values.WriteString("\n# Forge real-machine fixture values.\n")
+	managedStorage := os.Getenv(storageChartArchiveEnv) != "" && os.Getenv(forceExternalStorageEnv) != "true"
+	if managedStorage {
+		// The exact-candidate single-node path is the mandatory combined proof for
+		// DES-HOR-469-02: the ordered certificate substrate establishes the
+		// internal CA before Longhorn, and the platform keeps its normal TLS-on
+		// behavior. Reloader owns leaf-renewal restarts for chart workloads.
+		values.WriteString("global:\n  internalTLS:\n    enabled: true\nreloader:\n  enabled: true\n")
+	}
+	values.WriteString("storage:\n  rwx:\n")
+	if managedStorage {
 		values.WriteString("    mode: managed-longhorn\n    storageClassName: iterabase-rwx\n    managedLonghorn:\n      topology: single-node\n")
 	} else {
 		// Ordinary PR source E2E intentionally composes with the published
@@ -202,7 +211,7 @@ func TestCandidateOverlayValues(t *testing.T) {
 func TestCandidateOverlayValuesSelectManagedStorageOnlyWithExactCompanion(t *testing.T) {
 	t.Setenv(storageChartArchiveEnv, "/tmp/rwx-storage-substrate.tgz")
 	values := candidateOverlayValues(t)
-	for _, expected := range []string{"mode: managed-longhorn", "storageClassName: iterabase-rwx", "topology: single-node"} {
+	for _, expected := range []string{"internalTLS:\n    enabled: true", "reloader:\n  enabled: true", "mode: managed-longhorn", "storageClassName: iterabase-rwx", "topology: single-node"} {
 		if !strings.Contains(values, expected) {
 			t.Fatalf("managed exact-candidate values missing %q:\n%s", expected, values)
 		}

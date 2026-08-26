@@ -1,13 +1,15 @@
 # iterabase-platform umbrella defaults (single-node).
 
 # --- Internal TLS (opt-in; the prod overlay flips this one switch) ---
-# When true, every component enables in-cluster TLS off the internal CA
-# (cert-issuers.internal): Postgres (ssl=on + hostssl), Redis (TLS + AUTH),
-# the control-plane API (HTTPS), and the gateway connects with verify-full +
-# rediss://. Propagated to subcharts via `global.internalTLS` (helm shares
-# `global.*` with subcharts); each subchart reads it with a local override
-# escape hatch. Default false -> plaintext (kind/E2E). The CA Secret name is
-# computed (<release>-internal-ca-root), so the overlay sets only `enabled`.
+# When true, supported in-cluster service links use the Iterabase internal CA:
+# Postgres (ssl=on + hostssl), Redis (TLS + AUTH), control-plane API (HTTPS),
+# verified gateway clients, observability HTTPS, and—when the managed companion
+# is selected—Longhorn manager-to-instance-manager gRPC mTLS. The managed
+# single-node RWX NFSv4.1 hop is an explicitly unencrypted same-host data-plane
+# exposure; this CA does not secure NFS/iSCSI/CSI/replica traffic. Production
+# multi-node storage requires separately approved encrypted networking (HOR-519).
+# Propagated via `global.internalTLS`; default false keeps dev/kind plaintext.
+# The CA Secret remains <release>-internal-ca-root, so overlays set only enabled.
 global:
   internalTLS:
     enabled: false

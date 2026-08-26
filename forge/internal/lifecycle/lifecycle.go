@@ -336,9 +336,10 @@ func certificateOwnershipMigrationRequired(ctx context.Context, d deployer.Deplo
 }
 
 // applyCertificateSubstrate installs the same-version companion release before
-// any cert-manager custom resources. The release contains only the operator,
-// CRDs, webhook, and CSI driver, so its --wait boundary is the readiness DAG
-// Helm cannot express between dependencies in one umbrella release.
+// any cert-manager consumers. The release owns the operator, CRDs, webhook, and
+// CSI driver; when internal TLS is selected its ordered hook also creates or
+// verifies the future platform release's internal CA resources before managed
+// storage can request a leaf. The platform remains their Helm owner.
 func applyCertificateSubstrate(ctx context.Context, cfg *config.Cluster, d deployer.Deployer, opts ApplyOpts, res *Result, overlayDest string) error {
 	if d == nil || opts.SkipChart || cfg.Spec.Chart.Version == "" {
 		return nil
@@ -362,7 +363,10 @@ func applyCertificateSubstrate(ctx context.Context, cfg *config.Cluster, d deplo
 		Namespace:  ch.Namespace,
 		// The platform observability chart owns this cross-release monitor. Keep
 		// substrate installation independent of Prometheus Operator CRDs.
-		Values: []string{"cert-manager.prometheus.servicemonitor.enabled=false"},
+		Values: []string{
+			"cert-manager.prometheus.servicemonitor.enabled=false",
+			"global.internalTLS.platformRelease=" + ch.Release,
+		},
 	}
 	if overlayDest != "" {
 		dopts.ValueFiles = overlayValueFiles(overlayDest)

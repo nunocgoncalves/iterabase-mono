@@ -35,4 +35,29 @@ grep -Fq 'controller_runtime_reconcile_total{namespace=~\"$namespace\",result=\"
   echo 'ERROR: manager reconciliation dashboard panel must target the stable component="manager" scrape identity' >&2
   exit 1
 }
-echo "OK: $labels provisioned dashboards are organized across Kubernetes, Iterabase, Infrastructure, and Observability; stable UIDs are enforced"
+for title in \
+  'Longhorn managers available' \
+  'Longhorn unhealthy volumes' \
+  'Longhorn minimum node/disk headroom' \
+  'Longhorn CSI unavailable nodes' \
+  'Longhorn share-managers unavailable' \
+  'Longhorn replicas rebuilding'; do
+  grep -Fq "\"title\": \"$title\"" <<<"$rendered" || {
+    echo "ERROR: 50 — Data and Storage is missing compact panel: $title" >&2
+    exit 1
+  }
+done
+for query in \
+  'up{namespace=\"longhorn-system\",pod=~\"longhorn-manager-.*\"}' \
+  'longhorn_volume_robustness{state=~\"degraded|faulted\"}' \
+  'longhorn_node_storage_capacity_bytes - longhorn_node_storage_usage_bytes - longhorn_node_storage_reservation_bytes' \
+  'longhorn_disk_capacity_bytes - longhorn_disk_usage_bytes - longhorn_disk_reservation_bytes' \
+  'daemonset=\"longhorn-csi-plugin\"' \
+  'pod=~\"share-manager-.*\"' \
+  'longhorn_replica_state{state=\"starting\"}'; do
+  grep -Fq "$query" <<<"$rendered" || {
+    echo "ERROR: Longhorn dashboard contract is missing query fragment: $query" >&2
+    exit 1
+  }
+done
+echo "OK: $labels provisioned dashboards are organized across Kubernetes, Iterabase, Infrastructure, and Observability; stable UIDs and compact Longhorn orientation panels are enforced"

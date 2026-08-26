@@ -1,0 +1,78 @@
+{{- include "rwx-storage-substrate.validate" . -}}
+{{- if eq (include "rwx-storage-substrate.internalTLSEnabled" .) "true" }}
+{{- $name := printf "%s-grpc-bootstrap" (include "rwx-storage-substrate.fullname" .) | trunc 63 | trimSuffix "-" }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "rwx-storage-substrate.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-20"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  activeDeadlineSeconds: 900
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        {{- include "rwx-storage-substrate.labels" . | nindent 8 }}
+        app.kubernetes.io/component: grpc-mtls-bootstrap
+    spec:
+      serviceAccountName: {{ $name }}
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: bootstrap
+          image: "{{ .Values.validation.image.repository }}:{{ .Values.validation.image.tag }}@{{ .Values.validation.image.digest }}"
+          imagePullPolicy: {{ .Values.validation.image.pullPolicy }}
+          command: [/bin/bash, -ceu]
+          args:
+            - |
+              manifest=/tmp/longhorn-grpc-certificate.yaml
+              cat >"$manifest" <<'YAML'
+{{ include "rwx-storage-substrate.grpcCertificate" . | indent 14 }}
+              YAML
+              for attempt in $(seq 1 120); do
+                if kubectl apply -f "$manifest"; then
+                  break
+                fi
+                if [[ "$attempt" -eq 120 ]]; then
+                  echo "the Iterabase internal CA did not accept the Longhorn gRPC Certificate" >&2
+                  exit 1
+                fi
+                sleep 2
+              done
+              kubectl wait --for=condition=Ready certificate/longhorn-grpc-tls --timeout=5m
+              for key in 'ca.crt' 'tls.crt' 'tls.key'; do
+                value="$(kubectl get secret/longhorn-grpc-tls -o "jsonpath={.data.${key//./\\.}}")"
+                [[ -n "$value" ]] || { echo "longhorn-grpc-tls is missing $key" >&2; exit 1; }
+              done
+              echo "longhorn-grpc-bootstrap=pass issuer={{ dig "internalTLS" "issuerName" "internal-ca" (.Values.global | default (dict)) }} secret=longhorn-grpc-tls"
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              cpu: 250m
+              memory: 128Mi
+      volumes:
+        - name: tmp
+          emptyDir: {}
+{{- end }}
