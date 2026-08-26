@@ -548,8 +548,17 @@ spec:
   probe: {port: 8081}
 YAML`, workerImage)
 	mustSSHOutput(t, client, contractAndPool)
-	mustSSHOutput(t, client, `for i in $(seq 1 120); do test "$(sudo k3s kubectl get pods -n iterabase-system -l platform.iterabase.com/agentpool=external-reference-pool --no-headers 2>/dev/null | wc -l)" -eq 2 && break; sleep 2; done`)
-	mustSSHOutput(t, client, "sudo k3s kubectl wait -n iterabase-system --for=condition=Ready pod -l platform.iterabase.com/agentpool=external-reference-pool --timeout=15m")
+	agentPoolDiagnostics := func() string {
+		output, _ := sshOutput(client, `{ echo '=== AgentPool ==='; sudo k3s kubectl get agentpool external-reference-pool -n iterabase-system -o yaml || true; echo '=== controller ==='; sudo tail -n 300 /var/log/agentpool-storage-controller.log || true; echo '=== owned resources ==='; sudo k3s kubectl get pvc,pod,configmap,networkpolicy -n iterabase-system -l platform.iterabase.com/agentpool=external-reference-pool -o wide || true; echo '=== recent events ==='; sudo k3s kubectl get events -n iterabase-system --sort-by=.lastTimestamp | tail -100 || true; } 2>&1`)
+		return output
+	}
+	waitForWorkers := `for i in $(seq 1 120); do test "$(sudo k3s kubectl get pods -n iterabase-system -l platform.iterabase.com/agentpool=external-reference-pool --no-headers 2>/dev/null | wc -l)" -eq 2 && exit 0; sleep 2; done; exit 1`
+	if output, err := sshOutput(client, waitForWorkers); err != nil {
+		t.Fatalf("external AgentPool did not create two workers: %v\n%s\n%s", err, output, agentPoolDiagnostics())
+	}
+	if output, err := sshOutput(client, "sudo k3s kubectl wait -n iterabase-system --for=condition=Ready pod -l platform.iterabase.com/agentpool=external-reference-pool --timeout=15m"); err != nil {
+		t.Fatalf("external AgentPool workers did not become Ready: %v\n%s\n%s", err, output, agentPoolDiagnostics())
+	}
 	deadline := time.Now().Add(5 * time.Minute)
 	for time.Now().Before(deadline) {
 		status := strings.TrimSpace(mustSSHOutput(t, client, `sudo k3s kubectl get agentpool external-reference-pool -n iterabase-system -o jsonpath='{.status.ready}|{.status.readyReplicas}|{.status.conditions[?(@.type=="StorageReady")].reason}'`))
