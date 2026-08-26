@@ -94,7 +94,7 @@ decision rather than an implementation-local substitution.
 - **Scope:** `global.internalTLS` integration for the pinned Longhorn managed path and the production qualification boundary for managed multi-node networking.
 - **Decision:** When `global.internalTLS.enabled=true`, the existing Iterabase internal CA issues the `longhorn-grpc-tls` client/server leaf required by Longhorn `1.12.1`. The leaf Secret must exist before the Longhorn manager and instance managers start, or every component that started without it must be deterministically restarted. Release validation must prove valid manager-to-instance-manager gRPC mutual TLS and prove the current instance-manager services reject clients without the leaf and plaintext gRPC, so Longhorn's compatibility fallback cannot carry current traffic. The single-node profile accepts the RWX NFSv4.1 hop only as a bounded same-host data-plane exposure; the internal CA does not secure NFS, iSCSI, CSI, engine/replica, or share-manager data transport. Any future managed multi-node production topology requires encrypted inter-node networking and evidence that NFS and replica traffic traverse it. K3s Flannel `wireguard-native` is the leading design, but its selection and implementation belong to provisional HOR-519 rather than HOR-469.
 - **Consequences:** HOR-469 provisions and validates the internal-CA-backed Longhorn gRPC leaf, makes the single-node exposure and multi-node prerequisite explicit, validates internal TLS and managed storage together, and adds compact Longhorn health panels to the existing operator dashboard. The existing three-node storage scenario remains implementation/reference evidence, not production qualification for unencrypted multi-node networking. HOR-469 does not implement full-platform HA, Forge multi-node lifecycle, service replicas, or inter-node encryption and makes no claim that the Iterabase CA directly secures NFS.
-- **Evidence:** Founder response in the continuing PR #63 remediation session: reject a blanket storage exclusion; use Longhorn's supported `longhorn-grpc-tls` Secret from the Iterabase internal CA, prove no plaintext fallback, accept only the same-host single-node NFS exposure, and require future multi-node encrypted networking under HOR-519.
+- **Evidence:** Canonical approval is durable in Obsidian `Areas/ho/Architecture/HOR-469 — Longhorn Internal TLS and Managed-Storage Transport Boundary.md`. It records the founder's exact 2026-08-26 response, selected scope, and consequences for PR #63, HOR-469, and provisional HOR-519.
 
 ## 2. Product and inherited runtime constraints
 
@@ -833,10 +833,12 @@ The implementation is incomplete until all of these pass:
    recreation or data loss;
 10. disable/uninstall refusing active consumers, then deliberate retained-volume
     disposition and complete cleanup;
-11. TLS-on managed single-node evidence that the platform CA issued
-    `longhorn-grpc-tls`, every current instance-manager service uses mutual TLS,
-    and unauthenticated TLS/plaintext gRPC are rejected; compact Longhorn panels
-    render in `50 — Data and Storage`; and
+11. a mandatory exact-head PR CPU scenario that packages and selects the current
+    platform, certificate, and RWX companion charts with TLS-on managed
+    single-node values, then proves the platform CA issued `longhorn-grpc-tls`,
+    every current instance-manager service uses mutual TLS, unauthenticated
+    TLS/plaintext gRPC are rejected, and compact Longhorn panels render in
+    `50 — Data and Storage`; and
 12. exact release evidence for versions, images/digests, settings, nodes/disks,
     class, claims, results, timings, and accepted single-point-of-failure limits.
 

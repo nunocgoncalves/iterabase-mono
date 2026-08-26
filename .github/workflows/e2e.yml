@@ -144,19 +144,29 @@ jobs:
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: ./.github/actions/setup-go
         with:
           go-version: 1.26.5
           cache-dependency-path: ${{ env.GO_CACHE_DEPENDENCIES }}
           cache-scope: e2e-digitalocean-cpu
-      - name: Composed CPU E2E
+      - uses: ./.github/actions/setup-kubernetes-tools
+      - name: Package exact-head platform and managed-storage companions
+        run: >-
+          .github/scripts/prepare_pr_managed_runtime.sh
+          '${{ runner.temp }}/managed-runtime'
+          "$GITHUB_ENV"
+      - name: Composed CPU E2E with mandatory managed storage and internal TLS
         run: make test-e2e
         working-directory: forge
         env:
           DIGITALOCEAN_TOKEN: ${{ secrets.DIGITALOCEAN_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FORGE_E2E_REQUIRE_CAPACITY: "true"
+          FORGE_E2E_REQUIRE_MANAGED_TLS: "true"
           ITERABASE_E2E_FIXTURE_MODE: source
-          ITERABASE_E2E_SOURCE_SHA: ${{ github.sha }}
+          ITERABASE_E2E_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           ITERABASE_E2E_SOURCE_INPUTS: ${{ github.workspace }}/forge/test/e2e/published-fixture.json
           ITERABASE_E2E_DIAGNOSTICS: ${{ runner.temp }}/forge-diagnostics
       - name: Upload redacted CPU failure diagnostics
