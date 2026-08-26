@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	stderrors "errors"
 	"testing"
 	"time"
 
@@ -78,6 +79,17 @@ func storageTestReconciler(t *testing.T, objects ...client.Object) *AgentPoolRec
 	require.NoError(t, v1alpha1.AddToScheme(scheme))
 	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&v1alpha1.AgentPool{}).WithObjects(objects...).Build()
 	return &AgentPoolReconciler{Client: c, Scheme: scheme, APIReader: c}
+}
+
+type workerDeleteFailureClient struct {
+	client.Client
+}
+
+func (c *workerDeleteFailureClient) Delete(ctx context.Context, obj client.Object, opts ...client.DeleteOption) error {
+	if _, ok := obj.(*corev1.Pod); ok {
+		return stderrors.New("simulated worker delete failure")
+	}
+	return c.Client.Delete(ctx, obj, opts...)
 }
 
 func TestAssessExternalRWXStorageRequiresLiveClassBoundConformance(t *testing.T) {
@@ -281,13 +293,65 @@ func TestReconcileReadyPoolRejectsPVCMutationWithCurrentStorageCondition(t *test
 			require.NotNil(t, condition)
 			assert.Equal(t, metav1.ConditionFalse, condition.Status)
 			assert.Equal(t, tt.wantReason, condition.Reason)
-			assert.Contains(t, condition.Message, "workers were removed")
+			assert.Contains(t, condition.Message, "scheduling credit was removed before worker quiescing")
 
 			var removed corev1.Pod
 			err = r.Get(context.Background(), types.NamespacedName{Name: worker.Name, Namespace: worker.Namespace}, &removed)
 			assert.True(t, apierrors.IsNotFound(err), "ready worker must be quiesced after a rejected storage mutation")
 		})
 	}
+}
+
+func TestReconcileReadyPoolRecordsStorageMutationBeforeQuiesceFailure(t *testing.T) {
+	pool := validAgentPool("quiesce-failure", "platform")
+	pool.Spec.CredentialBindings = nil
+	pool.Spec.GatewayGrants = nil
+	pool.Spec.Sandbox.Size = resource.MustParse("5Gi")
+	pool.Finalizers = []string{agentPoolFinalizer}
+	pool.Generation = 2
+	pool.Status.Ready = true
+	pool.Status.ReadyReplicas = 1
+	pool.Status.Conditions = []metav1.Condition{{
+		Type: "StorageReady", Status: metav1.ConditionTrue, Reason: storageReasonReady,
+		ObservedGeneration: 1,
+	}}
+	class := pool.Spec.Sandbox.StorageClassName
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: sandboxPVCName(pool), Namespace: pool.Namespace, UID: "pvc-uid",
+			CreationTimestamp: metav1.NewTime(time.Now()),
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			StorageClassName: &class,
+			AccessModes:      []corev1.PersistentVolumeAccessMode{pool.Spec.Sandbox.AccessMode},
+			Resources:        corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("10Gi")}},
+		},
+	}
+	worker := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: workerName(pool, 0), Namespace: pool.Namespace, Labels: poolLabels(pool)},
+		Status: corev1.PodStatus{Conditions: []corev1.PodCondition{{
+			Type: corev1.PodReady, Status: corev1.ConditionTrue,
+		}}},
+	}
+	ca := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: pool.Spec.Identity.CASecretRef.Name, Namespace: pool.Namespace}}
+	r := storageTestReconciler(t, pool, pvc, worker, ca)
+	r.Client = &workerDeleteFailureClient{Client: r.Client}
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: pool.Name, Namespace: pool.Namespace}})
+	require.ErrorContains(t, err, "simulated worker delete failure")
+
+	var got v1alpha1.AgentPool
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Name: pool.Name, Namespace: pool.Namespace}, &got))
+	assert.False(t, got.Status.Ready)
+	assert.Zero(t, got.Status.ReadyReplicas)
+	condition := meta.FindStatusCondition(got.Status.Conditions, "StorageReady")
+	require.NotNil(t, condition)
+	assert.Equal(t, metav1.ConditionFalse, condition.Status)
+	assert.Equal(t, storageReasonPVCExpansionFailed, condition.Reason)
+	assert.Contains(t, condition.Message, "scheduling credit was removed before worker quiescing")
+
+	var retained corev1.Pod
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Name: worker.Name, Namespace: worker.Namespace}, &retained), "the simulated delete failure should retain the worker while status remains fail-closed")
 }
 
 func TestQuiesceWorkersDeletesSchedulingCreditAfterStorageLoss(t *testing.T) {

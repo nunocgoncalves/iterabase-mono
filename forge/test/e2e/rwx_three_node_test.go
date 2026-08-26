@@ -745,6 +745,38 @@ YAML`
 		t.Fatalf("Longhorn pre-upgrade system backup not Ready: %s", backupState)
 	}
 
+	predecessorEngine := strings.TrimSpace(mustSSHOutput(t, client, fmt.Sprintf(`sudo k3s kubectl get volumes.longhorn.io %s -n longhorn-system -o jsonpath='{.spec.image}|{.status.currentImage}'`, state.volume)))
+	predecessorEngineParts := strings.Split(predecessorEngine, "|")
+	if len(predecessorEngineParts) != 2 || !strings.Contains(predecessorEngineParts[0], "v1.11.3") || !strings.Contains(predecessorEngineParts[1], "v1.11.3") {
+		t.Fatalf("pre-upgrade retained volume engine=%q want desired/current v1.11.3", predecessorEngine)
+	}
+	holder := `cat <<'YAML' | sudo k3s kubectl apply -f -
+apiVersion: v1
+kind: Pod
+metadata: {name: three-node-upgrade-holder, namespace: iterabase-system}
+spec:
+  restartPolicy: Never
+  containers:
+    - name: holder
+      image: debian:13-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132
+      command: [bash, -ceu]
+      args: ['test "$(cat /data/marker)" = three-node-committed; sleep 3600']
+      readinessProbe:
+        exec: {command: [bash, -ceu, 'test "$(cat /data/marker)" = three-node-committed']}
+        periodSeconds: 2
+      volumeMounts: [{name: data, mountPath: /data}]
+  volumes: [{name: data, persistentVolumeClaim: {claimName: three-node-evidence}}]
+YAML`
+	mustSSHOutput(t, client, holder)
+	mustSSHOutput(t, client, "sudo k3s kubectl wait -n iterabase-system --for=condition=Ready pod/three-node-upgrade-holder --timeout=15m")
+	predecessorShareManagerPod := "share-manager-" + state.volume
+	mustSSHOutput(t, client, fmt.Sprintf("sudo k3s kubectl wait -n longhorn-system --for=condition=Ready pod/%s --timeout=10m", predecessorShareManagerPod))
+	predecessorShareManager := strings.TrimSpace(mustSSHOutput(t, client, fmt.Sprintf(`sudo k3s kubectl get pod %s -n longhorn-system -o jsonpath='{.metadata.uid}|{.spec.containers[0].image}'`, predecessorShareManagerPod)))
+	predecessorShareManagerParts := strings.Split(predecessorShareManager, "|")
+	if len(predecessorShareManagerParts) != 2 || predecessorShareManagerParts[0] == "" || !strings.Contains(predecessorShareManagerParts[1], "v1.11.3") {
+		t.Fatalf("pre-upgrade share-manager identity=%q want non-empty UID and v1.11.3 image", predecessorShareManager)
+	}
+
 	remoteArchive := "/tmp/" + filepath.Base(state.archive)
 	upgrade := fmt.Sprintf("sudo helm --kubeconfig /etc/rancher/k3s/k3s.yaml upgrade three-rwx-storage %s -n longhorn-system --reset-values --set storage.rwx.managedLonghorn.topology=three-node --set validation.attestationNamespace=iterabase-system --wait --timeout 65m", candidateShellQuote(remoteArchive))
 	mustSSHOutput(t, client, upgrade)
@@ -752,29 +784,96 @@ YAML`
 	if !strings.Contains(managerImage, "v1.12.1@sha256:") {
 		t.Fatalf("upgraded manager image=%q want pinned v1.12.1 digest", managerImage)
 	}
+
+	engineImageDeadline := time.Now().Add(10 * time.Minute)
+	candidateEngineImage := ""
+	for time.Now().Before(engineImageDeadline) {
+		out, commandErr := sshOutput(client, `sudo k3s kubectl get engineimages.longhorn.io -n longhorn-system -o json | jq -r '[.items[] | select(.spec.image | contains("v1.12.1@sha256:")) | select(.status.state=="deployed") | .spec.image][0] // empty'`)
+		candidateEngineImage = strings.TrimSpace(out)
+		if commandErr == nil && strings.Contains(candidateEngineImage, "v1.12.1@sha256:") {
+			break
+		}
+		time.Sleep(5 * time.Second)
+	}
+	if !strings.Contains(candidateEngineImage, "v1.12.1@sha256:") {
+		t.Fatalf("candidate Longhorn engine image never deployed: %q", candidateEngineImage)
+	}
+	enginePatch := fmt.Sprintf(`{"spec":{"image":%q}}`, candidateEngineImage)
+	mustSSHOutput(t, client, fmt.Sprintf("sudo k3s kubectl patch volumes.longhorn.io %s -n longhorn-system --type=merge -p %s", state.volume, candidateShellQuote(enginePatch)))
+
+	engineDeadline := time.Now().Add(15 * time.Minute)
+	volumeEngineState := ""
+	activeEngineState := ""
+	for time.Now().Before(engineDeadline) {
+		volumeOut, volumeErr := sshOutput(client, fmt.Sprintf(`sudo k3s kubectl get volumes.longhorn.io %s -n longhorn-system -o jsonpath='{.spec.image}|{.status.currentImage}|{.status.robustness}|{.status.state}'`, state.volume))
+		engineOut, engineErr := sshOutput(client, fmt.Sprintf(`sudo k3s kubectl get engines.longhorn.io -n longhorn-system -o json | jq -r --arg volume %s '[.items[] | select(.spec.volumeName==$volume and .spec.active==true) | "\(.spec.image)|\(.status.currentImage)|\(.status.currentState)"] | if length == 1 then .[0] else join(";") end'`, candidateShellQuote(state.volume)))
+		volumeEngineState = strings.TrimSpace(volumeOut)
+		activeEngineState = strings.TrimSpace(engineOut)
+		if volumeErr == nil && engineErr == nil &&
+			volumeEngineState == candidateEngineImage+"|"+candidateEngineImage+"|healthy|attached" &&
+			activeEngineState == candidateEngineImage+"|"+candidateEngineImage+"|running" {
+			break
+		}
+		time.Sleep(5 * time.Second)
+	}
+	if volumeEngineState != candidateEngineImage+"|"+candidateEngineImage+"|healthy|attached" || activeEngineState != candidateEngineImage+"|"+candidateEngineImage+"|running" {
+		t.Fatalf("retained volume engine upgrade did not converge: volume=%q activeEngine=%q candidate=%q", volumeEngineState, activeEngineState, candidateEngineImage)
+	}
+
+	candidateShareManagerImage := ""
+	shareManagerDeadline := time.Now().Add(5 * time.Minute)
+	for time.Now().Before(shareManagerDeadline) {
+		out, commandErr := sshOutput(client, fmt.Sprintf(`sudo k3s kubectl get sharemanagers.longhorn.io %s -n longhorn-system -o jsonpath='{.spec.image}'`, state.volume))
+		candidateShareManagerImage = strings.TrimSpace(out)
+		if commandErr == nil && strings.Contains(candidateShareManagerImage, "v1.12.1@sha256:") {
+			break
+		}
+		time.Sleep(5 * time.Second)
+	}
+	if !strings.Contains(candidateShareManagerImage, "v1.12.1@sha256:") {
+		t.Fatalf("share-manager desired image did not advance to v1.12.1: %q", candidateShareManagerImage)
+	}
+
 	uid := strings.TrimSpace(mustSSHOutput(t, client, `sudo k3s kubectl get pvc three-node-evidence -n iterabase-system -o jsonpath='{.metadata.uid}'`))
 	if uid != state.pvcUID {
 		t.Fatalf("Longhorn 1.11.3 to 1.12.1 upgrade replaced PVC: before=%s after=%s", state.pvcUID, uid)
 	}
+	// A running RWX share-manager may retain its predecessor image after the
+	// manager/engine upgrade. Close the maintenance consumer, deliberately
+	// recreate that NFS endpoint, and prove committed bytes through a fresh
+	// client before accepting the adjacent-minor transition.
+	mustSSHOutput(t, client, "sudo k3s kubectl delete pod three-node-upgrade-holder -n iterabase-system --wait=true --timeout=5m")
+	mustSSHOutput(t, client, fmt.Sprintf("sudo k3s kubectl delete pod %s -n longhorn-system --ignore-not-found --wait=true --timeout=5m", predecessorShareManagerPod))
 	reader := `cat <<'YAML' | sudo k3s kubectl apply -f -
-apiVersion: batch/v1
-kind: Job
+apiVersion: v1
+kind: Pod
 metadata: {name: three-node-upgrade-reader, namespace: iterabase-system}
 spec:
-  backoffLimit: 0
-  template:
-    spec:
-      restartPolicy: Never
-      containers:
-        - name: reader
-          image: debian:13-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132
-          command: [bash, -ceu]
-          args: ['test "$(cat /data/marker)" = three-node-committed']
-          volumeMounts: [{name: data, mountPath: /data}]
-      volumes: [{name: data, persistentVolumeClaim: {claimName: three-node-evidence}}]
+  restartPolicy: Never
+  containers:
+    - name: reader
+      image: debian:13-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132
+      command: [bash, -ceu]
+      args: ['test "$(cat /data/marker)" = three-node-committed; sleep 900']
+      readinessProbe:
+        exec: {command: [bash, -ceu, 'test "$(cat /data/marker)" = three-node-committed']}
+        periodSeconds: 2
+      volumeMounts: [{name: data, mountPath: /data}]
+  volumes: [{name: data, persistentVolumeClaim: {claimName: three-node-evidence}}]
 YAML`
 	mustSSHOutput(t, client, reader)
-	mustSSHOutput(t, client, "sudo k3s kubectl wait -n iterabase-system --for=condition=complete job/three-node-upgrade-reader --timeout=15m")
+	mustSSHOutput(t, client, "sudo k3s kubectl wait -n iterabase-system --for=condition=Ready pod/three-node-upgrade-reader --timeout=15m")
+	mustSSHOutput(t, client, fmt.Sprintf("sudo k3s kubectl wait -n longhorn-system --for=condition=Ready pod/%s --timeout=10m", predecessorShareManagerPod))
+	upgradedShareManager := strings.TrimSpace(mustSSHOutput(t, client, fmt.Sprintf(`sudo k3s kubectl get pod %s -n longhorn-system -o jsonpath='{.metadata.uid}|{.spec.containers[0].image}'`, predecessorShareManagerPod)))
+	upgradedShareManagerParts := strings.Split(upgradedShareManager, "|")
+	if len(upgradedShareManagerParts) != 2 || upgradedShareManagerParts[0] == predecessorShareManagerParts[0] || upgradedShareManagerParts[1] != candidateShareManagerImage {
+		t.Fatalf("share-manager transition did not converge: before=%q after=%q desired=%q", predecessorShareManager, upgradedShareManager, candidateShareManagerImage)
+	}
+	postTransitionEngine := strings.TrimSpace(mustSSHOutput(t, client, fmt.Sprintf(`sudo k3s kubectl get volumes.longhorn.io %s -n longhorn-system -o jsonpath='{.spec.image}|{.status.currentImage}|{.status.robustness}'`, state.volume)))
+	if postTransitionEngine != candidateEngineImage+"|"+candidateEngineImage+"|healthy" {
+		t.Fatalf("upgraded engine regressed across share-manager recreation: %q", postTransitionEngine)
+	}
+	mustSSHOutput(t, client, "sudo k3s kubectl delete pod three-node-upgrade-reader -n iterabase-system --wait=true --timeout=5m")
 	class := strings.TrimSpace(mustSSHOutput(t, client, `sudo k3s kubectl get storageclass iterabase-rwx -o jsonpath='{.parameters.numberOfReplicas}|{.reclaimPolicy}|{.allowVolumeExpansion}'`))
 	if class != "3|Retain|true" {
 		t.Fatalf("upgraded three-node StorageClass=%q", class)

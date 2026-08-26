@@ -114,6 +114,11 @@ write_attestation() {
   validated_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
   k get namespace "$ATTEST_NAMESPACE" >/dev/null
+  # kube-state-metrics exposes ConfigMap creation time, not data.validatedAt.
+  # Recreate only after every live assertion passes so a successful rerun
+  # advances the operational staleness clock instead of updating an invisible
+  # data field while leaving the alert permanently stale.
+  k -n "$ATTEST_NAMESPACE" delete configmap "$name" --ignore-not-found --wait=true >/dev/null
   k -n "$ATTEST_NAMESPACE" create configmap "$name" \
     --from-literal=contractVersion="$CONTRACT_VERSION" \
     --from-literal=storageClassName="$STORAGE_CLASS" \
@@ -121,8 +126,7 @@ write_attestation() {
     --from-literal=provisioner="$provisioner" \
     --from-literal=context="$context" \
     --from-literal=validatedAt="$validated_at" \
-    --from-literal=result=pass \
-    --dry-run=client -o yaml | k apply -f - >/dev/null
+    --from-literal=result=pass >/dev/null
   k -n "$ATTEST_NAMESPACE" label configmap "$name" --overwrite \
     platform.iterabase.com/storage-conformance=true >/dev/null
   k -n "$ATTEST_NAMESPACE" annotate configmap "$name" --overwrite \

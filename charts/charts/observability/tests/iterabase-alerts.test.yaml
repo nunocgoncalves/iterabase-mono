@@ -245,11 +245,11 @@ tests:
               first_action: Inspect PVC/PV conditions, CSI resizer/node plugin, mount events, and physical capacity; never report or attempt shrink.
               runbook_url: https://github.com/nunocgoncalves/iterabase-mono/blob/master/docs/runbooks/platform-alerts.md#iterabasepvcexpansionstalled
 
-  - name: warning RWX conformance age expires after seven days
+  - name: warning RWX conformance age fires then resolves after successful rerun recreates the attestation
     interval: 1m
     input_series:
       - series: 'kube_configmap_created{namespace="iterabase-system",configmap="iterabase-rwx-conformance-abcd"}'
-        values: '60x12000'
+        values: '60x11580 694860x120'
     alert_rule_test:
       - eval_time: 8d1h
         alertname: IterabaseRWXConformanceStale
@@ -264,6 +264,9 @@ tests:
               description: The exact class/backend evidence is too old for continued release confidence.
               first_action: Re-run the same-release disposable conformance gate after confirming backend, CSI, node image, and class identity.
               runbook_url: https://github.com/nunocgoncalves/iterabase-mono/blob/master/docs/runbooks/platform-alerts.md#iterabaserwxconformancestale
+      - eval_time: 8d2h
+        alertname: IterabaseRWXConformanceStale
+        exp_alerts: []
 
   - name: critical share manager readiness loss is actionable
     interval: 1m
