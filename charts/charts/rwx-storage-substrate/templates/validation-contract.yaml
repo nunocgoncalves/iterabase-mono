@@ -3,7 +3,7 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ include "rwx-storage-substrate.fullname" . }}-validation
+  name: {{ include "rwx-storage-substrate.validationName" . }}
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "rwx-storage-substrate.labels" . | nindent 4 }}

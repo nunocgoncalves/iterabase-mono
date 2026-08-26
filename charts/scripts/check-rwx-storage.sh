@@ -69,6 +69,21 @@ grep -Fq 'longhorn-grpc-mtls=pass' "$tls_render"
 grep -Fq 'unauthenticatedTLSRejected=' "$tls_render"
 grep -Fq 'plaintextRejected=' "$tls_render"
 grep -Fq 'secret.reloader.stakater.com/reload: longhorn-grpc-tls' "$tls_render"
+
+# Forge release names remain within Helm's 53-character boundary but can make
+# hook Job names exceed the Kubernetes-generated 63-character job-name labels.
+# Preserve each semantic suffix while truncating the shared base first.
+long_release=forge-e2e-1787767040-rwx-storage
+helm template "$long_release" "$chart" --namespace longhorn-system \
+  --set global.internalTLS.enabled=true \
+  --show-only templates/validation-job.yaml >"$tmp/long-validation.yaml"
+helm template "$long_release" "$chart" --namespace longhorn-system \
+  --show-only templates/uninstall-guard-job.yaml >"$tmp/long-uninstall.yaml"
+validation_name="$(awk '$1 == "name:" { print $2; exit }' "$tmp/long-validation.yaml")"
+uninstall_name="$(awk '$1 == "name:" { print $2; exit }' "$tmp/long-uninstall.yaml")"
+[[ ${#validation_name} -le 63 && "$validation_name" == *-validation ]]
+[[ ${#uninstall_name} -le 63 && "$uninstall_name" == *-uninstall-guard ]]
+
 if grep -Fq 'kind: Certificate' "$tmp/single-node.yaml"; then
   echo "plaintext managed mode unexpectedly rendered the Longhorn gRPC leaf" >&2
   exit 1
