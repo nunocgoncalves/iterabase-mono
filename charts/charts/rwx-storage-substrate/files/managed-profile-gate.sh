@@ -70,7 +70,7 @@ validate_grpc_mtls() {
   local name ip pod log auth_count port health_hex
   while IFS=$'\t' read -r name ip; do
     [[ -n "$name" && -n "$ip" ]] || continue
-    pod="$(kubectl -n "$LONGHORN_NAMESPACE" get pod -l "longhorn.io/component=instance-manager,longhorn.io/instance-manager-name=$name" -o jsonpath='{.items[0].metadata.name}')"
+    pod="$(kubectl -n "$LONGHORN_NAMESPACE" get pod -l "longhorn.io/component=instance-manager,longhorn.io/instance-manager-name=$name" -o json | jq -r '.items[0].metadata.name // empty')"
     if [[ -z "$pod" ]]; then
       pod="$(kubectl -n "$LONGHORN_NAMESPACE" get pod -l longhorn.io/component=instance-manager -o json | jq -r --arg name "$name" '.items[] | select(.metadata.name == $name) | .metadata.name' | head -n1)"
     fi
