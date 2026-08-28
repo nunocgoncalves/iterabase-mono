@@ -384,8 +384,7 @@ YAML`, repository, tag, state.runID, state.runID, state.runID, state.runID, stat
 	// Capture the first desired worker set before readiness. If the controller
 	// removes either pod during Longhorn's initial unknown/detached window, the
 	// subsequent identity comparison fails even if replacement pods converge.
-	mustSSHOutput(t, sc, `sudo k3s kubectl wait -n iterabase-system --for=create pod/forge-storage-pool-worker-0 pod/forge-storage-pool-worker-1 --timeout=3m`)
-	state.initialWorkerPodUIDs = managedAgentPoolWorkerUIDs(t, sc)
+	state.initialWorkerPodUIDs = waitForInitialManagedAgentPoolWorkerUIDs(t, sc, 3*time.Minute)
 	mustSSHOutput(t, sc, `sudo k3s kubectl wait -n iterabase-system --for=jsonpath='{.status.phase}'=Bound pvc/forge-storage-pool-sandbox --timeout=3m`)
 	claim := strings.TrimSpace(mustSSHOutput(t, sc, `sudo k3s kubectl get pvc forge-storage-pool-sandbox -n iterabase-system -o jsonpath='{.metadata.uid}|{.status.phase}'`))
 	claimParts := strings.Split(claim, "|")
@@ -404,6 +403,23 @@ YAML`, repository, tag, state.runID, state.runID, state.runID, state.runID, stat
 	if status != "true|2|StorageReady|True|" {
 		t.Fatalf("managed AgentPool initial convergence = %q, want true|2|StorageReady|True| with no replacement cycle", status)
 	}
+}
+
+func waitForInitialManagedAgentPoolWorkerUIDs(t *testing.T, client *ssh.Client, timeout time.Duration) string {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	last := "no workers observed"
+	for time.Now().Before(deadline) {
+		output, err := sshOutput(client, `for pod in forge-storage-pool-worker-0 forge-storage-pool-worker-1; do sudo k3s kubectl get pod "$pod" -n iterabase-system -o jsonpath='{.metadata.uid}' || exit; printf '\n'; done`)
+		last = strings.TrimSpace(output)
+		uids := strings.Fields(last)
+		if err == nil && len(uids) == 2 && uids[0] != "" && uids[1] != "" && uids[0] != uids[1] {
+			return strings.Join(uids, "\n")
+		}
+		time.Sleep(time.Second)
+	}
+	t.Fatalf("managed AgentPool did not expose one complete initial worker set within %s: %s", timeout, last)
+	return ""
 }
 
 func managedAgentPoolWorkerUIDs(t *testing.T, client *ssh.Client) string {
