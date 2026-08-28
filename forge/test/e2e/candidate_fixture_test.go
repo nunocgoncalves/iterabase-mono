@@ -1,12 +1,20 @@
 package e2e
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/nunocgoncalves/iterabase-mono/forge/test/e2e/internal/remotecluster"
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/clientcmd"
 )
 
 const (
@@ -25,12 +33,15 @@ type candidateContainerStatus struct {
 	ImageID string `json:"imageID"`
 }
 
+const candidateControlPlaneReadyTimeout = 10 * time.Minute
+
 // assertCandidateImageDigests verifies both sides of the runtime contract: a
 // Pod requested the selected index digest, and CRI reported an immutable image
 // ID for that container. For multi-platform images the runtime ID may be the
 // selected child-manifest digest rather than the parent index digest.
 func assertCandidateImageDigests(t *testing.T, cluster *remotecluster.Cluster, namespace string, digestEnvs ...string) {
 	t.Helper()
+	waitForCandidateControlPlaneReady(t, cluster, namespace, candidateControlPlaneReadyTimeout)
 	var pods struct {
 		Items []struct {
 			Spec struct {
@@ -75,5 +86,100 @@ func assertCandidateImageDigests(t *testing.T, cluster *remotecluster.Cluster, n
 			t.Fatalf("no running container in %s requested %s=%s and reported an immutable image ID", namespace, envName, digest)
 		}
 		t.Logf("verified candidate request %s and its runtime image ID", digest)
+	}
+}
+
+func waitForCandidateControlPlaneReady(t *testing.T, cluster *remotecluster.Cluster, namespace string, timeout time.Duration) {
+	t.Helper()
+	restConfig, err := clientcmd.BuildConfigFromFlags("", cluster.Kubeconfig)
+	if err != nil {
+		t.Fatalf("build candidate kubeconfig: %v", err)
+	}
+	restConfig.Timeout = 30 * time.Second
+	clientset, err := kubernetes.NewForConfig(restConfig)
+	if err != nil {
+		t.Fatalf("create candidate Kubernetes client: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	last := "no control-plane Deployment observed"
+	for {
+		deployments, listErr := clientset.AppsV1().Deployments(namespace).List(ctx, metav1.ListOptions{
+			LabelSelector: "app.kubernetes.io/name=control-plane",
+		})
+		if listErr != nil {
+			last = "list control-plane Deployments: " + listErr.Error()
+		} else if ready, state := candidateControlPlaneDeploymentsReady(deployments.Items); ready {
+			t.Logf("candidate control-plane workload Ready: %s", state)
+			return
+		} else {
+			last = state
+		}
+
+		select {
+		case <-ctx.Done():
+			t.Fatalf("candidate control-plane workload did not become Ready within %s: %s", timeout, last)
+		case <-time.After(2 * time.Second):
+		}
+	}
+}
+
+func candidateControlPlaneDeploymentsReady(deployments []appsv1.Deployment) (bool, string) {
+	if len(deployments) == 0 {
+		return false, "no control-plane Deployment observed"
+	}
+	states := make([]string, 0, len(deployments))
+	allReady := true
+	for i := range deployments {
+		deployment := &deployments[i]
+		desired := int32(0)
+		if deployment.Spec.Replicas != nil {
+			desired = *deployment.Spec.Replicas
+		}
+		available := false
+		for _, condition := range deployment.Status.Conditions {
+			if condition.Type == appsv1.DeploymentAvailable && condition.Status == corev1.ConditionTrue {
+				available = true
+				break
+			}
+		}
+		ready := desired > 0 && deployment.Status.ObservedGeneration >= deployment.Generation &&
+			deployment.Status.AvailableReplicas >= desired && available
+		allReady = allReady && ready
+		states = append(states, fmt.Sprintf("%s ready=%t desired=%d available=%d observed=%d generation=%d",
+			deployment.Name, ready, desired, deployment.Status.AvailableReplicas,
+			deployment.Status.ObservedGeneration, deployment.Generation))
+	}
+	return allReady, strings.Join(states, "; ")
+}
+
+func TestCandidateControlPlaneDeploymentsReady(t *testing.T) {
+	replicas := int32(1)
+	ready := appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "control-plane-api", Generation: 2},
+		Spec:       appsv1.DeploymentSpec{Replicas: &replicas},
+		Status: appsv1.DeploymentStatus{
+			ObservedGeneration: 2,
+			AvailableReplicas:  1,
+			Conditions: []appsv1.DeploymentCondition{{
+				Type: appsv1.DeploymentAvailable, Status: corev1.ConditionTrue,
+			}},
+		},
+	}
+
+	ok, state := candidateControlPlaneDeploymentsReady(nil)
+	if ok || !strings.Contains(state, "no control-plane Deployment") {
+		t.Fatalf("empty deployment state = %t %q", ok, state)
+	}
+	ok, state = candidateControlPlaneDeploymentsReady([]appsv1.Deployment{ready})
+	if !ok || !strings.Contains(state, "ready=true") {
+		t.Fatalf("ready deployment state = %t %q", ok, state)
+	}
+	stale := ready.DeepCopy()
+	stale.Status.ObservedGeneration = 1
+	ok, state = candidateControlPlaneDeploymentsReady([]appsv1.Deployment{ready, *stale})
+	if ok || !strings.Contains(state, "ready=false") {
+		t.Fatalf("mixed deployment state = %t %q", ok, state)
 	}
 }

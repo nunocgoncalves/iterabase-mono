@@ -40,8 +40,9 @@ type GPUVM struct {
 	Tags        []string
 }
 
-// ErrNoGPUCapacity signals no GPU instance could be created in any region;
-// callers skip-loudly rather than fail so DO scarcity doesn't block PRs.
+// ErrNoGPUCapacity signals no GPU instance could be created in any region.
+// Ordinary PR runs skip loudly; mandatory candidate runs classify this as an
+// external-capacity blocker and remain failed until capacity returns.
 var ErrNoGPUCapacity = errors.New("no GPU capacity available in any region")
 
 type doGPUVMProvisioner struct{ client *godo.Client }
@@ -189,7 +190,7 @@ func provisionGPUStage(t *testing.T, state *digitalOceanGPUState) {
 	err := provisionGPUHost(state)
 	if errors.Is(err, ErrNoGPUCapacity) {
 		if os.Getenv("FORGE_E2E_REQUIRE_CAPACITY") == "true" {
-			t.Fatalf("mandatory GPU release validation incomplete — no capacity: %v", err)
+			t.Fatalf("mandatory GPU release validation blocked by external capacity; candidate must be retried when capacity returns (gate is not skipped): %v", err)
 		}
 		t.Skipf("GPU e2e skipped — no GPU capacity (try later or add Verda): %v", err)
 	}

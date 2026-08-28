@@ -278,7 +278,14 @@ func containsAccessMode(modes []corev1.PersistentVolumeAccessMode, wanted corev1
 	return false
 }
 
-func storageWasReady(pool *v1alpha1.AgentPool) bool {
+// storageWasOperationallyReady distinguishes an established pool from initial
+// storage convergence. Storage predicates may become true before any worker has
+// mounted the RWX claim; that transient state must not trigger the post-readiness
+// fail-closed replacement path while Longhorn starts its first share-manager.
+func storageWasOperationallyReady(pool *v1alpha1.AgentPool) bool {
+	if !pool.Status.Ready || pool.Status.ReadyReplicas == 0 {
+		return false
+	}
 	for _, condition := range pool.Status.Conditions {
 		if condition.Type == "StorageReady" {
 			return condition.Status == "True"

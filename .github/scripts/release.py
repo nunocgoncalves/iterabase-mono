@@ -25,6 +25,8 @@ TARGET_NAMES = (
     "iterabase-platform-chart",
 )
 RUNNABLE_E2E_TIERS = {"F2", "F3"}
+CANDIDATE_ALIAS_SCHEME = "source-run-attempt-v1"
+POSITIVE_INTEGER = re.compile(r"^[1-9][0-9]*$")
 
 
 class ReleaseError(ValueError):
@@ -104,6 +106,32 @@ def require_semver(value: Any, label: str) -> str:
     if not isinstance(value, str) or not SEMVER.fullmatch(value):
         raise ReleaseError(f"{label} must be stable SemVer without a v prefix: {value!r}")
     return value
+
+
+def candidate_image_alias(source_sha: Any, run_id: Any, run_attempt: Any) -> str:
+    if not isinstance(source_sha, str) or not SHA.fullmatch(source_sha):
+        raise ReleaseError("candidate alias source_sha must be a full lowercase commit SHA")
+    if not isinstance(run_id, str) or not POSITIVE_INTEGER.fullmatch(run_id):
+        raise ReleaseError("candidate alias run_id must be a positive integer")
+    if not isinstance(run_attempt, str) or not POSITIVE_INTEGER.fullmatch(run_attempt):
+        raise ReleaseError("candidate alias run_attempt must be a positive integer")
+    return f"{source_sha}-{run_id}-{run_attempt}"
+
+
+def validate_candidate_aliases(plan: dict[str, Any]) -> None:
+    scheme = plan.get("candidate_alias_scheme")
+    if scheme is None:
+        # Promotion remains able to verify retained pre-HOR-523 schema-v3
+        # candidates. Newly generated plans always declare the immutable scheme.
+        return
+    if scheme != CANDIDATE_ALIAS_SCHEME:
+        raise ReleaseError(f"unsupported candidate alias scheme {scheme!r}")
+    expected = candidate_image_alias(
+        plan.get("source_sha"), plan.get("run_id"), plan.get("run_attempt")
+    )
+    for image in plan.get("image_matrix", []):
+        if not isinstance(image, dict) or image.get("candidate_tag") != expected:
+            raise ReleaseError("candidate image alias does not bind source SHA, run ID, and run attempt")
 
 
 def read_version(path: Path) -> str:
@@ -484,12 +512,11 @@ def make_plan(
     run_id: str,
     root: Path,
     catalogue: dict[str, Any] | None = None,
+    *,
+    run_attempt: str = "1",
 ) -> dict[str, Any]:
     selected = parse_targets(selected_targets)
-    if not SHA.fullmatch(master_sha):
-        raise ReleaseError("master_sha must be a full lowercase commit SHA")
-    if not run_id.isdigit():
-        raise ReleaseError("run_id must be numeric")
+    candidate_tag = candidate_image_alias(master_sha, run_id, run_attempt)
 
     versions = repository_versions(root, targets)
     metadata = {
@@ -521,7 +548,7 @@ def make_plan(
                     **image,
                     "target": target,
                     "version": version,
-                    "candidate_tag": master_sha,
+                    "candidate_tag": candidate_tag,
                 }
                 for image in definition["images"]
             )
@@ -731,7 +758,9 @@ def make_plan(
     plan = {
         "schema_version": 3,
         "candidate_workflow": "release-candidate.yml",
+        "candidate_alias_scheme": CANDIDATE_ALIAS_SCHEME,
         "run_id": run_id,
+        "run_attempt": run_attempt,
         "source_sha": master_sha,
         "targets": selected,
         "releases": releases,
@@ -856,6 +885,7 @@ def asset_records(directory: Path) -> list[dict[str, Any]]:
 
 
 def validate_candidate_assets(plan: dict[str, Any], assets: Path) -> None:
+    validate_candidate_aliases(plan)
     if plan["image_matrix"]:
         expected = {item["name"]: item for item in plan["image_matrix"]}
         discovered: set[str] = set()
@@ -921,15 +951,19 @@ def assemble_evidence(plan: dict[str, Any], assets: Path) -> dict[str, Any]:
     records = asset_records(assets)
     if not records:
         raise ReleaseError("candidate has no recorded assets")
+    candidate = {
+        "workflow": plan["candidate_workflow"],
+        "run_id": plan["run_id"],
+        "source_sha": plan["source_sha"],
+        "targets": plan["targets"],
+        "releases": plan["releases"],
+    }
+    for field in ("candidate_alias_scheme", "run_attempt"):
+        if field in plan:
+            candidate[field] = plan[field]
     return {
         "schema_version": 3,
-        "candidate": {
-            "workflow": plan["candidate_workflow"],
-            "run_id": plan["run_id"],
-            "source_sha": plan["source_sha"],
-            "targets": plan["targets"],
-            "releases": plan["releases"],
-        },
+        "candidate": candidate,
         "tested_with": plan["tested_with"],
         "validation": {"status": "passed"},
         "plan_sha256": hashlib.sha256((compact(plan) + "\n").encode()).hexdigest(),
@@ -952,7 +986,11 @@ def verify_candidate(directory: Path) -> dict[str, Any]:
     if evidence.get("assets") != actual:
         raise ReleaseError("candidate assets do not match recorded checksums")
     candidate = evidence.get("candidate", {})
-    for field in ("run_id", "source_sha", "targets", "releases"):
+    fields = ["run_id", "source_sha", "targets", "releases"]
+    fields.extend(
+        field for field in ("candidate_alias_scheme", "run_attempt") if field in plan
+    )
+    for field in fields:
         if candidate.get(field) != plan.get(field):
             raise ReleaseError(f"candidate evidence {field} does not match plan")
     validate_candidate_assets(plan, assets)
@@ -1000,6 +1038,7 @@ def build_parser() -> argparse.ArgumentParser:
     plan.add_argument("--targets", required=True)
     plan.add_argument("--master-sha", required=True)
     plan.add_argument("--run-id", required=True)
+    plan.add_argument("--run-attempt", required=True)
     plan.add_argument("--output", type=Path, required=True)
     plan.add_argument("--github-output", type=Path)
     evidence = sub.add_parser("evidence")
@@ -1030,7 +1069,14 @@ def main() -> int:
         elif args.command == "outputs":
             write_github_outputs(args.github_output, load_json(args.plan))
         elif args.command == "plan":
-            plan = make_plan(targets, args.targets, args.master_sha, args.run_id, root)
+            plan = make_plan(
+                targets,
+                args.targets,
+                args.master_sha,
+                args.run_id,
+                root,
+                run_attempt=args.run_attempt,
+            )
             args.output.write_text(compact(plan) + "\n", encoding="utf-8")
             print(compact(plan))
             output = args.github_output

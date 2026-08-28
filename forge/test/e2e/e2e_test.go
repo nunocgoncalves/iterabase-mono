@@ -377,7 +377,7 @@ spec:
   workspaceTools: false
 YAML`, repository, tag, state.runID, state.runID, state.runID, state.runID, state.runID, state.runID, state.runID)
 	mustSSHOutput(t, sc, manifest)
-	mustSSHOutput(t, sc, "sudo k3s kubectl wait -n iterabase-system --for=jsonpath='{.status.ready}'=true agentpool/forge-storage-pool --timeout=10m")
+	waitForManagedAgentPoolReady(t, sc, 10*time.Minute)
 	status := strings.TrimSpace(mustSSHOutput(t, sc, `sudo k3s kubectl get agentpool forge-storage-pool -n iterabase-system -o jsonpath='{.status.readyReplicas}|{.status.conditions[?(@.type=="StorageReady")].reason}'`))
 	if status != "2|StorageReady" {
 		t.Fatalf("managed AgentPool readiness = %q, want 2|StorageReady", status)
@@ -387,6 +387,39 @@ YAML`, repository, tag, state.runID, state.runID, state.runID, state.runID, stat
 	if state.agentPoolPVCUID == "" || len(strings.Fields(state.initialWorkerPodUID)) != 2 {
 		t.Fatalf("managed AgentPool identities incomplete: pvc=%q workers=%q", state.agentPoolPVCUID, state.initialWorkerPodUID)
 	}
+}
+
+func waitForManagedAgentPoolReady(t *testing.T, client *ssh.Client, timeout time.Duration) {
+	t.Helper()
+	command := fmt.Sprintf("sudo k3s kubectl wait -n iterabase-system --for=jsonpath='{.status.ready}'=true agentpool/forge-storage-pool --timeout=%s", timeout)
+	output, err := sshOutput(client, command)
+	if err == nil {
+		return
+	}
+
+	diagnostics, diagnosticsErr := sshOutput(client, `{
+  echo '=== AgentPool ==='
+  sudo k3s kubectl get agentpool forge-storage-pool -n iterabase-system -o yaml || true
+  echo '=== workers and claim ==='
+  sudo k3s kubectl get pods -n iterabase-system -l platform.iterabase.com/agentpool=forge-storage-pool -o wide || true
+  sudo k3s kubectl get pvc forge-storage-pool-sandbox -n iterabase-system -o wide || true
+  pv=$(sudo k3s kubectl get pvc forge-storage-pool-sandbox -n iterabase-system -o jsonpath='{.spec.volumeName}' 2>/dev/null || true)
+  if [ -n "$pv" ]; then
+    sudo k3s kubectl get pv "$pv" -o wide || true
+    volume=$(sudo k3s kubectl get pv "$pv" -o jsonpath='{.spec.csi.volumeHandle}' 2>/dev/null || true)
+    if [ -n "$volume" ]; then
+      sudo k3s kubectl get volumes.longhorn.io "$volume" -n longhorn-system -o custom-columns=NAME:.metadata.name,STATE:.status.state,ROBUSTNESS:.status.robustness,NODE:.status.currentNodeID || true
+      sudo k3s kubectl get pods -n longhorn-system -l longhorn.io/component=share-manager -o wide | grep -E "(^NAME|$volume)" || true
+    fi
+  fi
+  echo '=== recent storage and worker events ==='
+  sudo k3s kubectl get events -n iterabase-system --sort-by=.metadata.creationTimestamp | tail -100 || true
+  sudo k3s kubectl get events -n longhorn-system --sort-by=.metadata.creationTimestamp | tail -100 || true
+} 2>&1`)
+	if diagnosticsErr != nil {
+		diagnostics += "\ncollect AgentPool timeout diagnostics: " + diagnosticsErr.Error()
+	}
+	t.Fatalf("managed AgentPool did not become Ready within %s: %v\n%s\n%s", timeout, err, output, diagnostics)
 }
 
 func exerciseManagedShareManagerFailureStage(t *testing.T, state *digitalOceanCPUState) {
@@ -439,7 +472,7 @@ func assertManagedStorageRecoveryStage(t *testing.T, state *digitalOceanCPUState
 		t.Fatalf("ssh dial %s: %v", state.ip, err)
 	}
 	defer sc.Close()
-	mustSSHOutput(t, sc, "sudo k3s kubectl wait -n iterabase-system --for=jsonpath='{.status.ready}'=true agentpool/forge-storage-pool --timeout=10m")
+	waitForManagedAgentPoolReady(t, sc, 10*time.Minute)
 	identity := strings.TrimSpace(mustSSHOutput(t, sc, `sudo k3s kubectl get pvc forge-storage-pool-sandbox -n iterabase-system -o jsonpath='{.metadata.uid}'`))
 	if identity != state.agentPoolPVCUID {
 		t.Fatalf("storage recovery replaced the AgentPool PVC: before=%s after=%s", state.agentPoolPVCUID, identity)
