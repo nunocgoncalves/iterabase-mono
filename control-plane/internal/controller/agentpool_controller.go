@@ -239,6 +239,7 @@ func (r *AgentPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			return ctrl.Result{}, err
 		}
 		if hadWorkers {
+			storage.ReplacementPending = true
 			storage.Message += "; workers were removed to stop scheduling credit, and recovery requires healthy storage plus fresh workers without automatic turn/effect replay"
 		}
 		_ = r.patchStatus(ctx, &pool, false, 0, storage.Message, false, &storage)
@@ -256,9 +257,13 @@ func (r *AgentPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	readyReplicas := r.countReadyWorkers(ctx, &pool)
 	storage = r.assessAgentPoolStorage(ctx, &pool)
 	if !storage.Ready {
-		if storageWasOperationallyReady(&pool) || !storage.CanMount {
+		wasOperationallyReady := storageWasOperationallyReady(&pool)
+		if wasOperationallyReady || !storage.CanMount {
 			if err := r.quiesceWorkers(ctx, &pool); err != nil {
 				return ctrl.Result{}, err
+			}
+			if wasOperationallyReady || readyReplicas > 0 {
+				storage.ReplacementPending = true
 			}
 			readyReplicas = 0
 			storage.Reason = storageReasonRecoveryPending
@@ -267,7 +272,9 @@ func (r *AgentPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		_ = r.patchStatus(ctx, &pool, false, readyReplicas, storage.Message, false, &storage)
 		return ctrl.Result{RequeueAfter: healthRequeueInterval}, nil
 	}
-	if storage.Mode == storageModeManagedLonghorn && (readyReplicas > 0 || storageWasOperationallyReady(&pool)) {
+	replacementPending := storageWorkerReplacementPending(&pool)
+	verifyAttachedBackend := readyReplicas > 0 || (storageWasOperationallyReady(&pool) && !replacementPending)
+	if storage.Mode == storageModeManagedLonghorn && verifyAttachedBackend {
 		if failure := r.managedLonghornVolumeHealth(ctx, storage.VolumeHandle, true); failure != nil {
 			failure.Mode = storage.Mode
 			failure.ClassName = storage.ClassName
@@ -278,6 +285,7 @@ func (r *AgentPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			}
 			failure.Reason = storageReasonRecoveryPending
 			failure.Message += "; workers were removed and no turn/effect will be replayed automatically"
+			failure.ReplacementPending = true
 			_ = r.patchStatus(ctx, &pool, false, 0, failure.Message, false, failure)
 			return ctrl.Result{RequeueAfter: healthRequeueInterval}, nil
 		}
@@ -1097,11 +1105,13 @@ func podIsReady(p *corev1.Pod) bool {
 
 func (r *AgentPoolReconciler) patchStatus(ctx context.Context, pool *v1alpha1.AgentPool, ready bool, readyReplicas int32, message string, recordObserved bool, storage ...*agentPoolStorageAssessment) error {
 	wasOperationallyReady := storageWasOperationallyReady(pool)
+	replacementPending := storageWorkerReplacementPending(pool)
 	previousObservedGeneration := pool.Status.ObservedGeneration
 	base := pool.DeepCopy()
 	pool.Status.Ready = ready
 	pool.Status.ReadyReplicas = readyReplicas
 	storageReady := false
+	markReplacementPending := false
 	if len(storage) > 0 && storage[0] != nil {
 		condition := metav1.Condition{
 			Type:               storageConditionReady,
@@ -1115,8 +1125,10 @@ func (r *AgentPoolReconciler) patchStatus(ctx context.Context, pool *v1alpha1.Ag
 			storageReady = true
 		}
 		meta.SetStatusCondition(&pool.Status.Conditions, condition)
+		markReplacementPending = storage[0].ReplacementPending
 	}
 	operationallyReadyNow := ready && readyReplicas > 0 && storageReady
+	setStorageWorkerReplacementCondition(pool, replacementPending, markReplacementPending, operationallyReadyNow)
 	operationalCondition := meta.FindStatusCondition(pool.Status.Conditions, storageConditionOperationalReadinessReached)
 	if (wasOperationallyReady || operationallyReadyNow) &&
 		(operationalCondition == nil || operationalCondition.Status != metav1.ConditionTrue) {
@@ -1142,6 +1154,28 @@ func (r *AgentPoolReconciler) patchStatus(ctx context.Context, pool *v1alpha1.Ag
 	}
 	pool.Status.Message = message
 	return r.Status().Patch(ctx, pool, client.MergeFrom(base))
+}
+
+func setStorageWorkerReplacementCondition(pool *v1alpha1.AgentPool, replacementPending, markPending, operationallyReady bool) {
+	if markPending {
+		replacementPending = true
+		meta.SetStatusCondition(&pool.Status.Conditions, metav1.Condition{
+			Type:               storageConditionWorkerReplacementPending,
+			Status:             metav1.ConditionTrue,
+			Reason:             storageReasonRecoveryPending,
+			Message:            "workers affected by storage loss were removed; keep scheduling closed while healthy storage attaches to fresh replacement workers",
+			ObservedGeneration: pool.Generation,
+		})
+	}
+	if operationallyReady && replacementPending {
+		meta.SetStatusCondition(&pool.Status.Conditions, metav1.Condition{
+			Type:               storageConditionWorkerReplacementPending,
+			Status:             metav1.ConditionFalse,
+			Reason:             storageReasonFreshWorkersReady,
+			Message:            "fresh replacement workers reached Ready after attached backend and share-manager health verification",
+			ObservedGeneration: pool.Generation,
+		})
+	}
 }
 
 // SetupWithManager registers the reconciler and watches owned
