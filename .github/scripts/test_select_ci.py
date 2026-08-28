@@ -132,6 +132,7 @@ class ChangedPathCollectionFixtures(unittest.TestCase):
             "FORGE_E2E_RWX_STORAGE_CHART_ARCHIVE",
             "FORGE_E2E_SOURCE_IMAGE_ARCHIVE",
             "CONTROL_PLANE_IMAGE_REPO",
+            "TOOL_RUNNER_IMAGE_REPO",
             "HARNESS_IMAGE_REPO",
             "docker build --platform linux/amd64",
             "docker save --output",

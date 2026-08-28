@@ -154,6 +154,12 @@ func candidateOverlayValues(t *testing.T) string {
 	toolRunner := imageValues(
 		"TOOL_RUNNER_IMAGE_REPO", "TOOL_RUNNER_IMAGE_TAG", toolRunnerDigestEnv, "      ",
 	)
+	if sourceReference := exactSourceImageReference(t, "TOOL_RUNNER_IMAGE_REPO", "TOOL_RUNNER_IMAGE_TAG"); sourceReference != "" {
+		if toolRunner != "" {
+			t.Fatal("exact source image archive and tool-runner registry digest fixture are mutually exclusive")
+		}
+		toolRunner = fmt.Sprintf("      repository: %q\n      tag: %q\n", os.Getenv("TOOL_RUNNER_IMAGE_REPO"), os.Getenv("TOOL_RUNNER_IMAGE_TAG"))
+	}
 	inference := imageValues(
 		"INFERENCE_GATEWAY_IMAGE_REPO", "INFERENCE_GATEWAY_IMAGE_TAG", inferenceGatewayDigestEnv, "    ",
 	)
@@ -248,14 +254,18 @@ func TestCandidateOverlayValuesSelectImportedExactSourceImages(t *testing.T) {
 	t.Setenv("ITERABASE_E2E_SOURCE_SHA", sourceSHA)
 	t.Setenv("CONTROL_PLANE_IMAGE_REPO", "localhost/iterabase/control-plane")
 	t.Setenv("CONTROL_PLANE_IMAGE_TAG", sourceSHA)
+	t.Setenv("TOOL_RUNNER_IMAGE_REPO", "localhost/iterabase/control-plane-tool-runner")
+	t.Setenv("TOOL_RUNNER_IMAGE_TAG", sourceSHA)
 	t.Setenv("HARNESS_IMAGE_REPO", "localhost/iterabase/control-plane-harness")
 	t.Setenv("HARNESS_IMAGE_TAG", sourceSHA)
 	t.Setenv(controlPlaneDigestEnv, "")
+	t.Setenv(toolRunnerDigestEnv, "")
 
 	values := candidateOverlayValues(t)
 	for _, expected := range []string{
 		"mode: managed-longhorn",
 		"repository: \"localhost/iterabase/control-plane\"",
+		"repository: \"localhost/iterabase/control-plane-tool-runner\"",
 		"tag: \"" + sourceSHA + "\"",
 	} {
 		if !strings.Contains(values, expected) {

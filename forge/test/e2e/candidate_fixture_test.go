@@ -89,10 +89,13 @@ func assertCandidateImageDigests(t *testing.T, cluster *remotecluster.Cluster, n
 	}
 }
 
-func assertExactSourceControlPlaneImage(t *testing.T, cluster *remotecluster.Cluster, namespace string) {
+func assertExactSourceRuntimeImages(t *testing.T, cluster *remotecluster.Cluster, namespace string) {
 	t.Helper()
-	expected := exactSourceImageReference(t, "CONTROL_PLANE_IMAGE_REPO", "CONTROL_PLANE_IMAGE_TAG")
-	if expected == "" {
+	expected := []string{
+		exactSourceImageReference(t, "CONTROL_PLANE_IMAGE_REPO", "CONTROL_PLANE_IMAGE_TAG"),
+		exactSourceImageReference(t, "TOOL_RUNNER_IMAGE_REPO", "TOOL_RUNNER_IMAGE_TAG"),
+	}
+	if expected[0] == "" {
 		return
 	}
 	waitForCandidateControlPlaneReady(t, cluster, namespace, candidateControlPlaneReadyTimeout)
@@ -110,24 +113,30 @@ func assertExactSourceControlPlaneImage(t *testing.T, cluster *remotecluster.Clu
 	}
 	raw := cluster.Kubectl(t, "get", "pods", "-n", namespace, "-l", "app.kubernetes.io/name=control-plane", "-o", "json")
 	if err := json.Unmarshal([]byte(raw), &pods); err != nil {
-		t.Fatalf("decode exact source control-plane image identities: %v", err)
+		t.Fatalf("decode exact source runtime image identities: %v", err)
 	}
-	for _, pod := range pods.Items {
-		specs := append(pod.Spec.Containers, pod.Spec.InitContainers...)
-		statuses := append(pod.Status.ContainerStatuses, pod.Status.InitContainerStatuses...)
-		for _, spec := range specs {
-			if spec.Image != expected {
-				continue
-			}
-			for _, status := range statuses {
-				if status.Name == spec.Name && strings.Contains(status.ImageID, "sha256:") {
-					t.Logf("verified exact source control-plane request %s and runtime image ID %s", expected, status.ImageID)
-					return
+	for _, wanted := range expected {
+		found := false
+		for _, pod := range pods.Items {
+			specs := append(pod.Spec.Containers, pod.Spec.InitContainers...)
+			statuses := append(pod.Status.ContainerStatuses, pod.Status.InitContainerStatuses...)
+			for _, spec := range specs {
+				if spec.Image != wanted {
+					continue
+				}
+				for _, status := range statuses {
+					if status.Name == spec.Name && strings.Contains(status.ImageID, "sha256:") {
+						found = true
+						t.Logf("verified exact source request %s and runtime image ID %s", wanted, status.ImageID)
+						break
+					}
 				}
 			}
 		}
+		if !found {
+			t.Fatalf("no running container requested exact source image %s with an immutable runtime image ID", wanted)
+		}
 	}
-	t.Fatalf("no running control-plane container requested exact source image %s with an immutable runtime image ID", expected)
 }
 
 func waitForCandidateControlPlaneReady(t *testing.T, cluster *remotecluster.Cluster, namespace string, timeout time.Duration) {

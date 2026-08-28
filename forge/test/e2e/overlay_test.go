@@ -55,7 +55,7 @@ func runOverlayStage(t *testing.T, state *digitalOceanCPUState) {
 	} else {
 		assertCandidateImageDigests(t, candidateCluster, "iterabase-system",
 			controlPlaneDigestEnv, inferenceGatewayDigestEnv, toolRunnerDigestEnv)
-		assertExactSourceControlPlaneImage(t, candidateCluster, "iterabase-system")
+		assertExactSourceRuntimeImages(t, candidateCluster, "iterabase-system")
 	}
 	if state.managedRWX {
 		assertManagedLonghornInternalTLS(t, candidateCluster, state.runID)

@@ -91,6 +91,7 @@ func prepareExactSourceImages(t *testing.T, ip, keyPath string) {
 		return
 	}
 	controlPlaneImage := exactSourceImageReference(t, "CONTROL_PLANE_IMAGE_REPO", "CONTROL_PLANE_IMAGE_TAG")
+	toolRunnerImage := exactSourceImageReference(t, "TOOL_RUNNER_IMAGE_REPO", "TOOL_RUNNER_IMAGE_TAG")
 	harnessImage := exactSourceImageReference(t, "HARNESS_IMAGE_REPO", "HARNESS_IMAGE_TAG")
 
 	client, err := sshDial(ip, keyPath)
@@ -102,11 +103,11 @@ func prepareExactSourceImages(t *testing.T, ip, keyPath string) {
 	transferRWXFixture(t, client, archive, remote)
 	mustSSHOutput(t, client, "sudo k3s ctr images import "+candidateShellQuote(remote))
 	images := mustSSHOutput(t, client, "sudo k3s ctr images list -q")
-	for _, expected := range []string{controlPlaneImage, harnessImage} {
+	for _, expected := range []string{controlPlaneImage, toolRunnerImage, harnessImage} {
 		if !strings.Contains("\n"+images+"\n", "\n"+expected+"\n") {
 			t.Fatalf("exact source image %s was not imported into k3s containerd:\n%s", expected, images)
 		}
 	}
 	mustSSHOutput(t, client, "rm -f "+candidateShellQuote(remote))
-	t.Logf("imported exact source control-plane and harness images for %s", os.Getenv("ITERABASE_E2E_SOURCE_SHA"))
+	t.Logf("imported exact source control-plane, tool-runner, and harness images for %s", os.Getenv("ITERABASE_E2E_SOURCE_SHA"))
 }

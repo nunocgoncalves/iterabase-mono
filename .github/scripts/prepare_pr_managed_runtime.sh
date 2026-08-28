@@ -51,8 +51,10 @@ if [[ "$runtime_mode" == "with-source-images" ]]; then
   source_sha="$(git -C "$root" rev-parse HEAD)"
   source_date="$(git -C "$root" show -s --format=%cI HEAD)"
   control_plane_repository=localhost/iterabase/control-plane
+  tool_runner_repository=localhost/iterabase/control-plane-tool-runner
   harness_repository=localhost/iterabase/control-plane-harness
   control_plane_image="$control_plane_repository:$source_sha"
+  tool_runner_image="$tool_runner_repository:$source_sha"
   harness_image="$harness_repository:$source_sha"
   source_image_archive="$candidate_dir/exact-source-images-$source_sha.tar"
 
@@ -64,10 +66,15 @@ if [[ "$runtime_mode" == "with-source-images" ]]; then
     "$root/control-plane"
   docker build --platform linux/amd64 \
     --build-arg VERSION="$source_sha" \
+    --tag "$tool_runner_image" \
+    --file "$root/control-plane/tool-runner/Dockerfile" \
+    "$root/control-plane/tool-runner"
+  docker build --platform linux/amd64 \
+    --build-arg VERSION="$source_sha" \
     --tag "$harness_image" \
     --file "$root/control-plane/harness/Dockerfile" \
     "$root/control-plane/harness"
-  docker save --output "$source_image_archive" "$control_plane_image" "$harness_image"
+  docker save --output "$source_image_archive" "$control_plane_image" "$tool_runner_image" "$harness_image"
   runtime_artifacts+=("$source_image_archive")
 fi
 
@@ -97,6 +104,8 @@ PY
     printf 'FORGE_E2E_SOURCE_IMAGE_ARCHIVE=%s\n' "$source_image_archive"
     printf 'CONTROL_PLANE_IMAGE_REPO=%s\n' "$control_plane_repository"
     printf 'CONTROL_PLANE_IMAGE_TAG=%s\n' "$source_sha"
+    printf 'TOOL_RUNNER_IMAGE_REPO=%s\n' "$tool_runner_repository"
+    printf 'TOOL_RUNNER_IMAGE_TAG=%s\n' "$source_sha"
     printf 'HARNESS_IMAGE_REPO=%s\n' "$harness_repository"
     printf 'HARNESS_IMAGE_TAG=%s\n' "$source_sha"
   fi
