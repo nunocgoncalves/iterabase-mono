@@ -145,11 +145,12 @@ func candidateControlPlaneDeploymentsReady(deployments []appsv1.Deployment) (boo
 			}
 		}
 		ready := desired > 0 && deployment.Status.ObservedGeneration >= deployment.Generation &&
+			deployment.Status.UpdatedReplicas == desired && deployment.Status.Replicas == desired &&
 			deployment.Status.AvailableReplicas >= desired && available
 		allReady = allReady && ready
-		states = append(states, fmt.Sprintf("%s ready=%t desired=%d available=%d observed=%d generation=%d",
-			deployment.Name, ready, desired, deployment.Status.AvailableReplicas,
-			deployment.Status.ObservedGeneration, deployment.Generation))
+		states = append(states, fmt.Sprintf("%s ready=%t desired=%d total=%d updated=%d available=%d observed=%d generation=%d",
+			deployment.Name, ready, desired, deployment.Status.Replicas, deployment.Status.UpdatedReplicas,
+			deployment.Status.AvailableReplicas, deployment.Status.ObservedGeneration, deployment.Generation))
 	}
 	return allReady, strings.Join(states, "; ")
 }
@@ -161,6 +162,8 @@ func TestCandidateControlPlaneDeploymentsReady(t *testing.T) {
 		Spec:       appsv1.DeploymentSpec{Replicas: &replicas},
 		Status: appsv1.DeploymentStatus{
 			ObservedGeneration: 2,
+			Replicas:           1,
+			UpdatedReplicas:    1,
 			AvailableReplicas:  1,
 			Conditions: []appsv1.DeploymentCondition{{
 				Type: appsv1.DeploymentAvailable, Status: corev1.ConditionTrue,
@@ -175,6 +178,18 @@ func TestCandidateControlPlaneDeploymentsReady(t *testing.T) {
 	ok, state = candidateControlPlaneDeploymentsReady([]appsv1.Deployment{ready})
 	if !ok || !strings.Contains(state, "ready=true") {
 		t.Fatalf("ready deployment state = %t %q", ok, state)
+	}
+	oldReplicaSetAvailable := ready.DeepCopy()
+	oldReplicaSetAvailable.Status.UpdatedReplicas = 0
+	ok, state = candidateControlPlaneDeploymentsReady([]appsv1.Deployment{*oldReplicaSetAvailable})
+	if ok || !strings.Contains(state, "updated=0") {
+		t.Fatalf("old ReplicaSet availability state = %t %q", ok, state)
+	}
+	rolling := ready.DeepCopy()
+	rolling.Status.Replicas = 2
+	ok, state = candidateControlPlaneDeploymentsReady([]appsv1.Deployment{*rolling})
+	if ok || !strings.Contains(state, "total=2") {
+		t.Fatalf("rolling Deployment state = %t %q", ok, state)
 	}
 	stale := ready.DeepCopy()
 	stale.Status.ObservedGeneration = 1

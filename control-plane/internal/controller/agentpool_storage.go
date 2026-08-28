@@ -8,6 +8,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
@@ -30,19 +31,22 @@ const (
 )
 
 const (
-	storageReasonClassMissing       = "StorageClassMissing"
-	storageReasonClassMismatch      = "StorageClassMismatch"
-	storageReasonConformancePending = "StorageConformancePending"
-	storageReasonConformanceFailed  = "StorageConformanceFailed"
-	storageReasonPVCProvisioning    = "PVCProvisioning"
-	storageReasonPVCExpansionFailed = "PVCExpansionFailed"
-	storageReasonPVCUnavailable     = "PVCUnavailable"
-	storageReasonMountRootUnsafe    = "MountRootUnsafe"
-	storageReasonBackendDegraded    = "BackendDegraded"
-	storageReasonShareManagerDown   = "ShareManagerUnavailable"
-	storageReasonCapacity           = "CapacityInsufficient"
-	storageReasonRecoveryPending    = "StorageRecoveryPending"
-	storageReasonReady              = "StorageReady"
+	storageReasonClassMissing                   = "StorageClassMissing"
+	storageReasonClassMismatch                  = "StorageClassMismatch"
+	storageReasonConformancePending             = "StorageConformancePending"
+	storageReasonConformanceFailed              = "StorageConformanceFailed"
+	storageReasonPVCProvisioning                = "PVCProvisioning"
+	storageReasonPVCExpansionFailed             = "PVCExpansionFailed"
+	storageReasonPVCUnavailable                 = "PVCUnavailable"
+	storageReasonMountRootUnsafe                = "MountRootUnsafe"
+	storageReasonBackendDegraded                = "BackendDegraded"
+	storageReasonShareManagerDown               = "ShareManagerUnavailable"
+	storageReasonCapacity                       = "CapacityInsufficient"
+	storageReasonRecoveryPending                = "StorageRecoveryPending"
+	storageReasonReady                          = "StorageReady"
+	storageReasonOperationalReadinessReached    = "ReadyWorkersObserved"
+	storageConditionReady                       = "StorageReady"
+	storageConditionOperationalReadinessReached = "OperationalReadinessReached"
 )
 
 type agentPoolStorageAssessment struct {
@@ -279,16 +283,22 @@ func containsAccessMode(modes []corev1.PersistentVolumeAccessMode, wanted corev1
 }
 
 // storageWasOperationallyReady distinguishes an established pool from initial
-// storage convergence. Storage predicates may become true before any worker has
-// mounted the RWX claim; that transient state must not trigger the post-readiness
-// fail-closed replacement path while Longhorn starts its first share-manager.
+// storage convergence. OperationalReadinessReached is a durable latch: once a
+// worker has been Ready with healthy storage, unrelated transient status updates
+// must not disarm the post-readiness fail-closed replacement path. The aggregate
+// fallback arms pre-HOR-523 pools on their next status patch.
 func storageWasOperationallyReady(pool *v1alpha1.AgentPool) bool {
+	for _, condition := range pool.Status.Conditions {
+		if condition.Type == storageConditionOperationalReadinessReached && condition.Status == metav1.ConditionTrue {
+			return true
+		}
+	}
 	if !pool.Status.Ready || pool.Status.ReadyReplicas == 0 {
 		return false
 	}
 	for _, condition := range pool.Status.Conditions {
-		if condition.Type == "StorageReady" {
-			return condition.Status == "True"
+		if condition.Type == storageConditionReady {
+			return condition.Status == metav1.ConditionTrue
 		}
 	}
 	return false
