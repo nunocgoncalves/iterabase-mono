@@ -92,6 +92,53 @@ func (c *workerDeleteFailureClient) Delete(ctx context.Context, obj client.Objec
 	return c.Client.Delete(ctx, obj, opts...)
 }
 
+type asynchronousPodDeleteClient struct {
+	client.Client
+	terminating map[client.ObjectKey]metav1.Time
+}
+
+func (c *asynchronousPodDeleteClient) Delete(ctx context.Context, obj client.Object, opts ...client.DeleteOption) error {
+	if _, ok := obj.(*corev1.Pod); !ok {
+		return c.Client.Delete(ctx, obj, opts...)
+	}
+	var pod corev1.Pod
+	key := client.ObjectKeyFromObject(obj)
+	if err := c.Client.Get(ctx, key, &pod); err != nil {
+		return err
+	}
+	if _, ok := c.terminating[key]; !ok {
+		c.terminating[key] = metav1.Now()
+	}
+	return nil
+}
+
+func (c *asynchronousPodDeleteClient) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if err := c.Client.Get(ctx, key, obj, opts...); err != nil {
+		return err
+	}
+	if pod, ok := obj.(*corev1.Pod); ok {
+		if timestamp, terminating := c.terminating[key]; terminating {
+			pod.DeletionTimestamp = &timestamp
+		}
+	}
+	return nil
+}
+
+func (c *asynchronousPodDeleteClient) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	if err := c.Client.List(ctx, list, opts...); err != nil {
+		return err
+	}
+	if pods, ok := list.(*corev1.PodList); ok {
+		for i := range pods.Items {
+			key := client.ObjectKeyFromObject(&pods.Items[i])
+			if timestamp, terminating := c.terminating[key]; terminating {
+				pods.Items[i].DeletionTimestamp = &timestamp
+			}
+		}
+	}
+	return nil
+}
+
 func TestAssessExternalRWXStorageRequiresLiveClassBoundConformance(t *testing.T) {
 	pool := validAgentPool("external-pool", "platform")
 	pool.Spec.CredentialBindings = nil
@@ -299,16 +346,24 @@ func TestReconcileManagedRWXEstablishedPoolQuiescesAndRecoversWithFreshWorkers(t
 		buildWorkerPod(pool, workerName(pool, 0), workerPodTemplateHash(pool, workerName(pool, 0))),
 		buildWorkerPod(pool, workerName(pool, 1), workerPodTemplateHash(pool, workerName(pool, 1))),
 	}
+	for _, worker := range workers {
+		worker.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
+	}
 	ca := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: pool.Spec.Identity.CASecretRef.Name, Namespace: pool.Namespace}}
 	objects = append(objects, pool, volume, workers[0], workers[1], ca)
 	r := storageTestReconciler(t, objects...)
+	baseClient := r.Client
+	asyncClient := &asynchronousPodDeleteClient{Client: baseClient, terminating: make(map[client.ObjectKey]metav1.Time)}
+	r.Client = asyncClient
+	r.APIReader = r.Client
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: pool.Name, Namespace: pool.Namespace}})
 	require.NoError(t, err)
 	for _, worker := range workers {
-		var removed corev1.Pod
-		err = r.Get(context.Background(), client.ObjectKeyFromObject(worker), &removed)
-		assert.True(t, apierrors.IsNotFound(err), "established workers must be quiesced after share-manager loss")
+		var terminating corev1.Pod
+		require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(worker), &terminating))
+		assert.False(t, terminating.DeletionTimestamp.IsZero(), "affected workers must enter asynchronous termination after share-manager loss")
+		assert.False(t, podIsReady(&terminating), "terminating Ready=True workers must not retain scheduling credit")
 	}
 	var got v1alpha1.AgentPool
 	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(pool), &got))
@@ -325,6 +380,38 @@ func TestReconcileManagedRWXEstablishedPoolQuiescesAndRecoversWithFreshWorkers(t
 	require.NotNil(t, replacementCondition)
 	assert.Equal(t, metav1.ConditionTrue, replacementCondition.Status)
 
+	shareManager := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "share-manager-pool-volume",
+			Namespace: managedLonghornNamespace,
+			Labels:    map[string]string{longhornShareManagerComponentKey: longhornShareManagerComponent},
+		},
+		Status: corev1.PodStatus{Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}},
+	}
+	require.NoError(t, r.Create(context.Background(), shareManager))
+	result, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: pool.Name, Namespace: pool.Namespace}})
+	require.NoError(t, err)
+	assert.Equal(t, healthRequeueInterval, result.RequeueAfter)
+	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(pool), &got))
+	assert.False(t, got.Status.Ready, "terminating affected workers must not reopen the pool after backend recovery")
+	assert.Zero(t, got.Status.ReadyReplicas)
+	replacementCondition = meta.FindStatusCondition(got.Status.Conditions, storageConditionWorkerReplacementPending)
+	require.NotNil(t, replacementCondition)
+	assert.Equal(t, metav1.ConditionTrue, replacementCondition.Status)
+	for _, worker := range workers {
+		var terminating corev1.Pod
+		require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(worker), &terminating))
+		require.Len(t, terminating.Status.Conditions, 1)
+		assert.Equal(t, corev1.ConditionTrue, terminating.Status.Conditions[0].Status, "asynchronous deletion may preserve the old Ready condition")
+		require.NoError(t, baseClient.Delete(context.Background(), &terminating))
+		delete(asyncClient.terminating, client.ObjectKeyFromObject(worker))
+		var removed corev1.Pod
+		assert.True(t, apierrors.IsNotFound(r.Get(context.Background(), client.ObjectKeyFromObject(worker), &removed)))
+	}
+	var recoveredShareManager corev1.Pod
+	require.NoError(t, baseClient.Get(context.Background(), client.ObjectKeyFromObject(shareManager), &recoveredShareManager))
+	require.NoError(t, baseClient.Delete(context.Background(), &recoveredShareManager))
+
 	detachedVolume := &unstructured.Unstructured{}
 	detachedVolume.SetAPIVersion("longhorn.io/v1beta2")
 	detachedVolume.SetKind("Volume")
@@ -332,7 +419,7 @@ func TestReconcileManagedRWXEstablishedPoolQuiescesAndRecoversWithFreshWorkers(t
 	require.NoError(t, unstructured.SetNestedField(detachedVolume.Object, "detached", "status", "state"))
 	require.NoError(t, r.Update(context.Background(), detachedVolume))
 
-	result, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: pool.Name, Namespace: pool.Namespace}})
+	result, err = r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: pool.Name, Namespace: pool.Namespace}})
 	require.NoError(t, err)
 	assert.Equal(t, healthRequeueInterval, result.RequeueAfter)
 	for _, worker := range workers {

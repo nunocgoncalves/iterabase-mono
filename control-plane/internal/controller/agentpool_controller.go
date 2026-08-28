@@ -1093,8 +1093,13 @@ func isDesiredWorker(pool *v1alpha1.AgentPool, name string) bool {
 	return false
 }
 
-// podIsReady reports whether a pod has a Ready condition True.
+// podIsReady reports whether a non-terminating pod has a Ready condition True.
+// Kubernetes may preserve Ready=True during asynchronous deletion; those pods
+// must never restore AgentPool scheduling credit or satisfy backend recovery.
 func podIsReady(p *corev1.Pod) bool {
+	if !p.DeletionTimestamp.IsZero() {
+		return false
+	}
 	for _, c := range p.Status.Conditions {
 		if c.Type == corev1.PodReady {
 			return c.Status == corev1.ConditionTrue
