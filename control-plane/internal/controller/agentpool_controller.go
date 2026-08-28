@@ -1096,12 +1096,15 @@ func podIsReady(p *corev1.Pod) bool {
 }
 
 func (r *AgentPoolReconciler) patchStatus(ctx context.Context, pool *v1alpha1.AgentPool, ready bool, readyReplicas int32, message string, recordObserved bool, storage ...*agentPoolStorageAssessment) error {
+	wasOperationallyReady := storageWasOperationallyReady(pool)
+	previousObservedGeneration := pool.Status.ObservedGeneration
 	base := pool.DeepCopy()
 	pool.Status.Ready = ready
 	pool.Status.ReadyReplicas = readyReplicas
+	storageReady := false
 	if len(storage) > 0 && storage[0] != nil {
 		condition := metav1.Condition{
-			Type:               "StorageReady",
+			Type:               storageConditionReady,
 			Status:             metav1.ConditionFalse,
 			Reason:             storage[0].Reason,
 			Message:            storage[0].Message,
@@ -1109,8 +1112,25 @@ func (r *AgentPoolReconciler) patchStatus(ctx context.Context, pool *v1alpha1.Ag
 		}
 		if storage[0].Ready {
 			condition.Status = metav1.ConditionTrue
+			storageReady = true
 		}
 		meta.SetStatusCondition(&pool.Status.Conditions, condition)
+	}
+	operationallyReadyNow := ready && readyReplicas > 0 && storageReady
+	operationalCondition := meta.FindStatusCondition(pool.Status.Conditions, storageConditionOperationalReadinessReached)
+	if (wasOperationallyReady || operationallyReadyNow) &&
+		(operationalCondition == nil || operationalCondition.Status != metav1.ConditionTrue) {
+		observedGeneration := previousObservedGeneration
+		if operationallyReadyNow || observedGeneration == 0 {
+			observedGeneration = pool.Generation
+		}
+		meta.SetStatusCondition(&pool.Status.Conditions, metav1.Condition{
+			Type:               storageConditionOperationalReadinessReached,
+			Status:             metav1.ConditionTrue,
+			Reason:             storageReasonOperationalReadinessReached,
+			Message:            "at least one worker reached Ready while storage was healthy; later storage loss remains fail-closed until fresh workers replace the affected set",
+			ObservedGeneration: observedGeneration,
+		})
 	}
 	// ObservedGeneration is advanced only on definitive outcomes: a successful
 	// reconcile or a structural validation rejection (no retry until the spec

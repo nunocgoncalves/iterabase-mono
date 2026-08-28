@@ -197,8 +197,12 @@ func TestManagedRWXStorageRequiresReadyShareManagerWhenAttached(t *testing.T) {
 	assert.Nil(t, r.managedLonghornVolumeHealth(context.Background(), "pool-volume", true))
 }
 
-func TestStorageWasOperationallyReadyRequiresReadyWorkers(t *testing.T) {
-	condition := metav1.Condition{Type: "StorageReady", Status: metav1.ConditionTrue, Reason: storageReasonReady}
+func TestStorageWasOperationallyReadyUsesDurableMarkerAndLegacyAggregate(t *testing.T) {
+	storageReady := metav1.Condition{Type: storageConditionReady, Status: metav1.ConditionTrue, Reason: storageReasonReady}
+	operationalReadinessReached := metav1.Condition{
+		Type: storageConditionOperationalReadinessReached, Status: metav1.ConditionTrue,
+		Reason: storageReasonOperationalReadinessReached,
+	}
 	tests := []struct {
 		name          string
 		ready         bool
@@ -206,10 +210,11 @@ func TestStorageWasOperationallyReadyRequiresReadyWorkers(t *testing.T) {
 		conditions    []metav1.Condition
 		want          bool
 	}{
-		{name: "storage predicates only", conditions: []metav1.Condition{condition}},
-		{name: "scaled to zero", ready: true, conditions: []metav1.Condition{condition}},
+		{name: "storage predicates only", conditions: []metav1.Condition{storageReady}},
+		{name: "scaled to zero", ready: true, conditions: []metav1.Condition{storageReady}},
 		{name: "workers without storage", ready: true, readyReplicas: 2},
-		{name: "operational", ready: true, readyReplicas: 2, conditions: []metav1.Condition{condition}, want: true},
+		{name: "legacy operational aggregate", ready: true, readyReplicas: 2, conditions: []metav1.Condition{storageReady}, want: true},
+		{name: "durable marker after transient status", conditions: []metav1.Condition{storageReady, operationalReadinessReached}, want: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -308,10 +313,80 @@ func TestReconcileManagedRWXEstablishedPoolStillQuiescesShareManagerLoss(t *test
 	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(pool), &got))
 	assert.False(t, got.Status.Ready)
 	assert.Zero(t, got.Status.ReadyReplicas)
-	condition := meta.FindStatusCondition(got.Status.Conditions, "StorageReady")
+	condition := meta.FindStatusCondition(got.Status.Conditions, storageConditionReady)
 	require.NotNil(t, condition)
 	assert.Equal(t, metav1.ConditionFalse, condition.Status)
 	assert.Equal(t, storageReasonRecoveryPending, condition.Reason)
+	operationalCondition := meta.FindStatusCondition(got.Status.Conditions, storageConditionOperationalReadinessReached)
+	require.NotNil(t, operationalCondition)
+	assert.Equal(t, metav1.ConditionTrue, operationalCondition.Status)
+}
+
+func TestReconcileManagedRWXEstablishedPoolKeepsFailClosedAfterTransientStatus(t *testing.T) {
+	pool := validAgentPool("managed-pool", "platform")
+	pool.UID = types.UID("pool-uid")
+	pool.Finalizers = []string{agentPoolFinalizer}
+	pool.Generation = 1
+	pool.Spec.CredentialBindings = nil
+	pool.Spec.GatewayGrants = nil
+	pool.Spec.Sandbox.StorageClassName = managedLonghornStorageClass
+	pool.Status.Ready = true
+	pool.Status.ReadyReplicas = 2
+	pool.Status.ObservedGeneration = 1
+	pool.Status.Conditions = []metav1.Condition{{
+		Type: storageConditionReady, Status: metav1.ConditionTrue, Reason: storageReasonReady,
+		ObservedGeneration: 1,
+	}}
+
+	objects := storageTestObjects(pool, storageModeManagedLonghorn, managedLonghornStorageClass, managedLonghornProvisioner)
+	volume := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "longhorn.io/v1beta2", "kind": "Volume",
+		"metadata": map[string]any{"name": "pool-volume", "namespace": managedLonghornNamespace},
+		"status":   map[string]any{"robustness": "healthy", "state": "attached"},
+	}}
+	workers := []*corev1.Pod{
+		buildWorkerPod(pool, workerName(pool, 0), workerPodTemplateHash(pool, workerName(pool, 0))),
+		buildWorkerPod(pool, workerName(pool, 1), workerPodTemplateHash(pool, workerName(pool, 1))),
+	}
+	objects = append(objects, pool, volume, workers[0], workers[1])
+	r := storageTestReconciler(t, objects...)
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Name: pool.Name, Namespace: pool.Namespace}}
+
+	result, err := r.Reconcile(context.Background(), request)
+	require.NoError(t, err)
+	assert.Equal(t, healthRequeueInterval, result.RequeueAfter)
+	var transient v1alpha1.AgentPool
+	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(pool), &transient))
+	assert.False(t, transient.Status.Ready)
+	assert.Zero(t, transient.Status.ReadyReplicas)
+	assert.Contains(t, transient.Status.Message, "dependency:")
+	operationalCondition := meta.FindStatusCondition(transient.Status.Conditions, storageConditionOperationalReadinessReached)
+	require.NotNil(t, operationalCondition)
+	assert.Equal(t, metav1.ConditionTrue, operationalCondition.Status)
+	assert.Equal(t, int64(1), operationalCondition.ObservedGeneration)
+
+	require.NoError(t, r.Create(context.Background(), &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: pool.Spec.Identity.CASecretRef.Name, Namespace: pool.Namespace},
+	}))
+	result, err = r.Reconcile(context.Background(), request)
+	require.NoError(t, err)
+	assert.Equal(t, healthRequeueInterval, result.RequeueAfter)
+	for _, worker := range workers {
+		var removed corev1.Pod
+		err = r.Get(context.Background(), client.ObjectKeyFromObject(worker), &removed)
+		assert.True(t, apierrors.IsNotFound(err), "established workers must be quiesced after transient status and share-manager loss")
+	}
+	var got v1alpha1.AgentPool
+	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(pool), &got))
+	assert.False(t, got.Status.Ready)
+	assert.Zero(t, got.Status.ReadyReplicas)
+	condition := meta.FindStatusCondition(got.Status.Conditions, storageConditionReady)
+	require.NotNil(t, condition)
+	assert.Equal(t, metav1.ConditionFalse, condition.Status)
+	assert.Equal(t, storageReasonRecoveryPending, condition.Reason)
+	operationalCondition = meta.FindStatusCondition(got.Status.Conditions, storageConditionOperationalReadinessReached)
+	require.NotNil(t, operationalCondition)
+	assert.Equal(t, metav1.ConditionTrue, operationalCondition.Status)
 }
 
 func TestEnsurePVCRefusesShrinkWithoutRecreation(t *testing.T) {
