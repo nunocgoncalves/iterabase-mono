@@ -385,13 +385,14 @@ YAML`, repository, tag, state.runID, state.runID, state.runID, state.runID, stat
 	// removes either pod during Longhorn's initial unknown/detached window, the
 	// subsequent identity comparison fails even if replacement pods converge.
 	mustSSHOutput(t, sc, `sudo k3s kubectl wait -n iterabase-system --for=create pod/forge-storage-pool-worker-0 pod/forge-storage-pool-worker-1 --timeout=3m`)
+	state.initialWorkerPodUIDs = managedAgentPoolWorkerUIDs(t, sc)
+	mustSSHOutput(t, sc, `sudo k3s kubectl wait -n iterabase-system --for=jsonpath='{.status.phase}'=Bound pvc/forge-storage-pool-sandbox --timeout=3m`)
 	claim := strings.TrimSpace(mustSSHOutput(t, sc, `sudo k3s kubectl get pvc forge-storage-pool-sandbox -n iterabase-system -o jsonpath='{.metadata.uid}|{.status.phase}'`))
 	claimParts := strings.Split(claim, "|")
 	if len(claimParts) != 2 || claimParts[0] == "" || claimParts[1] != "Bound" {
 		t.Fatalf("managed AgentPool initial claim identity/status = %q, want non-empty UID|Bound", claim)
 	}
 	state.agentPoolPVCUID = claimParts[0]
-	state.initialWorkerPodUIDs = managedAgentPoolWorkerUIDs(t, sc)
 
 	waitForManagedAgentPoolReady(t, sc, 10*time.Minute)
 	readyWorkerUIDs := managedAgentPoolWorkerUIDs(t, sc)
