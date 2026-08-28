@@ -24,10 +24,17 @@ class ReleaseContractTests(unittest.TestCase):
     def setUp(self) -> None:
         self.targets = release.load_json(ROOT / "release" / "targets.json")
         self.sha = "a" * 40
+        self.candidate_tag = f"{self.sha}-123-2"
 
     def plan(self, targets: str) -> dict:
         return release.make_plan(
-            self.targets, targets, self.sha, "123", ROOT, self.catalogue
+            self.targets,
+            targets,
+            self.sha,
+            "123",
+            ROOT,
+            self.catalogue,
+            run_attempt="2",
         )
 
     def check_availability(
@@ -257,9 +264,49 @@ class ReleaseContractTests(unittest.TestCase):
             ["control-plane", "control-plane-harness", "control-plane-tool-runner"],
         )
         self.assertEqual([item["chart"] for item in plan["chart_matrix"]], ["control-plane"])
+        self.assertEqual(plan["candidate_alias_scheme"], release.CANDIDATE_ALIAS_SCHEME)
+        self.assertEqual(plan["run_attempt"], "2")
+        self.assertEqual(
+            {item["candidate_tag"] for item in plan["image_matrix"]},
+            {self.candidate_tag},
+        )
+        self.assertTrue(all("ghcr.io/nunocgoncalves/" in item["repository"] for item in plan["image_matrix"]))
         self.assertTrue(plan["forge"])
         self.assertTrue(plan["real_machine"])
         self.assertEqual(len(plan["kind_matrix"]), 5)
+
+    def test_candidate_alias_changes_by_run_and_attempt_without_changing_package(self) -> None:
+        first = self.plan("control-plane")
+        next_attempt = release.make_plan(
+            self.targets,
+            "control-plane",
+            self.sha,
+            "123",
+            ROOT,
+            self.catalogue,
+            run_attempt="3",
+        )
+        next_run = release.make_plan(
+            self.targets,
+            "control-plane",
+            self.sha,
+            "124",
+            ROOT,
+            self.catalogue,
+            run_attempt="1",
+        )
+        self.assertEqual(
+            [item["repository"] for item in first["image_matrix"]],
+            [item["repository"] for item in next_attempt["image_matrix"]],
+        )
+        self.assertEqual(
+            {item["candidate_tag"] for item in next_attempt["image_matrix"]},
+            {f"{self.sha}-123-3"},
+        )
+        self.assertEqual(
+            {item["candidate_tag"] for item in next_run["image_matrix"]},
+            {f"{self.sha}-124-1"},
+        )
 
     def test_single_forge_target_remains_supported(self) -> None:
         plan = self.plan("forge")
@@ -331,6 +378,16 @@ class ReleaseContractTests(unittest.TestCase):
             release.make_plan(self.targets, "forge", "short", "1", ROOT)
         with self.assertRaises(release.ReleaseError):
             release.make_plan(self.targets, "forge", self.sha, "run", ROOT)
+        for attempt in ("0", "attempt"):
+            with self.subTest(attempt=attempt), self.assertRaises(release.ReleaseError):
+                release.make_plan(
+                    self.targets,
+                    "forge",
+                    self.sha,
+                    "1",
+                    ROOT,
+                    run_attempt=attempt,
+                )
 
     def test_bundle_uses_candidates_for_selected_members_and_published_baselines_otherwise(self) -> None:
         plan = self.plan("control-plane,control-plane-chart,forge")
@@ -427,7 +484,7 @@ class ReleaseContractTests(unittest.TestCase):
                 "name": "inference-gateway",
                 "target": "inference-gateway",
                 "repository": "ghcr.io/nunocgoncalves/inference-gateway",
-                "candidate_tag": self.sha,
+                "candidate_tag": self.candidate_tag,
                 "version": "0.2.7",
                 "digest": "sha256:" + "1" * 64,
                 "source_sha": self.sha,
@@ -448,6 +505,8 @@ class ReleaseContractTests(unittest.TestCase):
             verified = release.verify_candidate(root)
             self.assertEqual(verified["source_sha"], self.sha)
             self.assertEqual(verified["targets"], ["inference-gateway"])
+            self.assertEqual(evidence["candidate"]["candidate_alias_scheme"], release.CANDIDATE_ALIAS_SCHEME)
+            self.assertEqual(evidence["candidate"]["run_attempt"], "2")
 
             metadata["source_sha"] = "b" * 40
             (images / "candidate-inference-gateway.json").write_text(
@@ -464,7 +523,7 @@ class ReleaseContractTests(unittest.TestCase):
             "name": "inference-gateway",
             "target": "inference-gateway",
             "repository": "ghcr.io/nunocgoncalves/inference-gateway",
-            "candidate_tag": self.sha,
+            "candidate_tag": self.candidate_tag,
             "version": "0.2.7",
             "digest": "sha256:" + "1" * 64,
             "source_sha": self.sha,
@@ -862,7 +921,12 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertNotIn("iterabase-release-candidates", candidate)
         self.assertNotIn("compatibility.json", candidate + promotion)
         self.assertNotIn("Reuse an existing immutable full-SHA candidate", candidate)
-        self.assertIn("Reject an existing unverified full-SHA alias", candidate)
+        self.assertIn("Reject an existing immutable run-scoped alias", candidate)
+        self.assertIn("CANDIDATE_TAG: ${{ matrix.candidate_tag }}", candidate)
+        self.assertIn('--run-attempt "$RUN_ATTEMPT"', candidate)
+        self.assertNotIn("gh api --method DELETE", candidate)
+        self.assertIn("candidate_tag=\"$(jq -r '.candidate_tag'", promotion)
+        self.assertIn('imagetools inspect "$repository:$candidate_tag"', promotion)
         self.assertIn("Reject existing semantic artifacts before candidate validation", candidate)
         self.assertIn("check_release_availability.sh candidate-plan.json", candidate)
         self.assertIn("resolve_release_baselines.sh candidate-plan.json", candidate)

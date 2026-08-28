@@ -52,11 +52,13 @@ Dispatch **Release candidate** from `master` with:
 The workflow trims and validates the explicit target set, rejects empty, unknown, or duplicate members, and canonicalizes it in repository target order. CI may suggest affected targets, but it does not silently choose release intent. Every selected version is inferred from source; callers cannot supply conflicting versions.
 
 1. Preflight validates the repository release contract, exact source membership, target set, version authorities, production-tag uniqueness, and absence of every planned semantic image/chart identity. Existing semantic artifacts or an unavailable registry fail before builds and validation begin.
-2. Every selected target is built exactly once. Image targets push canonical digests plus immutable full-SHA aliases in existing GHCR packages. Chart and Forge archives remain Actions artifacts; candidate runs create no persistent run-specific package namespace.
+2. Every selected target is built exactly once. Image targets push canonical digests plus immutable run-scoped aliases in the existing GHCR packages. The alias format is `<source-sha>-<run-id>-<run-attempt>` and the exact value is recorded in the plan and image metadata separately from the source SHA and digest. Re-dispatches and GitHub run attempts therefore cannot collide. Existing aliases are never deleted or retargeted, and no run-specific package name or candidate package namespace is created. Chart and Forge archives remain Actions artifacts.
 3. Validation consumes all selected candidates together. For example, a selected control-plane chart installs the selected control-plane image digest, and selected Forge validation runs with both. Shared owner, chart, Kind, and real-machine suites are deduplicated into one union.
 4. Any unselected dependency used by validation resolves to an explicit, reviewed, already-published baseline. Candidate evidence distinguishes selected candidate identities from baseline dependencies; it never treats a bumped but unpublished repository version as an available baseline.
 5. A generated bundle bill of materials records source SHA, selected target/version pairs, exact artifact identities, published baselines, native chart dependencies, fixture inputs, and validation result. There is no hand-maintained global compatibility manifest.
 6. The final `release-candidate` Actions artifact contains the canonical plan, evidence, exact chart/Forge files, checksums, SBOMs, and image digest metadata. It is retained for 90 days pending promotion or expiry.
+
+Real-machine assertions remain bounded rather than relying on fixed timing. Exact-image verification waits up to 10 minutes for every control-plane Deployment to report its current generation Available before inspecting requested digests and CRI image IDs. Managed AgentPool readiness retains its 10-minute bound; a timeout emits the AgentPool condition/message, worker/PVC/PV/Longhorn volume/share-manager state, and recent platform/storage events. When the mandatory GPU gate exhausts all offered DigitalOcean regions/sizes, the candidate remains failed and is classified as blocked by an evidenced external-capacity dependency. It is retried when capacity returns; it is never converted to a skip under `FORGE_E2E_REQUIRE_CAPACITY=true`.
 
 ## Promotion flow
 
@@ -72,7 +74,7 @@ Before approval, the workflow verifies:
 
 The publication job then waits once for founder approval in the protected `release` environment. After approval it re-verifies the bundle and preflights **every** semantic image, chart, protected tag, and GitHub Release destination before the first mutation. It then:
 
-- adds semantic image tags to the tested digests;
+- verifies each exact tested run-scoped alias again, then adds semantic image tags to those digests;
 - pushes unchanged chart archives;
 - creates or verifies each protected namespaced Git tag at the exact source SHA; and
 - creates one GitHub Release per selected target, attaching that target's exact candidate files plus the shared bundle plan and evidence.
@@ -126,4 +128,4 @@ Release-only implementation changes are handled by these focused contract checks
 
 ## Rollback
 
-No overlay deploys automatically. Consumers continue pinning immutable versions. Disable or revert the manual workflows to stop publication. Never overwrite or delete an immutable production release to roll back behavior; publish a corrected version and update consumers deliberately. If publication stops between bundle members, resume the exact verified candidate rather than rebuilding it.
+No overlay deploys automatically. Consumers continue pinning immutable versions. Disable or revert the manual workflows to stop publication. Never overwrite, retarget, or delete an immutable candidate alias or production release to roll back behavior; publish a corrected candidate/version and update consumers deliberately. If publication stops between bundle members, resume the exact verified candidate rather than rebuilding it.

@@ -138,8 +138,8 @@ jobs:
             repository="$(jq -r '.repository' "$metadata")"
             version="$(jq -r '.version' "$metadata")"
             digest="$(jq -r '.digest' "$metadata")"
-            source_sha="$(jq -r '.source_sha' "$metadata")"
-            test "$(docker buildx imagetools inspect "$repository:$source_sha" --format '{{json .Manifest.Digest}}' | tr -d '"')" = "$digest"
+            candidate_tag="$(jq -r '.candidate_tag' "$metadata")"
+            test "$(docker buildx imagetools inspect "$repository:$candidate_tag" --format '{{json .Manifest.Digest}}' | tr -d '"')" = "$digest"
             existing="$(docker buildx imagetools inspect "$repository:$version" --format '{{json .Manifest.Digest}}' 2>/dev/null | tr -d '"' || true)"
             if [ -n "$existing" ]; then
               test "$existing" = "$digest"

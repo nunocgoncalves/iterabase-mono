@@ -214,7 +214,7 @@ func (r *AgentPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 				Message:   mutationErr.message,
 				ClassName: pool.Spec.Sandbox.StorageClassName,
 			}
-			hadWorkers := r.countReadyWorkers(ctx, &pool) > 0 || storageWasReady(&pool)
+			hadWorkers := r.countReadyWorkers(ctx, &pool) > 0 || storageWasOperationallyReady(&pool)
 			if hadWorkers {
 				assessment.Message += "; scheduling credit was removed before worker quiescing, and recovery requires a reviewed storage migration or a corrected declarative value without automatic turn/effect replay"
 			}
@@ -234,7 +234,7 @@ func (r *AgentPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 	storage := r.assessAgentPoolStorage(ctx, &pool)
 	if !storage.CanMount {
-		hadWorkers := r.countReadyWorkers(ctx, &pool) > 0 || storageWasReady(&pool)
+		hadWorkers := r.countReadyWorkers(ctx, &pool) > 0 || storageWasOperationallyReady(&pool)
 		if err := r.quiesceWorkers(ctx, &pool); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -256,7 +256,7 @@ func (r *AgentPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	readyReplicas := r.countReadyWorkers(ctx, &pool)
 	storage = r.assessAgentPoolStorage(ctx, &pool)
 	if !storage.Ready {
-		if storageWasReady(&pool) || !storage.CanMount {
+		if storageWasOperationallyReady(&pool) || !storage.CanMount {
 			if err := r.quiesceWorkers(ctx, &pool); err != nil {
 				return ctrl.Result{}, err
 			}
@@ -267,7 +267,7 @@ func (r *AgentPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		_ = r.patchStatus(ctx, &pool, false, readyReplicas, storage.Message, false, &storage)
 		return ctrl.Result{RequeueAfter: healthRequeueInterval}, nil
 	}
-	if storage.Mode == storageModeManagedLonghorn && (readyReplicas > 0 || storageWasReady(&pool)) {
+	if storage.Mode == storageModeManagedLonghorn && (readyReplicas > 0 || storageWasOperationallyReady(&pool)) {
 		if failure := r.managedLonghornVolumeHealth(ctx, storage.VolumeHandle, true); failure != nil {
 			failure.Mode = storage.Mode
 			failure.ClassName = storage.ClassName

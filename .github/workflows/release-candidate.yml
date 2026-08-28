@@ -84,6 +84,7 @@ jobs:
           REQUESTED_TARGETS: ${{ inputs.targets }}
           REQUESTED_SHA: ${{ inputs.master_sha }}
           RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
           python3 .github/scripts/test_release.py
           python3 .github/scripts/release.py validate
@@ -91,6 +92,7 @@ jobs:
             --targets "$REQUESTED_TARGETS" \
             --master-sha "$REQUESTED_SHA" \
             --run-id "$RUN_ID" \
+            --run-attempt "$RUN_ATTEMPT" \
             --output candidate-plan.json \
             --github-output "$GITHUB_OUTPUT"
       - name: Reject existing protected production tags
@@ -252,14 +254,14 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Reject an existing unverified full-SHA alias
+      - name: Reject an existing immutable run-scoped alias
         env:
           REPOSITORY: ${{ matrix.repository }}
-          SOURCE_SHA: ${{ inputs.master_sha }}
+          CANDIDATE_TAG: ${{ matrix.candidate_tag }}
         run: |
-          existing="$(docker buildx imagetools inspect "$REPOSITORY:$SOURCE_SHA" --format '{{json .Manifest.Digest}}' 2>/dev/null | tr -d '"' || true)"
+          existing="$(docker buildx imagetools inspect "$REPOSITORY:$CANDIDATE_TAG" --format '{{json .Manifest.Digest}}' 2>/dev/null | tr -d '"' || true)"
           test -z "$existing" || {
-            echo "$REPOSITORY:$SOURCE_SHA already exists at $existing; refusing unverified candidate reuse" >&2
+            echo "$REPOSITORY:$CANDIDATE_TAG already exists at $existing; immutable candidate aliases are never reused or retargeted" >&2
             exit 1
           }
       - name: Build and push one canonical untagged digest
@@ -281,20 +283,20 @@ jobs:
           sbom: true
           cache-from: type=gha,scope=release-${{ matrix.name }}
           cache-to: type=gha,mode=max,scope=release-${{ matrix.name }}
-      - name: Create or verify immutable full-SHA alias
+      - name: Create immutable run-scoped candidate alias
         env:
           REPOSITORY: ${{ matrix.repository }}
-          SOURCE_SHA: ${{ inputs.master_sha }}
+          CANDIDATE_TAG: ${{ matrix.candidate_tag }}
           DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           test -n "$DIGEST"
-          existing="$(docker buildx imagetools inspect "$REPOSITORY:$SOURCE_SHA" --format '{{json .Manifest.Digest}}' 2>/dev/null | tr -d '"' || true)"
-          if [ -n "$existing" ]; then
-            test "$existing" = "$DIGEST"
-          else
-            docker buildx imagetools create --tag "$REPOSITORY:$SOURCE_SHA" "$REPOSITORY@$DIGEST"
-          fi
-          test "$(docker buildx imagetools inspect "$REPOSITORY:$SOURCE_SHA" --format '{{json .Manifest.Digest}}' | tr -d '"')" = "$DIGEST"
+          existing="$(docker buildx imagetools inspect "$REPOSITORY:$CANDIDATE_TAG" --format '{{json .Manifest.Digest}}' 2>/dev/null | tr -d '"' || true)"
+          test -z "$existing" || {
+            echo "$REPOSITORY:$CANDIDATE_TAG appeared at $existing during the build; refusing to retarget it" >&2
+            exit 1
+          }
+          docker buildx imagetools create --tag "$REPOSITORY:$CANDIDATE_TAG" "$REPOSITORY@$DIGEST"
+          test "$(docker buildx imagetools inspect "$REPOSITORY:$CANDIDATE_TAG" --format '{{json .Manifest.Digest}}' | tr -d '"')" = "$DIGEST"
       - name: Generate portable SPDX SBOM
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.20.6
         with:
@@ -375,7 +377,7 @@ jobs:
             --arg name '${{ matrix.name }}' \
             --arg target '${{ matrix.target }}' \
             --arg repository '${{ matrix.repository }}' \
-            --arg candidate_tag '${{ inputs.master_sha }}' \
+            --arg candidate_tag '${{ matrix.candidate_tag }}' \
             --arg version '${{ matrix.version }}' \
             --arg digest "$DIGEST" \
             --arg source_sha '${{ inputs.master_sha }}' \
