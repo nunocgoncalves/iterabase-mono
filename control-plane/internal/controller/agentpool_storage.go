@@ -43,21 +43,24 @@ const (
 	storageReasonShareManagerDown               = "ShareManagerUnavailable"
 	storageReasonCapacity                       = "CapacityInsufficient"
 	storageReasonRecoveryPending                = "StorageRecoveryPending"
+	storageReasonFreshWorkersReady              = "FreshWorkersReady"
 	storageReasonReady                          = "StorageReady"
 	storageReasonOperationalReadinessReached    = "ReadyWorkersObserved"
 	storageConditionReady                       = "StorageReady"
 	storageConditionOperationalReadinessReached = "OperationalReadinessReached"
+	storageConditionWorkerReplacementPending    = "StorageWorkerReplacementPending"
 )
 
 type agentPoolStorageAssessment struct {
-	Ready        bool
-	CanMount     bool
-	Reason       string
-	Message      string
-	Mode         string
-	ClassName    string
-	PVName       string
-	VolumeHandle string
+	Ready              bool
+	CanMount           bool
+	Reason             string
+	Message            string
+	Mode               string
+	ClassName          string
+	PVName             string
+	VolumeHandle       string
+	ReplacementPending bool
 }
 
 // assessAgentPoolStorage intentionally keeps the ordered fail-closed predicate
@@ -298,6 +301,18 @@ func storageWasOperationallyReady(pool *v1alpha1.AgentPool) bool {
 	}
 	for _, condition := range pool.Status.Conditions {
 		if condition.Type == storageConditionReady {
+			return condition.Status == metav1.ConditionTrue
+		}
+	}
+	return false
+}
+
+// storageWorkerReplacementPending distinguishes affected clients that must stay
+// quiesced from the fresh worker set that is allowed to drive a recovered RWX
+// volume from detached to attached before it can report Ready.
+func storageWorkerReplacementPending(pool *v1alpha1.AgentPool) bool {
+	for _, condition := range pool.Status.Conditions {
+		if condition.Type == storageConditionWorkerReplacementPending {
 			return condition.Status == metav1.ConditionTrue
 		}
 	}

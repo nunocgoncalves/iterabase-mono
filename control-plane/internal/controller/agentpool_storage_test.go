@@ -271,9 +271,10 @@ func TestReconcileManagedRWXInitialShareManagerStartupKeepsWorkers(t *testing.T)
 	assert.Equal(t, metav1.ConditionTrue, condition.Status)
 	assert.Equal(t, storageReasonReady, condition.Reason)
 	assert.Contains(t, got.Status.Message, "waiting for worker pods")
+	assert.Nil(t, meta.FindStatusCondition(got.Status.Conditions, storageConditionWorkerReplacementPending))
 }
 
-func TestReconcileManagedRWXEstablishedPoolStillQuiescesShareManagerLoss(t *testing.T) {
+func TestReconcileManagedRWXEstablishedPoolQuiescesAndRecoversWithFreshWorkers(t *testing.T) {
 	pool := validAgentPool("managed-pool", "platform")
 	pool.UID = types.UID("pool-uid")
 	pool.Finalizers = []string{agentPoolFinalizer}
@@ -320,6 +321,67 @@ func TestReconcileManagedRWXEstablishedPoolStillQuiescesShareManagerLoss(t *test
 	operationalCondition := meta.FindStatusCondition(got.Status.Conditions, storageConditionOperationalReadinessReached)
 	require.NotNil(t, operationalCondition)
 	assert.Equal(t, metav1.ConditionTrue, operationalCondition.Status)
+	replacementCondition := meta.FindStatusCondition(got.Status.Conditions, storageConditionWorkerReplacementPending)
+	require.NotNil(t, replacementCondition)
+	assert.Equal(t, metav1.ConditionTrue, replacementCondition.Status)
+
+	detachedVolume := &unstructured.Unstructured{}
+	detachedVolume.SetAPIVersion("longhorn.io/v1beta2")
+	detachedVolume.SetKind("Volume")
+	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(volume), detachedVolume))
+	require.NoError(t, unstructured.SetNestedField(detachedVolume.Object, "detached", "status", "state"))
+	require.NoError(t, r.Update(context.Background(), detachedVolume))
+
+	result, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: pool.Name, Namespace: pool.Namespace}})
+	require.NoError(t, err)
+	assert.Equal(t, healthRequeueInterval, result.RequeueAfter)
+	for _, worker := range workers {
+		var fresh corev1.Pod
+		require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(worker), &fresh), "fresh workers must remain while their mount drives detached backend recovery")
+	}
+	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(pool), &got))
+	assert.False(t, got.Status.Ready)
+	assert.Zero(t, got.Status.ReadyReplicas)
+	replacementCondition = meta.FindStatusCondition(got.Status.Conditions, storageConditionWorkerReplacementPending)
+	require.NotNil(t, replacementCondition)
+	assert.Equal(t, metav1.ConditionTrue, replacementCondition.Status)
+
+	result, err = r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: pool.Name, Namespace: pool.Namespace}})
+	require.NoError(t, err)
+	assert.Equal(t, healthRequeueInterval, result.RequeueAfter)
+	for _, worker := range workers {
+		var fresh corev1.Pod
+		require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(worker), &fresh), "replacement-pending state must survive repeated detached recovery reconciles")
+	}
+
+	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(volume), detachedVolume))
+	require.NoError(t, unstructured.SetNestedField(detachedVolume.Object, "attached", "status", "state"))
+	require.NoError(t, r.Update(context.Background(), detachedVolume))
+	require.NoError(t, r.Create(context.Background(), &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "share-manager-pool-volume",
+			Namespace: managedLonghornNamespace,
+			Labels:    map[string]string{longhornShareManagerComponentKey: longhornShareManagerComponent},
+		},
+		Status: corev1.PodStatus{Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}},
+	}))
+	for _, worker := range workers {
+		var fresh corev1.Pod
+		require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(worker), &fresh))
+		fresh.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
+		require.NoError(t, r.Status().Update(context.Background(), &fresh))
+	}
+
+	result, err = r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: pool.Name, Namespace: pool.Namespace}})
+	require.NoError(t, err)
+	assert.Equal(t, healthRequeueInterval, result.RequeueAfter)
+	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(pool), &got))
+	assert.True(t, got.Status.Ready)
+	assert.Equal(t, int32(2), got.Status.ReadyReplicas)
+	replacementCondition = meta.FindStatusCondition(got.Status.Conditions, storageConditionWorkerReplacementPending)
+	require.NotNil(t, replacementCondition)
+	assert.Equal(t, metav1.ConditionFalse, replacementCondition.Status)
+	assert.Equal(t, storageReasonFreshWorkersReady, replacementCondition.Reason)
 }
 
 func TestReconcileManagedRWXEstablishedPoolKeepsFailClosedAfterTransientStatus(t *testing.T) {
@@ -387,6 +449,9 @@ func TestReconcileManagedRWXEstablishedPoolKeepsFailClosedAfterTransientStatus(t
 	operationalCondition = meta.FindStatusCondition(got.Status.Conditions, storageConditionOperationalReadinessReached)
 	require.NotNil(t, operationalCondition)
 	assert.Equal(t, metav1.ConditionTrue, operationalCondition.Status)
+	replacementCondition := meta.FindStatusCondition(got.Status.Conditions, storageConditionWorkerReplacementPending)
+	require.NotNil(t, replacementCondition)
+	assert.Equal(t, metav1.ConditionTrue, replacementCondition.Status)
 }
 
 func TestEnsurePVCRefusesShrinkWithoutRecreation(t *testing.T) {
