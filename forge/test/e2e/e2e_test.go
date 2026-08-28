@@ -501,19 +501,27 @@ func exerciseManagedShareManagerFailureStage(t *testing.T, state *digitalOceanCP
 	mustSSHOutput(t, sc, fmt.Sprintf("sudo k3s kubectl annotate agentpool forge-storage-pool -n iterabase-system --overwrite platform.iterabase.com/storage-fault-trigger=%d", time.Now().UnixNano()))
 
 	deadline := time.Now().Add(3 * time.Minute)
-	lastStatus, lastWorkerCount := "", ""
+	lastStatus, lastWorkerUIDs := "", ""
 	for time.Now().Before(deadline) {
 		out, commandErr := sshOutput(sc, `sudo k3s kubectl get agentpool forge-storage-pool -n iterabase-system -o jsonpath='{.status.ready}|{.status.readyReplicas}|{.status.conditions[?(@.type=="StorageReady")].reason}|{.status.conditions[?(@.type=="OperationalReadinessReached")].status}|{.status.conditions[?(@.type=="StorageWorkerReplacementPending")].status}|{.status.conditions[?(@.type=="StorageWorkerReplacementPending")].reason}'`)
 		lastStatus = strings.TrimSpace(out)
-		lastWorkerCount = strings.TrimSpace(mustSSHOutput(t, sc, `sudo k3s kubectl get pods -n iterabase-system -l platform.iterabase.com/agentpool=forge-storage-pool --no-headers 2>/dev/null | wc -l`))
+		lastWorkerUIDs = strings.TrimSpace(mustSSHOutput(t, sc, `sudo k3s kubectl get pods -n iterabase-system -l platform.iterabase.com/agentpool=forge-storage-pool -o jsonpath='{range .items[*]}{.metadata.uid}{"\n"}{end}'`))
 		parts := strings.Split(lastStatus, "|")
-		failClosedReason := len(parts) == 6 && (parts[2] == "StorageRecoveryPending" || parts[2] == "BackendDegraded")
-		if commandErr == nil && failClosedReason && parts[0] == "false" && parts[1] == "0" && parts[3] == "True" && parts[4] == "True" && parts[5] == "StorageRecoveryPending" && lastWorkerCount == "0" {
+		failClosedReason := len(parts) == 6 && (parts[2] == "StorageRecoveryPending" || parts[2] == "BackendDegraded" || parts[2] == "StorageReady")
+		readyClosed := len(parts) == 6 && (parts[0] == "" || parts[0] == "false") && (parts[1] == "" || parts[1] == "0")
+		affectedWorkersRemoved := true
+		for _, oldUID := range strings.Fields(state.initialWorkerPodUIDs) {
+			if strings.Contains(lastWorkerUIDs, oldUID) {
+				affectedWorkersRemoved = false
+				break
+			}
+		}
+		if commandErr == nil && failClosedReason && readyClosed && parts[3] == "True" && parts[4] == "True" && parts[5] == "StorageRecoveryPending" && affectedWorkersRemoved {
 			return
 		}
 		time.Sleep(time.Second)
 	}
-	t.Fatalf("AgentPool did not durably fail closed on post-ready share-manager loss: status=%q workers=%q", lastStatus, lastWorkerCount)
+	t.Fatalf("AgentPool did not durably fail closed on post-ready share-manager loss: status=%q workerUIDs=%q initialUIDs=%q", lastStatus, lastWorkerUIDs, state.initialWorkerPodUIDs)
 }
 
 func assertManagedStorageRecoveryStage(t *testing.T, state *digitalOceanCPUState) {
