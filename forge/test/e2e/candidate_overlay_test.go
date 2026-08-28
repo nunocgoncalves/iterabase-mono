@@ -108,6 +108,22 @@ func prepareCandidateOverlay(t *testing.T, runID, ip, keyPath string) candidateO
 	return plan
 }
 
+func exactSourceImageReference(t *testing.T, repositoryEnv, tagEnv string) string {
+	t.Helper()
+	if os.Getenv(sourceImageArchiveEnv) == "" {
+		return ""
+	}
+	sourceSHA := os.Getenv("ITERABASE_E2E_SOURCE_SHA")
+	repository, tag := os.Getenv(repositoryEnv), os.Getenv(tagEnv)
+	if sourceSHA == "" || repository == "" || tag != sourceSHA {
+		t.Fatalf("%s requires non-empty source SHA/repository and %s equal to ITERABASE_E2E_SOURCE_SHA", sourceImageArchiveEnv, tagEnv)
+	}
+	if !strings.HasPrefix(repository, "localhost/") {
+		t.Fatalf("%s=%q must use the host-local imported-image namespace", repositoryEnv, repository)
+	}
+	return repository + ":" + tag
+}
+
 func candidateOverlayValues(t *testing.T) string {
 	t.Helper()
 	imageValues := func(repositoryEnv, tagEnv, digestEnv, prefix string) string {
@@ -129,6 +145,12 @@ func candidateOverlayValues(t *testing.T) string {
 	controlPlane := imageValues(
 		"CONTROL_PLANE_IMAGE_REPO", "CONTROL_PLANE_IMAGE_TAG", controlPlaneDigestEnv, "    ",
 	)
+	if sourceReference := exactSourceImageReference(t, "CONTROL_PLANE_IMAGE_REPO", "CONTROL_PLANE_IMAGE_TAG"); sourceReference != "" {
+		if controlPlane != "" {
+			t.Fatal("exact source image archive and registry digest fixture are mutually exclusive")
+		}
+		controlPlane = fmt.Sprintf("    repository: %q\n    tag: %q\n", os.Getenv("CONTROL_PLANE_IMAGE_REPO"), os.Getenv("CONTROL_PLANE_IMAGE_TAG"))
+	}
 	toolRunner := imageValues(
 		"TOOL_RUNNER_IMAGE_REPO", "TOOL_RUNNER_IMAGE_TAG", toolRunnerDigestEnv, "      ",
 	)
@@ -216,6 +238,32 @@ func TestCandidateOverlayValues(t *testing.T) {
 		if !strings.Contains(plan.values, expected) {
 			t.Fatalf("candidate values missing %q:\n%s", expected, plan.values)
 		}
+	}
+}
+
+func TestCandidateOverlayValuesSelectImportedExactSourceImages(t *testing.T) {
+	sourceSHA := strings.Repeat("c", 40)
+	t.Setenv(sourceImageArchiveEnv, "/tmp/exact-source-images.tar")
+	t.Setenv(storageChartArchiveEnv, "/tmp/rwx-storage-substrate.tgz")
+	t.Setenv("ITERABASE_E2E_SOURCE_SHA", sourceSHA)
+	t.Setenv("CONTROL_PLANE_IMAGE_REPO", "localhost/iterabase/control-plane")
+	t.Setenv("CONTROL_PLANE_IMAGE_TAG", sourceSHA)
+	t.Setenv("HARNESS_IMAGE_REPO", "localhost/iterabase/control-plane-harness")
+	t.Setenv("HARNESS_IMAGE_TAG", sourceSHA)
+	t.Setenv(controlPlaneDigestEnv, "")
+
+	values := candidateOverlayValues(t)
+	for _, expected := range []string{
+		"mode: managed-longhorn",
+		"repository: \"localhost/iterabase/control-plane\"",
+		"tag: \"" + sourceSHA + "\"",
+	} {
+		if !strings.Contains(values, expected) {
+			t.Fatalf("exact source values missing %q:\n%s", expected, values)
+		}
+	}
+	if got := exactSourceImageReference(t, "HARNESS_IMAGE_REPO", "HARNESS_IMAGE_TAG"); got != "localhost/iterabase/control-plane-harness:"+sourceSHA {
+		t.Fatalf("exact source harness reference = %q", got)
 	}
 }
 

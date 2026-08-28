@@ -151,12 +151,20 @@ jobs:
           go-version: 1.26.5
           cache-dependency-path: ${{ env.GO_CACHE_DEPENDENCIES }}
           cache-scope: e2e-digitalocean-cpu
+      - uses: ./.github/actions/setup-kubernetes-tools
+      - name: Package exact-head managed runtime and source images
+        run: >-
+          .github/scripts/prepare_pr_managed_runtime.sh
+          '${{ runner.temp }}/managed-cpu-runtime'
+          "$GITHUB_ENV"
+          with-source-images
       - name: Composed CPU E2E
         run: make test-e2e
         working-directory: forge
         env:
           DIGITALOCEAN_TOKEN: ${{ secrets.DIGITALOCEAN_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FORGE_E2E_REQUIRE_MANAGED_AGENTPOOL: "true"
           ITERABASE_E2E_FIXTURE_MODE: source
           ITERABASE_E2E_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           ITERABASE_E2E_SOURCE_INPUTS: ${{ github.workspace }}/forge/test/e2e/published-fixture.json

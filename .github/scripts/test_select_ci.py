@@ -110,6 +110,39 @@ class ChangedPathCollectionFixtures(unittest.TestCase):
                 self.assertNotIn("git diff --name-only", workflow)
                 self.assertIn(f"name: {workflow_name} / required", workflow)
 
+    def test_selected_pr_cpu_uses_exact_head_managed_agentpool_runtime(self) -> None:
+        workflow = (ROOT / ".github/workflows/e2e.yml").read_text()
+        job = workflow.split("  digitalocean-cpu:\n", 1)[1].split(
+            "\n  digitalocean-rwx-tls:\n", 1
+        )[0]
+        for contract in (
+            "needs.changes.outputs.forge_real_e2e == 'true'",
+            "ref: ${{ github.event.pull_request.head.sha || github.sha }}",
+            "./.github/actions/setup-kubernetes-tools",
+            ".github/scripts/prepare_pr_managed_runtime.sh",
+            "with-source-images",
+            'FORGE_E2E_REQUIRE_MANAGED_AGENTPOOL: "true"',
+            "ITERABASE_E2E_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}",
+        ):
+            self.assertIn(contract, job)
+        helper = (
+            ROOT / ".github/scripts/prepare_pr_managed_runtime.sh"
+        ).read_text()
+        for contract in (
+            "FORGE_E2E_RWX_STORAGE_CHART_ARCHIVE",
+            "FORGE_E2E_SOURCE_IMAGE_ARCHIVE",
+            "CONTROL_PLANE_IMAGE_REPO",
+            "HARNESS_IMAGE_REPO",
+            "docker build --platform linux/amd64",
+            "docker save --output",
+        ):
+            self.assertIn(contract, helper)
+        result = selection(["forge/test/e2e/e2e_test.go"])
+        self.assertTrue(result["forge_real_e2e"])
+        self.assertFalse(selection(["docs/source-authority.md"])["forge_real_e2e"])
+        required = workflow.split("  required:\n", 1)[1]
+        self.assertIn("- digitalocean-cpu", required)
+
     def test_pr_has_required_exact_head_managed_storage_internal_tls_job(self) -> None:
         workflow = (ROOT / ".github/workflows/e2e.yml").read_text()
         job = workflow.split("  digitalocean-rwx-tls:\n", 1)[1].split(

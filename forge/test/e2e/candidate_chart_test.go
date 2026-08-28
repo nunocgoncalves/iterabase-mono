@@ -4,16 +4,19 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
 const (
-	platformChartArchiveEnv  = "FORGE_E2E_PLATFORM_CHART_ARCHIVE"
-	substrateChartArchiveEnv = "FORGE_E2E_SUBSTRATE_CHART_ARCHIVE"
-	storageChartArchiveEnv   = "FORGE_E2E_RWX_STORAGE_CHART_ARCHIVE"
-	forceExternalStorageEnv  = "FORGE_E2E_FORCE_EXTERNAL_STORAGE"
-	requireManagedTLSEnv     = "FORGE_E2E_REQUIRE_MANAGED_TLS"
-	storageTLSOnlyEnv        = "FORGE_E2E_STORAGE_TLS_ONLY"
+	platformChartArchiveEnv    = "FORGE_E2E_PLATFORM_CHART_ARCHIVE"
+	substrateChartArchiveEnv   = "FORGE_E2E_SUBSTRATE_CHART_ARCHIVE"
+	storageChartArchiveEnv     = "FORGE_E2E_RWX_STORAGE_CHART_ARCHIVE"
+	forceExternalStorageEnv    = "FORGE_E2E_FORCE_EXTERNAL_STORAGE"
+	requireManagedTLSEnv       = "FORGE_E2E_REQUIRE_MANAGED_TLS"
+	storageTLSOnlyEnv          = "FORGE_E2E_STORAGE_TLS_ONLY"
+	sourceImageArchiveEnv      = "FORGE_E2E_SOURCE_IMAGE_ARCHIVE"
+	requireManagedAgentPoolEnv = "FORGE_E2E_REQUIRE_MANAGED_AGENTPOOL"
 )
 
 // prepareCandidateChart transfers the exact Actions-retained platform and
@@ -22,6 +25,7 @@ const (
 // bytes without publishing a persistent candidate package.
 func prepareCandidateChart(t *testing.T, ip, keyPath string) {
 	t.Helper()
+	prepareExactSourceImages(t, ip, keyPath)
 	platform := os.Getenv(platformChartArchiveEnv)
 	substrate := os.Getenv(substrateChartArchiveEnv)
 	storage := os.Getenv(storageChartArchiveEnv)
@@ -78,4 +82,31 @@ func prepareCandidateChart(t *testing.T, ip, keyPath string) {
 		}
 	})
 	t.Log("transferred exact platform, certificate, and managed-RWX substrate candidate archives to the real-machine host")
+}
+
+func prepareExactSourceImages(t *testing.T, ip, keyPath string) {
+	t.Helper()
+	archive := os.Getenv(sourceImageArchiveEnv)
+	if archive == "" {
+		return
+	}
+	controlPlaneImage := exactSourceImageReference(t, "CONTROL_PLANE_IMAGE_REPO", "CONTROL_PLANE_IMAGE_TAG")
+	harnessImage := exactSourceImageReference(t, "HARNESS_IMAGE_REPO", "HARNESS_IMAGE_TAG")
+
+	client, err := sshDial(ip, keyPath)
+	if err != nil {
+		t.Fatalf("dial source fixture host to transfer exact images: %v", err)
+	}
+	defer client.Close()
+	remote := filepath.Join("/tmp", filepath.Base(archive))
+	transferRWXFixture(t, client, archive, remote)
+	mustSSHOutput(t, client, "sudo k3s ctr images import "+candidateShellQuote(remote))
+	images := mustSSHOutput(t, client, "sudo k3s ctr images list -q")
+	for _, expected := range []string{controlPlaneImage, harnessImage} {
+		if !strings.Contains("\n"+images+"\n", "\n"+expected+"\n") {
+			t.Fatalf("exact source image %s was not imported into k3s containerd:\n%s", expected, images)
+		}
+	}
+	mustSSHOutput(t, client, "rm -f "+candidateShellQuote(remote))
+	t.Logf("imported exact source control-plane and harness images for %s", os.Getenv("ITERABASE_E2E_SOURCE_SHA"))
 }

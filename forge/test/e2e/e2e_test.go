@@ -122,6 +122,9 @@ func newDigitalOceanCPUStateForScenario(t *testing.T, scenario string) *digitalO
 	if os.Getenv(requireManagedTLSEnv) == "true" && !state.managedRWX {
 		t.Fatalf("mandatory managed-storage/internal-TLS evidence requires %s and forbids %s=true", storageChartArchiveEnv, forceExternalStorageEnv)
 	}
+	if os.Getenv(requireManagedAgentPoolEnv) == "true" && !state.managedRWX {
+		t.Fatalf("mandatory managed AgentPool evidence requires %s and forbids %s=true", storageChartArchiveEnv, forceExternalStorageEnv)
+	}
 	t.Logf("run %s (keep=%v managedRWX=%v)", state.runID, state.keep, state.managedRWX)
 	return state
 }
@@ -395,6 +398,7 @@ YAML`, repository, tag, state.runID, state.runID, state.runID, state.runID, stat
 	if readyWorkerUIDs != state.initialWorkerPodUIDs {
 		t.Fatalf("managed AgentPool churned initial workers during first attachment: initial=%q ready=%q", state.initialWorkerPodUIDs, readyWorkerUIDs)
 	}
+	assertManagedAgentPoolWorkerImage(t, sc, repository+":"+tag)
 	status := strings.TrimSpace(mustSSHOutput(t, sc, `sudo k3s kubectl get agentpool forge-storage-pool -n iterabase-system -o jsonpath='{.status.ready}|{.status.readyReplicas}|{.status.conditions[?(@.type=="StorageReady")].reason}|{.status.conditions[?(@.type=="OperationalReadinessReached")].status}|{.status.conditions[?(@.type=="StorageWorkerReplacementPending")].status}'`))
 	if status != "true|2|StorageReady|True|" {
 		t.Fatalf("managed AgentPool initial convergence = %q, want true|2|StorageReady|True| with no replacement cycle", status)
@@ -409,6 +413,20 @@ func managedAgentPoolWorkerUIDs(t *testing.T, client *ssh.Client) string {
 		t.Fatalf("managed AgentPool worker identities incomplete: %q", output)
 	}
 	return strings.Join(uids, "\n")
+}
+
+func assertManagedAgentPoolWorkerImage(t *testing.T, client *ssh.Client, expected string) {
+	t.Helper()
+	for _, pod := range []string{"forge-storage-pool-worker-0", "forge-storage-pool-worker-1"} {
+		identity := strings.TrimSpace(mustSSHOutput(t, client, fmt.Sprintf(
+			`sudo k3s kubectl get pod %s -n iterabase-system -o jsonpath='{.spec.containers[0].image}|{.status.containerStatuses[0].imageID}'`,
+			candidateShellQuote(pod),
+		)))
+		parts := strings.Split(identity, "|")
+		if len(parts) != 2 || parts[0] != expected || !strings.Contains(parts[1], "sha256:") {
+			t.Fatalf("managed AgentPool worker %s image identity=%q, want %s with immutable runtime image ID", pod, identity, expected)
+		}
+	}
 }
 
 func waitForManagedAgentPoolReady(t *testing.T, client *ssh.Client, timeout time.Duration) {

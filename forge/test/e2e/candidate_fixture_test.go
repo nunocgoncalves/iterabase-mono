@@ -89,6 +89,47 @@ func assertCandidateImageDigests(t *testing.T, cluster *remotecluster.Cluster, n
 	}
 }
 
+func assertExactSourceControlPlaneImage(t *testing.T, cluster *remotecluster.Cluster, namespace string) {
+	t.Helper()
+	expected := exactSourceImageReference(t, "CONTROL_PLANE_IMAGE_REPO", "CONTROL_PLANE_IMAGE_TAG")
+	if expected == "" {
+		return
+	}
+	waitForCandidateControlPlaneReady(t, cluster, namespace, candidateControlPlaneReadyTimeout)
+	var pods struct {
+		Items []struct {
+			Spec struct {
+				Containers     []candidateContainerSpec `json:"containers"`
+				InitContainers []candidateContainerSpec `json:"initContainers"`
+			} `json:"spec"`
+			Status struct {
+				ContainerStatuses     []candidateContainerStatus `json:"containerStatuses"`
+				InitContainerStatuses []candidateContainerStatus `json:"initContainerStatuses"`
+			} `json:"status"`
+		} `json:"items"`
+	}
+	raw := cluster.Kubectl(t, "get", "pods", "-n", namespace, "-l", "app.kubernetes.io/name=control-plane", "-o", "json")
+	if err := json.Unmarshal([]byte(raw), &pods); err != nil {
+		t.Fatalf("decode exact source control-plane image identities: %v", err)
+	}
+	for _, pod := range pods.Items {
+		specs := append(pod.Spec.Containers, pod.Spec.InitContainers...)
+		statuses := append(pod.Status.ContainerStatuses, pod.Status.InitContainerStatuses...)
+		for _, spec := range specs {
+			if spec.Image != expected {
+				continue
+			}
+			for _, status := range statuses {
+				if status.Name == spec.Name && strings.Contains(status.ImageID, "sha256:") {
+					t.Logf("verified exact source control-plane request %s and runtime image ID %s", expected, status.ImageID)
+					return
+				}
+			}
+		}
+	}
+	t.Fatalf("no running control-plane container requested exact source image %s with an immutable runtime image ID", expected)
+}
+
 func waitForCandidateControlPlaneReady(t *testing.T, cluster *remotecluster.Cluster, namespace string, timeout time.Duration) {
 	t.Helper()
 	restConfig, err := clientcmd.BuildConfigFromFlags("", cluster.Kubeconfig)
