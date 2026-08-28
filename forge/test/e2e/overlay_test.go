@@ -32,8 +32,9 @@ func runOverlayStage(t *testing.T, state *digitalOceanCPUState) {
 		t, state.runID, state.ip, state.privKeyPath, state.chartVersion, plan,
 	)
 	out := applyOnce(t, state.forgeBin, state.forgeHome, candidateConfig)
+	storageTLSOnly := os.Getenv(storageTLSOnlyEnv) == "true"
 	actionMarker := "action:     skip"
-	if os.Getenv(storageTLSOnlyEnv) == "true" {
+	if storageTLSOnly {
 		actionMarker = "action:     install"
 	}
 	markers := []string{actionMarker, "node ready: true", "certificate substrate applied: true",
@@ -46,8 +47,15 @@ func runOverlayStage(t *testing.T, state *digitalOceanCPUState) {
 	assertApplyMarkers(t, out, markers...)
 	t.Logf("apply output:\n%s", out)
 	candidateCluster := remotecluster.Use(t, filepath.Join(state.forgeHome, state.runID, "kubeconfig.yaml"))
-	assertCandidateImageDigests(t, candidateCluster, "iterabase-system",
-		controlPlaneDigestEnv, inferenceGatewayDigestEnv, toolRunnerDigestEnv)
+	if storageTLSOnly {
+		// This platform-chart-only scenario deliberately disables product
+		// workloads and proves the certificate/RWX companions. The complete CPU
+		// scenario owns exact product-image handoff for candidate bundles.
+		t.Log("storage/TLS-only fixture omits product-image handoff by design")
+	} else {
+		assertCandidateImageDigests(t, candidateCluster, "iterabase-system",
+			controlPlaneDigestEnv, inferenceGatewayDigestEnv, toolRunnerDigestEnv)
+	}
 	if state.managedRWX {
 		assertManagedLonghornInternalTLS(t, candidateCluster, state.runID)
 	}
