@@ -19,9 +19,9 @@ func TestE2E(t *testing.T) {
 		sharede2e.Define(sharede2e.Scenario[*digitalOceanCPUState]{
 			Metadata: forgeScenarioMetadata(
 				"digitalocean-cpu",
-				"Provisions a fresh CPU host and proves Forge bootstrap, exact-source managed Longhorn RWX prerequisites/conformance/persistence, internal-CA gRPC mTLS with negative rejection probes, migration, exact source/Flux handoff, secret transport, idempotent reconciliation, diagnostics, and cleanup.",
+				"Provisions a fresh CPU host and proves Forge bootstrap, exact-source managed Longhorn RWX initial AgentPool convergence and post-ready fresh-worker recovery, prerequisites/conformance/persistence, internal-CA gRPC mTLS with negative rejection probes, migration, exact source/Flux handoff, secret transport, idempotent reconciliation, diagnostics, and cleanup.",
 				sharede2e.TierF3,
-				[]string{"HOR-406", "HOR-469", "DES-HOR-424-01", "DES-HOR-469-01", "DES-HOR-469-02"},
+				[]string{"HOR-406", "HOR-469", "HOR-527", "DES-HOR-424-01", "DES-HOR-469-01", "DES-HOR-469-02"},
 				[]string{"forge", "iterabase-platform-chart"},
 				"test-e2e", 90, "cpu",
 			),

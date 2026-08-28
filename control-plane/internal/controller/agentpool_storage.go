@@ -39,6 +39,7 @@ const (
 	storageReasonPVCExpansionFailed             = "PVCExpansionFailed"
 	storageReasonPVCUnavailable                 = "PVCUnavailable"
 	storageReasonMountRootUnsafe                = "MountRootUnsafe"
+	storageReasonInitialConvergence             = "InitialStorageConvergence"
 	storageReasonBackendDegraded                = "BackendDegraded"
 	storageReasonShareManagerDown               = "ShareManagerUnavailable"
 	storageReasonCapacity                       = "CapacityInsufficient"
@@ -176,8 +177,7 @@ func (r *AgentPoolReconciler) assessAgentPoolStorage(ctx context.Context, pool *
 			assessment.Message = fmt.Sprintf("managed PV %s must use CSI driver %s and a non-empty volume handle", pv.Name, managedLonghornProvisioner)
 			return assessment
 		}
-		if failure := r.managedLonghornVolumeHealth(ctx, assessment.VolumeHandle, false); failure != nil {
-			failure.CanMount = false
+		if failure := r.managedLonghornVolumeHealth(ctx, pool, assessment.VolumeHandle, false); failure != nil {
 			failure.Mode = assessment.Mode
 			failure.ClassName = assessment.ClassName
 			failure.PVName = assessment.PVName
@@ -237,7 +237,7 @@ func (r *AgentPoolReconciler) storageConformance(ctx context.Context, class *sto
 	return nil, &agentPoolStorageAssessment{Reason: storageReasonConformancePending, Message: fmt.Sprintf("StorageClass %q has no %s live conformance attestation bound to class UID %s; run docs/architecture/validation/hor-424-rwx-conformance.sh", class.Name, storageContractVersion, class.UID)}
 }
 
-func (r *AgentPoolReconciler) managedLonghornVolumeHealth(ctx context.Context, volumeHandle string, requireAttached bool) *agentPoolStorageAssessment {
+func (r *AgentPoolReconciler) managedLonghornVolumeHealth(ctx context.Context, pool *v1alpha1.AgentPool, volumeHandle string, requireAttached bool) *agentPoolStorageAssessment {
 	volume := &unstructured.Unstructured{}
 	volume.SetAPIVersion("longhorn.io/v1beta2")
 	volume.SetKind("Volume")
@@ -246,6 +246,16 @@ func (r *AgentPoolReconciler) managedLonghornVolumeHealth(ctx context.Context, v
 	}
 	robustness, _, _ := unstructured.NestedString(volume.Object, "status", "robustness")
 	state, _, _ := unstructured.NestedString(volume.Object, "status", "state")
+	if robustness == "unknown" && state == "detached" && !storageWasOperationallyReady(pool) {
+		return &agentPoolStorageAssessment{
+			CanMount: true,
+			Reason:   storageReasonInitialConvergence,
+			Message: fmt.Sprintf(
+				"Longhorn volume %s/%s is in initial convergence with robustness=%q state=%q; retain the desired workers to drive first attachment while AgentPool readiness stays closed until the backend, share-manager, and workers are Ready",
+				managedLonghornNamespace, volumeHandle, robustness, state,
+			),
+		}
+	}
 	if robustness != "healthy" {
 		return &agentPoolStorageAssessment{Reason: storageReasonBackendDegraded, Message: fmt.Sprintf("Longhorn volume %s/%s robustness=%q state=%q; restore replica/node/disk capacity before replacing workers", managedLonghornNamespace, volumeHandle, robustness, state)}
 	}

@@ -320,8 +320,11 @@ Filesystem CSI PVC/PV with usable requested capacity, and—on managed
 Longhorn—a healthy volume and active share-manager once mounted. Stable
 `StorageReady` condition reasons identify class, conformance, PVC/expansion,
 mount-root, backend, share-manager, capacity, and recovery failures. Storage
-loss removes worker pods/scheduling credit; recovery waits for backend health
-and creates fresh workers without automatic turn/effect replay.
+loss after durable operational readiness removes worker pods/scheduling credit;
+the exact initial Longhorn `unknown`/`detached` bootstrap window instead retains
+the desired workers needed to drive first attachment while readiness stays
+closed. Established recovery waits for backend health and creates fresh workers
+without automatic turn/effect replay.
 
 `spec.workspaceTools` is the deny-by-default local-tool switch (ARCH-016):
 `false` exposes none; `true` exposes exactly `read`/`write`/`edit`/`bash`.

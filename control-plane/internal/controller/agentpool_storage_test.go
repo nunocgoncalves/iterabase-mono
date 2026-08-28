@@ -215,6 +215,34 @@ func TestAssessManagedRWXStorageRejectsDegradedBackend(t *testing.T) {
 	assert.Contains(t, assessment.Message, "replica/node/disk capacity")
 }
 
+func TestAssessManagedRWXUnknownDetachedIsInitialOnlyBeforeOperationalReadiness(t *testing.T) {
+	pool := validAgentPool("managed-pool", "platform")
+	pool.Spec.CredentialBindings = nil
+	pool.Spec.Sandbox.StorageClassName = managedLonghornStorageClass
+	objects := storageTestObjects(pool, storageModeManagedLonghorn, managedLonghornStorageClass, managedLonghornProvisioner)
+	objects = append(objects, &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "longhorn.io/v1beta2", "kind": "Volume",
+		"metadata": map[string]any{"name": "pool-volume", "namespace": managedLonghornNamespace},
+		"status":   map[string]any{"robustness": "unknown", "state": "detached"},
+	}})
+	r := storageTestReconciler(t, objects...)
+
+	assessment := r.assessAgentPoolStorage(context.Background(), pool)
+	assert.False(t, assessment.Ready)
+	assert.True(t, assessment.CanMount)
+	assert.Equal(t, storageReasonInitialConvergence, assessment.Reason)
+	assert.Contains(t, assessment.Message, "retain the desired workers")
+
+	pool.Status.Conditions = []metav1.Condition{{
+		Type: storageConditionOperationalReadinessReached, Status: metav1.ConditionTrue,
+		Reason: storageReasonOperationalReadinessReached,
+	}}
+	assessment = r.assessAgentPoolStorage(context.Background(), pool)
+	assert.False(t, assessment.Ready)
+	assert.False(t, assessment.CanMount)
+	assert.Equal(t, storageReasonBackendDegraded, assessment.Reason)
+}
+
 func TestManagedRWXStorageRequiresReadyShareManagerWhenAttached(t *testing.T) {
 	pool := validAgentPool("managed-pool", "platform")
 	pool.Spec.CredentialBindings = nil
@@ -230,7 +258,7 @@ func TestManagedRWXStorageRequiresReadyShareManagerWhenAttached(t *testing.T) {
 
 	assessment := r.assessAgentPoolStorage(context.Background(), pool)
 	assert.True(t, assessment.Ready, "initial attachment may proceed while the share-manager becomes Ready")
-	failure := r.managedLonghornVolumeHealth(context.Background(), "pool-volume", true)
+	failure := r.managedLonghornVolumeHealth(context.Background(), pool, "pool-volume", true)
 	require.NotNil(t, failure)
 	assert.Equal(t, storageReasonShareManagerDown, failure.Reason)
 
@@ -241,7 +269,7 @@ func TestManagedRWXStorageRequiresReadyShareManagerWhenAttached(t *testing.T) {
 	require.NoError(t, r.Create(context.Background(), shareManager))
 	assessment = r.assessAgentPoolStorage(context.Background(), pool)
 	assert.True(t, assessment.Ready)
-	assert.Nil(t, r.managedLonghornVolumeHealth(context.Background(), "pool-volume", true))
+	assert.Nil(t, r.managedLonghornVolumeHealth(context.Background(), pool, "pool-volume", true))
 }
 
 func TestStorageWasOperationallyReadyUsesDurableMarkerAndLegacyAggregate(t *testing.T) {
@@ -274,7 +302,7 @@ func TestStorageWasOperationallyReadyUsesDurableMarkerAndLegacyAggregate(t *test
 	}
 }
 
-func TestReconcileManagedRWXInitialShareManagerStartupKeepsWorkers(t *testing.T) {
+func TestReconcileManagedRWXInitialUnknownDetachedConvergesWithoutWorkerChurn(t *testing.T) {
 	pool := validAgentPool("managed-pool", "platform")
 	pool.UID = types.UID("pool-uid")
 	pool.Finalizers = []string{agentPoolFinalizer}
@@ -282,16 +310,12 @@ func TestReconcileManagedRWXInitialShareManagerStartupKeepsWorkers(t *testing.T)
 	pool.Spec.CredentialBindings = nil
 	pool.Spec.GatewayGrants = nil
 	pool.Spec.Sandbox.StorageClassName = managedLonghornStorageClass
-	pool.Status.Conditions = []metav1.Condition{{
-		Type: "StorageReady", Status: metav1.ConditionTrue, Reason: storageReasonReady,
-		ObservedGeneration: 1,
-	}}
 
 	objects := storageTestObjects(pool, storageModeManagedLonghorn, managedLonghornStorageClass, managedLonghornProvisioner)
 	volume := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "longhorn.io/v1beta2", "kind": "Volume",
 		"metadata": map[string]any{"name": "pool-volume", "namespace": managedLonghornNamespace},
-		"status":   map[string]any{"robustness": "healthy", "state": "attached"},
+		"status":   map[string]any{"robustness": "unknown", "state": "detached"},
 	}}
 	workers := []*corev1.Pod{
 		buildWorkerPod(pool, workerName(pool, 0), workerPodTemplateHash(pool, workerName(pool, 0))),
@@ -300,28 +324,64 @@ func TestReconcileManagedRWXInitialShareManagerStartupKeepsWorkers(t *testing.T)
 	ca := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: pool.Spec.Identity.CASecretRef.Name, Namespace: pool.Namespace}}
 	objects = append(objects, pool, volume, workers[0], workers[1], ca)
 	r := storageTestReconciler(t, objects...)
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Name: pool.Name, Namespace: pool.Namespace}}
 
-	result, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: pool.Name, Namespace: pool.Namespace}})
-	require.NoError(t, err)
-	assert.Equal(t, healthRequeueInterval, result.RequeueAfter)
-
-	for _, worker := range workers {
-		var retained corev1.Pod
-		require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(worker), &retained), "initial workers must remain while the first share-manager becomes Ready")
+	for range 2 {
+		result, err := r.Reconcile(context.Background(), request)
+		require.NoError(t, err)
+		assert.Equal(t, healthRequeueInterval, result.RequeueAfter)
+		for _, worker := range workers {
+			var retained corev1.Pod
+			require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(worker), &retained), "initial workers must remain across repeated unknown/detached reconciles")
+		}
 	}
+
 	var got v1alpha1.AgentPool
 	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(pool), &got))
 	assert.False(t, got.Status.Ready)
 	assert.Zero(t, got.Status.ReadyReplicas)
-	condition := meta.FindStatusCondition(got.Status.Conditions, "StorageReady")
+	condition := meta.FindStatusCondition(got.Status.Conditions, storageConditionReady)
+	require.NotNil(t, condition)
+	assert.Equal(t, metav1.ConditionFalse, condition.Status)
+	assert.Equal(t, storageReasonInitialConvergence, condition.Reason)
+	assert.Contains(t, got.Status.Message, "initial convergence")
+	assert.Nil(t, meta.FindStatusCondition(got.Status.Conditions, storageConditionOperationalReadinessReached))
+	assert.Nil(t, meta.FindStatusCondition(got.Status.Conditions, storageConditionWorkerReplacementPending))
+
+	require.NoError(t, unstructured.SetNestedField(volume.Object, "healthy", "status", "robustness"))
+	require.NoError(t, unstructured.SetNestedField(volume.Object, "attached", "status", "state"))
+	require.NoError(t, r.Update(context.Background(), volume))
+	require.NoError(t, r.Create(context.Background(), &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "share-manager-pool-volume",
+			Namespace: managedLonghornNamespace,
+			Labels:    map[string]string{longhornShareManagerComponentKey: longhornShareManagerComponent},
+		},
+		Status: corev1.PodStatus{Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}},
+	}))
+	for _, worker := range workers {
+		var readyWorker corev1.Pod
+		require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(worker), &readyWorker))
+		readyWorker.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
+		require.NoError(t, r.Status().Update(context.Background(), &readyWorker))
+	}
+
+	result, err := r.Reconcile(context.Background(), request)
+	require.NoError(t, err)
+	assert.Equal(t, healthRequeueInterval, result.RequeueAfter)
+	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(pool), &got))
+	assert.True(t, got.Status.Ready)
+	assert.Equal(t, int32(2), got.Status.ReadyReplicas)
+	condition = meta.FindStatusCondition(got.Status.Conditions, storageConditionReady)
 	require.NotNil(t, condition)
 	assert.Equal(t, metav1.ConditionTrue, condition.Status)
 	assert.Equal(t, storageReasonReady, condition.Reason)
-	assert.Contains(t, got.Status.Message, "waiting for worker pods")
-	assert.Nil(t, meta.FindStatusCondition(got.Status.Conditions, storageConditionWorkerReplacementPending))
+	operationalCondition := meta.FindStatusCondition(got.Status.Conditions, storageConditionOperationalReadinessReached)
+	require.NotNil(t, operationalCondition)
+	assert.Equal(t, metav1.ConditionTrue, operationalCondition.Status)
 }
 
-func TestReconcileManagedRWXEstablishedPoolQuiescesAndRecoversWithFreshWorkers(t *testing.T) {
+func TestReconcileManagedRWXEstablishedUnknownDetachedQuiescesAndRecoversWithFreshWorkers(t *testing.T) {
 	pool := validAgentPool("managed-pool", "platform")
 	pool.UID = types.UID("pool-uid")
 	pool.Finalizers = []string{agentPoolFinalizer}
@@ -331,16 +391,22 @@ func TestReconcileManagedRWXEstablishedPoolQuiescesAndRecoversWithFreshWorkers(t
 	pool.Spec.Sandbox.StorageClassName = managedLonghornStorageClass
 	pool.Status.Ready = true
 	pool.Status.ReadyReplicas = 2
-	pool.Status.Conditions = []metav1.Condition{{
-		Type: "StorageReady", Status: metav1.ConditionTrue, Reason: storageReasonReady,
-		ObservedGeneration: 1,
-	}}
+	pool.Status.Conditions = []metav1.Condition{
+		{
+			Type: "StorageReady", Status: metav1.ConditionTrue, Reason: storageReasonReady,
+			ObservedGeneration: 1,
+		},
+		{
+			Type: storageConditionOperationalReadinessReached, Status: metav1.ConditionTrue,
+			Reason: storageReasonOperationalReadinessReached, ObservedGeneration: 1,
+		},
+	}
 
 	objects := storageTestObjects(pool, storageModeManagedLonghorn, managedLonghornStorageClass, managedLonghornProvisioner)
 	volume := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "longhorn.io/v1beta2", "kind": "Volume",
 		"metadata": map[string]any{"name": "pool-volume", "namespace": managedLonghornNamespace},
-		"status":   map[string]any{"robustness": "healthy", "state": "attached"},
+		"status":   map[string]any{"robustness": "unknown", "state": "detached"},
 	}}
 	workers := []*corev1.Pod{
 		buildWorkerPod(pool, workerName(pool, 0), workerPodTemplateHash(pool, workerName(pool, 0))),
@@ -362,7 +428,7 @@ func TestReconcileManagedRWXEstablishedPoolQuiescesAndRecoversWithFreshWorkers(t
 	for _, worker := range workers {
 		var terminating corev1.Pod
 		require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(worker), &terminating))
-		assert.False(t, terminating.DeletionTimestamp.IsZero(), "affected workers must enter asynchronous termination after share-manager loss")
+		assert.False(t, terminating.DeletionTimestamp.IsZero(), "affected workers must enter asynchronous termination after established unknown/detached storage")
 		assert.False(t, podIsReady(&terminating), "terminating Ready=True workers must not retain scheduling credit")
 	}
 	var got v1alpha1.AgentPool
@@ -372,7 +438,7 @@ func TestReconcileManagedRWXEstablishedPoolQuiescesAndRecoversWithFreshWorkers(t
 	condition := meta.FindStatusCondition(got.Status.Conditions, storageConditionReady)
 	require.NotNil(t, condition)
 	assert.Equal(t, metav1.ConditionFalse, condition.Status)
-	assert.Equal(t, storageReasonRecoveryPending, condition.Reason)
+	assert.Equal(t, storageReasonBackendDegraded, condition.Reason)
 	operationalCondition := meta.FindStatusCondition(got.Status.Conditions, storageConditionOperationalReadinessReached)
 	require.NotNil(t, operationalCondition)
 	assert.Equal(t, metav1.ConditionTrue, operationalCondition.Status)
@@ -393,7 +459,7 @@ func TestReconcileManagedRWXEstablishedPoolQuiescesAndRecoversWithFreshWorkers(t
 	require.NoError(t, err)
 	assert.Equal(t, healthRequeueInterval, result.RequeueAfter)
 	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(pool), &got))
-	assert.False(t, got.Status.Ready, "terminating affected workers must not reopen the pool after backend recovery")
+	assert.False(t, got.Status.Ready, "a share-manager alone must not reopen the established pool while affected workers terminate")
 	assert.Zero(t, got.Status.ReadyReplicas)
 	replacementCondition = meta.FindStatusCondition(got.Status.Conditions, storageConditionWorkerReplacementPending)
 	require.NotNil(t, replacementCondition)
@@ -416,6 +482,7 @@ func TestReconcileManagedRWXEstablishedPoolQuiescesAndRecoversWithFreshWorkers(t
 	detachedVolume.SetAPIVersion("longhorn.io/v1beta2")
 	detachedVolume.SetKind("Volume")
 	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(volume), detachedVolume))
+	require.NoError(t, unstructured.SetNestedField(detachedVolume.Object, "healthy", "status", "robustness"))
 	require.NoError(t, unstructured.SetNestedField(detachedVolume.Object, "detached", "status", "state"))
 	require.NoError(t, r.Update(context.Background(), detachedVolume))
 

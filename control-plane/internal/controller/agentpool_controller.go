@@ -275,7 +275,7 @@ func (r *AgentPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	replacementPending := storageWorkerReplacementPending(&pool)
 	verifyAttachedBackend := readyReplicas > 0 || (storageWasOperationallyReady(&pool) && !replacementPending)
 	if storage.Mode == storageModeManagedLonghorn && verifyAttachedBackend {
-		if failure := r.managedLonghornVolumeHealth(ctx, storage.VolumeHandle, true); failure != nil {
+		if failure := r.managedLonghornVolumeHealth(ctx, &pool, storage.VolumeHandle, true); failure != nil {
 			failure.Mode = storage.Mode
 			failure.ClassName = storage.ClassName
 			failure.PVName = storage.PVName

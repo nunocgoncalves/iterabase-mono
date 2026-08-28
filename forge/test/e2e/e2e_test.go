@@ -68,24 +68,24 @@ func (provisioner *doCPUVMProvisioner) Destroy(ctx context.Context, id int) erro
 }
 
 type digitalOceanCPUState struct {
-	ctx                 context.Context
-	provisioner         cpuVMProvisioner
-	ready               func(context.Context, string, string) error
-	runID               string
-	keep                bool
-	pubKey              string
-	privKeyPath         string
-	droplet             *godo.Droplet
-	ip                  string
-	forgeBin            string
-	forgeHome           string
-	chartVersion        string
-	managedRWX          bool
-	storagePVCUID       string
-	storagePV           string
-	agentPoolPVCUID     string
-	initialWorkerPodUID string
-	diagnostics         forgeDiagnostics
+	ctx                  context.Context
+	provisioner          cpuVMProvisioner
+	ready                func(context.Context, string, string) error
+	runID                string
+	keep                 bool
+	pubKey               string
+	privKeyPath          string
+	droplet              *godo.Droplet
+	ip                   string
+	forgeBin             string
+	forgeHome            string
+	chartVersion         string
+	managedRWX           bool
+	storagePVCUID        string
+	storagePV            string
+	agentPoolPVCUID      string
+	initialWorkerPodUIDs string
+	diagnostics          forgeDiagnostics
 }
 
 func newDigitalOceanCPUState(t *testing.T) *digitalOceanCPUState {
@@ -377,16 +377,38 @@ spec:
   workspaceTools: false
 YAML`, repository, tag, state.runID, state.runID, state.runID, state.runID, state.runID, state.runID, state.runID)
 	mustSSHOutput(t, sc, manifest)
+
+	// Capture the first desired worker set before readiness. If the controller
+	// removes either pod during Longhorn's initial unknown/detached window, the
+	// subsequent identity comparison fails even if replacement pods converge.
+	mustSSHOutput(t, sc, `sudo k3s kubectl wait -n iterabase-system --for=create pod/forge-storage-pool-worker-0 pod/forge-storage-pool-worker-1 --timeout=3m`)
+	claim := strings.TrimSpace(mustSSHOutput(t, sc, `sudo k3s kubectl get pvc forge-storage-pool-sandbox -n iterabase-system -o jsonpath='{.metadata.uid}|{.status.phase}'`))
+	claimParts := strings.Split(claim, "|")
+	if len(claimParts) != 2 || claimParts[0] == "" || claimParts[1] != "Bound" {
+		t.Fatalf("managed AgentPool initial claim identity/status = %q, want non-empty UID|Bound", claim)
+	}
+	state.agentPoolPVCUID = claimParts[0]
+	state.initialWorkerPodUIDs = managedAgentPoolWorkerUIDs(t, sc)
+
 	waitForManagedAgentPoolReady(t, sc, 10*time.Minute)
-	status := strings.TrimSpace(mustSSHOutput(t, sc, `sudo k3s kubectl get agentpool forge-storage-pool -n iterabase-system -o jsonpath='{.status.readyReplicas}|{.status.conditions[?(@.type=="StorageReady")].reason}'`))
-	if status != "2|StorageReady" {
-		t.Fatalf("managed AgentPool readiness = %q, want 2|StorageReady", status)
+	readyWorkerUIDs := managedAgentPoolWorkerUIDs(t, sc)
+	if readyWorkerUIDs != state.initialWorkerPodUIDs {
+		t.Fatalf("managed AgentPool churned initial workers during first attachment: initial=%q ready=%q", state.initialWorkerPodUIDs, readyWorkerUIDs)
 	}
-	state.agentPoolPVCUID = strings.TrimSpace(mustSSHOutput(t, sc, `sudo k3s kubectl get pvc forge-storage-pool-sandbox -n iterabase-system -o jsonpath='{.metadata.uid}'`))
-	state.initialWorkerPodUID = strings.TrimSpace(mustSSHOutput(t, sc, `sudo k3s kubectl get pods -n iterabase-system -l platform.iterabase.com/agentpool=forge-storage-pool -o jsonpath='{range .items[*]}{.metadata.uid}{"\n"}{end}'`))
-	if state.agentPoolPVCUID == "" || len(strings.Fields(state.initialWorkerPodUID)) != 2 {
-		t.Fatalf("managed AgentPool identities incomplete: pvc=%q workers=%q", state.agentPoolPVCUID, state.initialWorkerPodUID)
+	status := strings.TrimSpace(mustSSHOutput(t, sc, `sudo k3s kubectl get agentpool forge-storage-pool -n iterabase-system -o jsonpath='{.status.ready}|{.status.readyReplicas}|{.status.conditions[?(@.type=="StorageReady")].reason}|{.status.conditions[?(@.type=="OperationalReadinessReached")].status}|{.status.conditions[?(@.type=="StorageWorkerReplacementPending")].status}'`))
+	if status != "true|2|StorageReady|True|" {
+		t.Fatalf("managed AgentPool initial convergence = %q, want true|2|StorageReady|True| with no replacement cycle", status)
 	}
+}
+
+func managedAgentPoolWorkerUIDs(t *testing.T, client *ssh.Client) string {
+	t.Helper()
+	output := mustSSHOutput(t, client, `for pod in forge-storage-pool-worker-0 forge-storage-pool-worker-1; do sudo k3s kubectl get pod "$pod" -n iterabase-system -o jsonpath='{.metadata.uid}'; printf '\n'; done`)
+	uids := strings.Fields(output)
+	if len(uids) != 2 || uids[0] == "" || uids[1] == "" || uids[0] == uids[1] {
+		t.Fatalf("managed AgentPool worker identities incomplete: %q", output)
+	}
+	return strings.Join(uids, "\n")
 }
 
 func waitForManagedAgentPoolReady(t *testing.T, client *ssh.Client, timeout time.Duration) {
@@ -444,22 +466,19 @@ func exerciseManagedShareManagerFailureStage(t *testing.T, state *digitalOceanCP
 	mustSSHOutput(t, sc, fmt.Sprintf("sudo k3s kubectl annotate agentpool forge-storage-pool -n iterabase-system --overwrite platform.iterabase.com/storage-fault-trigger=%d", time.Now().UnixNano()))
 
 	deadline := time.Now().Add(3 * time.Minute)
-	last := ""
+	lastStatus, lastWorkerCount := "", ""
 	for time.Now().Before(deadline) {
-		out, commandErr := sshOutput(sc, `sudo k3s kubectl get agentpool forge-storage-pool -n iterabase-system -o jsonpath='{.status.ready}|{.status.readyReplicas}|{.status.conditions[?(@.type=="StorageReady")].reason}|{.status.message}'`)
-		last = strings.TrimSpace(out)
-		parts := strings.SplitN(last, "|", 4)
-		if commandErr == nil && len(parts) == 4 && parts[0] == "false" && parts[1] == "0" && parts[2] == "StorageRecoveryPending" {
-			break
+		out, commandErr := sshOutput(sc, `sudo k3s kubectl get agentpool forge-storage-pool -n iterabase-system -o jsonpath='{.status.ready}|{.status.readyReplicas}|{.status.conditions[?(@.type=="StorageReady")].reason}|{.status.conditions[?(@.type=="OperationalReadinessReached")].status}|{.status.conditions[?(@.type=="StorageWorkerReplacementPending")].status}|{.status.conditions[?(@.type=="StorageWorkerReplacementPending")].reason}'`)
+		lastStatus = strings.TrimSpace(out)
+		lastWorkerCount = strings.TrimSpace(mustSSHOutput(t, sc, `sudo k3s kubectl get pods -n iterabase-system -l platform.iterabase.com/agentpool=forge-storage-pool --no-headers 2>/dev/null | wc -l`))
+		parts := strings.Split(lastStatus, "|")
+		failClosedReason := len(parts) == 6 && (parts[2] == "StorageRecoveryPending" || parts[2] == "BackendDegraded")
+		if commandErr == nil && failClosedReason && parts[0] == "false" && parts[1] == "0" && parts[3] == "True" && parts[4] == "True" && parts[5] == "StorageRecoveryPending" && lastWorkerCount == "0" {
+			return
 		}
 		time.Sleep(time.Second)
 	}
-	if !strings.HasPrefix(last, "false|0|StorageRecoveryPending|") {
-		t.Fatalf("AgentPool did not fail closed on share-manager loss: %q", last)
-	}
-	if count := strings.TrimSpace(mustSSHOutput(t, sc, `sudo k3s kubectl get pods -n iterabase-system -l platform.iterabase.com/agentpool=forge-storage-pool --no-headers 2>/dev/null | wc -l`)); count != "0" {
-		t.Fatalf("storage-unready AgentPool retained %s worker pods/scheduling credits", count)
-	}
+	t.Fatalf("AgentPool did not durably fail closed on post-ready share-manager loss: status=%q workers=%q", lastStatus, lastWorkerCount)
 }
 
 func assertManagedStorageRecoveryStage(t *testing.T, state *digitalOceanCPUState) {
@@ -481,14 +500,14 @@ func assertManagedStorageRecoveryStage(t *testing.T, state *digitalOceanCPUState
 	if len(strings.Fields(workers)) != 2 {
 		t.Fatalf("storage recovery has incomplete fresh worker set: %q", workers)
 	}
-	for _, oldUID := range strings.Fields(state.initialWorkerPodUID) {
+	for _, oldUID := range strings.Fields(state.initialWorkerPodUIDs) {
 		if strings.Contains(workers, oldUID) {
 			t.Fatalf("storage recovery reused affected worker %s instead of a fresh worker set", oldUID)
 		}
 	}
-	status := strings.TrimSpace(mustSSHOutput(t, sc, `sudo k3s kubectl get agentpool forge-storage-pool -n iterabase-system -o jsonpath='{.status.ready}|{.status.readyReplicas}|{.status.conditions[?(@.type=="StorageReady")].reason}'`))
-	if status != "true|2|StorageReady" {
-		t.Fatalf("managed storage recovery status=%q", status)
+	status := strings.TrimSpace(mustSSHOutput(t, sc, `sudo k3s kubectl get agentpool forge-storage-pool -n iterabase-system -o jsonpath='{.status.ready}|{.status.readyReplicas}|{.status.conditions[?(@.type=="StorageReady")].reason}|{.status.conditions[?(@.type=="OperationalReadinessReached")].status}|{.status.conditions[?(@.type=="StorageWorkerReplacementPending")].status}|{.status.conditions[?(@.type=="StorageWorkerReplacementPending")].reason}'`))
+	if status != "true|2|StorageReady|True|False|FreshWorkersReady" {
+		t.Fatalf("managed storage recovery status=%q, want durable readiness with a fresh completed replacement set", status)
 	}
 }
 

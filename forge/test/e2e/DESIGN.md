@@ -25,9 +25,11 @@ Stages:
 4. Assert node readiness, dual-stack pod CIDRs, label propagation, gateway pod readiness, and HTTPS/MetalLB health.
 5. Upgrade to the reviewed current platform release through the public E2E overlay: exact Flux source first, certificate ownership handoff, companion substrate, platform, then CR reconciliation.
 6. Assert both Helm versions, certificate CRD ownership, exact Flux revision/digest, tool-runner readiness, and HTTPS health through the fixture's NodePort edge.
-7. Re-apply the current release and assert the reality-derived action is `skip` while every configured phase reconciles successfully.
-8. Materialize an overlay-declared Secret from an operator environment variable and verify its value/type.
-9. Reconcile Flux again and assert controllers, source artifact, and Kustomization readiness.
+7. Create a two-worker managed-RWX AgentPool, capture the first worker UIDs after its claim is Bound, and prove that exact set reaches Ready without initial-attachment churn while durable operational readiness is recorded.
+8. Delete the established pool's share-manager and prove fail-closed scheduling removal, a durable replacement-pending marker, preserved claim identity, and recovery only through two fresh workers.
+9. Re-apply the current release and assert the reality-derived action is `skip` while every configured phase reconciles successfully.
+10. Materialize an overlay-declared Secret from an operator environment variable and verify its value/type.
+11. Reconcile Flux again and assert controllers, source artifact, and Kustomization readiness.
 
 The old release is an intentional migration input, never the desired test target. Only migration setup needs a fresh host. Current-platform, secret-sync, and Flux checks compose on that host so this scenario covers the exact `0.2.2` → `0.3+` ownership and Helm-status path used by OPO1.
 
@@ -63,7 +65,7 @@ Those replacements passed their owner PRs and required source/candidate-backed g
 
 | Previous test | New scenario/stage | Coverage |
 |---|---|---|
-| `TestE2E` | `digitalocean-cpu/install-migration-source` through `reapply-current-idempotently` | k3s, real Helm 4 migration, certificate handoff, exact Flux source, runner readiness, overlay, node, dual-stack, and gateway edges |
+| `TestE2E` | `digitalocean-cpu/install-migration-source` through `reapply-current-idempotently` | k3s, real Helm 4 migration, certificate handoff, exact Flux source, runner readiness, overlay, node, dual-stack, gateway edges, and managed-RWX initial/post-ready AgentPool convergence |
 | `TestGPUE2E_PreflightFail` | `digitalocean-cpu/reject-gpu-on-cpu-host` | no-GPU preflight refusal; now actually selected by CI |
 | `TestE2EOverlay` | `digitalocean-cpu/apply-public-overlay` | public tokenless clone, commit, values, CRD path |
 | `TestE2ESecrets` | `digitalocean-cpu/sync-secrets` | env → SSH stdin → Kubernetes Secret |
