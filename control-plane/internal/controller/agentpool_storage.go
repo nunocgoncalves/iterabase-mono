@@ -53,16 +53,15 @@ const (
 )
 
 type agentPoolStorageAssessment struct {
-	Ready                   bool
-	CanMount                bool
-	Reason                  string
-	Message                 string
-	Mode                    string
-	ClassName               string
-	PVName                  string
-	VolumeHandle            string
-	ReplacementPending      bool
-	MountDrivingConvergence bool
+	Ready              bool
+	CanMount           bool
+	Reason             string
+	Message            string
+	Mode               string
+	ClassName          string
+	PVName             string
+	VolumeHandle       string
+	ReplacementPending bool
 }
 
 // assessAgentPoolStorage intentionally keeps the ordered fail-closed predicate
@@ -247,35 +246,25 @@ func (r *AgentPoolReconciler) managedLonghornVolumeHealth(ctx context.Context, p
 	}
 	robustness, _, _ := unstructured.NestedString(volume.Object, "status", "robustness")
 	state, _, _ := unstructured.NestedString(volume.Object, "status", "state")
-	if robustness == "unknown" && state == "detached" {
-		if !storageWasOperationallyReady(pool) {
-			return &agentPoolStorageAssessment{
-				CanMount:                true,
-				MountDrivingConvergence: true,
-				Reason:                  storageReasonInitialConvergence,
-				Message: fmt.Sprintf(
-					"Longhorn volume %s/%s is in initial convergence with robustness=%q state=%q; retain the desired workers to drive first attachment while AgentPool readiness stays closed until the backend, share-manager, and workers are Ready",
-					managedLonghornNamespace, volumeHandle, robustness, state,
-				),
-			}
-		}
-		if storageWorkerReplacementPending(pool) {
-			return &agentPoolStorageAssessment{
-				CanMount:                true,
-				MountDrivingConvergence: true,
-				Reason:                  storageReasonRecoveryPending,
-				Message: fmt.Sprintf(
-					"Longhorn volume %s/%s is in replacement recovery with robustness=%q state=%q; retain only the fresh replacement workers needed to drive attachment while scheduling stays closed",
-					managedLonghornNamespace, volumeHandle, robustness, state,
-				),
-			}
+	if robustness == "unknown" && state == "detached" && !storageWasOperationallyReady(pool) {
+		return &agentPoolStorageAssessment{
+			CanMount: true,
+			Reason:   storageReasonInitialConvergence,
+			Message: fmt.Sprintf(
+				"Longhorn volume %s/%s is in initial convergence with robustness=%q state=%q; retain the desired workers to drive first attachment while AgentPool readiness stays closed until the backend, share-manager, and workers are Ready",
+				managedLonghornNamespace, volumeHandle, robustness, state,
+			),
 		}
 	}
 	if robustness != "healthy" {
 		return &agentPoolStorageAssessment{Reason: storageReasonBackendDegraded, Message: fmt.Sprintf("Longhorn volume %s/%s robustness=%q state=%q; restore replica/node/disk capacity before replacing workers", managedLonghornNamespace, volumeHandle, robustness, state)}
 	}
 	if requireAttached && state != "attached" {
-		return &agentPoolStorageAssessment{Reason: storageReasonRecoveryPending, Message: fmt.Sprintf("Longhorn volume %s/%s is healthy but state=%q; wait for a fresh worker attachment before scheduling", managedLonghornNamespace, volumeHandle, state)}
+		message := fmt.Sprintf("Longhorn volume %s/%s is healthy but state=%q; wait for the desired workers to complete first attachment before scheduling", managedLonghornNamespace, volumeHandle, state)
+		if storageWasOperationallyReady(pool) {
+			message = fmt.Sprintf("Longhorn volume %s/%s is healthy but state=%q; restore backend/share-manager attachment before creating fresh replacement workers", managedLonghornNamespace, volumeHandle, state)
+		}
+		return &agentPoolStorageAssessment{Reason: storageReasonRecoveryPending, Message: message}
 	}
 	if requireAttached && state == "attached" && !r.shareManagerReady(ctx, volumeHandle) {
 		return &agentPoolStorageAssessment{Reason: storageReasonShareManagerDown, Message: fmt.Sprintf("Longhorn share-manager for volume %s is unavailable; restore backend/share-manager health, then use fresh workers without replay", volumeHandle)}
@@ -332,9 +321,9 @@ func storageWasOperationallyReady(pool *v1alpha1.AgentPool) bool {
 	return false
 }
 
-// storageWorkerReplacementPending distinguishes affected clients that must stay
-// quiesced from the fresh worker set that is allowed to drive a recovered RWX
-// volume from detached to attached before it can report Ready.
+// storageWorkerReplacementPending keeps affected clients quiesced until the
+// managed backend is healthy and attached with a Ready share-manager. Only then
+// may the controller create the fresh replacement set.
 func storageWorkerReplacementPending(pool *v1alpha1.AgentPool) bool {
 	for _, condition := range pool.Status.Conditions {
 		if condition.Type == storageConditionWorkerReplacementPending {

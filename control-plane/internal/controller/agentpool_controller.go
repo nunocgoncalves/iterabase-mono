@@ -249,6 +249,18 @@ func (r *AgentPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		_ = r.patchStatus(ctx, &pool, false, 0, fmt.Sprintf("ensure NetworkPolicy: %v", err), false, &storage)
 		return ctrl.Result{}, err
 	}
+	if storage.Mode == storageModeManagedLonghorn && storageWorkerReplacementPending(&pool) {
+		if failure := r.managedLonghornVolumeHealth(ctx, &pool, storage.VolumeHandle, true); failure != nil {
+			failure.Mode = storage.Mode
+			failure.ClassName = storage.ClassName
+			failure.PVName = storage.PVName
+			failure.VolumeHandle = storage.VolumeHandle
+			failure.ReplacementPending = true
+			failure.Message += "; keep replacement workers absent until managed backend and share-manager health are restored"
+			_ = r.patchStatus(ctx, &pool, false, 0, failure.Message, false, failure)
+			return ctrl.Result{RequeueAfter: healthRequeueInterval}, nil
+		}
+	}
 	if err := r.reconcileWorkers(ctx, &pool); err != nil {
 		_ = r.patchStatus(ctx, &pool, false, 0, fmt.Sprintf("ensure workers: %v", err), false, &storage)
 		return ctrl.Result{}, err
@@ -258,7 +270,7 @@ func (r *AgentPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	storage = r.assessAgentPoolStorage(ctx, &pool)
 	if !storage.Ready {
 		wasOperationallyReady := storageWasOperationallyReady(&pool)
-		if (wasOperationallyReady && !storage.MountDrivingConvergence) || !storage.CanMount {
+		if wasOperationallyReady || !storage.CanMount {
 			if err := r.quiesceWorkers(ctx, &pool); err != nil {
 				return ctrl.Result{}, err
 			}
@@ -1173,7 +1185,7 @@ func setStorageWorkerReplacementCondition(pool *v1alpha1.AgentPool, replacementP
 			Type:               storageConditionWorkerReplacementPending,
 			Status:             metav1.ConditionTrue,
 			Reason:             storageReasonRecoveryPending,
-			Message:            "workers affected by storage loss were removed; keep scheduling closed while healthy storage attaches to fresh replacement workers",
+			Message:            "workers affected by storage loss were removed; keep scheduling closed and replacements absent until storage is healthy and attached with a Ready share-manager",
 			ObservedGeneration: pool.Generation,
 		})
 	}

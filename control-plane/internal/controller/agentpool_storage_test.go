@@ -230,7 +230,6 @@ func TestAssessManagedRWXUnknownDetachedIsInitialOnlyBeforeOperationalReadiness(
 	assessment := r.assessAgentPoolStorage(context.Background(), pool)
 	assert.False(t, assessment.Ready)
 	assert.True(t, assessment.CanMount)
-	assert.True(t, assessment.MountDrivingConvergence)
 	assert.Equal(t, storageReasonInitialConvergence, assessment.Reason)
 	assert.Contains(t, assessment.Message, "retain the desired workers")
 
@@ -249,9 +248,8 @@ func TestAssessManagedRWXUnknownDetachedIsInitialOnlyBeforeOperationalReadiness(
 	})
 	assessment = r.assessAgentPoolStorage(context.Background(), pool)
 	assert.False(t, assessment.Ready)
-	assert.True(t, assessment.CanMount)
-	assert.True(t, assessment.MountDrivingConvergence)
-	assert.Equal(t, storageReasonRecoveryPending, assessment.Reason)
+	assert.False(t, assessment.CanMount)
+	assert.Equal(t, storageReasonBackendDegraded, assessment.Reason)
 }
 
 func TestManagedRWXStorageRequiresReadyShareManagerWhenAttached(t *testing.T) {
@@ -513,12 +511,14 @@ func TestReconcileManagedRWXEstablishedUnknownDetachedQuiescesAndRecoversWithFre
 	require.NoError(t, unstructured.SetNestedField(detachedVolume.Object, "detached", "status", "state"))
 	require.NoError(t, r.Update(context.Background(), detachedVolume))
 
-	result, err = r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: pool.Name, Namespace: pool.Namespace}})
-	require.NoError(t, err)
-	assert.Equal(t, healthRequeueInterval, result.RequeueAfter)
-	for _, worker := range workers {
-		var fresh corev1.Pod
-		require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(worker), &fresh), "fresh workers must remain while their mount drives detached backend recovery")
+	for range 2 {
+		result, err = r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: pool.Name, Namespace: pool.Namespace}})
+		require.NoError(t, err)
+		assert.Equal(t, healthRequeueInterval, result.RequeueAfter)
+		for _, worker := range workers {
+			var absent corev1.Pod
+			assert.True(t, apierrors.IsNotFound(r.Get(context.Background(), client.ObjectKeyFromObject(worker), &absent)), "established unknown/detached storage must not admit replacement workers")
+		}
 	}
 	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(pool), &got))
 	assert.False(t, got.Status.Ready)
@@ -526,21 +526,28 @@ func TestReconcileManagedRWXEstablishedUnknownDetachedQuiescesAndRecoversWithFre
 	condition = meta.FindStatusCondition(got.Status.Conditions, storageConditionReady)
 	require.NotNil(t, condition)
 	assert.Equal(t, metav1.ConditionFalse, condition.Status)
-	assert.Equal(t, storageReasonRecoveryPending, condition.Reason)
+	assert.Equal(t, storageReasonBackendDegraded, condition.Reason)
 	replacementCondition = meta.FindStatusCondition(got.Status.Conditions, storageConditionWorkerReplacementPending)
 	require.NotNil(t, replacementCondition)
 	assert.Equal(t, metav1.ConditionTrue, replacementCondition.Status)
 
+	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(volume), detachedVolume))
+	require.NoError(t, unstructured.SetNestedField(detachedVolume.Object, "healthy", "status", "robustness"))
+	require.NoError(t, r.Update(context.Background(), detachedVolume))
 	result, err = r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: pool.Name, Namespace: pool.Namespace}})
 	require.NoError(t, err)
 	assert.Equal(t, healthRequeueInterval, result.RequeueAfter)
 	for _, worker := range workers {
-		var fresh corev1.Pod
-		require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(worker), &fresh), "replacement-pending state must survive repeated detached recovery reconciles")
+		var absent corev1.Pod
+		assert.True(t, apierrors.IsNotFound(r.Get(context.Background(), client.ObjectKeyFromObject(worker), &absent)), "healthy but detached storage must recover attachment before replacement workers are created")
 	}
+	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(pool), &got))
+	condition = meta.FindStatusCondition(got.Status.Conditions, storageConditionReady)
+	require.NotNil(t, condition)
+	assert.Equal(t, metav1.ConditionFalse, condition.Status)
+	assert.Equal(t, storageReasonRecoveryPending, condition.Reason)
 
 	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(volume), detachedVolume))
-	require.NoError(t, unstructured.SetNestedField(detachedVolume.Object, "healthy", "status", "robustness"))
 	require.NoError(t, unstructured.SetNestedField(detachedVolume.Object, "attached", "status", "state"))
 	require.NoError(t, r.Update(context.Background(), detachedVolume))
 	require.NoError(t, r.Create(context.Background(), &corev1.Pod{
@@ -551,6 +558,20 @@ func TestReconcileManagedRWXEstablishedUnknownDetachedQuiescesAndRecoversWithFre
 		},
 		Status: corev1.PodStatus{Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}},
 	}))
+	result, err = r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: pool.Name, Namespace: pool.Namespace}})
+	require.NoError(t, err)
+	assert.Equal(t, healthRequeueInterval, result.RequeueAfter)
+	for _, worker := range workers {
+		var fresh corev1.Pod
+		require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(worker), &fresh), "fresh workers may be created only after attached backend and share-manager health")
+	}
+	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(pool), &got))
+	assert.False(t, got.Status.Ready)
+	assert.Zero(t, got.Status.ReadyReplicas)
+	replacementCondition = meta.FindStatusCondition(got.Status.Conditions, storageConditionWorkerReplacementPending)
+	require.NotNil(t, replacementCondition)
+	assert.Equal(t, metav1.ConditionTrue, replacementCondition.Status)
+
 	for _, worker := range workers {
 		var fresh corev1.Pod
 		require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(worker), &fresh))
