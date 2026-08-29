@@ -575,6 +575,14 @@ func resetManagedStorageClientsForRecovery(t *testing.T, client *ssh.Client, sta
 	if lastCount != "0" {
 		t.Fatalf("managed storage client reset retained %s worker pods", lastCount)
 	}
+	pvName := strings.TrimSpace(mustSSHOutput(t, client, `sudo k3s kubectl get pvc forge-storage-pool-sandbox -n iterabase-system -o jsonpath='{.spec.volumeName}'`))
+	attachments := strings.TrimSpace(mustSSHOutput(t, client, `sudo k3s kubectl get volumeattachments.storage.k8s.io -o jsonpath='{range .items[*]}{.metadata.name}{"|"}{.spec.source.persistentVolumeName}{"\n"}{end}'`))
+	for _, line := range strings.Fields(attachments) {
+		parts := strings.Split(line, "|")
+		if len(parts) == 2 && parts[1] == pvName {
+			mustSSHOutput(t, client, "sudo k3s kubectl delete volumeattachment.storage.k8s.io "+candidateShellQuote(parts[0])+" --wait=false")
+		}
+	}
 	mustSSHOutput(t, client, fmt.Sprintf(
 		`sudo k3s kubectl wait -n longhorn-system --for=jsonpath='{.status.state}'=detached volume.longhorn.io/%s --timeout=3m`,
 		candidateShellQuote(state.agentPoolVolume),
