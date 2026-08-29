@@ -503,7 +503,7 @@ func exerciseManagedShareManagerFailureStage(t *testing.T, state *digitalOceanCP
 	deadline := time.Now().Add(3 * time.Minute)
 	lastStatus, lastWorkerUIDs, lastBackend, lastShareManagerReady := "", "", "", ""
 	for time.Now().Before(deadline) {
-		out, commandErr := sshOutput(sc, `sudo k3s kubectl get agentpool forge-storage-pool -n iterabase-system -o jsonpath='{.status.ready}|{.status.readyReplicas}|{.status.conditions[?(@.type=="StorageReady")].reason}|{.status.conditions[?(@.type=="OperationalReadinessReached")].status}|{.status.conditions[?(@.type=="StorageWorkerReplacementPending")].status}|{.status.conditions[?(@.type=="StorageWorkerReplacementPending")].reason}'`)
+		out, commandErr := sshOutput(sc, `sudo k3s kubectl get agentpool forge-storage-pool -n iterabase-system -o jsonpath='{.status.ready}|{.status.readyReplicas}|{.status.conditions[?(@.type=="StorageReady")].reason}|{.status.conditions[?(@.type=="OperationalReadinessReached")].status}|{.status.conditions[?(@.type=="StorageWorkerReplacementPending")].status}|{.status.conditions[?(@.type=="StorageWorkerReplacementPending")].reason}|{.spec.replicas}'`)
 		lastStatus = strings.TrimSpace(out)
 		lastWorkerUIDs = strings.TrimSpace(mustSSHOutput(t, sc, `sudo k3s kubectl get pods -n iterabase-system -l platform.iterabase.com/agentpool=forge-storage-pool -o jsonpath='{range .items[*]}{.metadata.uid}{"\n"}{end}'`))
 		backend, _ := sshOutput(sc, fmt.Sprintf(`sudo k3s kubectl get volume.longhorn.io %s -n longhorn-system -o jsonpath='{.status.robustness}|{.status.state}'`, candidateShellQuote(volume)))
@@ -511,8 +511,8 @@ func exerciseManagedShareManagerFailureStage(t *testing.T, state *digitalOceanCP
 		shareManagerReady, _ := sshOutput(sc, fmt.Sprintf(`sudo k3s kubectl get pod share-manager-%s -n longhorn-system -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}'`, candidateShellQuote(volume)))
 		lastShareManagerReady = strings.TrimSpace(shareManagerReady)
 		parts := strings.Split(lastStatus, "|")
-		failClosedReason := len(parts) == 6 && (parts[2] == "StorageRecoveryPending" || parts[2] == "BackendDegraded" || parts[2] == "ShareManagerUnavailable" || parts[2] == "StorageReady")
-		readyClosed := len(parts) == 6 && (parts[0] == "" || parts[0] == "false") && (parts[1] == "" || parts[1] == "0")
+		failClosedReason := len(parts) == 7 && (parts[2] == "StorageRecoveryPending" || parts[2] == "BackendDegraded" || parts[2] == "ShareManagerUnavailable" || parts[2] == "StorageReady")
+		readyClosed := len(parts) == 7 && (parts[0] == "" || parts[0] == "false") && (parts[1] == "" || parts[1] == "0")
 		affectedWorkersRemoved := true
 		for _, oldUID := range strings.Fields(state.initialWorkerPodUIDs) {
 			if strings.Contains(lastWorkerUIDs, oldUID) {
@@ -521,7 +521,7 @@ func exerciseManagedShareManagerFailureStage(t *testing.T, state *digitalOceanCP
 			}
 		}
 		replacementsRespectHealthGate := len(strings.Fields(lastWorkerUIDs)) == 0 || (lastBackend == "healthy|attached" && lastShareManagerReady == "True")
-		if commandErr == nil && failClosedReason && readyClosed && parts[3] == "True" && parts[4] == "True" && parts[5] == "StorageRecoveryPending" && affectedWorkersRemoved && replacementsRespectHealthGate {
+		if commandErr == nil && failClosedReason && readyClosed && parts[3] == "True" && parts[4] == "True" && parts[5] == "StorageRecoveryPending" && parts[6] == "2" && affectedWorkersRemoved && replacementsRespectHealthGate {
 			return
 		}
 		time.Sleep(time.Second)
