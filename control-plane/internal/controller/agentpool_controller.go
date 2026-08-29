@@ -280,6 +280,11 @@ func (r *AgentPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			failure.ClassName = storage.ClassName
 			failure.PVName = storage.PVName
 			failure.VolumeHandle = storage.VolumeHandle
+			if !storageWasOperationallyReady(&pool) {
+				failure.CanMount = true
+				_ = r.patchStatus(ctx, &pool, false, readyReplicas, failure.Message, false, failure)
+				return ctrl.Result{RequeueAfter: healthRequeueInterval}, nil
+			}
 			if err := r.quiesceWorkers(ctx, &pool); err != nil {
 				return ctrl.Result{}, err
 			}

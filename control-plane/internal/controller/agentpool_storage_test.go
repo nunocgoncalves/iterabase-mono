@@ -362,14 +362,6 @@ func TestReconcileManagedRWXInitialUnknownDetachedConvergesWithoutWorkerChurn(t 
 	require.NoError(t, unstructured.SetNestedField(volume.Object, "healthy", "status", "robustness"))
 	require.NoError(t, unstructured.SetNestedField(volume.Object, "attached", "status", "state"))
 	require.NoError(t, r.Update(context.Background(), volume))
-	require.NoError(t, r.Create(context.Background(), &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "share-manager-pool-volume",
-			Namespace: managedLonghornNamespace,
-			Labels:    map[string]string{longhornShareManagerComponentKey: longhornShareManagerComponent},
-		},
-		Status: corev1.PodStatus{Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}},
-	}))
 	for _, worker := range workers {
 		var readyWorker corev1.Pod
 		require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(worker), &readyWorker))
@@ -378,6 +370,31 @@ func TestReconcileManagedRWXInitialUnknownDetachedConvergesWithoutWorkerChurn(t 
 	}
 
 	result, err := r.Reconcile(context.Background(), request)
+	require.NoError(t, err)
+	assert.Equal(t, healthRequeueInterval, result.RequeueAfter)
+	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(pool), &got))
+	assert.False(t, got.Status.Ready)
+	assert.Equal(t, int32(2), got.Status.ReadyReplicas)
+	condition = meta.FindStatusCondition(got.Status.Conditions, storageConditionReady)
+	require.NotNil(t, condition)
+	assert.Equal(t, metav1.ConditionFalse, condition.Status)
+	assert.Equal(t, storageReasonShareManagerDown, condition.Reason)
+	assert.Nil(t, meta.FindStatusCondition(got.Status.Conditions, storageConditionOperationalReadinessReached))
+	assert.Nil(t, meta.FindStatusCondition(got.Status.Conditions, storageConditionWorkerReplacementPending))
+	for _, worker := range workers {
+		var retained corev1.Pod
+		require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(worker), &retained), "initial workers must remain while the first share-manager becomes Ready")
+	}
+
+	require.NoError(t, r.Create(context.Background(), &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "share-manager-pool-volume",
+			Namespace: managedLonghornNamespace,
+			Labels:    map[string]string{longhornShareManagerComponentKey: longhornShareManagerComponent},
+		},
+		Status: corev1.PodStatus{Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}},
+	}))
+	result, err = r.Reconcile(context.Background(), request)
 	require.NoError(t, err)
 	assert.Equal(t, healthRequeueInterval, result.RequeueAfter)
 	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(pool), &got))
