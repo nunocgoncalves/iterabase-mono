@@ -894,15 +894,18 @@ YAML`
 func replaceLostRWXNodeStage(t *testing.T, state *rwxThreeNodeState) {
 	t.Helper()
 	lost := state.droplets[2]
-	if _, err := state.client.Droplets.Delete(state.ctx, lost.ID); err != nil {
-		t.Fatalf("delete one RWX storage node: %v", err)
-	}
-	state.removed[lost.ID] = true
-
 	server, err := sshDial(state.serverIP, state.privKeyPath)
 	if err != nil {
 		t.Fatal(err)
 	}
+	stopShareManagerWatcher := startShareManagerAttemptWatcher(t, &state.diagnosticEvidence, state.serverIP, state.privKeyPath, "three-node-replace")
+	defer stopShareManagerWatcher()
+
+	if _, err := state.client.Droplets.Delete(state.ctx, lost.ID); err != nil {
+		server.Close()
+		t.Fatalf("delete one RWX storage node: %v", err)
+	}
+	state.removed[lost.ID] = true
 	lostNode := lost.Name
 	mustSSHOutput(t, server, "sudo k3s kubectl get node "+candidateShellQuote(lostNode))
 	degradedDeadline := time.Now().Add(8 * time.Minute)

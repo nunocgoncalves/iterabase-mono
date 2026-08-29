@@ -346,6 +346,8 @@ func setupManagedAgentPoolStage(t *testing.T, state *digitalOceanCPUState) {
 		t.Fatalf("ssh dial %s: %v", state.ip, err)
 	}
 	defer sc.Close()
+	stopInitialStorageWatcher := startShareManagerAttemptWatcher(t, &state.diagnostics, state.ip, state.privKeyPath, "cpu-initial")
+	defer stopInitialStorageWatcher()
 	manifest := fmt.Sprintf(`cat <<'YAML' | sudo k3s kubectl apply -f -
 apiVersion: platform.iterabase.com/v1alpha1
 kind: AgentPool

@@ -264,7 +264,30 @@ func shareManagerAttemptWatcherScript() string {
 set -u
 output=${1:?output path required}
 declare -A last
+last_storage_state=
 while true; do
+  storage_state=$({
+    printf '%s\n' '--- nodes ---'
+    k3s kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"|"}{.spec.podCIDR}{"|"}{.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}'
+    printf '%s\n' '--- AgentPools ---'
+    k3s kubectl get agentpools -A -o jsonpath='{range .items[*]}{.metadata.namespace}{"/"}{.metadata.name}{"|"}{.metadata.uid}{"|"}{.status.ready}{"|"}{.status.readyReplicas}{"|"}{.status.conditions}{"|"}{.status.message}{"\n"}{end}'
+    printf '%s\n' '--- AgentPool workers ---'
+    k3s kubectl get pods -A -l platform.iterabase.com/agentpool -o jsonpath='{range .items[*]}{.metadata.namespace}{"/"}{.metadata.name}{"|"}{.metadata.uid}{"|"}{.metadata.creationTimestamp}{"|"}{.metadata.deletionTimestamp}{"|"}{.metadata.annotations.platform\.iterabase\.com/pod-template-hash}{"|"}{.status.phase}{"|"}{.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}'
+    printf '%s\n' '--- Longhorn volumes ---'
+    k3s kubectl get volumes.longhorn.io -n longhorn-system -o jsonpath='{range .items[*]}{.metadata.name}{"|"}{.status.robustness}{"|"}{.status.state}{"|"}{.status.shareState}{"|"}{.status.shareEndpoint}{"|"}{.status.currentNodeID}{"|"}{.status.ownerID}{"\n"}{end}'
+    printf '%s\n' '--- Longhorn share managers ---'
+    k3s kubectl get sharemanagers.longhorn.io -n longhorn-system -o jsonpath='{range .items[*]}{.metadata.name}{"|"}{.status.state}{"|"}{.status.endpoint}{"|"}{.status.ownerID}{"\n"}{end}'
+    printf '%s\n' '--- recovery-backend endpoints ---'
+    k3s kubectl get endpointslices.discovery.k8s.io -n longhorn-system -l kubernetes.io/service-name=longhorn-recovery-backend -o jsonpath='{range .items[*].endpoints[*]}{.addresses}{"|"}{.conditions.ready}{"|"}{.nodeName}{"\n"}{end}'
+  } 2>/dev/null || true)
+  if [[ "$last_storage_state" != "$storage_state" ]]; then
+    last_storage_state=$storage_state
+    {
+      printf '\n===== %s storage control-plane state =====\n' "$(date -u +%FT%TZ)"
+      printf '%s\n' "$storage_state"
+    } >>"$output" 2>&1
+  fi
+
   pods=$(k3s kubectl get pods -n longhorn-system -l longhorn.io/component=share-manager -o name 2>/dev/null || true)
   for pod in $pods; do
     state=$(k3s kubectl get -n longhorn-system "$pod" -o jsonpath='{.metadata.uid}|{.status.phase}|{.status.containerStatuses[0].state.waiting.reason}|{.status.containerStatuses[0].state.running.startedAt}|{.status.containerStatuses[0].state.terminated.reason}|{.status.containerStatuses[0].state.terminated.exitCode}|{.status.containerStatuses[0].state.terminated.finishedAt}' 2>/dev/null || true)
@@ -406,6 +429,11 @@ func TestShareManagerAttemptWatcherRetainsTerminatingEvidence(t *testing.T) {
 	}
 	for _, contract := range []string{
 		"longhorn.io/component=share-manager",
+		"storage control-plane state",
+		".status.robustness",
+		".status.shareState",
+		".status.conditions",
+		"kubernetes.io/service-name=longhorn-recovery-backend",
 		".status.containerStatuses[0].state.terminated.exitCode",
 		"--- pod status ---",
 		"--- current share-manager log ---",
