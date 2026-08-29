@@ -249,6 +249,9 @@ func (r *AgentPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		_ = r.patchStatus(ctx, &pool, false, 0, fmt.Sprintf("ensure NetworkPolicy: %v", err), false, &storage)
 		return ctrl.Result{}, err
 	}
+	// DES-HOR-424-05 orders established recovery deliberately: restore a
+	// healthy attached backend and Ready share-manager, then quiesce the
+	// affected clients, and only afterward create the fresh replacement set.
 	if storage.Mode == storageModeManagedLonghorn && storageWorkerReplacementPending(&pool) {
 		if failure := r.managedLonghornVolumeHealth(ctx, &pool, storage.VolumeHandle, true); failure != nil {
 			failure.Mode = storage.Mode
