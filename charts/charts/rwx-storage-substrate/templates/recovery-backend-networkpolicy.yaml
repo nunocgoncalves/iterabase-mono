@@ -1,0 +1,24 @@
+{{- include "rwx-storage-substrate.validate" . -}}
+# DES-HOR-527-01: Longhorn 1.12.1's NFS-Ganesha bootstrap performs one
+# recovery-backend connection when a share-manager starts. Admit pods from any
+# cluster namespace to only that backend port so a newly recreated pod does not
+# race a component-label source update. A namespace selector does not admit
+# external IP sources; the private UI and all upstream policies remain intact.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "rwx-storage-substrate.recoveryBackendPolicyName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "rwx-storage-substrate.labels" . | nindent 4 }}
+    app.kubernetes.io/component: recovery-backend
+spec:
+  podSelector:
+    matchLabels:
+      longhorn.io/recovery-backend: longhorn-recovery-backend
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector: {}
+      ports:
+        - {protocol: TCP, port: 9503}

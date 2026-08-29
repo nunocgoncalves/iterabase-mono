@@ -1,7 +1,7 @@
 # Managed RWX storage operations
 
-This runbook implements `DES-HOR-424-01`–`06` and `DES-HOR-469-01`–`02`. The
-architecture and responsibility authority remains
+This runbook implements `DES-HOR-424-01`–`06`, `DES-HOR-469-01`–`02`, and
+`DES-HOR-527-01`. The architecture and responsibility authority remains
 [`../../docs/architecture/v2-rwx-storage.md`](../../docs/architecture/v2-rwx-storage.md).
 
 ## Immutable dependency and license record
@@ -75,9 +75,13 @@ The validation/uninstall hook uses the multi-architecture
 The UI stays ClusterIP-only, internal NetworkPolicies remain enabled, V2 engine
 and experimental RWX fast failover remain disabled, and no storage credential
 enters workers. Longhorn's manager API/UI and `/metrics` port remain upstream
-HTTP inside that restricted boundary; the UI has no ingress and the companion
-adds only the named Prometheus metrics exception. The Iterabase CA guarantee is
-manager-to-instance-manager gRPC mTLS, not blanket Longhorn HTTP/data-plane TLS.
+HTTP inside that restricted boundary; the UI has no ingress. The companion adds
+the named Prometheus metrics exception and one `DES-HOR-527-01` rule admitting
+namespaced cluster pods to only recovery-backend TCP/9503. That rule has no
+external-IP source, adds no other port, and leaves every unrelated Longhorn
+policy untouched. It changes only NetworkPolicy source admission: the Iterabase
+CA guarantee remains manager-to-instance-manager gRPC mTLS, not blanket Longhorn
+HTTP/data-plane TLS, and no encryption or authentication requirement is waived.
 Forge forwards only `mode`, `storageClassName`, managed
 `topology`, the global internal-TLS boolean, and the chart-owned attestation
 namespace to the companion. The complete `longhorn.*` value tree is
@@ -125,9 +129,12 @@ Iterabase-managed backend or widen the supported semantic values.
 
 A worker, share-manager, node, network, or capacity failure removes AgentPool
 storage readiness and scheduling credit. Restore Longhorn volume/replica/node
-and share-manager health first. Replace affected workers and verify committed
-hashes. Never interpret Service readiness as recovery of an existing NFS
-client, replay a turn/effect, or claim seamless failover.
+and share-manager health first. `DES-HOR-527-01` prevents the recreated
+share-manager's one-shot recovery-backend connection from depending on its
+component-label NetworkPolicy update; it authorizes no operator or test-authored
+repair. Replace affected workers only through controller-owned recovery and
+verify committed hashes. Never interpret Service readiness as recovery of an
+existing NFS client, replay a turn/effect, or claim seamless failover.
 
 Technical diagnosis includes the exact class/PVC/PV, AgentPool condition,
 worker mount/restart events, Longhorn volume/engine/replica/share-manager,

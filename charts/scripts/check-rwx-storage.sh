@@ -18,6 +18,8 @@ render_profile single-node
 render_profile three-node
 helm template rwx "$chart" --namespace longhorn-system \
   --set global.internalTLS.enabled=true >"$tmp/single-node-tls.yaml"
+helm template rwx "$chart" --namespace longhorn-system \
+  --show-only templates/recovery-backend-networkpolicy.yaml >"$tmp/recovery-backend-networkpolicy.yaml"
 
 for profile in single-node three-node; do
   rendered="$tmp/${profile}.yaml"
@@ -54,6 +56,22 @@ done
 grep -Fq 'numberOfReplicas: "1"' "$tmp/single-node.yaml"
 grep -Fq 'numberOfReplicas: "3"' "$tmp/three-node.yaml"
 
+# DES-HOR-527-01: the additive rule admits only namespaced cluster pods to the
+# recovery-backend's single TCP port. It must not depend on the share-manager's
+# dynamic component label or admit external IP sources.
+recovery_policy="$tmp/recovery-backend-networkpolicy.yaml"
+grep -Fq 'app.kubernetes.io/component: recovery-backend' "$recovery_policy"
+grep -Fq 'longhorn.io/recovery-backend: longhorn-recovery-backend' "$recovery_policy"
+grep -Fq 'namespaceSelector: {}' "$recovery_policy"
+grep -Fq '{protocol: TCP, port: 9503}' "$recovery_policy"
+[[ "$(grep -Fc 'podSelector:' "$recovery_policy")" -eq 1 ]]
+[[ "$(grep -Fc 'namespaceSelector: {}' "$recovery_policy")" -eq 1 ]]
+[[ "$(grep -Fc 'port:' "$recovery_policy")" -eq 1 ]]
+if grep -Eq 'longhorn.io/component: share-manager|ipBlock:|kind: (Ingress|HTTPRoute)' "$recovery_policy"; then
+  echo 'recovery-backend policy widened beyond cluster-pod TCP/9503 ingress' >&2
+  exit 1
+fi
+
 # DES-HOR-469-02: TLS-on rendering must issue the fixed upstream Secret before
 # Longhorn starts and make authenticated, unauthenticated, and plaintext probes
 # part of the post-install gate. Plain rendering must not invent the leaf.
@@ -84,10 +102,14 @@ helm template "$long_release" "$chart" --namespace longhorn-system \
   --show-only templates/validation-job.yaml >"$tmp/long-validation.yaml"
 helm template "$long_release" "$chart" --namespace longhorn-system \
   --show-only templates/uninstall-guard-job.yaml >"$tmp/long-uninstall.yaml"
+helm template "$long_release" "$chart" --namespace longhorn-system \
+  --show-only templates/recovery-backend-networkpolicy.yaml >"$tmp/long-recovery-policy.yaml"
 validation_name="$(awk '$1 == "name:" { print $2; exit }' "$tmp/long-validation.yaml")"
 uninstall_name="$(awk '$1 == "name:" { print $2; exit }' "$tmp/long-uninstall.yaml")"
+recovery_policy_name="$(awk '$1 == "name:" { print $2; exit }' "$tmp/long-recovery-policy.yaml")"
 [[ ${#validation_name} -le 63 && "$validation_name" == *-validation ]]
 [[ ${#uninstall_name} -le 63 && "$uninstall_name" == *-uninstall-guard ]]
+[[ ${#recovery_policy_name} -le 63 && "$recovery_policy_name" == *-recovery-ingress ]]
 
 if grep -Fq 'kind: Certificate' "$tmp/single-node.yaml"; then
   echo "plaintext managed mode unexpectedly rendered the Longhorn gRPC leaf" >&2

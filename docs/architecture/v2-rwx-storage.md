@@ -96,6 +96,15 @@ decision rather than an implementation-local substitution.
 - **Consequences:** HOR-469 provisions and validates the internal-CA-backed Longhorn gRPC leaf, makes the single-node exposure and multi-node prerequisite explicit, validates internal TLS and managed storage together, and adds compact Longhorn health panels to the existing operator dashboard. The existing three-node storage scenario remains implementation/reference evidence, not production qualification for unencrypted multi-node networking. HOR-469 does not implement full-platform HA, Forge multi-node lifecycle, service replicas, or inter-node encryption and makes no claim that the Iterabase CA directly secures NFS.
 - **Evidence:** Canonical approval is durable in Obsidian `Areas/ho/Architecture/HOR-469 — Longhorn Internal TLS and Managed-Storage Transport Boundary.md`. It records the founder's exact 2026-08-26 response, selected scope, and consequences for PR #63, HOR-469, and provisional HOR-519.
 
+### DES-HOR-527-01 — Recovery-backend NetworkPolicy source exception
+
+- **Approved by:** Nuno Gonçalves
+- **Approved on:** 2026-08-29
+- **Scope:** Longhorn `1.12.1` recovery-backend ingress needed for autonomous share-manager recreation; bounded amendment to `DES-HOR-424-06` only.
+- **Decision:** Keep Longhorn's internal NetworkPolicies enabled, but add one chart-owned rule that admits namespaced cluster pods to only the recovery-backend on TCP/9503 without relying on the dynamically selected share-manager source label. The rule admits no external IP source and no additional port. The private Longhorn UI, unrelated Longhorn policies, and the existing internal-TLS configuration and validation remain unchanged; this source-admission exception waives no encryption or authentication requirement.
+- **Consequences:** A recreated share-manager can make NFS-Ganesha's one-shot recovery-backend connection without racing the component-label source update. The public storage values surface does not widen. Validation must delete only the established share-manager as fault injection, keep desired AgentPool replicas stable, perform no attachment or manual repair, and prove production-owned backend/share-manager recovery followed by fresh workers. The compiled affected-test selector remains the sole authority for running the CPU scenario.
+- **Evidence:** Canonical approval and exact-head failure evidence are durable in HOR-527. PR #65 run `33251761942`, job `99098724417`, retained the replacement share-manager status/logs showing recovery-backend TCP/9503 connection failure while its Service and Ready manager endpoint remained present.
+
 ## 2. Product and inherited runtime constraints
 
 The storage choice serves the existing runtime; it does not redefine it:
@@ -177,6 +186,7 @@ remain in the I/O path.
 | manager ↔ current V1 instance-manager gRPC services | Mutual TLS with the `longhorn-grpc-tls` client/server leaf issued by the Iterabase internal CA; unauthenticated TLS and plaintext are rejected |
 | Longhorn ↔ Kubernetes API | Kubernetes API server TLS and service-account authorization |
 | manager API/UI and `/metrics` on port 9500 | Upstream HTTP inside ClusterIP/restricted NetworkPolicies; UI has no customer ingress and Prometheus receives only the metrics exception |
+| share-manager → recovery-backend TCP/9503 | Cluster-internal upstream recovery metadata path; `DES-HOR-527-01` admits namespaced pods to this port without an external-IP source or any change to the internal-TLS contract |
 | single-node worker ↔ share-manager NFSv4.1 | Unencrypted same-host data plane, accepted only as the bounded single-node exposure |
 | host iSCSI/CSI sockets and V1 engine/replica/share-manager data paths | Not directly secured by the Iterabase CA; future production inter-node traffic requires the HOR-519 encrypted-network gate |
 
@@ -188,7 +198,8 @@ The managed installation pins:
 - generic non-migratable RWX Filesystem volumes;
 - NFSv4 client support on every worker node;
 - internal Longhorn NetworkPolicies enabled with `type: k3s` and internal
-  traffic restriction enabled;
+  traffic restriction enabled, plus only the `DES-HOR-527-01` namespaced-pod
+  source exception for recovery-backend TCP/9503;
 - an Iterabase-internal-CA `longhorn-grpc-tls` leaf whenever
   `global.internalTLS.enabled=true`, with current instance-manager gRPC services
   rejecting plaintext and unauthenticated clients;
@@ -811,6 +822,7 @@ slice:
 | Enforce topology replica count, reserve/over-provisioning, hard capacity, `Retain`, expansion-only, and capacity alerts | DES-HOR-424-04 |
 | Gate readiness, surface stable reasons/events, run worker/share-manager/node-loss recovery without replay, and recycle clients | DES-HOR-424-05 |
 | Enable internal NetworkPolicies; keep UI private; document encryption owner; validate upgrade, re-apply, decommission, and deletion confirmation | DES-HOR-424-06 |
+| Admit only namespaced cluster pods to recovery-backend TCP/9503, without a share-manager label race, external IP sources, extra ports, manual recovery, or selector broadening | DES-HOR-527-01 |
 | Provision the internal-CA Longhorn gRPC leaf before startup, reject unauthenticated/plaintext current services, document the same-host NFS boundary, gate multi-node production on HOR-519, and add compact operator dashboard signals | DES-HOR-469-02 |
 
 The implementation is incomplete until all of these pass:

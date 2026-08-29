@@ -7,6 +7,7 @@ appVersion: "1.12.1"
 annotations:
   iterabase.com/architecture-decision: DES-HOR-469-01
   iterabase.com/transport-decision: DES-HOR-469-02
+  iterabase.com/recovery-network-decision: DES-HOR-527-01
   iterabase.com/longhorn-chart-sha256: d70764e2d6cce673482da4d91da5b44a9791cda842c1914f77e7806ad1cd94bb
 dependencies:
   - name: longhorn
