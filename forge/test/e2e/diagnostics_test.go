@@ -332,14 +332,20 @@ capture_terminal_pod() {
   local pod_uid=${3:?pod uid required}
   local event=${4:?event required}
   local file="$output_dir/share-manager-${pod_uid}-terminal.log"
+  local live_uid
+  live_uid=$(k3s kubectl get pod "$pod_name" -n longhorn-system -o jsonpath='{.metadata.uid}' 2>/dev/null || true)
   {
     printf '\n===== %s %s %s uid=%s =====\n' "$(date -u +%FT%TZ.%N)" "$event_type" "$pod_name" "$pod_uid"
     printf '%s\n' "$event"
-    echo '--- final live pod object, if retained ---'
+    if [[ "$live_uid" != "$pod_uid" ]]; then
+      printf '%s\n' 'live pod object/log requests skipped because the named pod was deleted or replaced with another UID; the event and UID-bound log stream above remain authoritative'
+      return
+    fi
+    echo '--- final live pod object ---'
     k3s kubectl get pod "$pod_name" -n longhorn-system -o yaml || true
-    echo '--- current share-manager log, if retained ---'
+    echo '--- current share-manager log ---'
     k3s kubectl logs -n longhorn-system "$pod_name" -c share-manager --tail=500 --timestamps || true
-    echo '--- previous share-manager log, if retained ---'
+    echo '--- previous share-manager log ---'
     k3s kubectl logs -n longhorn-system "$pod_name" -c share-manager --previous --tail=500 --timestamps || true
   } >>"$file" 2>&1
 }
@@ -359,8 +365,12 @@ watch_share_manager_pods() {
           follow_share_manager_logs "$pod_name" "$pod_uid" &
           printf '%s\n' "$!" >>"$child_pids"
         fi
-        capture_network_state "$event_type $pod_name uid=$pod_uid"
-        if [[ "$event_type" == "DELETED" || "$event" == *terminated* ]]; then
+        if [[ "$event" == *'map[running:'* && ! -e "$output_dir/network-captured-${pod_uid}" ]]; then
+          : >"$output_dir/network-captured-${pod_uid}"
+          capture_network_state "$event_type running $pod_name uid=$pod_uid"
+        fi
+        if [[ ("$event_type" == "DELETED" || "$event" == *terminated*) && ! -e "$output_dir/terminal-captured-${pod_uid}" ]]; then
+          : >"$output_dir/terminal-captured-${pod_uid}"
           capture_terminal_pod "$event_type" "$pod_name" "$pod_uid" "$event"
         fi
       done
@@ -411,7 +421,7 @@ func (watcher *shareManagerAttemptWatcher) stop(t *testing.T) {
 	}
 	defer client.Close()
 	command := fmt.Sprintf(
-		"sudo kill %s >/dev/null 2>&1 || true; for i in $(seq 1 20); do sudo kill -0 %s >/dev/null 2>&1 || break; sleep 0.25; done; sudo bash -c 'for file in \"$1\"/*; do test -f \"$file\" || continue; printf \"===== %%s =====\\n\" \"$file\"; cat \"$file\"; done' _ %s",
+		"sudo kill %s >/dev/null 2>&1 || true; for i in $(seq 1 20); do sudo kill -0 %s >/dev/null 2>&1 || break; sleep 0.25; done; sudo bash -c 'for file in \"$1\"/*; do test -f \"$file\" || continue; printf \"===== %%s =====\\n\" \"$file\"; cat \"$file\"; printf \"\\n\"; done' _ %s",
 		candidateShellQuote(watcher.pid), candidateShellQuote(watcher.pid), candidateShellQuote(watcher.remoteDir),
 	)
 	output, commandErr := sshOutput(client, command)
@@ -527,7 +537,10 @@ func TestShareManagerAttemptWatcherRetainsTerminatingEvidence(t *testing.T) {
 		"STATE:.object.status.containerStatuses[0].state",
 		"LAST_STATE:.object.status.containerStatuses[0].lastState",
 		"--follow --timestamps",
-		"--- previous share-manager log, if retained ---",
+		"network-captured-${pod_uid}",
+		"live_uid",
+		"deleted or replaced with another UID",
+		"--- previous share-manager log ---",
 		"--previous --tail=500 --timestamps",
 		"iptables-save -c -t filter",
 		"ipset save",
