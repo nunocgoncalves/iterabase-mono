@@ -230,6 +230,7 @@ func TestAssessManagedRWXUnknownDetachedIsInitialOnlyBeforeOperationalReadiness(
 	assessment := r.assessAgentPoolStorage(context.Background(), pool)
 	assert.False(t, assessment.Ready)
 	assert.True(t, assessment.CanMount)
+	assert.True(t, assessment.MountDrivingConvergence)
 	assert.Equal(t, storageReasonInitialConvergence, assessment.Reason)
 	assert.Contains(t, assessment.Message, "retain the desired workers")
 
@@ -241,6 +242,16 @@ func TestAssessManagedRWXUnknownDetachedIsInitialOnlyBeforeOperationalReadiness(
 	assert.False(t, assessment.Ready)
 	assert.False(t, assessment.CanMount)
 	assert.Equal(t, storageReasonBackendDegraded, assessment.Reason)
+
+	pool.Status.Conditions = append(pool.Status.Conditions, metav1.Condition{
+		Type: storageConditionWorkerReplacementPending, Status: metav1.ConditionTrue,
+		Reason: storageReasonRecoveryPending,
+	})
+	assessment = r.assessAgentPoolStorage(context.Background(), pool)
+	assert.False(t, assessment.Ready)
+	assert.True(t, assessment.CanMount)
+	assert.True(t, assessment.MountDrivingConvergence)
+	assert.Equal(t, storageReasonRecoveryPending, assessment.Reason)
 }
 
 func TestManagedRWXStorageRequiresReadyShareManagerWhenAttached(t *testing.T) {
@@ -482,7 +493,6 @@ func TestReconcileManagedRWXEstablishedUnknownDetachedQuiescesAndRecoversWithFre
 	detachedVolume.SetAPIVersion("longhorn.io/v1beta2")
 	detachedVolume.SetKind("Volume")
 	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(volume), detachedVolume))
-	require.NoError(t, unstructured.SetNestedField(detachedVolume.Object, "healthy", "status", "robustness"))
 	require.NoError(t, unstructured.SetNestedField(detachedVolume.Object, "detached", "status", "state"))
 	require.NoError(t, r.Update(context.Background(), detachedVolume))
 
@@ -496,6 +506,10 @@ func TestReconcileManagedRWXEstablishedUnknownDetachedQuiescesAndRecoversWithFre
 	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(pool), &got))
 	assert.False(t, got.Status.Ready)
 	assert.Zero(t, got.Status.ReadyReplicas)
+	condition = meta.FindStatusCondition(got.Status.Conditions, storageConditionReady)
+	require.NotNil(t, condition)
+	assert.Equal(t, metav1.ConditionFalse, condition.Status)
+	assert.Equal(t, storageReasonRecoveryPending, condition.Reason)
 	replacementCondition = meta.FindStatusCondition(got.Status.Conditions, storageConditionWorkerReplacementPending)
 	require.NotNil(t, replacementCondition)
 	assert.Equal(t, metav1.ConditionTrue, replacementCondition.Status)
@@ -509,6 +523,7 @@ func TestReconcileManagedRWXEstablishedUnknownDetachedQuiescesAndRecoversWithFre
 	}
 
 	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(volume), detachedVolume))
+	require.NoError(t, unstructured.SetNestedField(detachedVolume.Object, "healthy", "status", "robustness"))
 	require.NoError(t, unstructured.SetNestedField(detachedVolume.Object, "attached", "status", "state"))
 	require.NoError(t, r.Update(context.Background(), detachedVolume))
 	require.NoError(t, r.Create(context.Background(), &corev1.Pod{

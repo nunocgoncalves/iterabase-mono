@@ -258,7 +258,7 @@ func (r *AgentPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	storage = r.assessAgentPoolStorage(ctx, &pool)
 	if !storage.Ready {
 		wasOperationallyReady := storageWasOperationallyReady(&pool)
-		if wasOperationallyReady || !storage.CanMount {
+		if (wasOperationallyReady && !storage.MountDrivingConvergence) || !storage.CanMount {
 			if err := r.quiesceWorkers(ctx, &pool); err != nil {
 				return ctrl.Result{}, err
 			}

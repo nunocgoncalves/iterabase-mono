@@ -26,7 +26,7 @@ Stages:
 5. Upgrade to the reviewed current platform release through the public E2E overlay: exact Flux source first, certificate ownership handoff, companion substrate, platform, then CR reconciliation.
 6. Assert both Helm versions, certificate CRD ownership, exact Flux revision/digest, tool-runner readiness, and HTTPS health through the fixture's NodePort edge.
 7. Create a two-worker managed-RWX AgentPool, capture the first worker UIDs after its claim is Bound, and prove that exact set reaches Ready without initial-attachment churn while durable operational readiness is recorded.
-8. Delete the established pool's share-manager and prove fail-closed scheduling removal, a durable replacement-pending marker, preserved claim identity, and recovery only through two fresh workers.
+8. Delete the established pool's share-manager and prove fail-closed scheduling removal, a durable replacement-pending marker, preserved claim identity, a bounded zero-client detach/reset, and recovery only through two fresh workers.
 9. Re-apply the current release and assert the reality-derived action is `skip` while every configured phase reconciles successfully.
 10. Materialize an overlay-declared Secret from an operator environment variable and verify its value/type.
 11. Reconcile Flux again and assert controllers, source artifact, and Kustomization readiness.

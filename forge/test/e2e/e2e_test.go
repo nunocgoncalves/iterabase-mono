@@ -84,6 +84,7 @@ type digitalOceanCPUState struct {
 	storagePVCUID        string
 	storagePV            string
 	agentPoolPVCUID      string
+	agentPoolVolume      string
 	initialWorkerPodUIDs string
 	diagnostics          forgeDiagnostics
 }
@@ -493,6 +494,7 @@ func exerciseManagedShareManagerFailureStage(t *testing.T, state *digitalOceanCP
 	if volume == "" {
 		t.Fatal("managed AgentPool PV has no Longhorn volume handle")
 	}
+	state.agentPoolVolume = volume
 	shareManager := strings.TrimSpace(mustSSHOutput(t, sc, fmt.Sprintf(`sudo k3s kubectl get pods -n longhorn-system -l longhorn.io/component=share-manager -o name | grep %s | head -1`, volume)))
 	if shareManager == "" {
 		t.Fatalf("no active share-manager for %s", volume)
@@ -534,6 +536,7 @@ func assertManagedStorageRecoveryStage(t *testing.T, state *digitalOceanCPUState
 		t.Fatalf("ssh dial %s: %v", state.ip, err)
 	}
 	defer sc.Close()
+	resetManagedStorageClientsForRecovery(t, sc, state)
 	waitForManagedAgentPoolReady(t, sc, 10*time.Minute)
 	identity := strings.TrimSpace(mustSSHOutput(t, sc, `sudo k3s kubectl get pvc forge-storage-pool-sandbox -n iterabase-system -o jsonpath='{.metadata.uid}'`))
 	if identity != state.agentPoolPVCUID {
@@ -552,6 +555,31 @@ func assertManagedStorageRecoveryStage(t *testing.T, state *digitalOceanCPUState
 	if status != "true|2|StorageReady|True|False|FreshWorkersReady" {
 		t.Fatalf("managed storage recovery status=%q, want durable readiness with a fresh completed replacement set", status)
 	}
+}
+
+func resetManagedStorageClientsForRecovery(t *testing.T, client *ssh.Client, state *digitalOceanCPUState) {
+	t.Helper()
+	if state.agentPoolVolume == "" {
+		t.Fatal("managed storage recovery has no captured Longhorn volume")
+	}
+	mustSSHOutput(t, client, `sudo k3s kubectl patch agentpool forge-storage-pool -n iterabase-system --type=merge -p '{"spec":{"replicas":0}}'`)
+	deadline := time.Now().Add(3 * time.Minute)
+	lastCount := ""
+	for time.Now().Before(deadline) {
+		lastCount = strings.TrimSpace(mustSSHOutput(t, client, `sudo k3s kubectl get pods -n iterabase-system -l platform.iterabase.com/agentpool=forge-storage-pool --no-headers 2>/dev/null | wc -l`))
+		if lastCount == "0" {
+			break
+		}
+		time.Sleep(time.Second)
+	}
+	if lastCount != "0" {
+		t.Fatalf("managed storage client reset retained %s worker pods", lastCount)
+	}
+	mustSSHOutput(t, client, fmt.Sprintf(
+		`sudo k3s kubectl wait -n longhorn-system --for=jsonpath='{.status.state}'=detached volume.longhorn.io/%s --timeout=3m`,
+		candidateShellQuote(state.agentPoolVolume),
+	))
+	mustSSHOutput(t, client, `sudo k3s kubectl patch agentpool forge-storage-pool -n iterabase-system --type=merge -p '{"spec":{"replicas":2}}'`)
 }
 
 func reapplyCurrentPlatformStage(t *testing.T, state *digitalOceanCPUState) {

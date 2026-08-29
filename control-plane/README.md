@@ -323,8 +323,10 @@ mount-root, backend, share-manager, capacity, and recovery failures. Storage
 loss after durable operational readiness removes worker pods/scheduling credit;
 the exact initial Longhorn `unknown`/`detached` bootstrap window instead retains
 the desired workers needed to drive first attachment while readiness stays
-closed. Established recovery waits for backend health and creates fresh workers
-without automatic turn/effect replay.
+closed. Established recovery first latches replacement-pending after quiescing
+the affected set; only then may fresh workers drive an exact detached backend
+back to attachment while scheduling remains closed. No turn/effect is replayed
+automatically.
 
 `spec.workspaceTools` is the deny-by-default local-tool switch (ARCH-016):
 `false` exposes none; `true` exposes exactly `read`/`write`/`edit`/`bash`.

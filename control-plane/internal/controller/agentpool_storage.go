@@ -53,15 +53,16 @@ const (
 )
 
 type agentPoolStorageAssessment struct {
-	Ready              bool
-	CanMount           bool
-	Reason             string
-	Message            string
-	Mode               string
-	ClassName          string
-	PVName             string
-	VolumeHandle       string
-	ReplacementPending bool
+	Ready                   bool
+	CanMount                bool
+	Reason                  string
+	Message                 string
+	Mode                    string
+	ClassName               string
+	PVName                  string
+	VolumeHandle            string
+	ReplacementPending      bool
+	MountDrivingConvergence bool
 }
 
 // assessAgentPoolStorage intentionally keeps the ordered fail-closed predicate
@@ -246,14 +247,28 @@ func (r *AgentPoolReconciler) managedLonghornVolumeHealth(ctx context.Context, p
 	}
 	robustness, _, _ := unstructured.NestedString(volume.Object, "status", "robustness")
 	state, _, _ := unstructured.NestedString(volume.Object, "status", "state")
-	if robustness == "unknown" && state == "detached" && !storageWasOperationallyReady(pool) {
-		return &agentPoolStorageAssessment{
-			CanMount: true,
-			Reason:   storageReasonInitialConvergence,
-			Message: fmt.Sprintf(
-				"Longhorn volume %s/%s is in initial convergence with robustness=%q state=%q; retain the desired workers to drive first attachment while AgentPool readiness stays closed until the backend, share-manager, and workers are Ready",
-				managedLonghornNamespace, volumeHandle, robustness, state,
-			),
+	if robustness == "unknown" && state == "detached" {
+		if !storageWasOperationallyReady(pool) {
+			return &agentPoolStorageAssessment{
+				CanMount:                true,
+				MountDrivingConvergence: true,
+				Reason:                  storageReasonInitialConvergence,
+				Message: fmt.Sprintf(
+					"Longhorn volume %s/%s is in initial convergence with robustness=%q state=%q; retain the desired workers to drive first attachment while AgentPool readiness stays closed until the backend, share-manager, and workers are Ready",
+					managedLonghornNamespace, volumeHandle, robustness, state,
+				),
+			}
+		}
+		if storageWorkerReplacementPending(pool) {
+			return &agentPoolStorageAssessment{
+				CanMount:                true,
+				MountDrivingConvergence: true,
+				Reason:                  storageReasonRecoveryPending,
+				Message: fmt.Sprintf(
+					"Longhorn volume %s/%s is in replacement recovery with robustness=%q state=%q; retain only the fresh replacement workers needed to drive attachment while scheduling stays closed",
+					managedLonghornNamespace, volumeHandle, robustness, state,
+				),
+			}
 		}
 	}
 	if robustness != "healthy" {
