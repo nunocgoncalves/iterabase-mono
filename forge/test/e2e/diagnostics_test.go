@@ -39,8 +39,7 @@ type shareManagerAttemptWatcher struct {
 	ip          string
 	keyPath     string
 	pid         string
-	remoteLog   string
-	driverLog   string
+	remoteDir   string
 	label       string
 	stopped     bool
 }
@@ -234,14 +233,13 @@ func startShareManagerAttemptWatcher(t *testing.T, diagnostics *forgeDiagnostics
 
 	remoteBase := fmt.Sprintf("/tmp/iterabase-share-manager-attempts-%d", time.Now().UnixNano())
 	remoteScript := remoteBase + ".sh"
-	remoteLog := remoteBase + ".log"
-	driverLog := remoteBase + "-driver.log"
+	remoteDir := remoteBase + ".d"
 	script := shareManagerAttemptWatcherScript()
 	encoded := base64.StdEncoding.EncodeToString([]byte(script))
 	start := fmt.Sprintf(
-		"printf %%s %s | base64 --decode | sudo tee %s >/dev/null; sudo chmod 0700 %s; sudo nohup %s %s >%s 2>&1 </dev/null & echo $!",
-		candidateShellQuote(encoded), candidateShellQuote(remoteScript), candidateShellQuote(remoteScript),
-		candidateShellQuote(remoteScript), candidateShellQuote(remoteLog), candidateShellQuote(driverLog),
+		"sudo mkdir -p %s; printf %%s %s | base64 --decode | sudo tee %s >/dev/null; sudo chmod 0700 %s; sudo sh -c 'nohup \"$1\" \"$2\" >\"$2/driver.log\" 2>&1 </dev/null & echo $!' _ %s %s",
+		candidateShellQuote(remoteDir), candidateShellQuote(encoded), candidateShellQuote(remoteScript), candidateShellQuote(remoteScript),
+		candidateShellQuote(remoteScript), candidateShellQuote(remoteDir),
 	)
 	output, err := sshOutput(client, start)
 	if err != nil {
@@ -252,62 +250,151 @@ func startShareManagerAttemptWatcher(t *testing.T, diagnostics *forgeDiagnostics
 	if pidErr != nil || pidNumber <= 0 {
 		t.Fatalf("share-manager attempt watcher returned invalid PID %q", pid)
 	}
+	readyCommand := fmt.Sprintf(
+		"for i in $(seq 1 100); do test -f %s/ready && exit 0; sleep 0.1; done; sudo cat %s/driver.log >&2; exit 1",
+		candidateShellQuote(remoteDir), candidateShellQuote(remoteDir),
+	)
+	if readyOutput, readyErr := sshOutput(client, readyCommand); readyErr != nil {
+		t.Fatalf("share-manager attempt watcher did not establish event watches and baseline network evidence: %v\n%s", readyErr, readyOutput)
+	}
 	watcher := &shareManagerAttemptWatcher{
 		diagnostics: diagnostics, ip: ip, keyPath: keyPath, pid: pid,
-		remoteLog: remoteLog, driverLog: driverLog, label: label,
+		remoteDir: remoteDir, label: label,
 	}
 	return func() { watcher.stop(t) }
 }
 
 func shareManagerAttemptWatcherScript() string {
 	return `#!/usr/bin/env bash
-set -u
-output=${1:?output path required}
-declare -A last
-last_storage_state=
-while true; do
-  storage_state=$({
-    printf '%s\n' '--- nodes ---'
-    k3s kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"|"}{.spec.podCIDR}{"|"}{.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}'
-    printf '%s\n' '--- AgentPools ---'
-    k3s kubectl get agentpools -A -o jsonpath='{range .items[*]}{.metadata.namespace}{"/"}{.metadata.name}{"|"}{.metadata.uid}{"|"}{.status.ready}{"|"}{.status.readyReplicas}{"|"}{.status.conditions}{"|"}{.status.message}{"\n"}{end}'
-    printf '%s\n' '--- AgentPool workers ---'
-    k3s kubectl get pods -A -l platform.iterabase.com/agentpool -o jsonpath='{range .items[*]}{.metadata.namespace}{"/"}{.metadata.name}{"|"}{.metadata.uid}{"|"}{.metadata.creationTimestamp}{"|"}{.metadata.deletionTimestamp}{"|"}{.metadata.annotations.platform\.iterabase\.com/pod-template-hash}{"|"}{.status.phase}{"|"}{.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}'
-    printf '%s\n' '--- Longhorn volumes ---'
-    k3s kubectl get volumes.longhorn.io -n longhorn-system -o jsonpath='{range .items[*]}{.metadata.name}{"|"}{.status.robustness}{"|"}{.status.state}{"|"}{.status.shareState}{"|"}{.status.shareEndpoint}{"|"}{.status.currentNodeID}{"|"}{.status.ownerID}{"\n"}{end}'
-    printf '%s\n' '--- Longhorn share managers ---'
-    k3s kubectl get sharemanagers.longhorn.io -n longhorn-system -o jsonpath='{range .items[*]}{.metadata.name}{"|"}{.status.state}{"|"}{.status.endpoint}{"|"}{.status.ownerID}{"\n"}{end}'
-    printf '%s\n' '--- recovery-backend endpoints ---'
-    k3s kubectl get endpointslices.discovery.k8s.io -n longhorn-system -l kubernetes.io/service-name=longhorn-recovery-backend -o jsonpath='{range .items[*].endpoints[*]}{.addresses}{"|"}{.conditions.ready}{"|"}{.nodeName}{"\n"}{end}'
-  } 2>/dev/null || true)
-  if [[ "$last_storage_state" != "$storage_state" ]]; then
-    last_storage_state=$storage_state
-    {
-      printf '\n===== %s storage control-plane state =====\n' "$(date -u +%FT%TZ)"
-      printf '%s\n' "$storage_state"
-    } >>"$output" 2>&1
-  fi
+set -uo pipefail
+output_dir=${1:?output directory required}
+driver="$output_dir/driver.log"
+child_pids="$output_dir/child-pids"
+mkdir -p "$output_dir"
+: >"$child_pids"
 
-  pods=$(k3s kubectl get pods -n longhorn-system -l longhorn.io/component=share-manager -o name 2>/dev/null || true)
-  for pod in $pods; do
-    state=$(k3s kubectl get -n longhorn-system "$pod" -o jsonpath='{.metadata.uid}|{.status.phase}|{.status.containerStatuses[0].state.waiting.reason}|{.status.containerStatuses[0].state.running.startedAt}|{.status.containerStatuses[0].state.terminated.reason}|{.status.containerStatuses[0].state.terminated.exitCode}|{.status.containerStatuses[0].state.terminated.finishedAt}' 2>/dev/null || true)
-    test -n "$state" || continue
-    if [[ "${last[$pod]-}" == "$state" ]]; then
-      continue
+capture_network_state() {
+  local reason=${1:?snapshot reason required}
+  {
+    printf '\n===== %s network snapshot: %s =====\n' "$(date -u +%FT%TZ.%N)" "$reason"
+    echo '--- recovery-backend NetworkPolicy ---'
+    k3s kubectl get networkpolicy longhorn-recovery-backend -n longhorn-system -o yaml || true
+    echo '--- recovery-backend Service and EndpointSlices ---'
+    k3s kubectl get service longhorn-recovery-backend -n longhorn-system -o wide || true
+    k3s kubectl get endpointslices.discovery.k8s.io -n longhorn-system -l kubernetes.io/service-name=longhorn-recovery-backend -o yaml || true
+    echo '--- share-manager pods ---'
+    k3s kubectl get pods -n longhorn-system -l longhorn.io/component=share-manager -o wide || true
+    echo '--- TCP/9503 sockets ---'
+    ss -ntp 2>/dev/null | grep ':9503' || true
+    echo '--- iptables filter counters ---'
+    if command -v iptables-save >/dev/null 2>&1; then
+      iptables-save -c -t filter || true
     fi
-    last[$pod]=$state
-    {
-      printf '\n===== %s %s state=%s =====\n' "$(date -u +%FT%TZ)" "$pod" "$state"
-      echo '--- pod status ---'
-      k3s kubectl get -n longhorn-system "$pod" -o yaml || true
-      echo '--- current share-manager log ---'
-      k3s kubectl logs -n longhorn-system "$pod" -c share-manager --tail=500 || true
-      echo '--- previous share-manager log ---'
-      k3s kubectl logs -n longhorn-system "$pod" -c share-manager --previous --tail=500 || true
-    } >>"$output" 2>&1
+    echo '--- kube-router ipsets ---'
+    if command -v ipset >/dev/null 2>&1; then
+      ipset save || true
+    fi
+  } >>"$output_dir/network-snapshots.log" 2>&1
+}
+
+watch_table() {
+  local stream=${1:?stream required}
+  local file=${2:?file required}
+  shift 2
+  while true; do
+    k3s kubectl get "$@" --watch --output-watch-events --no-headers 2>>"$driver" |
+      while IFS= read -r event; do
+        printf '%s|%s|%s\n' "$(date -u +%FT%TZ.%N)" "$stream" "$event"
+      done >>"$file"
+    printf '%s watch stream %s closed; reconnecting\n' "$(date -u +%FT%TZ.%N)" "$stream" >>"$driver"
+    sleep 1
   done
-  sleep 0.25
-done
+}
+
+follow_share_manager_logs() {
+  local pod_name=${1:?pod name required}
+  local pod_uid=${2:?pod uid required}
+  local file="$output_dir/share-manager-${pod_uid}-follow.log"
+  while [[ "$(k3s kubectl get pod "$pod_name" -n longhorn-system -o jsonpath='{.metadata.uid}' 2>/dev/null || true)" == "$pod_uid" ]]; do
+    {
+      printf '\n===== %s following %s uid=%s =====\n' "$(date -u +%FT%TZ.%N)" "$pod_name" "$pod_uid"
+      if k3s kubectl logs -n longhorn-system "$pod_name" -c share-manager --follow --timestamps; then
+        exit 0
+      fi
+    } >>"$file" 2>&1
+    sleep 1
+  done
+}
+
+capture_terminal_pod() {
+  local event_type=${1:?event type required}
+  local pod_name=${2:?pod name required}
+  local pod_uid=${3:?pod uid required}
+  local event=${4:?event required}
+  local file="$output_dir/share-manager-${pod_uid}-terminal.log"
+  {
+    printf '\n===== %s %s %s uid=%s =====\n' "$(date -u +%FT%TZ.%N)" "$event_type" "$pod_name" "$pod_uid"
+    printf '%s\n' "$event"
+    echo '--- final live pod object, if retained ---'
+    k3s kubectl get pod "$pod_name" -n longhorn-system -o yaml || true
+    echo '--- current share-manager log, if retained ---'
+    k3s kubectl logs -n longhorn-system "$pod_name" -c share-manager --tail=500 --timestamps || true
+    echo '--- previous share-manager log, if retained ---'
+    k3s kubectl logs -n longhorn-system "$pod_name" -c share-manager --previous --tail=500 --timestamps || true
+  } >>"$file" 2>&1
+}
+
+watch_share_manager_pods() {
+  while true; do
+    k3s kubectl get pods -n longhorn-system -l longhorn.io/component=share-manager \
+      --watch --output-watch-events --no-headers \
+      -o 'custom-columns=TYPE:.type,NAME:.object.metadata.name,UID:.object.metadata.uid,PHASE:.object.status.phase,POD_IP:.object.status.podIP,NODE:.object.spec.nodeName,STATE:.object.status.containerStatuses[0].state,LAST_STATE:.object.status.containerStatuses[0].lastState' \
+      2>>"$driver" |
+      while IFS= read -r event; do
+        read -r event_type pod_name pod_uid _ <<<"$event"
+        [[ -n "$event_type" && -n "$pod_name" && -n "$pod_uid" ]] || continue
+        printf '%s|%s\n' "$(date -u +%FT%TZ.%N)" "$event" >>"$output_dir/share-manager-pod-events.log"
+        if [[ ! -e "$output_dir/seen-${pod_uid}" ]]; then
+          : >"$output_dir/seen-${pod_uid}"
+          follow_share_manager_logs "$pod_name" "$pod_uid" &
+          printf '%s\n' "$!" >>"$child_pids"
+        fi
+        capture_network_state "$event_type $pod_name uid=$pod_uid"
+        if [[ "$event_type" == "DELETED" || "$event" == *terminated* ]]; then
+          capture_terminal_pod "$event_type" "$pod_name" "$pod_uid" "$event"
+        fi
+      done
+    printf '%s share-manager pod watch closed; reconnecting\n' "$(date -u +%FT%TZ.%N)" >>"$driver"
+    sleep 1
+  done
+}
+
+cleanup() {
+  trap - TERM INT EXIT
+  capture_network_state watcher-stop
+  while IFS= read -r pid; do
+    kill "$pid" >/dev/null 2>&1 || true
+  done <"$child_pids"
+  for pid in $(jobs -pr); do
+    kill "$pid" >/dev/null 2>&1 || true
+  done
+  wait || true
+}
+trap cleanup TERM INT EXIT
+
+watch_share_manager_pods &
+capture_network_state watcher-start
+watch_table nodes "$output_dir/nodes.log" nodes -o 'custom-columns=TYPE:.type,NAME:.object.metadata.name,UID:.object.metadata.uid,POD_CIDRS:.object.spec.podCIDRs,READY:.object.status.conditions[?(@.type=="Ready")].status' &
+watch_table agentpools "$output_dir/agentpools.log" agentpools -A -o 'custom-columns=TYPE:.type,NAMESPACE:.object.metadata.namespace,NAME:.object.metadata.name,UID:.object.metadata.uid,READY:.object.status.ready,READY_REPLICAS:.object.status.readyReplicas,CONDITIONS:.object.status.conditions,MESSAGE:.object.status.message' &
+watch_table workers "$output_dir/workers.log" pods -A -l platform.iterabase.com/agentpool -o 'custom-columns=TYPE:.type,NAMESPACE:.object.metadata.namespace,NAME:.object.metadata.name,UID:.object.metadata.uid,CREATED:.object.metadata.creationTimestamp,DELETING:.object.metadata.deletionTimestamp,TEMPLATE_HASH:.object.metadata.annotations.platform\\.iterabase\\.com/pod-template-hash,NODE:.object.spec.nodeName,PHASE:.object.status.phase,READY:.object.status.conditions[?(@.type=="Ready")].status,STATE:.object.status.containerStatuses[0].state,LAST_STATE:.object.status.containerStatuses[0].lastState' &
+watch_table volumes "$output_dir/volumes.log" volumes.longhorn.io -n longhorn-system -o 'custom-columns=TYPE:.type,NAME:.object.metadata.name,ROBUSTNESS:.object.status.robustness,STATE:.object.status.state,SHARE_STATE:.object.status.shareState,SHARE_ENDPOINT:.object.status.shareEndpoint,CURRENT_NODE:.object.status.currentNodeID,OWNER:.object.status.ownerID' &
+watch_table engines "$output_dir/engines.log" engines.longhorn.io -n longhorn-system -o 'custom-columns=TYPE:.type,NAME:.object.metadata.name,VOLUME:.object.spec.volumeName,ACTIVE:.object.spec.active,CURRENT_STATE:.object.status.currentState,INSTANCE_MANAGER:.object.status.instanceManagerName,REPLICA_MODE_MAP:.object.status.replicaModeMap' &
+watch_table replicas "$output_dir/replicas.log" replicas.longhorn.io -n longhorn-system -o 'custom-columns=TYPE:.type,NAME:.object.metadata.name,VOLUME:.object.spec.volumeName,NODE:.object.spec.nodeID,DISK:.object.spec.diskID,FAILED_AT:.object.spec.failedAt,HEALTHY_AT:.object.spec.healthyAt,CURRENT_STATE:.object.status.currentState,INSTANCE_MANAGER:.object.status.instanceManagerName' &
+watch_table instance-managers "$output_dir/instance-managers.log" instancemanagers.longhorn.io -n longhorn-system -o 'custom-columns=TYPE:.type,NAME:.object.metadata.name,NODE:.object.spec.nodeID,ENGINE_IMAGE:.object.spec.image,STATE:.object.status.currentState,INSTANCES:.object.status.instanceEngines' &
+watch_table share-managers "$output_dir/share-managers.log" sharemanagers.longhorn.io -n longhorn-system -o 'custom-columns=TYPE:.type,NAME:.object.metadata.name,STATE:.object.status.state,ENDPOINT:.object.status.endpoint,OWNER:.object.status.ownerID' &
+watch_table recovery-endpoints "$output_dir/recovery-endpoints.log" endpointslices.discovery.k8s.io -n longhorn-system -l kubernetes.io/service-name=longhorn-recovery-backend -o 'custom-columns=TYPE:.type,NAME:.object.metadata.name,ADDRESSES:.object.endpoints[*].addresses,READY:.object.endpoints[*].conditions.ready,NODES:.object.endpoints[*].nodeName' &
+: >"$output_dir/ready"
+wait
 `
 }
 
@@ -324,8 +411,8 @@ func (watcher *shareManagerAttemptWatcher) stop(t *testing.T) {
 	}
 	defer client.Close()
 	command := fmt.Sprintf(
-		"sudo kill %s >/dev/null 2>&1 || true; sleep 1; printf '===== watcher driver =====\\n'; sudo cat %s 2>/dev/null || true; printf '===== captured attempts =====\\n'; sudo cat %s 2>/dev/null || true",
-		candidateShellQuote(watcher.pid), candidateShellQuote(watcher.driverLog), candidateShellQuote(watcher.remoteLog),
+		"sudo kill %s >/dev/null 2>&1 || true; for i in $(seq 1 20); do sudo kill -0 %s >/dev/null 2>&1 || break; sleep 0.25; done; sudo bash -c 'for file in \"$1\"/*; do test -f \"$file\" || continue; printf \"===== %%s =====\\n\" \"$file\"; cat \"$file\"; done' _ %s",
+		candidateShellQuote(watcher.pid), candidateShellQuote(watcher.pid), candidateShellQuote(watcher.remoteDir),
 	)
 	output, commandErr := sshOutput(client, command)
 	if commandErr != nil {
@@ -336,7 +423,7 @@ func (watcher *shareManagerAttemptWatcher) stop(t *testing.T) {
 		t.Logf("write share-manager attempt watcher %s: %v", watcher.label, err)
 		return
 	}
-	t.Logf("retained terminating share-manager status/current/previous logs at %s", path)
+	t.Logf("retained event-driven share-manager termination/log and Longhorn/network transition evidence at %s", path)
 }
 
 func (diagnostics *forgeDiagnostics) collectSharedCluster(t *testing.T, kubeconfig string) {
@@ -429,17 +516,21 @@ func TestShareManagerAttemptWatcherRetainsTerminatingEvidence(t *testing.T) {
 	}
 	for _, contract := range []string{
 		"longhorn.io/component=share-manager",
-		"storage control-plane state",
+		"--watch --output-watch-events",
 		".status.robustness",
 		".status.shareState",
 		".status.conditions",
+		"engines.longhorn.io",
+		"replicas.longhorn.io",
+		"instancemanagers.longhorn.io",
 		"kubernetes.io/service-name=longhorn-recovery-backend",
-		".status.containerStatuses[0].state.terminated.exitCode",
-		"--- pod status ---",
-		"--- current share-manager log ---",
-		"--- previous share-manager log ---",
-		"--previous --tail=500",
-		"sleep 0.25",
+		"STATE:.object.status.containerStatuses[0].state",
+		"LAST_STATE:.object.status.containerStatuses[0].lastState",
+		"--follow --timestamps",
+		"--- previous share-manager log, if retained ---",
+		"--previous --tail=500 --timestamps",
+		"iptables-save -c -t filter",
+		"ipset save",
 	} {
 		if !strings.Contains(script, contract) {
 			t.Fatalf("share-manager watcher script missing %q:\n%s", contract, script)
@@ -447,6 +538,9 @@ func TestShareManagerAttemptWatcherRetainsTerminatingEvidence(t *testing.T) {
 	}
 	if strings.Contains(script, "sudo k3s") {
 		t.Fatalf("root-owned watcher must invoke k3s directly without nested sudo:\n%s", script)
+	}
+	if strings.Contains(script, "sleep 0.25") {
+		t.Fatalf("event-driven watcher must not restore the high-frequency kubectl loop:\n%s", script)
 	}
 }
 

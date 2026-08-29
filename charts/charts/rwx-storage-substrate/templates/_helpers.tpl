@@ -18,10 +18,6 @@
 {{- printf "%s-uninstall-guard" (include "rwx-storage-substrate.fullname" . | trunc 47 | trimSuffix "-") -}}
 {{- end -}}
 
-{{- define "rwx-storage-substrate.recoveryBackendPolicyName" -}}
-{{- printf "%s-recovery-ingress" (include "rwx-storage-substrate.fullname" . | trunc 46 | trimSuffix "-") -}}
-{{- end -}}
-
 {{- define "rwx-storage-substrate.labels" -}}
 app.kubernetes.io/name: {{ include "rwx-storage-substrate.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
