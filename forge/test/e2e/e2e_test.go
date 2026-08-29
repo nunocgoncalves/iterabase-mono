@@ -497,6 +497,8 @@ func exerciseManagedShareManagerFailureStage(t *testing.T, state *digitalOceanCP
 	if shareManager == "" {
 		t.Fatalf("no active share-manager for %s", volume)
 	}
+	stopShareManagerWatcher := startShareManagerAttemptWatcher(t, &state.diagnostics, state.ip, state.privKeyPath, "cpu-fault")
+	defer stopShareManagerWatcher()
 	mustSSHOutput(t, sc, fmt.Sprintf("sudo k3s kubectl delete -n longhorn-system %s --grace-period=0 --force --wait=false", shareManager))
 	mustSSHOutput(t, sc, fmt.Sprintf("sudo k3s kubectl annotate agentpool forge-storage-pool -n iterabase-system --overwrite platform.iterabase.com/storage-fault-trigger=%d", time.Now().UnixNano()))
 

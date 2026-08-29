@@ -17,22 +17,23 @@ import (
 const threeNodeK3sVersion = "v1.34.10+k3s1"
 
 type rwxThreeNodeState struct {
-	ctx            context.Context
-	client         *godo.Client
-	runID          string
-	keep           bool
-	pubKey         string
-	privKeyPath    string
-	droplets       []*godo.Droplet
-	volumes        []*godo.Volume
-	volumeByNodeID map[int]*godo.Volume
-	ips            []string
-	removed        map[int]bool
-	serverIP       string
-	archive        string
-	pvcUID         string
-	pvName         string
-	volume         string
+	ctx                context.Context
+	client             *godo.Client
+	runID              string
+	keep               bool
+	pubKey             string
+	privKeyPath        string
+	droplets           []*godo.Droplet
+	volumes            []*godo.Volume
+	volumeByNodeID     map[int]*godo.Volume
+	ips                []string
+	removed            map[int]bool
+	serverIP           string
+	archive            string
+	pvcUID             string
+	pvName             string
+	volume             string
+	diagnosticEvidence forgeDiagnostics
 }
 
 func newRWXThreeNodeState(t *testing.T) *rwxThreeNodeState {
@@ -50,6 +51,7 @@ func newRWXThreeNodeState(t *testing.T) *rwxThreeNodeState {
 		runID: fmt.Sprintf("rwx-three-node-%d", time.Now().Unix()),
 		keep:  os.Getenv("FORGE_E2E_KEEP") != "", pubKey: pubKey, privKeyPath: privateKey,
 		removed: make(map[int]bool), volumeByNodeID: make(map[int]*godo.Volume),
+		diagnosticEvidence: newForgeDiagnostics(t, "digitalocean-rwx-three-node"),
 	}
 }
 
@@ -992,6 +994,8 @@ func assertThreeNodePersistenceReapplyAndUninstallStage(t *testing.T, state *rwx
 		t.Fatal(err)
 	}
 	defer client.Close()
+	stopShareManagerWatcher := startShareManagerAttemptWatcher(t, &state.diagnosticEvidence, state.serverIP, state.privKeyPath, "three-node-reapply")
+	defer stopShareManagerWatcher()
 	remoteArchive := "/tmp/" + filepath.Base(state.archive)
 	reapply := fmt.Sprintf("sudo helm --kubeconfig /etc/rancher/k3s/k3s.yaml upgrade three-rwx-storage %s -n longhorn-system --reset-values --set storage.rwx.managedLonghorn.topology=three-node --set validation.attestationNamespace=iterabase-system --wait --timeout 65m", candidateShellQuote(remoteArchive))
 	mustSSHOutput(t, client, reapply)
@@ -1067,24 +1071,15 @@ func (state *rwxThreeNodeState) diagnostics(t *testing.T) {
 	if state.serverIP == "" {
 		return
 	}
-	client, err := sshDial(state.serverIP, state.privKeyPath)
-	if err != nil {
-		t.Logf("three-node diagnostics dial: %v", err)
-		return
-	}
-	defer client.Close()
-	for _, command := range []string{
-		"sudo k3s kubectl logs -n longhorn-system -l app.kubernetes.io/component=storage-validation --all-containers --tail=500",
-		"sudo k3s kubectl get nodes -o wide",
-		"sudo k3s kubectl get storageclass,pv -o wide",
-		"sudo k3s kubectl get pvc,pod,job -A -o wide",
-		"sudo k3s kubectl get nodes.longhorn.io,volumes.longhorn.io,replicas.longhorn.io -n longhorn-system -o wide",
-		"sudo k3s kubectl get events -A --sort-by=.lastTimestamp | tail -200",
-	} {
-		if output, err := sshOutput(client, command); err == nil {
-			t.Logf("three-node diagnostics %s:\n%s", command, output)
-		}
-	}
+	state.diagnosticEvidence.setDomain(failureDomainSubstrate)
+	state.diagnosticEvidence.recordDomain(t)
+	state.diagnosticEvidence.collectSSH(t, state.serverIP, state.privKeyPath, map[string]string{
+		"validation":    "sudo k3s kubectl logs -n longhorn-system -l app.kubernetes.io/component=storage-validation --all-containers --tail=500 2>&1 || true",
+		"resources":     "sudo k3s kubectl get nodes,storageclass,pv,pvc,pod,job,volumeattachment.storage.k8s.io -A -o yaml 2>&1 || true",
+		"longhorn":      "sudo k3s kubectl get nodes.longhorn.io,volumes.longhorn.io,volumeattachments.longhorn.io,sharemanagers.longhorn.io,replicas.longhorn.io -n longhorn-system -o yaml 2>&1 || true",
+		"longhorn-logs": `for pod in $(sudo k3s kubectl get pods -n longhorn-system -l 'app=longhorn-manager' -o name 2>/dev/null) $(sudo k3s kubectl get pods -n longhorn-system -l 'app=longhorn-csi-plugin' -o name 2>/dev/null); do echo "===== $pod ====="; sudo k3s kubectl logs -n longhorn-system "$pod" --all-containers --tail=500 || true; done`,
+		"events":        "sudo k3s kubectl get events -A --sort-by=.lastTimestamp 2>&1 | tail -500 || true",
+	})
 }
 
 func (state *rwxThreeNodeState) cleanup(t *testing.T) {

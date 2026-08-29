@@ -2,10 +2,13 @@ package e2e
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -29,6 +32,16 @@ type forgeDiagnostics struct {
 	domain    string
 	outputDir string
 	redactor  *redact.Redactor
+}
+
+type shareManagerAttemptWatcher struct {
+	diagnostics *forgeDiagnostics
+	ip          string
+	keyPath     string
+	pid         string
+	remoteLog   string
+	label       string
+	stopped     bool
 }
 
 func newForgeDiagnostics(t *testing.T, scenario string) forgeDiagnostics {
@@ -210,6 +223,98 @@ func bootstrapSecretLiterals(output string) ([]string, error) {
 	return secrets, nil
 }
 
+func startShareManagerAttemptWatcher(t *testing.T, diagnostics *forgeDiagnostics, ip, keyPath, label string) func() {
+	t.Helper()
+	client, err := sshDial(ip, keyPath)
+	if err != nil {
+		t.Fatalf("start share-manager attempt watcher: dial host: %v", err)
+	}
+	defer client.Close()
+
+	remoteBase := fmt.Sprintf("/tmp/iterabase-share-manager-attempts-%d", time.Now().UnixNano())
+	remoteScript := remoteBase + ".sh"
+	remoteLog := remoteBase + ".log"
+	driverLog := remoteBase + "-driver.log"
+	script := shareManagerAttemptWatcherScript()
+	encoded := base64.StdEncoding.EncodeToString([]byte(script))
+	start := fmt.Sprintf(
+		"printf %%s %s | base64 --decode | sudo tee %s >/dev/null; sudo chmod 0700 %s; sudo nohup %s %s >%s 2>&1 </dev/null & echo $!",
+		candidateShellQuote(encoded), candidateShellQuote(remoteScript), candidateShellQuote(remoteScript),
+		candidateShellQuote(remoteScript), candidateShellQuote(remoteLog), candidateShellQuote(driverLog),
+	)
+	output, err := sshOutput(client, start)
+	if err != nil {
+		t.Fatalf("start share-manager attempt watcher: %v\n%s", err, output)
+	}
+	pid := strings.TrimSpace(output)
+	pidNumber, pidErr := strconv.Atoi(pid)
+	if pidErr != nil || pidNumber <= 0 {
+		t.Fatalf("share-manager attempt watcher returned invalid PID %q", pid)
+	}
+	watcher := &shareManagerAttemptWatcher{
+		diagnostics: diagnostics, ip: ip, keyPath: keyPath, pid: pid,
+		remoteLog: remoteLog, label: label,
+	}
+	return func() { watcher.stop(t) }
+}
+
+func shareManagerAttemptWatcherScript() string {
+	return `#!/usr/bin/env bash
+set -u
+output=${1:?output path required}
+declare -A last
+while true; do
+  pods=$(sudo k3s kubectl get pods -n longhorn-system -l longhorn.io/component=share-manager -o name 2>/dev/null || true)
+  for pod in $pods; do
+    state=$(sudo k3s kubectl get -n longhorn-system "$pod" -o jsonpath='{.metadata.uid}|{.status.phase}|{.status.containerStatuses[0].state.waiting.reason}|{.status.containerStatuses[0].state.running.startedAt}|{.status.containerStatuses[0].state.terminated.reason}|{.status.containerStatuses[0].state.terminated.exitCode}|{.status.containerStatuses[0].state.terminated.finishedAt}' 2>/dev/null || true)
+    test -n "$state" || continue
+    if [[ "${last[$pod]-}" == "$state" ]]; then
+      continue
+    fi
+    last[$pod]=$state
+    {
+      printf '\n===== %s %s state=%s =====\n' "$(date -u +%FT%TZ)" "$pod" "$state"
+      echo '--- pod status ---'
+      sudo k3s kubectl get -n longhorn-system "$pod" -o yaml || true
+      echo '--- current share-manager log ---'
+      sudo k3s kubectl logs -n longhorn-system "$pod" -c share-manager --tail=500 || true
+      echo '--- previous share-manager log ---'
+      sudo k3s kubectl logs -n longhorn-system "$pod" -c share-manager --previous --tail=500 || true
+    } >>"$output" 2>&1
+  done
+  sleep 0.25
+done
+`
+}
+
+func (watcher *shareManagerAttemptWatcher) stop(t *testing.T) {
+	t.Helper()
+	if watcher.stopped {
+		return
+	}
+	watcher.stopped = true
+	client, err := sshDial(watcher.ip, watcher.keyPath)
+	if err != nil {
+		t.Logf("retain share-manager attempt watcher %s: dial host: %v", watcher.label, err)
+		return
+	}
+	defer client.Close()
+	command := fmt.Sprintf(
+		"sudo kill %s >/dev/null 2>&1 || true; sleep 1; sudo cat %s 2>/dev/null || true",
+		candidateShellQuote(watcher.pid), candidateShellQuote(watcher.remoteLog),
+	)
+	output, commandErr := sshOutput(client, command)
+	if commandErr != nil {
+		t.Logf("retain share-manager attempt watcher %s: %v", watcher.label, commandErr)
+	}
+	path := filepath.Join(watcher.diagnostics.outputDir, "share-manager-attempts-"+watcher.label+".log")
+	if err := os.WriteFile(path, []byte(watcher.diagnostics.redactor.String(output)), 0o600); err != nil {
+		t.Logf("write share-manager attempt watcher %s: %v", watcher.label, err)
+		return
+	}
+	t.Logf("retained terminating share-manager status/current/previous logs at %s", path)
+}
+
 func (diagnostics *forgeDiagnostics) collectSharedCluster(t *testing.T, kubeconfig string) {
 	t.Helper()
 	if _, err := os.Stat(kubeconfig); err != nil {
@@ -288,6 +393,29 @@ func gpuScenarioDiagnostics() []sharede2e.Hook[*digitalOceanGPUState] {
 
 func gpuScenarioCleanup() []sharede2e.Hook[*digitalOceanGPUState] {
 	return []sharede2e.Hook[*digitalOceanGPUState]{{Name: "destroy-cloud-host", Run: func(t *testing.T, state *digitalOceanGPUState) { state.cleanup(t) }}}
+}
+
+func TestShareManagerAttemptWatcherRetainsTerminatingEvidence(t *testing.T) {
+	t.Parallel()
+	script := shareManagerAttemptWatcherScript()
+	command := exec.Command("bash", "-n")
+	command.Stdin = strings.NewReader(script)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("share-manager watcher script syntax: %v\n%s", err, output)
+	}
+	for _, contract := range []string{
+		"longhorn.io/component=share-manager",
+		".status.containerStatuses[0].state.terminated.exitCode",
+		"--- pod status ---",
+		"--- current share-manager log ---",
+		"--- previous share-manager log ---",
+		"--previous --tail=500",
+		"sleep 0.25",
+	} {
+		if !strings.Contains(script, contract) {
+			t.Fatalf("share-manager watcher script missing %q:\n%s", contract, script)
+		}
+	}
 }
 
 func TestForgeDiagnosticsRecordsFailureDomain(t *testing.T) {

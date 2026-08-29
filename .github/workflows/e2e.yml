@@ -256,6 +256,7 @@ jobs:
           ITERABASE_E2E_FIXTURE_MODE: source
           ITERABASE_E2E_SOURCE_SHA: ${{ github.sha }}
           ITERABASE_E2E_SOURCE_INPUTS: ${{ github.workspace }}/forge/test/e2e/published-fixture.json
+          ITERABASE_E2E_DIAGNOSTICS: ${{ runner.temp }}/forge-diagnostics
       - name: Upload three-node RWX failure diagnostics
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

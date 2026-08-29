@@ -144,6 +144,19 @@ class ChangedPathCollectionFixtures(unittest.TestCase):
         required = workflow.split("  required:\n", 1)[1]
         self.assertIn("- digitalocean-cpu", required)
 
+    def test_three_node_failure_evidence_uses_existing_chart_selection(self) -> None:
+        workflow = (ROOT / ".github/workflows/e2e.yml").read_text()
+        job = workflow.split("  digitalocean-rwx-three-node:\n", 1)[1].split(
+            "\n  digitalocean-gpu:\n", 1
+        )[0]
+        for contract in (
+            "needs.changes.outputs.charts == 'true' && github.event_name == 'pull_request'",
+            "ITERABASE_E2E_DIAGNOSTICS: ${{ runner.temp }}/forge-diagnostics",
+            "forge-diagnostics-digitalocean-rwx-three-node",
+            "${{ runner.temp }}/forge-diagnostics/digitalocean-rwx-three-node",
+        ):
+            self.assertIn(contract, job)
+
     def test_pr_has_required_exact_head_managed_storage_internal_tls_job(self) -> None:
         workflow = (ROOT / ".github/workflows/e2e.yml").read_text()
         job = workflow.split("  digitalocean-rwx-tls:\n", 1)[1].split(
