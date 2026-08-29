@@ -562,6 +562,19 @@ func TestReconcileManagedRWXEstablishedUnknownDetachedQuiescesAndRecoversWithFre
 	require.NoError(t, err)
 	assert.Equal(t, healthRequeueInterval, result.RequeueAfter)
 	for _, worker := range workers {
+		var absent corev1.Pod
+		assert.True(t, apierrors.IsNotFound(r.Get(context.Background(), client.ObjectKeyFromObject(worker), &absent)), "affected worker quiescing must complete as a distinct phase before replacement")
+	}
+	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(pool), &got))
+	replacementCondition = meta.FindStatusCondition(got.Status.Conditions, storageConditionWorkerReplacementPending)
+	require.NotNil(t, replacementCondition)
+	assert.Equal(t, metav1.ConditionTrue, replacementCondition.Status)
+	assert.Equal(t, storageReasonAffectedWorkersQuiesced, replacementCondition.Reason)
+
+	result, err = r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: pool.Name, Namespace: pool.Namespace}})
+	require.NoError(t, err)
+	assert.Equal(t, healthRequeueInterval, result.RequeueAfter)
+	for _, worker := range workers {
 		var fresh corev1.Pod
 		require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(worker), &fresh), "fresh workers may be created only after attached backend and share-manager health")
 	}
@@ -571,6 +584,7 @@ func TestReconcileManagedRWXEstablishedUnknownDetachedQuiescesAndRecoversWithFre
 	replacementCondition = meta.FindStatusCondition(got.Status.Conditions, storageConditionWorkerReplacementPending)
 	require.NotNil(t, replacementCondition)
 	assert.Equal(t, metav1.ConditionTrue, replacementCondition.Status)
+	assert.Equal(t, storageReasonAffectedWorkersQuiesced, replacementCondition.Reason)
 
 	for _, worker := range workers {
 		var fresh corev1.Pod
@@ -641,9 +655,9 @@ func TestReconcileManagedRWXEstablishedPoolKeepsFailClosedAfterTransientStatus(t
 	require.NoError(t, err)
 	assert.Equal(t, healthRequeueInterval, result.RequeueAfter)
 	for _, worker := range workers {
-		var removed corev1.Pod
-		err = r.Get(context.Background(), client.ObjectKeyFromObject(worker), &removed)
-		assert.True(t, apierrors.IsNotFound(err), "established workers must be quiesced after transient status and share-manager loss")
+		var retained corev1.Pod
+		require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(worker), &retained), "affected workers remain only while the share-manager recovers")
+		assert.True(t, retained.DeletionTimestamp.IsZero())
 	}
 	var got v1alpha1.AgentPool
 	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(pool), &got))
@@ -659,6 +673,28 @@ func TestReconcileManagedRWXEstablishedPoolKeepsFailClosedAfterTransientStatus(t
 	replacementCondition := meta.FindStatusCondition(got.Status.Conditions, storageConditionWorkerReplacementPending)
 	require.NotNil(t, replacementCondition)
 	assert.Equal(t, metav1.ConditionTrue, replacementCondition.Status)
+	assert.Equal(t, storageReasonRecoveryPending, replacementCondition.Reason)
+
+	require.NoError(t, r.Create(context.Background(), &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "share-manager-pool-volume",
+			Namespace: managedLonghornNamespace,
+			Labels:    map[string]string{longhornShareManagerComponentKey: longhornShareManagerComponent},
+		},
+		Status: corev1.PodStatus{Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}},
+	}))
+	result, err = r.Reconcile(context.Background(), request)
+	require.NoError(t, err)
+	assert.Equal(t, healthRequeueInterval, result.RequeueAfter)
+	for _, worker := range workers {
+		var removed corev1.Pod
+		assert.True(t, apierrors.IsNotFound(r.Get(context.Background(), client.ObjectKeyFromObject(worker), &removed)), "backend recovery must precede affected worker quiescing")
+	}
+	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(pool), &got))
+	replacementCondition = meta.FindStatusCondition(got.Status.Conditions, storageConditionWorkerReplacementPending)
+	require.NotNil(t, replacementCondition)
+	assert.Equal(t, metav1.ConditionTrue, replacementCondition.Status)
+	assert.Equal(t, storageReasonAffectedWorkersQuiesced, replacementCondition.Reason)
 }
 
 func TestEnsurePVCRefusesShrinkWithoutRecreation(t *testing.T) {

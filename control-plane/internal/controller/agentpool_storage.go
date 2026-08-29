@@ -44,6 +44,7 @@ const (
 	storageReasonShareManagerDown               = "ShareManagerUnavailable"
 	storageReasonCapacity                       = "CapacityInsufficient"
 	storageReasonRecoveryPending                = "StorageRecoveryPending"
+	storageReasonAffectedWorkersQuiesced        = "AffectedWorkersQuiesced"
 	storageReasonFreshWorkersReady              = "FreshWorkersReady"
 	storageReasonReady                          = "StorageReady"
 	storageReasonOperationalReadinessReached    = "ReadyWorkersObserved"
@@ -53,15 +54,16 @@ const (
 )
 
 type agentPoolStorageAssessment struct {
-	Ready              bool
-	CanMount           bool
-	Reason             string
-	Message            string
-	Mode               string
-	ClassName          string
-	PVName             string
-	VolumeHandle       string
-	ReplacementPending bool
+	Ready               bool
+	CanMount            bool
+	Reason              string
+	Message             string
+	Mode                string
+	ClassName           string
+	PVName              string
+	VolumeHandle        string
+	ReplacementPending  bool
+	ReplacementQuiesced bool
 }
 
 // assessAgentPoolStorage intentionally keeps the ordered fail-closed predicate
@@ -328,6 +330,15 @@ func storageWorkerReplacementPending(pool *v1alpha1.AgentPool) bool {
 	for _, condition := range pool.Status.Conditions {
 		if condition.Type == storageConditionWorkerReplacementPending {
 			return condition.Status == metav1.ConditionTrue
+		}
+	}
+	return false
+}
+
+func storageAffectedWorkersQuiesced(pool *v1alpha1.AgentPool) bool {
+	for _, condition := range pool.Status.Conditions {
+		if condition.Type == storageConditionWorkerReplacementPending {
+			return condition.Status == metav1.ConditionTrue && condition.Reason == storageReasonAffectedWorkersQuiesced
 		}
 	}
 	return false

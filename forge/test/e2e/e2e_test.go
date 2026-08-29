@@ -520,8 +520,8 @@ func exerciseManagedShareManagerFailureStage(t *testing.T, state *digitalOceanCP
 				break
 			}
 		}
-		replacementsRespectHealthGate := len(strings.Fields(lastWorkerUIDs)) == 0 || (lastBackend == "healthy|attached" && lastShareManagerReady == "True")
-		if commandErr == nil && failClosedReason && readyClosed && parts[3] == "True" && parts[4] == "True" && parts[5] == "StorageRecoveryPending" && parts[6] == "2" && affectedWorkersRemoved && replacementsRespectHealthGate {
+		healthGateSatisfied := lastBackend == "healthy|attached" && lastShareManagerReady == "True"
+		if commandErr == nil && failClosedReason && readyClosed && parts[3] == "True" && parts[4] == "True" && parts[5] == "AffectedWorkersQuiesced" && parts[6] == "2" && affectedWorkersRemoved && healthGateSatisfied {
 			return
 		}
 		time.Sleep(time.Second)
