@@ -660,9 +660,13 @@ YAML`
 	}
 	state.pvcUID, state.pvName = parts[0], parts[1]
 	state.volume = strings.TrimSpace(mustSSHOutput(t, client, fmt.Sprintf("sudo k3s kubectl get pv %s -o jsonpath='{.spec.csi.volumeHandle}'", state.pvName)))
-	volume := strings.TrimSpace(mustSSHOutput(t, client, fmt.Sprintf(`sudo k3s kubectl get volumes.longhorn.io %s -n longhorn-system -o jsonpath='{.spec.numberOfReplicas}|{.status.robustness}'`, state.volume)))
-	if volume != "3|healthy" {
-		t.Fatalf("three-node Longhorn volume=%q", volume)
+	volume := strings.TrimSpace(mustSSHOutput(t, client, fmt.Sprintf(`sudo k3s kubectl get volumes.longhorn.io %s -n longhorn-system -o jsonpath='{.spec.numberOfReplicas}|{.status.robustness}|{.status.state}'`, state.volume)))
+	if volume != "3|healthy|attached" && volume != "3|unknown|detached" {
+		t.Fatalf("three-node Longhorn volume=%q, want the attached healthy state or normal post-writer detached state", volume)
+	}
+	replicaEvidence := strings.TrimSpace(mustSSHOutput(t, client, fmt.Sprintf(`sudo k3s kubectl get replicas.longhorn.io -n longhorn-system -o json | jq -r --arg volume %s '[.items[] | select(.spec.volumeName==$volume and (.spec.failedAt // "")=="" and (.spec.healthyAt // "")!="") | .spec.nodeID] | "\(length)|\(unique | length)"'`, candidateShellQuote(state.volume))))
+	if replicaEvidence != "3|3" {
+		t.Fatalf("three-node detached volume has incomplete healthy replica evidence=%q, want three replicas across three nodes", replicaEvidence)
 	}
 }
 

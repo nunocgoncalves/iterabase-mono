@@ -40,6 +40,7 @@ type shareManagerAttemptWatcher struct {
 	keyPath     string
 	pid         string
 	remoteLog   string
+	driverLog   string
 	label       string
 	stopped     bool
 }
@@ -253,7 +254,7 @@ func startShareManagerAttemptWatcher(t *testing.T, diagnostics *forgeDiagnostics
 	}
 	watcher := &shareManagerAttemptWatcher{
 		diagnostics: diagnostics, ip: ip, keyPath: keyPath, pid: pid,
-		remoteLog: remoteLog, label: label,
+		remoteLog: remoteLog, driverLog: driverLog, label: label,
 	}
 	return func() { watcher.stop(t) }
 }
@@ -264,9 +265,9 @@ set -u
 output=${1:?output path required}
 declare -A last
 while true; do
-  pods=$(sudo k3s kubectl get pods -n longhorn-system -l longhorn.io/component=share-manager -o name 2>/dev/null || true)
+  pods=$(k3s kubectl get pods -n longhorn-system -l longhorn.io/component=share-manager -o name 2>/dev/null || true)
   for pod in $pods; do
-    state=$(sudo k3s kubectl get -n longhorn-system "$pod" -o jsonpath='{.metadata.uid}|{.status.phase}|{.status.containerStatuses[0].state.waiting.reason}|{.status.containerStatuses[0].state.running.startedAt}|{.status.containerStatuses[0].state.terminated.reason}|{.status.containerStatuses[0].state.terminated.exitCode}|{.status.containerStatuses[0].state.terminated.finishedAt}' 2>/dev/null || true)
+    state=$(k3s kubectl get -n longhorn-system "$pod" -o jsonpath='{.metadata.uid}|{.status.phase}|{.status.containerStatuses[0].state.waiting.reason}|{.status.containerStatuses[0].state.running.startedAt}|{.status.containerStatuses[0].state.terminated.reason}|{.status.containerStatuses[0].state.terminated.exitCode}|{.status.containerStatuses[0].state.terminated.finishedAt}' 2>/dev/null || true)
     test -n "$state" || continue
     if [[ "${last[$pod]-}" == "$state" ]]; then
       continue
@@ -275,11 +276,11 @@ while true; do
     {
       printf '\n===== %s %s state=%s =====\n' "$(date -u +%FT%TZ)" "$pod" "$state"
       echo '--- pod status ---'
-      sudo k3s kubectl get -n longhorn-system "$pod" -o yaml || true
+      k3s kubectl get -n longhorn-system "$pod" -o yaml || true
       echo '--- current share-manager log ---'
-      sudo k3s kubectl logs -n longhorn-system "$pod" -c share-manager --tail=500 || true
+      k3s kubectl logs -n longhorn-system "$pod" -c share-manager --tail=500 || true
       echo '--- previous share-manager log ---'
-      sudo k3s kubectl logs -n longhorn-system "$pod" -c share-manager --previous --tail=500 || true
+      k3s kubectl logs -n longhorn-system "$pod" -c share-manager --previous --tail=500 || true
     } >>"$output" 2>&1
   done
   sleep 0.25
@@ -300,8 +301,8 @@ func (watcher *shareManagerAttemptWatcher) stop(t *testing.T) {
 	}
 	defer client.Close()
 	command := fmt.Sprintf(
-		"sudo kill %s >/dev/null 2>&1 || true; sleep 1; sudo cat %s 2>/dev/null || true",
-		candidateShellQuote(watcher.pid), candidateShellQuote(watcher.remoteLog),
+		"sudo kill %s >/dev/null 2>&1 || true; sleep 1; printf '===== watcher driver =====\\n'; sudo cat %s 2>/dev/null || true; printf '===== captured attempts =====\\n'; sudo cat %s 2>/dev/null || true",
+		candidateShellQuote(watcher.pid), candidateShellQuote(watcher.driverLog), candidateShellQuote(watcher.remoteLog),
 	)
 	output, commandErr := sshOutput(client, command)
 	if commandErr != nil {
@@ -415,6 +416,9 @@ func TestShareManagerAttemptWatcherRetainsTerminatingEvidence(t *testing.T) {
 		if !strings.Contains(script, contract) {
 			t.Fatalf("share-manager watcher script missing %q:\n%s", contract, script)
 		}
+	}
+	if strings.Contains(script, "sudo k3s") {
+		t.Fatalf("root-owned watcher must invoke k3s directly without nested sudo:\n%s", script)
 	}
 }
 
