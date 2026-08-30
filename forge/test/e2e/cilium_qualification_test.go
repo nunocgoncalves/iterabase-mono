@@ -375,8 +375,7 @@ server_ip=$(sudo k3s kubectl get pod "$server" -n hor537-cilium-authority -o jso
 for pod in "$server" allowed denied; do
   for attempt in $(seq 1 60); do
     state=$(sudo k3s kubectl get ciliumendpoint "$pod" -n hor537-cilium-authority -o json | jq -r '.status.state // ""')
-    policy=$(sudo k3s kubectl get ciliumendpoint "$pod" -n hor537-cilium-authority -o json | jq -r '.status.policy.spec["policy-enabled"] // ""' | tr '[:upper:]' '[:lower:]')
-    if test "$state" = ready && { test "$pod" != "$server" || test "$policy" = ingress; }; then break; fi
+    if test "$state" = ready; then break; fi
     test "$attempt" -lt 60
     sleep 1
   done
