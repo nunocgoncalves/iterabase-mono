@@ -321,9 +321,9 @@ Longhorn—a healthy volume and active share-manager once mounted. Stable
 `StorageReady` condition reasons identify class, conformance, PVC/expansion,
 mount-root, backend, share-manager, capacity, and recovery failures. Storage
 loss after durable operational readiness removes worker pods/scheduling credit;
-the initial Longhorn `unknown` transition from `detached` through `attached`
-instead retains the desired workers needed to drive first attachment while
-readiness stays closed. Established share-manager recovery first removes
+the initial Longhorn `unknown` transition from `detached` through `attaching`
+to `attached` instead retains the desired workers needed to drive first
+attachment while readiness stays closed. Established share-manager recovery first removes
 scheduling credit and latches replacement-pending, retaining affected clients
 only until the backend is healthy and attached with a Ready share-manager. It
 then quiesces that set

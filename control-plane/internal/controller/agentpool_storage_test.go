@@ -216,7 +216,7 @@ func TestAssessManagedRWXStorageRejectsDegradedBackend(t *testing.T) {
 }
 
 func TestAssessManagedRWXUnknownTransitionIsInitialOnlyBeforeOperationalReadiness(t *testing.T) {
-	for _, state := range []string{"detached", "attached"} {
+	for _, state := range []string{"detached", "attaching", "attached"} {
 		t.Run(state, func(t *testing.T) {
 			pool := validAgentPool("managed-pool", "platform")
 			pool.Spec.CredentialBindings = nil
@@ -315,7 +315,7 @@ func TestStorageWasOperationallyReadyUsesDurableMarkerAndLegacyAggregate(t *test
 	}
 }
 
-func TestReconcileManagedRWXInitialUnknownDetachedToAttachedConvergesWithoutWorkerChurn(t *testing.T) {
+func TestReconcileManagedRWXInitialUnknownDetachedThroughAttachingAndAttachedConvergesWithoutWorkerChurn(t *testing.T) {
 	pool := validAgentPool("managed-pool", "platform")
 	pool.UID = types.UID("pool-uid")
 	pool.Finalizers = []string{agentPoolFinalizer}
@@ -361,24 +361,26 @@ func TestReconcileManagedRWXInitialUnknownDetachedToAttachedConvergesWithoutWork
 	assert.Nil(t, meta.FindStatusCondition(got.Status.Conditions, storageConditionOperationalReadinessReached))
 	assert.Nil(t, meta.FindStatusCondition(got.Status.Conditions, storageConditionWorkerReplacementPending))
 
-	require.NoError(t, unstructured.SetNestedField(volume.Object, "attached", "status", "state"))
-	require.NoError(t, r.Update(context.Background(), volume))
-	for range 2 {
-		result, err := r.Reconcile(context.Background(), request)
-		require.NoError(t, err)
-		assert.Equal(t, healthRequeueInterval, result.RequeueAfter)
-		for _, worker := range workers {
-			var retained corev1.Pod
-			require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(worker), &retained), "initial workers must remain while attached robustness is still unknown")
+	for _, state := range []string{"attaching", "attached"} {
+		require.NoError(t, unstructured.SetNestedField(volume.Object, state, "status", "state"))
+		require.NoError(t, r.Update(context.Background(), volume))
+		for range 2 {
+			result, err := r.Reconcile(context.Background(), request)
+			require.NoError(t, err)
+			assert.Equal(t, healthRequeueInterval, result.RequeueAfter)
+			for _, worker := range workers {
+				var retained corev1.Pod
+				require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(worker), &retained), "initial workers must remain while robustness is unknown and state is %s", state)
+			}
 		}
+		require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(pool), &got))
+		condition = meta.FindStatusCondition(got.Status.Conditions, storageConditionReady)
+		require.NotNil(t, condition)
+		assert.Equal(t, metav1.ConditionFalse, condition.Status)
+		assert.Equal(t, storageReasonInitialConvergence, condition.Reason)
+		assert.Nil(t, meta.FindStatusCondition(got.Status.Conditions, storageConditionOperationalReadinessReached))
+		assert.Nil(t, meta.FindStatusCondition(got.Status.Conditions, storageConditionWorkerReplacementPending))
 	}
-	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(pool), &got))
-	condition = meta.FindStatusCondition(got.Status.Conditions, storageConditionReady)
-	require.NotNil(t, condition)
-	assert.Equal(t, metav1.ConditionFalse, condition.Status)
-	assert.Equal(t, storageReasonInitialConvergence, condition.Reason)
-	assert.Nil(t, meta.FindStatusCondition(got.Status.Conditions, storageConditionOperationalReadinessReached))
-	assert.Nil(t, meta.FindStatusCondition(got.Status.Conditions, storageConditionWorkerReplacementPending))
 
 	require.NoError(t, unstructured.SetNestedField(volume.Object, "healthy", "status", "robustness"))
 	require.NoError(t, unstructured.SetNestedField(volume.Object, "attached", "status", "state"))

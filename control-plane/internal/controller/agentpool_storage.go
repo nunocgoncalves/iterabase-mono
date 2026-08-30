@@ -248,7 +248,7 @@ func (r *AgentPoolReconciler) managedLonghornVolumeHealth(ctx context.Context, p
 	}
 	robustness, _, _ := unstructured.NestedString(volume.Object, "status", "robustness")
 	state, _, _ := unstructured.NestedString(volume.Object, "status", "state")
-	if robustness == "unknown" && (state == "detached" || state == "attached") && !storageWasOperationallyReady(pool) {
+	if robustness == "unknown" && (state == "detached" || state == "attaching" || state == "attached") && !storageWasOperationallyReady(pool) {
 		return &agentPoolStorageAssessment{
 			CanMount: true,
 			Reason:   storageReasonInitialConvergence,
