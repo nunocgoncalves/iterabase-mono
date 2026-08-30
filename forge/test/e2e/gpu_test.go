@@ -34,10 +34,11 @@ type GPUVMProvisioner interface {
 
 // GPUVM is an ephemeral GPU VM reachable over SSH with the forge sudo user.
 type GPUVM struct {
-	ID          int
-	IP          string
-	PrivKeyPath string
-	Tags        []string
+	ID              int
+	IP              string
+	PrivKeyPath     string
+	WorkspaceDevice string
+	Tags            []string
 }
 
 // ErrNoGPUCapacity signals no GPU instance could be created in any region.
@@ -45,7 +46,10 @@ type GPUVM struct {
 // external-capacity blocker and remain failed until capacity returns.
 var ErrNoGPUCapacity = errors.New("no GPU capacity available in any region")
 
-type doGPUVMProvisioner struct{ client *godo.Client }
+type doGPUVMProvisioner struct {
+	client          *godo.Client
+	workspaceVolume string
+}
 
 func (p *doGPUVMProvisioner) Provision(ctx context.Context, runID, pubKeyStr, privKeyPath string) (*GPUVM, error) {
 	cands, err := gpuCandidates(ctx, p.client)
@@ -60,6 +64,21 @@ func (p *doGPUVMProvisioner) Provision(ctx context.Context, runID, pubKeyStr, pr
 			continue // capacity/availability -> try next cheapest candidate
 		}
 		vm := &GPUVM{ID: d.ID, PrivKeyPath: privKeyPath, Tags: []string{"forge-e2e", "forge-gpu-e2e", runID}}
+		volumeName := runID + "-workspaces"
+		volume, _, volumeErr := p.client.Storage.CreateVolume(ctx, newWorkspaceVolumeRequest(runID, volumeName, c.region))
+		if volumeErr != nil {
+			_, _ = p.client.Droplets.Delete(ctx, d.ID)
+			lastErr = volumeErr
+			continue
+		}
+		p.workspaceVolume = volume.ID
+		if _, _, volumeErr = p.client.StorageActions.Attach(ctx, volume.ID, d.ID); volumeErr != nil {
+			_, _ = p.client.Droplets.Delete(ctx, d.ID)
+			_, _ = p.client.Storage.DeleteVolume(ctx, volume.ID)
+			lastErr = volumeErr
+			continue
+		}
+		vm.WorkspaceDevice = "/dev/disk/by-id/scsi-0DO_Volume_" + volumeName
 		ip, err := waitForIP(ctx, p.client, d.ID)
 		if err != nil {
 			if _, cleanupErr := p.client.Droplets.Delete(ctx, d.ID); cleanupErr != nil {
@@ -76,6 +95,9 @@ func (p *doGPUVMProvisioner) Provision(ctx context.Context, runID, pubKeyStr, pr
 			lastErr = err
 			continue
 		}
+		if err := waitForWorkspaceDevice(ctx, ip, privKeyPath, vm.WorkspaceDevice); err != nil {
+			return vm, err
+		}
 		return vm, nil
 	}
 	if lastErr == nil {
@@ -85,8 +107,12 @@ func (p *doGPUVMProvisioner) Provision(ctx context.Context, runID, pubKeyStr, pr
 }
 
 func (p *doGPUVMProvisioner) Destroy(ctx context.Context, id int) error {
-	_, err := p.client.Droplets.Delete(ctx, id)
-	return err
+	_, dropletErr := p.client.Droplets.Delete(ctx, id)
+	var volumeErr error
+	if p.workspaceVolume != "" {
+		_, volumeErr = p.client.Storage.DeleteVolume(ctx, p.workspaceVolume)
+	}
+	return errors.Join(dropletErr, volumeErr)
 }
 
 type gpuCandidate struct {
@@ -157,9 +183,6 @@ type digitalOceanGPUState struct {
 }
 
 func newDigitalOceanGPUState(t *testing.T) *digitalOceanGPUState {
-	// GPU driver-transition evidence remains isolated from the managed storage
-	// baseline; storage has dedicated single-/three-node scenarios.
-	t.Setenv(forceExternalStorageEnv, "true")
 	token := os.Getenv("DIGITALOCEAN_TOKEN")
 	if token == "" {
 		if os.Getenv("FORGE_E2E_REQUIRE_CAPACITY") == "true" {
@@ -195,7 +218,8 @@ func provisionGPUStage(t *testing.T, state *digitalOceanGPUState) {
 		t.Skipf("GPU e2e skipped — no GPU capacity (try later or add Verda): %v", err)
 	}
 	require.NoError(t, err)
-	t.Logf("gpu vm ip %s (keep=%v)", state.vm.IP, state.keep)
+	t.Setenv(workspaceDeviceEnv, state.vm.WorkspaceDevice)
+	t.Logf("gpu vm ip %s workspace=%s (keep=%v)", state.vm.IP, state.vm.WorkspaceDevice, state.keep)
 }
 
 func provisionGPUHost(state *digitalOceanGPUState) error {
@@ -210,7 +234,7 @@ func provisionGPUHost(state *digitalOceanGPUState) error {
 func applyGPUSubstrateStage(t *testing.T, state *digitalOceanGPUState) {
 	cfgPath := writeForgeConfigGPUDriver(t, state.runID, state.vm.IP, state.privKeyPath, gpuUpgradeBaselineDriver)
 	out := applyOnce(t, state.forgeBin, state.forgeHome, cfgPath)
-	assertApplyMarkers(t, out, "node ready: true", "gpu ready: true", "gpu driver: "+gpuUpgradeBaselineDriver)
+	assertApplyMarkers(t, out, "node ready: true", "AgentPool workspace:", "AgentPool local-path ready: true", "gpu ready: true", "gpu driver: "+gpuUpgradeBaselineDriver)
 	t.Logf("apply output:\n%s", out)
 }
 

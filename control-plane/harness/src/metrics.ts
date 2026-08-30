@@ -62,6 +62,31 @@ export class HarnessMetrics {
     labelNames: ["result"] as const,
     registers: [this.registry],
   });
+  readonly workspaceFreeBytes = new Gauge({
+    name: "control_plane_harness_workspace_free_bytes",
+    help: "Available bytes on the actual dedicated AgentPool workspace filesystem.",
+    registers: [this.registry],
+  });
+  readonly workspaceCapacityBytes = new Gauge({
+    name: "control_plane_harness_workspace_capacity_bytes",
+    help: "Total bytes on the actual dedicated AgentPool workspace filesystem.",
+    registers: [this.registry],
+  });
+  readonly workspaceFreeRatio = new Gauge({
+    name: "control_plane_harness_workspace_free_ratio",
+    help: "Available-byte ratio on the actual dedicated AgentPool workspace filesystem.",
+    registers: [this.registry],
+  });
+  readonly workspaceCapacityWarning = new Gauge({
+    name: "control_plane_harness_workspace_capacity_warning",
+    help: "Whether workspace free space is below the 25 percent warning threshold.",
+    registers: [this.registry],
+  });
+  readonly workspaceCreditGated = new Gauge({
+    name: "control_plane_harness_workspace_credit_gated",
+    help: "Whether fresh dispatch credit is withheld by the 20/25 percent capacity hysteresis gate.",
+    registers: [this.registry],
+  });
   readonly pendingReplays = new Gauge({
     name: "control_plane_harness_pending_replays",
     help: "Recovered or stream-loss event tails awaiting cumulative ACK.",
@@ -74,6 +99,11 @@ export class HarnessMetrics {
     this.dispatchConnected.set(0);
     this.activeTurns.set(0);
     this.storageReady.set(0);
+    this.workspaceFreeBytes.set(0);
+    this.workspaceCapacityBytes.set(0);
+    this.workspaceFreeRatio.set(0);
+    this.workspaceCapacityWarning.set(0);
+    this.workspaceCreditGated.set(0);
     this.pendingReplays.set(0);
   }
 }

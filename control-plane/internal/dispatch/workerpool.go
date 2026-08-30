@@ -17,11 +17,17 @@ type workerConn struct {
 	gen      int64  // fencing generation (CP-assigned, monotonic)
 	stream   *connect.BidiStream[v1.WorkerMessage, v1.ControlMessage]
 
-	mu         sync.Mutex
-	closed     bool
-	idle       bool   // has an unspent Ready credit
-	activeTurn string // turn_id currently assigned ("" when idle)
-	lastSeen   time.Time
+	mu                sync.Mutex
+	closed            bool
+	idle              bool   // has an unspent Ready credit
+	activeTurn        string // turn_id currently assigned ("" when idle)
+	lastSeen          time.Time
+	workspaceObserved bool
+	workspaceGated    bool
+	workspaceWarning  bool
+	workspaceFree     uint64
+	workspaceCapacity uint64
+	workspaceRatio    float64
 
 	// sendMu serializes all server->worker ControlMessage sends. The connect
 	// bidi writer ultimately shares the HTTP response writer; concurrent sends
@@ -135,20 +141,39 @@ func (w *workerConn) releaseTurn() {
 	w.mu.Unlock()
 }
 
-// grantCreditIfIdle atomically checks the worker is not busy and grants the
-// Ready credit. Returns false (and is a protocol violation) if a turn is
-// active; the caller closes the stream fail-closed. The busy check and credit
-// grant are one locked operation so the reconciler cannot race a concurrent
-// assignment between the check and the grant.
-func (w *workerConn) grantCreditIfIdle() bool {
+// grantCreditIfIdle atomically grants one Ready credit. A credit received while
+// capacity-gated is ignored (valid but not granted); a Ready while a turn is
+// active remains a protocol violation.
+func (w *workerConn) grantCreditIfIdle() (granted, valid bool) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if w.closed || w.activeTurn != "" {
-		return false
+	if w.closed || w.activeTurn != "" || !w.workspaceObserved {
+		return false, false
+	}
+	w.lastSeen = time.Now()
+	if w.workspaceGated {
+		w.idle = false
+		return false, true
 	}
 	w.idle = true
+	return true, true
+}
+
+// updateWorkspaceStatus stores one bounded actual-filesystem observation and
+// revokes an unspent credit while gated. It never changes an active assignment.
+func (w *workerConn) updateWorkspaceStatus(free, capacity uint64, ratio float64, warning, gated bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.workspaceObserved = true
+	w.workspaceFree = free
+	w.workspaceCapacity = capacity
+	w.workspaceRatio = ratio
+	w.workspaceWarning = warning
+	w.workspaceGated = gated
 	w.lastSeen = time.Now()
-	return true
+	if gated && w.activeTurn == "" {
+		w.idle = false
+	}
 }
 
 // workerPool tracks live worker connections keyed by (pool, worker). At most

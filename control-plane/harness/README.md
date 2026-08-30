@@ -142,7 +142,7 @@ streams (ARCH-011).
 - `ipc.ts` — framed discriminated-union IPC for fd 0/3/4/5 + runtime validation.
 - `launcher.ts` — the `setpriv` privilege-dropping launcher (full cap-drop + `no_new_privs`).
 - `sandbox.ts` — canonical paths + ownership/mode/cwd validation.
-- `storage-health.ts` — fail-closed runtime RWX fsync/rename/unlink health transaction.
+- `storage-health.ts` — fail-closed runtime workspace fsync/rename/unlink health transaction.
 - `config.ts` — infra-only boot config loader/validator.
 - `probes.ts` — `/healthz` + `/readyz`.
 

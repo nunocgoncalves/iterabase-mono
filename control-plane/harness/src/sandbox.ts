@@ -1,5 +1,5 @@
 // Sandbox provisioning + validation (HOR-245). The trusted supervisor (root)
-// provisions the per-session sandbox on the shared RWX PVC at AssignTurn, then
+// provisions the per-session sandbox on the same-node shared RWO PVC at AssignTurn, then
 // validates it before launching the child: resolve the root beneath the
 // boot-configured mount root, create+chown it (0700, session UID/GID) if
 // missing, verify it exists / is a directory / is NOT a symlink / is owned by
@@ -121,7 +121,7 @@ export function provisionSandbox(sandboxRoot: string, uid: number, gid: number):
 }
 
 /**
- * Reap (recursively remove) a terminated session's sandbox from the shared RWX
+ * Reap (recursively remove) a terminated session's sandbox from the same-node shared RWO
  * PVC. Called by the supervisor on `SessionEnd` (the HOR-245 cleanup owner —
  * the supervisor that provisioned the sandbox also reaps it). Symmetric with
  * {@link provisionSandbox} and the same trust boundary applies: only the
@@ -182,14 +182,14 @@ export function reapSandbox(sandboxRoot: string, uid: number, gid: number): void
 }
 
 /**
- * Ensure the sandbox mount root (the shared RWX PVC) is a non-symlink directory
+ * Ensure the sandbox mount root (the same-node shared RWO PVC) is a non-symlink directory
  * owned by the supervisor at mode 0711: traversable (so a session-UID child
  * can reach its own 0700 root) but not listable/writable by non-root (so only
  * the supervisor can create sandbox entries — a child cannot forge a sibling).
  * Called once at supervisor startup.
  *
  * ESTABLISH + VERIFY: the mode/ownership are set and then RE-STAT'd — a
- * root-squashed or pre-owned RWX volume can silently ignore chmod/chown, so the
+ * root-squashed or pre-owned shared volume can silently ignore chmod/chown, so the
  * resulting inode (not the call) is the source of truth. Startup FAILS if a
  * safe root cannot be guaranteed (symlink attack, foreign owner, un-fixable
  * mode). It never silently degrades to a best-effort skip: a writable/listable

@@ -110,19 +110,20 @@ class ChangedPathCollectionFixtures(unittest.TestCase):
                 self.assertNotIn("git diff --name-only", workflow)
                 self.assertIn(f"name: {workflow_name} / required", workflow)
 
-    def test_pr_has_required_exact_head_managed_storage_internal_tls_job(self) -> None:
+    def test_pr_has_required_exact_head_workspace_job(self) -> None:
         workflow = (ROOT / ".github/workflows/e2e.yml").read_text()
-        job = workflow.split("  digitalocean-rwx-tls:\n", 1)[1].split(
-            "\n  digitalocean-rwx-three-node:\n", 1
+        job = workflow.split("  digitalocean-workspace:\n", 1)[1].split(
+            "\n  digitalocean-gpu:\n", 1
         )[0]
         for contract in (
             "needs.changes.outputs.charts == 'true' ||",
-            "needs.changes.outputs.forge_real_e2e == 'true') &&",
+            "needs.changes.outputs.forge_real_e2e == 'true' ||",
+            "needs.changes.outputs.control_plane == 'true') &&",
             "ref: ${{ github.event.pull_request.head.sha || github.sha }}",
-            "timeout-minutes: 70",
-            "group: e2e-digitalocean-rwx-tls",
-            ".github/scripts/prepare_pr_managed_runtime.sh",
-            "run: make test-e2e-rwx-tls",
+            "timeout-minutes: 130",
+            "group: e2e-digitalocean-workspace",
+            ".github/scripts/prepare_pr_workspace_runtime.sh",
+            "run: make test-e2e-workspace",
             'FORGE_E2E_REQUIRE_CAPACITY: "true"',
             "ITERABASE_E2E_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}",
         ):
@@ -130,26 +131,21 @@ class ChangedPathCollectionFixtures(unittest.TestCase):
         for path in (
             "forge/test/e2e/overlay_test.go",
             "forge/internal/lifecycle/storage.go",
+            "control-plane/harness/src/storage-health.ts",
         ):
-            with self.subTest(managed_tls_path=path):
+            with self.subTest(workspace_path=path):
                 result = selection([path])
                 self.assertTrue(result["forge_real_e2e"])
-                self.assertFalse(result["charts"])
         required = workflow.split("  required:\n", 1)[1]
-        self.assertIn("- digitalocean-rwx-tls", required)
-        helper = (
-            ROOT / ".github/scripts/prepare_pr_managed_runtime.sh"
-        ).read_text()
-        for chart in (
-            "iterabase-platform",
-            "cert-manager-substrate",
-            "rwx-storage-substrate",
-        ):
+        self.assertIn("- digitalocean-workspace", required)
+        self.assertNotIn("digitalocean-rwx", workflow)
+        helper = (ROOT / ".github/scripts/prepare_pr_workspace_runtime.sh").read_text()
+        for chart in ("iterabase-platform", "cert-manager-substrate"):
             self.assertIn(chart, helper)
+        self.assertNotIn("rwx-storage-substrate", helper)
         for variable in (
             "FORGE_E2E_PLATFORM_CHART_ARCHIVE",
             "FORGE_E2E_SUBSTRATE_CHART_ARCHIVE",
-            "FORGE_E2E_RWX_STORAGE_CHART_ARCHIVE",
         ):
             self.assertIn(variable, helper)
 

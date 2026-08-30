@@ -1,8 +1,0 @@
-# Reference managed RWX selection. Install the same-version
-# rwx-storage-substrate companion with this file before iterabase-platform.
-storage:
-  rwx:
-    mode: managed-longhorn
-    storageClassName: iterabase-rwx
-    managedLonghorn:
-      topology: single-node

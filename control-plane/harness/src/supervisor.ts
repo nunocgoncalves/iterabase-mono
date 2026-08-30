@@ -35,6 +35,7 @@ import {
   WorkerMessageSchema,
   WorkerOutcomeSchema,
   WorkerState,
+  type WorkspaceStatus,
   type AssignTurn,
   type ControlMessage,
   type SessionEnd,
@@ -121,6 +122,8 @@ export interface SupervisorDeps {
   gatewayClient?: GatewayClient;
   /** Inference-gateway model stream (ARCH-010/011). Defaults to streamModel. */
   modelStream?: typeof streamModel;
+  /** Latest actual-filesystem capacity observation, reported after Welcome. */
+  workspaceStatus?: WorkspaceStatus;
   /** Test hook: invoked each time the supervisor advertises a Ready credit. */
   onCreditAdvertised?: () => void;
   /** Optional bounded supervisor metrics; disposable children expose no listener. */
@@ -141,11 +144,14 @@ export class Supervisor {
   private readonly tokens: TokenDeltaForwarder;
   private readonly gatewayClient: GatewayClient;
   private readonly modelStream: typeof streamModel;
+  private workspaceStatus: WorkspaceStatus | undefined;
+  private creditRevokedByCapacity = false;
 
   constructor(private readonly d: SupervisorDeps) {
     this.tokens = new TokenDeltaForwarder(() => this.stream, d.cfg.tokenDelta.sendBufferBytes);
     this.gatewayClient = d.gatewayClient ?? createGatewayClient(d.cfg);
     this.modelStream = d.modelStream ?? streamModel;
+    this.workspaceStatus = d.workspaceStatus;
     // Crash recovery: load unfinished turn WALs at startup (replayed as
     // after_terminal after the first Welcome — the CP already terminalized them
     // as worker-loss). The WAL is retained until the cumulative ACK.
@@ -204,6 +210,7 @@ export class Supervisor {
     this.d.probes.setReady(true);
     this.d.metrics?.dispatchConnected.set(1);
     this.d.metrics?.dispatchReconnects.labels("connected").inc();
+    this.sendWorkspaceStatus();
     this.replayPending(); // re-send staged unacked events (after_terminal); WAL retained until ACK
     this.tokens.flush(); // flush deltas buffered during the outage (ephemeral; best-effort)
     this.maybeAdvertiseCredit(); // Ready only when no replay is outstanding
@@ -282,16 +289,45 @@ export class Supervisor {
     this.fatal(new ProtocolError(`EventAck for unknown turn ${turnId}`));
   }
 
-  /** Advertise a Ready credit only when idle, not draining/fatal, and no replay outstanding. */
+  /** Publish a fresh capacity observation. Gating revokes only an unspent
+   * credit; an active turn continues through its normal terminal/ACK boundary. */
+  updateWorkspaceStatus(status: WorkspaceStatus): void {
+    this.workspaceStatus = status;
+    this.sendWorkspaceStatus();
+    if (status.creditGated) {
+      if ((this.state.phase as string) === "armed") this.creditRevokedByCapacity = true;
+      return;
+    }
+    if (this.creditRevokedByCapacity && (this.state.phase as string) === "armed") {
+      // The server revoked the old unspent credit when it observed the gated
+      // status. Re-advertise after the reopen status on the same ordered stream.
+      this.stream?.send(create(WorkerMessageSchema, { kind: { case: "ready", value: create(ReadySchema, {}) } }));
+      this.creditRevokedByCapacity = false;
+      this.d.onCreditAdvertised?.();
+      return;
+    }
+    this.maybeAdvertiseCredit();
+  }
+
+  private sendWorkspaceStatus(): void {
+    if (!this.workspaceStatus) return;
+    this.stream?.send(create(WorkerMessageSchema, { kind: { case: "workspaceStatus", value: this.workspaceStatus } }));
+  }
+
+  /** Advertise a Ready credit only when idle, not draining/fatal, replay-free,
+   * and above the workspace capacity gate. */
   private maybeAdvertiseCredit(): void {
-    if (this.pendingReplay.length > 0) return; // gate Ready on the replay ACK
+    if (this.pendingReplay.length > 0) return;
+    if (this.workspaceStatus?.creditGated) return;
     if (!this.state.canAdvertiseCredit) return;
     this.state.advertiseCredit();
+    this.creditRevokedByCapacity = false;
     this.stream?.send(create(WorkerMessageSchema, { kind: { case: "ready", value: create(ReadySchema, {}) } }));
     this.d.onCreditAdvertised?.();
   }
 
   private async handleAssignTurn(at: AssignTurn): Promise<void> {
+    this.creditRevokedByCapacity = false;
     const observedAt = Date.now();
     let observedResult = "failed";
     this.d.metrics?.activeTurns.inc();

@@ -29,7 +29,8 @@ func testConfig() *config.Cluster {
 		Kind:       config.Kind,
 		Metadata:   config.Metadata{Name: "opo1"},
 		Spec: config.Spec{
-			Mode: config.ModeSingleNode,
+			Mode:               config.ModeSingleNode,
+			AgentPoolWorkspace: config.AgentPoolWorkspace{Device: "/dev/disk/by-id/scsi-workspace"},
 			Hosts: []config.Host{{
 				Address: "10.20.0.10", SSHUser: "forge", SSHKeyPath: "/dev/null",
 				Role: config.RoleControlPlaneWorker,
@@ -54,21 +55,25 @@ type installCall struct {
 
 // fakeProv is a controllable provisioner.Provisioner for lifecycle tests.
 type fakeProv struct {
-	pf                     provisioner.PreflightResult
-	state                  provisioner.HostState
-	ready                  bool
-	readyAfterInstall      bool
-	kubeconfig             []byte
-	installErr             error
-	installs               []installCall
-	ensureDepsErr          error
-	ensureDepsCalls        int
-	ensureStorageErr       error
-	ensureStorageDepsCalls int
-	gpuReady               bool
-	gpuTerminal            bool
-	gpuReadinessReason     string
-	gpuDriverRequests      []string
+	pf                    provisioner.PreflightResult
+	state                 provisioner.HostState
+	ready                 bool
+	readyAfterInstall     bool
+	kubeconfig            []byte
+	installErr            error
+	installs              []installCall
+	ensureDepsErr         error
+	ensureDepsCalls       int
+	workspaceInspectErr   error
+	workspaceReconcileErr error
+	workspaceInspectCalls int
+	workspaceApplyCalls   int
+	localPathErr          error
+	localPathCalls        int
+	gpuReady              bool
+	gpuTerminal           bool
+	gpuReadinessReason    string
+	gpuDriverRequests     []string
 }
 
 func (f *fakeProv) Preflight(_ context.Context) (*provisioner.PreflightResult, error) {
@@ -102,9 +107,26 @@ func (f *fakeProv) EnsureDriverBuildDeps(_ context.Context) error {
 	f.ensureDepsCalls++
 	return f.ensureDepsErr
 }
-func (f *fakeProv) EnsureRWXStoragePrerequisites(_ context.Context) error {
-	f.ensureStorageDepsCalls++
-	return f.ensureStorageErr
+func (f *fakeProv) ListAgentPoolWorkspaceDevices(_ context.Context) ([]provisioner.WorkspaceDevice, error) {
+	return nil, nil
+}
+func (f *fakeProv) InspectAgentPoolWorkspace(_ context.Context, spec provisioner.AgentPoolWorkspaceSpec) (*provisioner.AgentPoolWorkspaceState, error) {
+	f.workspaceInspectCalls++
+	if f.workspaceInspectErr != nil {
+		return nil, f.workspaceInspectErr
+	}
+	return &provisioner.AgentPoolWorkspaceState{Device: spec.Device, State: "blank-candidate"}, nil
+}
+func (f *fakeProv) ReconcileAgentPoolWorkspace(_ context.Context, spec provisioner.AgentPoolWorkspaceSpec) (*provisioner.AgentPoolWorkspaceState, error) {
+	f.workspaceApplyCalls++
+	if f.workspaceReconcileErr != nil {
+		return nil, f.workspaceReconcileErr
+	}
+	return &provisioner.AgentPoolWorkspaceState{Device: spec.Device, FilesystemUUID: "11111111-1111-1111-1111-111111111111", State: "complete"}, nil
+}
+func (f *fakeProv) EnsureAgentPoolLocalPathStorage(_ context.Context) error {
+	f.localPathCalls++
+	return f.localPathErr
 }
 func (f *fakeProv) ReadGPUReadiness(_ context.Context, requestedDriverVersion string) (*provisioner.GPUReadiness, error) {
 	f.gpuDriverRequests = append(f.gpuDriverRequests, requestedDriverVersion)
@@ -1120,11 +1142,9 @@ func TestApply_Secrets(t *testing.T) {
 		}
 	}
 
-	// secrets plus the two semantic chart value files were read from the cloned overlay.
-	require.Len(t, o.readFileCalls, 3)
+	// Only the non-secret declaration is read; storage is fixed substrate config.
+	require.Len(t, o.readFileCalls, 1)
 	assert.Equal(t, "secrets.yaml", o.readFileCalls[0].relPath)
-	assert.Equal(t, "values.yaml", o.readFileCalls[1].relPath)
-	assert.Equal(t, "values.client.yaml", o.readFileCalls[2].relPath)
 
 	// secrets are applied AFTER the overlay clone + BEFORE the chart so
 	// cert-manager finds them on first reconcile.
@@ -1169,17 +1189,14 @@ func TestApply_SkipSecrets(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, res.SecretsApplied)
 	assert.Empty(t, d.applyManifestCalls, "SkipSecrets skips materialization")
-	assert.Equal(t, []readFileCall{
-		{dest: overlayDestPath(testConfigWithOverlay()), relPath: "values.yaml"},
-		{dest: overlayDestPath(testConfigWithOverlay()), relPath: "values.client.yaml"},
-	}, o.readFileCalls, "SkipSecrets still resolves the independent storage selection but does not read secrets.yaml")
+	assert.Empty(t, o.readFileCalls, "SkipSecrets does not read secret declarations; storage is not overlay-selectable")
 }
 
 func TestApply_Secrets_NoSecretsFile(t *testing.T) {
 	useTempHome(t)
 	p := &fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig), readyAfterInstall: true}
 	d := &fakeDeployer{}
-	// overlay cloned but has no secrets.yaml; semantic values remain readable.
+	// Overlay cloned but has no secrets.yaml.
 	o := &fakeOverlayer{cloneCommit: "deadbeef", readFileErrors: map[string]error{
 		"secrets.yaml": errors.New("overlay read secrets.yaml: No such file or directory"),
 	}}

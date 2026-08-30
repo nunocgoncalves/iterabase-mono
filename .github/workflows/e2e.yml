@@ -138,7 +138,7 @@ jobs:
       (github.event_name == 'pull_request' ||
       (github.event_name == 'workflow_dispatch' && inputs.complete_catalogue != true))
     runs-on: ubuntu-latest
-    timeout-minutes: 65
+    timeout-minutes: 105
     concurrency:
       group: e2e-digitalocean-cpu
       cancel-in-progress: false
@@ -170,18 +170,19 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-  digitalocean-rwx-tls:
-    name: digitalocean-rwx-tls
+  digitalocean-workspace:
+    name: digitalocean-workspace
     needs: [changes, harness]
     if: >-
       (needs.changes.outputs.charts == 'true' ||
-      needs.changes.outputs.forge_real_e2e == 'true') &&
+      needs.changes.outputs.forge_real_e2e == 'true' ||
+      needs.changes.outputs.control_plane == 'true') &&
       (github.event_name == 'pull_request' ||
       (github.event_name == 'workflow_dispatch' && inputs.complete_catalogue != true))
     runs-on: ubuntu-latest
-    timeout-minutes: 70
+    timeout-minutes: 130
     concurrency:
-      group: e2e-digitalocean-rwx-tls
+      group: e2e-digitalocean-workspace
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -191,15 +192,15 @@ jobs:
         with:
           go-version: 1.26.5
           cache-dependency-path: ${{ env.GO_CACHE_DEPENDENCIES }}
-          cache-scope: e2e-digitalocean-rwx-tls
+          cache-scope: e2e-digitalocean-workspace
       - uses: ./.github/actions/setup-kubernetes-tools
-      - name: Package exact-head platform and managed-storage companions
+      - name: Package exact-head platform and certificate companion
         run: >-
-          .github/scripts/prepare_pr_managed_runtime.sh
-          '${{ runner.temp }}/managed-runtime'
+          .github/scripts/prepare_pr_workspace_runtime.sh
+          '${{ runner.temp }}/workspace-runtime'
           "$GITHUB_ENV"
-      - name: Exact-head managed single-node internal-TLS gate
-        run: make test-e2e-rwx-tls
+      - name: Exact-head dedicated local-path workspace gate
+        run: make test-e2e-workspace
         working-directory: forge
         env:
           DIGITALOCEAN_TOKEN: ${{ secrets.DIGITALOCEAN_TOKEN }}
@@ -209,51 +210,12 @@ jobs:
           ITERABASE_E2E_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           ITERABASE_E2E_SOURCE_INPUTS: ${{ github.workspace }}/forge/test/e2e/published-fixture.json
           ITERABASE_E2E_DIAGNOSTICS: ${{ runner.temp }}/forge-diagnostics
-      - name: Upload managed TLS failure diagnostics
+      - name: Upload dedicated workspace failure diagnostics
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: forge-diagnostics-digitalocean-rwx-tls
-          path: ${{ runner.temp }}/forge-diagnostics/digitalocean-rwx-tls
-          if-no-files-found: ignore
-          retention-days: 7
-
-  digitalocean-rwx-three-node:
-    name: digitalocean-rwx-three-node
-    needs: [changes, harness]
-    if: >-
-      needs.changes.outputs.charts == 'true' && github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    timeout-minutes: 155
-    concurrency:
-      group: e2e-digitalocean-cpu
-      cancel-in-progress: false
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: ./.github/actions/setup-go
-        with:
-          go-version: 1.26.5
-          cache-dependency-path: ${{ env.GO_CACHE_DEPENDENCIES }}
-          cache-scope: e2e-digitalocean-rwx-three-node
-      - uses: ./.github/actions/setup-kubernetes-tools
-      - name: Add external chart repositories
-        run: .github/scripts/add_helm_repositories.sh
-      - name: Three-node managed RWX loss/rebuild/lifecycle gate
-        run: make test-e2e-rwx-three-node
-        working-directory: forge
-        env:
-          DIGITALOCEAN_TOKEN: ${{ secrets.DIGITALOCEAN_TOKEN }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          FORGE_E2E_REQUIRE_CAPACITY: "true"
-          ITERABASE_E2E_FIXTURE_MODE: source
-          ITERABASE_E2E_SOURCE_SHA: ${{ github.sha }}
-          ITERABASE_E2E_SOURCE_INPUTS: ${{ github.workspace }}/forge/test/e2e/published-fixture.json
-      - name: Upload three-node RWX failure diagnostics
-        if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: forge-diagnostics-digitalocean-rwx-three-node
-          path: ${{ runner.temp }}/forge-diagnostics/digitalocean-rwx-three-node
+          name: forge-diagnostics-digitalocean-workspace
+          path: ${{ runner.temp }}/forge-diagnostics/digitalocean-workspace
           if-no-files-found: ignore
           retention-days: 7
 
@@ -494,11 +456,11 @@ jobs:
           cache-dependency-path: ${{ env.GO_CACHE_DEPENDENCIES }}
           cache-scope: e2e-nightly-real-${{ matrix.capacity }}
       - uses: ./.github/actions/setup-kubernetes-tools
-      - name: Package exact-source managed TLS runtime
-        if: matrix.target == 'test-e2e-rwx-tls'
+      - name: Package exact-source workspace runtime
+        if: matrix.target == 'test-e2e-workspace'
         run: >-
-          .github/scripts/prepare_pr_managed_runtime.sh
-          '${{ runner.temp }}/managed-runtime'
+          .github/scripts/prepare_pr_workspace_runtime.sh
+          '${{ runner.temp }}/workspace-runtime'
           "$GITHUB_ENV"
       - name: Require mandatory capacity credentials
         env:
@@ -532,8 +494,7 @@ jobs:
       - changes
       - harness
       - digitalocean-cpu
-      - digitalocean-rwx-tls
-      - digitalocean-rwx-three-node
+      - digitalocean-workspace
       - digitalocean-gpu
       - control-plane-kind
       - control-plane-execution-kind

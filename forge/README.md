@@ -42,19 +42,26 @@ When GPU support is enabled, apply accepts readiness only from one coherent oper
 
 Before each Helm apply, forge reads the CRDs bundled in the exact pinned chart artifact, server-side applies them, and waits for them to become `Established`. This permits an existing release to enable an operator-backed dependency later (for example, enabling observability adds the Prometheus Operator CRDs) despite Helm's limitation that `crds/` are installed only during a release's initial install. Charts without bundled CRDs are unchanged. CRDs are intentionally retained on rollback/uninstall to protect custom resources and their data.
 
-For `storage.rwx.mode: managed-longhorn`, Forge derives the selection from the
-overlay's platform values—there is no storage provider toggle in `forge.yaml`.
-On its supported single-node reference substrate it idempotently installs and
-verifies iSCSI, NFSv4, kernel/filesystem tools, shared mount propagation, and the
-Longhorn data path, then installs the same-version `rwx-storage-substrate`
-companion in `longhorn-system` before the platform. The companion's disposable
-two-worker conformance hook must pass and attest the exact StorageClass UID.
-`external` installs no backend and requires the customer class to be attested
-separately. Forge refuses managed `three-node` because multi-host bootstrap is
-not a Forge capability; direct chart operators use the approved three-node
-profile. Destroy preserves the cluster if the managed companion refuses active
-consumers or retained-volume disposition. See
-[`../docs/architecture/v2-rwx-storage.md`](../docs/architecture/v2-rwx-storage.md).
+Every single-node config persists exactly one `spec.agentPoolWorkspace.device`
+stable `/dev/disk/by-id/...` whole-disk selection. `forge init` obtains it from
+the interactive list, `--agentpool-workspace-device`, or
+`FORGE_AGENTPOOL_WORKSPACE_DEVICE`; hand-authored config uses the same field.
+The selection is the sole authorization for Forge's first ext4 format.
+
+Before any K3s/chart mutation, apply rejects root/system, removable, volatile,
+partitioned, mounted, held, in-use, recognized-signature, missing, ambiguous, or
+identity-drifted devices. It repeats bounded topology/signature probes
+immediately before format; it does not scan the full device or accept a second
+confirmation, wipe/adopt switch, or root fallback. A fsynced root-owned receipt
+makes format/fstab/mount/marker reconciliation crash-resumable with exact UUID,
+`iterabase-agentpool-workspaces` label, and
+`/var/lib/iterabase/agentpool-workspaces` mount identity.
+
+After K3s is Ready, Forge keeps default `local-path` on K3s's normal platform
+path and configures fixed non-default `iterabase-agentpool-local-path` through
+the bundled `rancher.io/local-path` provisioner on only the dedicated mount.
+Destroy uninstalls K3s/platform resources but never wipes the workspace disk or
+filesystem. See [`../docs/architecture/v2-local-path-storage.md`](../docs/architecture/v2-local-path-storage.md).
 
 See `forge.example.yaml` for the full substrate config schema.
 
@@ -63,8 +70,7 @@ See `forge.example.yaml` for the full substrate config schema.
 ```sh
 make test           # unit + fake-SSH integration tests
 make test-e2e       # composed DigitalOcean single-node CPU e2e (needs DIGITALOCEAN_TOKEN)
-make test-e2e-rwx-tls # exact-companion single-node Longhorn internal-CA mTLS gate
-make test-e2e-rwx-three-node # three-node Longhorn loss/rebuild/lifecycle gate
+make test-e2e-workspace # exact-candidate dedicated-disk/local-path RWO gate
 make test-e2e-unit  # compile + unit-test the separate E2E harness module
 make lint           # golangci-lint
 make fmt-check      # gofmt check

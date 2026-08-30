@@ -380,12 +380,10 @@ func assertGrafanaDataStoragePanels(t *testing.T, client *http.Client, baseURL, 
 		t.Fatal(err)
 	}
 	want := map[string]string{
-		"Longhorn managers available":         "longhorn-manager-.*",
-		"Longhorn unhealthy volumes":          "longhorn_volume_robustness",
-		"Longhorn minimum node/disk headroom": "longhorn_disk_capacity_bytes",
-		"Longhorn CSI unavailable nodes":      "longhorn-csi-plugin",
-		"Longhorn share-managers unavailable": "share-manager-.*",
-		"Longhorn replicas rebuilding":        "longhorn_replica_state",
+		"Workspace free bytes":        "control_plane_harness_workspace_free_bytes",
+		"Workspace free ratio":        "control_plane_harness_workspace_free_ratio",
+		"Workspace capacity warnings": "control_plane_harness_workspace_capacity_warning",
+		"Workspace credit gates":      "control_plane_harness_workspace_credit_gated",
 	}
 	for _, panel := range payload.Dashboard.Panels {
 		fragment, ok := want[panel.Title]
@@ -395,7 +393,7 @@ func assertGrafanaDataStoragePanels(t *testing.T, client *http.Client, baseURL, 
 		delete(want, panel.Title)
 	}
 	if len(want) != 0 {
-		t.Fatalf("Grafana data/storage dashboard missing Longhorn orientation panels: %v", want)
+		t.Fatalf("Grafana data/storage dashboard missing dedicated workspace capacity panels: %v", want)
 	}
 }
 

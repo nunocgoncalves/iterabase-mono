@@ -415,7 +415,6 @@ jobs:
           helm dependency build charts/charts/control-plane
           helm dependency build charts/charts/observability
           helm dependency build charts/charts/cert-manager-substrate
-          ./charts/scripts/build-rwx-storage-dependency.sh
           helm dependency build charts/charts/iterabase-platform
           helm package 'charts/charts/${{ matrix.chart }}' --destination candidate-charts
           for companion in $(jq -r '.[]' <<<'${{ toJSON(matrix.companions) }}'); do

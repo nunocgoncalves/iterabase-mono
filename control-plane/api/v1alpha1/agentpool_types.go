@@ -10,8 +10,8 @@ import (
 // isolated warm-worker pods that execute Platform-v1 turns with the approved
 // supervisor/child model, fixed local-workspace boundary, and maximum gateway
 // permissions — without proxy sidecars or customer credentials in the sandbox
-// (ARCH-003/009/010/016/018). The operator provisions the RWX sandbox PVC,
-// per-pod SPIFFE certs (via the cert-manager CSI driver), the rendered harness
+// (ARCH-003/009/010/016/018). The operator provisions the dedicated-class RWO
+// sandbox PVC, per-pod SPIFFE certs (via the cert-manager CSI driver), the rendered harness
 // boot config, and a deny-by-default NetworkPolicy. HOR-249 owns dispatch and
 // the warm-pool scaling/credit protocol; HOR-245 only maintains a static
 // `replicas` warm set.
@@ -60,10 +60,10 @@ type AgentPoolSpec struct {
 	// +kubebuilder:validation:Required
 	Identity PoolIdentitySpec `json:"identity"`
 
-	// sandbox configures the shared RWX PVC that backs per-session sandboxes.
-	// Each session gets a 0700 subdir owned by its stable session UID/GID
-	// (provisioning/ownership enforced by the supervisor, HOR-381); the pool
-	// PVC request is the per-pool storage quota.
+	// sandbox configures the pool's shared node-local RWO PVC. Multiple workers
+	// mount it concurrently on the one supported K3s node. Each session gets a
+	// 0700 subdir owned by its stable UID/GID; the requested size is planning
+	// metadata because local-path provides no hard per-PVC quota.
 	// +kubebuilder:validation:Required
 	Sandbox SandboxSpec `json:"sandbox"`
 
@@ -153,26 +153,23 @@ type PoolIdentitySpec struct {
 	CertMountPath string `json:"certMountPath,omitempty"`
 }
 
-// SandboxSpec configures the shared sandbox PVC.
+// SandboxSpec configures the shared node-local sandbox PVC.
 // +kubebuilder:object:generate=true
 type SandboxSpec struct {
-	// storageClassName is the StorageClass backing the sandbox PVC. The
-	// operator validates it exists and supports the selected access mode.
+	// storageClassName is fixed to iterabase-agentpool-local-path. Alternate or
+	// default classes are rejected before the claim or workers are mutated.
+	// +kubebuilder:validation:Enum=iterabase-agentpool-local-path
 	// +kubebuilder:validation:Required
 	StorageClassName string `json:"storageClassName"`
 
-	// accessMode selects the sandbox PVC access mode (HOR-427). ReadWriteMany
-	// is required for multi-worker pools (the warm pool shares one PVC and
-	// per-turn children of different sessions run concurrently across pods).
-	// ReadWriteOnce is permitted only as a single-worker deployment mode
-	// (at most one replica, spec.replicas <= 1; replicas == 0 pauses the
-	// pool without the storage-mode change) on an ordinary RWO StorageClass,
-	// and is not the production multi-worker storage backend.
-	// +kubebuilder:validation:Enum=ReadWriteOnce;ReadWriteMany
+	// accessMode is fixed to ReadWriteOnce. RWO constrains the claim to one node,
+	// not one pod, so two or more workers may mount it on the supported single
+	// K3s node.
+	// +kubebuilder:validation:Enum=ReadWriteOnce
 	// +kubebuilder:validation:Required
 	AccessMode corev1.PersistentVolumeAccessMode `json:"accessMode"`
 
-	// size is the PVC request (the per-pool storage quota).
+	// size is planning metadata for the PVC request, not a hard quota.
 	// +kubebuilder:validation:Required
 	Size resource.Quantity `json:"size"`
 
@@ -386,14 +383,14 @@ type PoolProbeSpec struct {
 // +kubebuilder:object:generate=true
 type AgentPoolStatus struct {
 	// conditions expose stable storage/readiness reason families. StorageReady
-	// is fail-closed for RWX pools and identifies the exact class/PVC/PV/backend
-	// predicate or operator action without exposing session bytes.
+	// identifies the exact fixed class/PVC/PV/path predicate or operator action
+	// without exposing session bytes.
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
 	// ready is true once the warm-worker pods + PVC + NetworkPolicy are
-	// reconciled, the RWX class/conformance/PVC/backend contract is healthy, and
-	// at least one pod is Ready (envtest has no kubelet, so this stays false).
+	// reconciled, the dedicated local-path contract is healthy, and at least one
+	// pod is Ready (envtest has no kubelet, so this stays false).
 	// +optional
 	Ready bool `json:"ready,omitempty"`
 

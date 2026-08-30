@@ -168,7 +168,7 @@
     },
     {
       "id": 4,
-      "title": "Longhorn managers available",
+      "title": "Workspace free bytes",
       "type": "stat",
       "datasource": {
         "type": "prometheus",
@@ -182,7 +182,7 @@
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "short"
+          "unit": "bytes"
         },
         "overrides": []
       },
@@ -199,7 +199,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "min(up{namespace=\"longhorn-system\",pod=~\"longhorn-manager-.*\"})",
+          "expr": "min by (pod) (control_plane_harness_workspace_free_bytes{namespace=~\"$namespace\"})",
           "legendFormat": "{{component}} {{model}} {{route}} {{result}} {{pod}}",
           "range": false,
           "instant": true
@@ -208,7 +208,7 @@
     },
     {
       "id": 5,
-      "title": "Longhorn unhealthy volumes",
+      "title": "Workspace free ratio",
       "type": "stat",
       "datasource": {
         "type": "prometheus",
@@ -218,46 +218,6 @@
         "h": 7,
         "w": 12,
         "x": 0,
-        "y": 14
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "right",
-          "showLegend": false
-        },
-        "tooltip": {
-          "mode": "multi"
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sum(longhorn_volume_robustness{state=~\"degraded|faulted\"} == 1)",
-          "legendFormat": "{{component}} {{model}} {{route}} {{result}} {{pod}}",
-          "range": false,
-          "instant": true
-        }
-      ]
-    },
-    {
-      "id": 6,
-      "title": "Longhorn minimum node/disk headroom",
-      "type": "stat",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "gridPos": {
-        "h": 7,
-        "w": 12,
-        "x": 12,
         "y": 14
       },
       "fieldConfig": {
@@ -279,7 +239,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "min(((longhorn_node_storage_capacity_bytes - longhorn_node_storage_usage_bytes - longhorn_node_storage_reservation_bytes) / longhorn_node_storage_capacity_bytes) or ((longhorn_disk_capacity_bytes - longhorn_disk_usage_bytes - longhorn_disk_reservation_bytes) / longhorn_disk_capacity_bytes))",
+          "expr": "min by (pod) (control_plane_harness_workspace_free_ratio{namespace=~\"$namespace\"})",
           "legendFormat": "{{component}} {{model}} {{route}} {{result}} {{pod}}",
           "range": false,
           "instant": true
@@ -287,48 +247,8 @@
       ]
     },
     {
-      "id": 7,
-      "title": "Longhorn CSI unavailable nodes",
-      "type": "stat",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "gridPos": {
-        "h": 7,
-        "w": 12,
-        "x": 0,
-        "y": 21
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "right",
-          "showLegend": false
-        },
-        "tooltip": {
-          "mode": "multi"
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "clamp_min(kube_daemonset_status_desired_number_scheduled{namespace=\"longhorn-system\",daemonset=\"longhorn-csi-plugin\"} - kube_daemonset_status_number_ready{namespace=\"longhorn-system\",daemonset=\"longhorn-csi-plugin\"}, 0)",
-          "legendFormat": "{{component}} {{model}} {{route}} {{result}} {{pod}}",
-          "range": false,
-          "instant": true
-        }
-      ]
-    },
-    {
-      "id": 8,
-      "title": "Longhorn share-managers unavailable",
+      "id": 6,
+      "title": "Workspace capacity warnings",
       "type": "stat",
       "datasource": {
         "type": "prometheus",
@@ -338,6 +258,46 @@
         "h": 7,
         "w": 12,
         "x": 12,
+        "y": 14
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(control_plane_harness_workspace_capacity_warning{namespace=~\"$namespace\"})",
+          "legendFormat": "{{component}} {{model}} {{route}} {{result}} {{pod}}",
+          "range": false,
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "Workspace credit gates",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
         "y": 21
       },
       "fieldConfig": {
@@ -359,7 +319,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(kube_pod_status_ready{namespace=\"longhorn-system\",pod=~\"share-manager-.*\",condition=\"true\"} == 0)",
+          "expr": "sum(control_plane_harness_workspace_credit_gated{namespace=~\"$namespace\"})",
           "legendFormat": "{{component}} {{model}} {{route}} {{result}} {{pod}}",
           "range": false,
           "instant": true
@@ -367,47 +327,7 @@
       ]
     },
     {
-      "id": 9,
-      "title": "Longhorn replicas rebuilding",
-      "type": "stat",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "gridPos": {
-        "h": 7,
-        "w": 12,
-        "x": 0,
-        "y": 28
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "right",
-          "showLegend": false
-        },
-        "tooltip": {
-          "mode": "multi"
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sum(longhorn_replica_state{state=\"starting\"} == 1)",
-          "legendFormat": "{{component}} {{model}} {{route}} {{result}} {{pod}}",
-          "range": false,
-          "instant": true
-        }
-      ]
-    },
-    {
-      "id": 10,
+      "id": 8,
       "title": "Persistent volume utilization",
       "type": "timeseries",
       "datasource": {
@@ -418,7 +338,7 @@
         "h": 7,
         "w": 12,
         "x": 12,
-        "y": 28
+        "y": 21
       },
       "fieldConfig": {
         "defaults": {
@@ -447,7 +367,7 @@
       ]
     },
     {
-      "id": 11,
+      "id": 9,
       "title": "PostgreSQL connections",
       "type": "timeseries",
       "datasource": {
@@ -458,7 +378,7 @@
         "h": 7,
         "w": 12,
         "x": 0,
-        "y": 35
+        "y": 28
       },
       "fieldConfig": {
         "defaults": {
@@ -487,7 +407,7 @@
       ]
     },
     {
-      "id": 12,
+      "id": 10,
       "title": "Redis memory",
       "type": "timeseries",
       "datasource": {
@@ -498,7 +418,7 @@
         "h": 7,
         "w": 12,
         "x": 12,
-        "y": 35
+        "y": 28
       },
       "fieldConfig": {
         "defaults": {
@@ -527,7 +447,7 @@
       ]
     },
     {
-      "id": 13,
+      "id": 11,
       "title": "Inference database pool utilization",
       "type": "timeseries",
       "datasource": {
@@ -538,7 +458,7 @@
         "h": 7,
         "w": 12,
         "x": 0,
-        "y": 42
+        "y": 35
       },
       "fieldConfig": {
         "defaults": {
@@ -567,7 +487,7 @@
       ]
     },
     {
-      "id": 14,
+      "id": 12,
       "title": "Redis pool timeouts",
       "type": "timeseries",
       "datasource": {
@@ -578,7 +498,7 @@
         "h": 7,
         "w": 12,
         "x": 12,
-        "y": 42
+        "y": 35
       },
       "fieldConfig": {
         "defaults": {

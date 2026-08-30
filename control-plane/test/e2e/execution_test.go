@@ -53,7 +53,7 @@ spec:
     trustDomain: iterabase.local
     caSecretRef: {name: late-platform-ca}
   sandbox:
-    storageClassName: standard
+    storageClassName: iterabase-agentpool-local-path
     accessMode: ReadWriteOnce
     size: 1Gi
   gateways:
@@ -212,14 +212,14 @@ apiVersion: platform.iterabase.com/v1alpha1
 kind: AgentPool
 metadata: {name: execution-pool, namespace: iterabase-system}
 spec:
-  replicas: 1
+  replicas: 2
   workerImage: %s
   podSecurity: baseline
   identity:
     trustDomain: iterabase.local
     caSecretRef: {name: iterabase-control-plane-gateway-ca}
   sandbox:
-    storageClassName: standard
+    storageClassName: iterabase-agentpool-local-path
     accessMode: ReadWriteOnce
     size: 1Gi
   gateways:
@@ -239,6 +239,7 @@ spec:
   workspaceTools: true
   gatewayGrants:
     - {tool: platform.fixture_read, maxEffectClass: read_only}
+    - {tool: platform.fixture_barrier, maxEffectClass: read_only}
     - {tool: platform.fixture_upsert, maxEffectClass: idempotent_write}
     - {tool: platform.fixture_write, maxEffectClass: non_idempotent_write}
   credentialBindings:
@@ -422,6 +423,27 @@ func exerciseWorkerLossCancellationStage(t *testing.T, state *deployedState) {
 	})
 	if err != nil {
 		t.Fatalf("AgentPool did not replace the lost worker with a Ready process: %v (last %q)", err, replacement)
+	}
+}
+
+func exerciseConcurrentSamePoolWorkStage(t *testing.T, state *deployedState) {
+	t.Helper()
+	state.applyYAML(t, "same-pool-barrier.yaml", workflowYAML("same-pool-barrier", "e2e/same-pool-barrier", "1", "E2E_MODE:barrier", false,
+		[]string{"platform.fixture_barrier"}, "", ""))
+	waitForWorkflowReady(t, state, "same-pool-barrier", 30*time.Second)
+
+	first := startWorkflow(t, state, "e2e/same-pool-barrier", "Concurrent same-pool work A")
+	second := startWorkflow(t, state, "e2e/same-pool-barrier", "Concurrent same-pool work B")
+	first = waitForWorkState(t, state, first.ID, "done", 4*time.Minute)
+	second = waitForWorkState(t, state, second.ID, "done", 4*time.Minute)
+
+	assignmentEvidence := state.databaseQuery(t, fmt.Sprintf(`SELECT count(DISTINCT worker_id)::text || '|' || count(*)::text FROM runtime.turn_assignments WHERE attempt_id IN ('%s','%s')`, first.CurrentAttemptID, second.CurrentAttemptID))
+	if assignmentEvidence != "2|2" {
+		t.Fatalf("same-pool barrier did not consume two simultaneous worker credits: %q", assignmentEvidence)
+	}
+	invocations := state.databaseQuery(t, fmt.Sprintf(`SELECT count(*) FROM toolgateway.invocations WHERE attempt_id IN ('%s','%s') AND tool_name='platform.fixture_barrier' AND state='succeeded'`, first.CurrentAttemptID, second.CurrentAttemptID))
+	if invocations != "2" {
+		t.Fatalf("concurrency barrier did not settle both authenticated work items: %q", invocations)
 	}
 }
 

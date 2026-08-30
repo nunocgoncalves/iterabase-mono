@@ -36,28 +36,23 @@ grep -Fq 'controller_runtime_reconcile_total{namespace=~\"$namespace\",result=\"
   exit 1
 }
 for title in \
-  'Longhorn managers available' \
-  'Longhorn unhealthy volumes' \
-  'Longhorn minimum node/disk headroom' \
-  'Longhorn CSI unavailable nodes' \
-  'Longhorn share-managers unavailable' \
-  'Longhorn replicas rebuilding'; do
+  'Workspace free bytes' \
+  'Workspace free ratio' \
+  'Workspace capacity warnings' \
+  'Workspace credit gates'; do
   grep -Fq "\"title\": \"$title\"" <<<"$rendered" || {
-    echo "ERROR: 50 — Data and Storage is missing compact panel: $title" >&2
+    echo "ERROR: 50 — Data and Storage is missing dedicated workspace panel: $title" >&2
     exit 1
   }
 done
 for query in \
-  'up{namespace=\"longhorn-system\",pod=~\"longhorn-manager-.*\"}' \
-  'longhorn_volume_robustness{state=~\"degraded|faulted\"}' \
-  'longhorn_node_storage_capacity_bytes - longhorn_node_storage_usage_bytes - longhorn_node_storage_reservation_bytes' \
-  'longhorn_disk_capacity_bytes - longhorn_disk_usage_bytes - longhorn_disk_reservation_bytes' \
-  'daemonset=\"longhorn-csi-plugin\"' \
-  'pod=~\"share-manager-.*\"' \
-  'longhorn_replica_state{state=\"starting\"}'; do
+  'control_plane_harness_workspace_free_bytes' \
+  'control_plane_harness_workspace_free_ratio' \
+  'control_plane_harness_workspace_capacity_warning' \
+  'control_plane_harness_workspace_credit_gated'; do
   grep -Fq "$query" <<<"$rendered" || {
-    echo "ERROR: Longhorn dashboard contract is missing query fragment: $query" >&2
+    echo "ERROR: workspace dashboard contract is missing query fragment: $query" >&2
     exit 1
   }
 done
-echo "OK: $labels provisioned dashboards are organized across Kubernetes, Iterabase, Infrastructure, and Observability; stable UIDs and compact Longhorn orientation panels are enforced"
+echo "OK: $labels provisioned dashboards are organized across Kubernetes, Iterabase, Infrastructure, and Observability; stable UIDs and dedicated workspace capacity panels are enforced"

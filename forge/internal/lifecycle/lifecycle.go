@@ -64,26 +64,26 @@ type ReconcilePlan struct {
 	OverlayRef         string // overlay.ref (branch or tag)
 	FluxEnabled        bool   // flux.enabled; the Flux GitOps phase will run
 	FluxVersion        string // flux2 release tag to install (empty => Flux disabled)
+	AgentPoolWorkspace *provisioner.AgentPoolWorkspaceState
 }
 
 // Result is the outcome of a mutating apply.
 type Result struct {
-	Plan                         *ReconcilePlan
-	KubeconfigPath               string
-	NodeReady                    bool
-	CertificateSubstrateApplied  bool
-	RWXStorageMode               string
-	RWXStoragePrerequisitesReady bool
-	RWXStorageSubstrateApplied   bool
-	ChartApplied                 bool
-	GPUOperatorApplied           bool   // nvidia/gpu-operator release installed/upgraded
-	GPUDriverVersion             string // nvidia driver version pinned via driver.version (empty => chart default)
-	GPUReady                     bool   // operator conditions and live node evidence passed the GPU readiness gate
-	OverlayApplied               bool   // overlay cloned + chart applied with overlay values + CRD instances applied
-	OverlayCommit                string // resolved overlay commit SHA
-	SecretsApplied               bool   // declared Secrets materialized from operator env vars
-	FluxInstalled                bool   // Flux components installed + GitRepository/Kustomization applied
-	GitRepositoryStatus          string // gated Ready revision/digest of the forge-applied GitRepository
+	Plan                        *ReconcilePlan
+	KubeconfigPath              string
+	NodeReady                   bool
+	CertificateSubstrateApplied bool
+	AgentPoolWorkspace          *provisioner.AgentPoolWorkspaceState
+	AgentPoolLocalPathReady     bool
+	ChartApplied                bool
+	GPUOperatorApplied          bool   // nvidia/gpu-operator release installed/upgraded
+	GPUDriverVersion            string // nvidia driver version pinned via driver.version (empty => chart default)
+	GPUReady                    bool   // operator conditions and live node evidence passed the GPU readiness gate
+	OverlayApplied              bool   // overlay cloned + chart applied with overlay values + CRD instances applied
+	OverlayCommit               string // resolved overlay commit SHA
+	SecretsApplied              bool   // declared Secrets materialized from operator env vars
+	FluxInstalled               bool   // Flux components installed + GitRepository/Kustomization applied
+	GitRepositoryStatus         string // gated Ready revision/digest of the forge-applied GitRepository
 }
 
 // ApplyOpts configures an apply run.
@@ -132,7 +132,11 @@ func Plan(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner) (
 		return nil, fmt.Errorf("preflight: passwordless sudo required for user %q", host.SSHUser)
 	}
 
-	plan := &ReconcilePlan{Preflight: pf, WantVersion: cfg.Spec.K3s.Version, ChartVersion: cfg.Spec.Chart.Version}
+	workspace, err := inspectAgentPoolWorkspace(ctx, cfg, p)
+	if err != nil {
+		return nil, err
+	}
+	plan := &ReconcilePlan{Preflight: pf, WantVersion: cfg.Spec.K3s.Version, ChartVersion: cfg.Spec.Chart.Version, AgentPoolWorkspace: workspace}
 
 	if cfg.Spec.GPU.Enabled {
 		if !pf.HasNVIDIAGPU {
@@ -208,6 +212,15 @@ func Apply(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner, 
 		return res, fmt.Errorf("%s; run 'forge destroy' then 'forge apply'", plan.Reason)
 	case ActionRefuseUpgrade:
 		return res, fmt.Errorf("%s", plan.Reason)
+	}
+
+	workspace, err := reconcileAgentPoolWorkspace(ctx, cfg, p)
+	if err != nil {
+		return res, err
+	}
+	res.AgentPoolWorkspace = workspace
+
+	switch plan.Action {
 	case ActionInstall:
 		if err := p.Install(ctx, cfg.Spec.K3s.Version, k3s.ServerArgs(cfg)); err != nil {
 			auditFail(cfg, "apply", err)
@@ -236,6 +249,12 @@ func Apply(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner, 
 		return res, err
 	}
 
+	if err := p.EnsureAgentPoolLocalPathStorage(ctx); err != nil {
+		auditFail(cfg, "apply-agentpool-local-path", err)
+		return res, fmt.Errorf("AgentPool local-path storage: %w", err)
+	}
+	res.AgentPoolLocalPathReady = true
+
 	if err := applyGPU(ctx, cfg, p, d, opts, res); err != nil {
 		return res, err
 	}
@@ -243,7 +262,7 @@ func Apply(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner, 
 	// Overlay delivery is deliberately phased: clone + secrets, certificate
 	// substrate, exact Flux source artifact, platform chart, CR instances, then
 	// enable continuous Flux reconciliation.
-	if err := applyOverlayPhase(ctx, cfg, p, o, f, d, opts, res); err != nil {
+	if err := applyOverlayPhase(ctx, cfg, o, f, d, opts, res); err != nil {
 		return res, err
 	}
 
@@ -336,10 +355,9 @@ func certificateOwnershipMigrationRequired(ctx context.Context, d deployer.Deplo
 }
 
 // applyCertificateSubstrate installs the same-version companion release before
-// any cert-manager consumers. The release owns the operator, CRDs, webhook, and
-// CSI driver; when internal TLS is selected its ordered hook also creates or
-// verifies the future platform release's internal CA resources before managed
-// storage can request a leaf. The platform remains their Helm owner.
+// any cert-manager consumers. The release owns the operator, CRDs, webhook, CSI
+// driver, and ordered internal-CA bootstrap. The platform remains their Helm
+// owner.
 func applyCertificateSubstrate(ctx context.Context, cfg *config.Cluster, d deployer.Deployer, opts ApplyOpts, res *Result, overlayDest string) error {
 	if d == nil || opts.SkipChart || cfg.Spec.Chart.Version == "" {
 		return nil
@@ -477,7 +495,7 @@ func applyCRDInstances(ctx context.Context, d deployer.Deployer, overlayDest str
 // secrets → certificate substrate → Flux source → platform → CRs → Flux
 // Kustomization. The source precedes Helm because the chart-managed tool runner
 // is intentionally unready until it loads a valid generation.
-func applyOverlayPhase(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner, o overlayer.Overlayer, f fluxer.Fluxer, d deployer.Deployer, opts ApplyOpts, res *Result) error {
+func applyOverlayPhase(ctx context.Context, cfg *config.Cluster, o overlayer.Overlayer, f fluxer.Fluxer, d deployer.Deployer, opts ApplyOpts, res *Result) error {
 	overlayDest, overlayCommit, err := cloneOverlay(ctx, cfg, o, opts)
 	if err != nil {
 		auditFail(cfg, "apply-overlay", err)
@@ -511,9 +529,6 @@ func applyOverlayPhase(ctx context.Context, cfg *config.Cluster, p provisioner.P
 		return err
 	}
 	if err := applyCertificateSubstrate(ctx, cfg, d, opts, res, overlayDest); err != nil {
-		return err
-	}
-	if err := applyRWXStorageSubstrate(ctx, cfg, p, d, o, opts, res, overlayDest); err != nil {
 		return err
 	}
 	if err := applyFluxSourcePhase(ctx, cfg, f, d, opts, res, overlayCommit); err != nil {
@@ -766,17 +781,12 @@ func gpuOperatorValues(g config.GPU) []string {
 
 func isUbuntu(os string) bool { return strings.HasPrefix(os, "Ubuntu") }
 
-// Destroy removes the managed stateful substrate only after its strict
-// retained-data guard passes, then removes the stateless/control-plane layers
-// and finally uninstalls k3s. Best-effort cleanup is permitted only after the
-// storage boundary has proved zero consumers and explicit disposition.
+// Destroy removes platform/K3s resources but deliberately preserves the
+// dedicated AgentPool workspace filesystem, receipt, fstab identity, and bytes.
+// Disk wipe, replacement, migration, and decommission are separate contracts.
 func Destroy(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner, d deployer.Deployer, o overlayer.Overlayer, f fluxer.Fluxer) error {
-	if err := uninstallRWXStorageBeforeDestroy(ctx, cfg, d); err != nil {
-		return err
-	}
-
-	// Flux is now safe to stop (reverse of apply's flux-last). Remaining chart
-	// cleanup is best-effort because the stateful guard has already converged.
+	// Flux is stopped first (reverse of apply's flux-last). Remaining chart
+	// cleanup is best-effort and never mutates the workspace disk.
 	if f != nil && cfg.Spec.Flux.Enabled {
 		_ = f.UninstallFlux(ctx)
 	}

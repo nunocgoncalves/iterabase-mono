@@ -1,11 +1,10 @@
-// Runtime RWX health probe (DES-HOR-424-05 / HOR-469).
+// Runtime node-local workspace health and capacity gate (DES-HOR-538-01/02).
 //
-// Kubernetes pod readiness alone does not prove that an established NFS client
-// can still perform I/O after share-manager/node failure. The trusted root
-// supervisor therefore performs a tiny fsync+rename+unlink transaction under a
-// root-only infrastructure directory. Failure removes readiness, drains the
-// Work stream, and exits the disposable worker; dispatch owns worker-loss
-// fencing and never silently replays a turn/effect.
+// The trusted supervisor proves real filesystem I/O and measures the mounted
+// filesystem's available blocks. Capacity warning/gating is hysteretic and
+// suppresses only fresh dispatch credit: crossing the floor never aborts an
+// already active turn. Zero blocks or an actual I/O/fsync failure remains a
+// fail-closed worker loss handled by existing turn/effect fencing.
 
 import {
   chmodSync,
@@ -23,11 +22,47 @@ import { join } from "node:path";
 import { ensureSandboxMountRoot, SandboxError } from "./sandbox.js";
 
 const HEALTH_DIRECTORY = ".iterabase-storage-health";
+export const WORKSPACE_WARNING_RATIO = 0.25;
+export const WORKSPACE_GATE_RATIO = 0.20;
+export const WORKSPACE_REOPEN_RATIO = 0.25;
 
-export function checkSandboxStorageHealth(mountRoot: string, workerId: string): void {
+export interface WorkspaceCapacity {
+  freeBytes: number;
+  capacityBytes: number;
+  freeRatio: number;
+  warning: boolean;
+  creditGated: boolean;
+}
+
+export class WorkspaceCapacityGate {
+  private gated = false;
+
+  observe(freeBytes: number, capacityBytes: number): WorkspaceCapacity {
+    if (!Number.isFinite(freeBytes) || !Number.isFinite(capacityBytes) || freeBytes < 0 || capacityBytes <= 0 || freeBytes > capacityBytes) {
+      throw new SandboxError(`invalid workspace filesystem capacity observation: free=${freeBytes} capacity=${capacityBytes}`);
+    }
+    const freeRatio = freeBytes / capacityBytes;
+    if (freeRatio <= WORKSPACE_GATE_RATIO) this.gated = true;
+    else if (this.gated && freeRatio >= WORKSPACE_REOPEN_RATIO) this.gated = false;
+    return {
+      freeBytes,
+      capacityBytes,
+      freeRatio,
+      warning: freeRatio < WORKSPACE_WARNING_RATIO,
+      creditGated: this.gated,
+    };
+  }
+}
+
+export function checkSandboxStorageHealth(mountRoot: string, workerId: string): { freeBytes: number; capacityBytes: number } {
   ensureSandboxMountRoot(mountRoot);
   const stats = statfsSync(mountRoot);
-  if (stats.bavail <= 0) {
+  const freeBytes = Number(stats.bavail) * Number(stats.bsize);
+  const capacityBytes = Number(stats.blocks) * Number(stats.bsize);
+  if (!Number.isSafeInteger(freeBytes) || !Number.isSafeInteger(capacityBytes) || capacityBytes <= 0) {
+    throw new SandboxError(`sandbox storage capacity cannot be represented safely: ${mountRoot}`);
+  }
+  if (freeBytes <= 0) {
     throw new SandboxError(`sandbox storage has no available filesystem blocks: ${mountRoot}`);
   }
 
@@ -74,13 +109,14 @@ export function checkSandboxStorageHealth(mountRoot: string, workerId: string): 
     try {
       unlinkSync(temporary);
     } catch {
-      // The expected rename removes the temporary path. A failed operation is
-      // already surfaced above; cleanup must not conceal that original error.
+      // The expected rename removes the temporary path. Preserve the original
+      // transaction error when cleanup has nothing left to remove.
     }
     try {
       unlinkSync(committed);
     } catch {
-      // Same bounded best-effort cleanup for an interrupted unlink/fsync path.
+      // Same bounded cleanup for an interrupted unlink/fsync path.
     }
   }
+  return { freeBytes, capacityBytes };
 }

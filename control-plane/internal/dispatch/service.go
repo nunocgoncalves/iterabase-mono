@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"sync/atomic"
 	"time"
@@ -146,7 +147,7 @@ func identityFromContext(ctx context.Context) (spiffe.Identity, bool) {
 // --- Harness.Work bidi handler ---
 
 // Work is the one long-lived bidi stream per warm worker. Worker->CP: Hello,
-// Ready, Heartbeat, TurnEvent, TokenDelta. CP->worker: Welcome, AssignTurn,
+// Ready, WorkspaceStatus, Heartbeat, TurnEvent, TokenDelta. CP->worker: Welcome, AssignTurn,
 // AbortTurn, EventAck, SessionEnd.
 //
 //nolint:gocyclo // the bidi receive loop is naturally branchy; kept flat.
@@ -275,15 +276,23 @@ func (s *Service) Work(ctx context.Context, st *connect.BidiStream[v1.WorkerMess
 
 			switch m := msg.Kind.(type) {
 			case *v1.WorkerMessage_Ready:
-				// One credit. Legal only when no turn is active; a Ready while busy
-				// is a protocol violation (stream closed fail-closed). The busy
-				// check + credit grant are one locked worker operation so the
-				// reconciler cannot race an assignment between them.
-				if !w.grantCreditIfIdle() {
+				granted, valid := w.grantCreditIfIdle()
+				if !valid {
 					return connect.NewError(connect.CodeFailedPrecondition,
-						errors.New("ready while a turn is active is a protocol violation (one-credit dispatch)"))
+						errors.New("ready without a current workspace status or while a turn is active is a protocol violation"))
 				}
-				s.kickReconciler()
+				if granted {
+					s.kickReconciler()
+				}
+			case *v1.WorkerMessage_WorkspaceStatus:
+				if err := validateWorkspaceStatus(m.WorkspaceStatus); err != nil {
+					return connect.NewError(connect.CodeInvalidArgument, err)
+				}
+				ws := m.WorkspaceStatus
+				w.updateWorkspaceStatus(ws.GetFreeBytes(), ws.GetCapacityBytes(), ws.GetFreeRatio(), ws.GetWarning(), ws.GetCreditGated())
+				if ws.GetCreditGated() {
+					s.log.Warn("workspace capacity gate is withholding fresh credit", "pool", w.poolID, "worker", w.workerID, "free_bytes", ws.GetFreeBytes(), "free_ratio", ws.GetFreeRatio())
+				}
 			case *v1.WorkerMessage_Heartbeat:
 				// Any message renews the lease; nothing else to do.
 			case *v1.WorkerMessage_TurnEvent:
@@ -296,6 +305,27 @@ func (s *Service) Work(ctx context.Context, st *connect.BidiStream[v1.WorkerMess
 			}
 		}
 	}
+}
+
+func validateWorkspaceStatus(status *v1.WorkspaceStatus) error {
+	if status == nil || status.GetCapacityBytes() == 0 || status.GetFreeBytes() > status.GetCapacityBytes() {
+		return errors.New("workspace status has invalid byte capacity")
+	}
+	ratio := status.GetFreeRatio()
+	computed := float64(status.GetFreeBytes()) / float64(status.GetCapacityBytes())
+	if math.IsNaN(ratio) || math.IsInf(ratio, 0) || ratio < 0 || ratio > 1 || math.Abs(ratio-computed) > 0.000001 {
+		return errors.New("workspace status free ratio does not match available blocks")
+	}
+	if status.GetWarning() != (ratio < 0.25) {
+		return errors.New("workspace status warning does not match the 25 percent threshold")
+	}
+	if ratio <= 0.20 && !status.GetCreditGated() {
+		return errors.New("workspace status must gate credit at or below 20 percent free")
+	}
+	if ratio >= 0.25 && status.GetCreditGated() {
+		return errors.New("workspace status must reopen credit at or above 25 percent free")
+	}
+	return nil
 }
 
 // welcome builds the Welcome control message for a fencing generation.

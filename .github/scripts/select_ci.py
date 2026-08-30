@@ -174,6 +174,16 @@ def selection(paths: list[str], select_all: bool = False) -> dict[str, object]:
                         {"control-plane-harness", "control-plane-tool-runner"}
                     )
                 selected["images"] = bool(selected_images)
+                affects_workspace_e2e = (
+                    relative.startswith("harness/src/storage-health")
+                    or relative.startswith("harness/src/main")
+                    or relative.startswith("internal/controller/agentpool_storage")
+                    or relative.startswith("internal/controller/agentpool_controller")
+                    or relative.startswith("internal/dispatch/")
+                    or is_proto
+                )
+                selected["forge_e2e"] |= affects_workspace_e2e
+                selected["forge_real_e2e"] |= affects_workspace_e2e
                 continue
 
             if path.startswith("inference-gateway/"):

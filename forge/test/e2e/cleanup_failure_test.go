@@ -26,6 +26,10 @@ func (provisioner *fakeCPUVMProvisioner) Create(context.Context, string, string)
 	return provisioner.droplet, nil
 }
 
+func (provisioner *fakeCPUVMProvisioner) AttachWorkspace(context.Context, string, int) (string, error) {
+	return "/dev/disk/by-id/scsi-fixture-workspace", nil
+}
+
 func (provisioner *fakeCPUVMProvisioner) PublicIP(context.Context, int) (string, error) {
 	return "", provisioner.publicIPErr
 }
@@ -113,24 +117,14 @@ func TestGPUProvisioningAndCleanupFailuresRetainReaperOwnership(t *testing.T) {
 	}
 }
 
-func TestDedicatedRWXVolumeRequestRegistersReaperOwnership(t *testing.T) {
+func TestDedicatedWorkspaceVolumeRequestRegistersReaperOwnership(t *testing.T) {
 	t.Parallel()
-	request := newRWXVolumeRequest("fixture-run", "fixture-node")
-	if request.Name != "fixture-node-ssd" || !hasResourceTag(request.Tags, "forge-e2e") || !hasResourceTag(request.Tags, "fixture-run") {
-		t.Fatalf("RWX volume request does not preserve tagged reaper ownership: name=%q tags=%v", request.Name, request.Tags)
+	request := newWorkspaceVolumeRequest("fixture-run", "fixture-workspaces", region)
+	if request.Name != "fixture-workspaces" || !hasResourceTag(request.Tags, "forge-e2e") || !hasResourceTag(request.Tags, "fixture-run") {
+		t.Fatalf("workspace volume request does not preserve tagged reaper ownership: name=%q tags=%v", request.Name, request.Tags)
 	}
-	if request.SizeGigaBytes != 25 || request.Region != region {
-		t.Fatalf("RWX volume request does not preserve dedicated capacity/region: %+v", request)
-	}
-}
-
-func TestCPUScenarioSizeReservesManagedStorageHeadroom(t *testing.T) {
-	t.Parallel()
-	if got := cpuScenarioSize(false); got != size {
-		t.Fatalf("external CPU scenario size=%q want=%q", got, size)
-	}
-	if got := cpuScenarioSize(true); got != managedSize {
-		t.Fatalf("managed CPU scenario size=%q want=%q", got, managedSize)
+	if request.SizeGigaBytes != 25 || request.Region != region || !strings.Contains(request.Description, "AgentPool workspace") {
+		t.Fatalf("workspace volume request does not preserve dedicated capacity/region/purpose: %+v", request)
 	}
 }
 

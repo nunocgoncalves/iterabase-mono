@@ -11,10 +11,13 @@ import (
 // forgeConfigSpec is the shared config fixture for cloud E2E stages. Scenario
 // writers vary only the fields relevant to the contract they exercise, so the
 // common k3s/host recipe cannot drift across files.
+const workspaceDeviceEnv = "FORGE_E2E_AGENTPOOL_WORKSPACE_DEVICE"
+
 type forgeConfigSpec struct {
 	Name             string
 	Address          string
 	SSHKeyPath       string
+	WorkspaceDevice  string
 	RunLabel         bool
 	DualStack        bool
 	GPU              bool
@@ -28,11 +31,16 @@ type forgeConfigSpec struct {
 	Flux             bool
 }
 
-func e2eK3sVersion() string {
-	if os.Getenv(storageChartArchiveEnv) != "" && os.Getenv(forceExternalStorageEnv) != "true" {
-		return "v1.34.10+k3s1"
+func e2eK3sVersion() string { return "v1.34.10+k3s1" }
+
+func workspaceDevice(spec forgeConfigSpec) string {
+	if spec.WorkspaceDevice != "" {
+		return spec.WorkspaceDevice
 	}
-	return "v1.31.5+k3s1"
+	if device := os.Getenv(workspaceDeviceEnv); device != "" {
+		return device
+	}
+	return "/dev/disk/by-id/scsi-forge-e2e-workspaces"
 }
 
 func writeForgeConfigSpec(t *testing.T, spec forgeConfigSpec) string {
@@ -44,12 +52,14 @@ metadata:
   name: %s
 spec:
   mode: single-node
+  agentPoolWorkspace:
+    device: %s
   hosts:
     - address: %s
       sshUser: forge
       sshKeyPath: %s
       role: control-plane+worker
-`, spec.Name, spec.Address, spec.SSHKeyPath)
+`, spec.Name, workspaceDevice(spec), spec.Address, spec.SSHKeyPath)
 	if spec.RunLabel {
 		fmt.Fprintf(&cfg, `      labels:
         e2e.horizonshift.io/run: %q

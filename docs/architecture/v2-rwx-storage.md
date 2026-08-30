@@ -1,5 +1,12 @@
 # V2 production RWX and BYO storage contract
 
+> **Superseded historical record (2026-08-30).** `DES-HOR-469-03`,
+> `DES-HOR-538-01`, and `DES-HOR-538-02` withdrew this Longhorn/RWX/BYO release
+> direction before semantic promotion or deployment. It remains only as
+> reconstructable decision and implementation history. Current authority is
+> [`v2-local-path-storage.md`](v2-local-path-storage.md); no artifact, chart,
+> configuration, runbook, or release path below is supported.
+
 - **Status:** Approved architecture; implementation is owned by HOR-469.
 - **Approval date:** 2026-08-25
 - **Architecture ticket:** [HOR-424](https://linear.app/horizonshift/issue/HOR-424/v2-decide-and-validate-the-production-rwxbyo-storage-contract)
@@ -424,7 +431,7 @@ the release.
 ### 8.2 Live disposable-claim checks
 
 The exact release gate runs
-[`validation/hor-424-rwx-conformance.sh`](validation/hor-424-rwx-conformance.sh)
+[`historical/hor-424-rwx-conformance.sh.txt`](historical/hor-424-rwx-conformance.sh.txt)
 against the named class. It does not install a backend. It proves:
 
 1. dynamic provisioning and binding of one RWX Filesystem claim;
@@ -447,7 +454,7 @@ Run it against the current Kubernetes context with an explicit class:
 
 ```bash
 HOR424_STORAGE_CLASS=iterabase-rwx \
-  docs/architecture/validation/hor-424-rwx-conformance.sh
+  docs/architecture/historical/hor-424-rwx-conformance.sh.txt
 ```
 
 Set `HOR424_NAMESPACE` to isolate repeated evidence,
@@ -865,7 +872,7 @@ The implementation is incomplete until all of these pass:
 | Approved comparison and selection | DES-HOR-424-01–06 and section 3 |
 | Two-worker RWX read/write without cross-session leakage | Section 13 and executable conformance gate |
 | Lifecycle, upgrade, failure, recovery, capacity, backup, security, and ownership explicit | Sections 4–12 |
-| BYO conformance and diagnostics testable | Sections 8 and 11 plus `validation/hor-424-rwx-conformance.sh` |
+| BYO conformance and diagnostics testable | Sections 8 and 11 plus `historical/hor-424-rwx-conformance.sh.txt` |
 | HOR-469 can proceed without reopening architecture | Section 14 exact implementation handoff |
 
 Semantic publication classification for HOR-424 is **None**: this ticket adds a

@@ -3,7 +3,7 @@
 // The real-filesystem tests in sandbox.test.ts cover the establish/verify happy
 // paths and the symlink/non-directory refusals. Two failure modes cannot be
 // produced by a non-root test process against the real filesystem:
-//   - chmod EPERM (root-squash / read-only RWX volume ignoring chmod)
+//   - chmod EPERM (root-squash / read-only shared volume ignoring chmod)
 //   - a foreign-owned mount root (a non-root process cannot create a dir owned
 //     by another UID)
 // These are the exact attack scenarios the HOR-381 isolation contract defends

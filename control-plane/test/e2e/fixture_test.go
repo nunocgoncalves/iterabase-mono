@@ -268,6 +268,32 @@ func createControlPlaneKindStage(t *testing.T, state *deployedState) {
 	}
 	state.cluster = cluster
 	state.client = kube.Client{Executor: state.runner, Kubeconfig: cluster.Kubeconfig, Redactor: state.redactor}
+	configureKindWorkspaceStorage(t, state)
+}
+
+func configureKindWorkspaceStorage(t *testing.T, state *deployedState) {
+	t.Helper()
+	configJSON := `{"nodePathMap":[{"node":"DEFAULT_PATH_FOR_NON_LISTED_NODES","paths":["/var/local-path-provisioner"]}],"storageClassConfigs":{"standard":{"nodePathMap":[{"node":"DEFAULT_PATH_FOR_NON_LISTED_NODES","paths":["/var/local-path-provisioner"]}]},"iterabase-agentpool-local-path":{"nodePathMap":[{"node":"DEFAULT_PATH_FOR_NON_LISTED_NODES","paths":["/var/lib/iterabase/agentpool-workspaces"]}]}}}`
+	if output, err := state.client.Kubectl(state.ctx, 30*time.Second, "patch", "configmap/local-path-config", "-n", "local-path-storage", "--type=merge", "-p", fmt.Sprintf(`{"data":{"config.json":%q}}`, configJSON)); err != nil {
+		t.Fatalf("configure Kind local-path class isolation: %v\n%s", err, output)
+	}
+	state.applyYAML(t, "agentpool-storageclass.yaml", `apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: iterabase-agentpool-local-path
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "false"
+provisioner: rancher.io/local-path
+reclaimPolicy: Delete
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: false
+`)
+	if output, err := state.client.Kubectl(state.ctx, 2*time.Minute, "rollout", "restart", "deployment/local-path-provisioner", "-n", "local-path-storage"); err != nil {
+		t.Fatalf("restart Kind local-path provisioner: %v\n%s", err, output)
+	}
+	if output, err := state.client.Kubectl(state.ctx, 2*time.Minute, "rollout", "status", "deployment/local-path-provisioner", "-n", "local-path-storage", "--timeout=90s"); err != nil {
+		t.Fatalf("wait for Kind local-path provisioner: %v\n%s", err, output)
+	}
 }
 
 func loadSourceImageStage(t *testing.T, state *deployedState) {
@@ -577,7 +603,7 @@ spec:
     trustDomain: iterabase.local
     caSecretRef: {name: e2e-placeholder-ca}
   sandbox:
-    storageClassName: standard
+    storageClassName: iterabase-agentpool-local-path
     accessMode: ReadWriteOnce
     size: 1Gi
   gateways:

@@ -51,8 +51,8 @@ spec:
               isolated warm-worker pods that execute Platform-v1 turns with the approved
               supervisor/child model, fixed local-workspace boundary, and maximum gateway
               permissions — without proxy sidecars or customer credentials in the sandbox
-              (ARCH-003/009/010/016/018). The operator provisions the RWX sandbox PVC,
-              per-pod SPIFFE certs (via the cert-manager CSI driver), the rendered harness
+              (ARCH-003/009/010/016/018). The operator provisions the dedicated-class RWO
+              sandbox PVC, per-pod SPIFFE certs (via the cert-manager CSI driver), the rendered harness
               boot config, and a deny-by-default NetworkPolicy. HOR-249 owns dispatch and
               the warm-pool scaling/credit protocol; HOR-245 only maintains a static
               `replicas` warm set.
@@ -852,23 +852,18 @@ spec:
                 type: object
               sandbox:
                 description: |-
-                  sandbox configures the shared RWX PVC that backs per-session sandboxes.
-                  Each session gets a 0700 subdir owned by its stable session UID/GID
-                  (provisioning/ownership enforced by the supervisor, HOR-381); the pool
-                  PVC request is the per-pool storage quota.
+                  sandbox configures the pool's shared node-local RWO PVC. Multiple workers
+                  mount it concurrently on the one supported K3s node. Each session gets a
+                  0700 subdir owned by its stable UID/GID; the requested size is planning
+                  metadata because local-path provides no hard per-PVC quota.
                 properties:
                   accessMode:
                     description: |-
-                      accessMode selects the sandbox PVC access mode (HOR-427). ReadWriteMany
-                      is required for multi-worker pools (the warm pool shares one PVC and
-                      per-turn children of different sessions run concurrently across pods).
-                      ReadWriteOnce is permitted only as a single-worker deployment mode
-                      (at most one replica, spec.replicas <= 1; replicas == 0 pauses the
-                      pool without the storage-mode change) on an ordinary RWO StorageClass,
-                      and is not the production multi-worker storage backend.
+                      accessMode is fixed to ReadWriteOnce. RWO constrains the claim to one node,
+                      not one pod, so two or more workers may mount it on the supported single
+                      K3s node.
                     enum:
                     - ReadWriteOnce
-                    - ReadWriteMany
                     type: string
                   mountPath:
                     description: |-
@@ -880,13 +875,16 @@ spec:
                     anyOf:
                     - type: integer
                     - type: string
-                    description: size is the PVC request (the per-pool storage quota).
+                    description: size is planning metadata for the PVC request, not
+                      a hard quota.
                     pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                     x-kubernetes-int-or-string: true
                   storageClassName:
                     description: |-
-                      storageClassName is the StorageClass backing the sandbox PVC. The
-                      operator validates it exists and supports the selected access mode.
+                      storageClassName is fixed to iterabase-agentpool-local-path. Alternate or
+                      default classes are rejected before the claim or workers are mutated.
+                    enum:
+                    - iterabase-agentpool-local-path
                     type: string
                 required:
                 - accessMode
@@ -935,8 +933,8 @@ spec:
               conditions:
                 description: |-
                   conditions expose stable storage/readiness reason families. StorageReady
-                  is fail-closed for RWX pools and identifies the exact class/PVC/PV/backend
-                  predicate or operator action without exposing session bytes.
+                  identifies the exact fixed class/PVC/PV/path predicate or operator action
+                  without exposing session bytes.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -1003,8 +1001,8 @@ spec:
               ready:
                 description: |-
                   ready is true once the warm-worker pods + PVC + NetworkPolicy are
-                  reconciled, the RWX class/conformance/PVC/backend contract is healthy, and
-                  at least one pod is Ready (envtest has no kubelet, so this stays false).
+                  reconciled, the dedicated local-path contract is healthy, and at least one
+                  pod is Ready (envtest has no kubelet, so this stays false).
                 type: boolean
               readyReplicas:
                 description: readyReplicas is the number of warm-worker pods reporting

@@ -5,7 +5,7 @@
 # UIDs and to chown the sandboxes. Production grants those caps via the K8s
 # security context (HOR-245), not by running the supervisor as root.
 #
-# This is the HOR-381 isolation gate (bullets 1-5). Bullets 6-7 (RWX-CSI
+# This is the HOR-381 isolation gate (bullets 1-5). Bullets 6-7 (RWO local-path
 # cross-pod ownership + Pod Security admission) are HOR-245's gate.
 # Run: make harness-isolation-test
 

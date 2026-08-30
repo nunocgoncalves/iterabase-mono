@@ -1,10 +1,8 @@
 # TLS-on preset for the iterabase-platform umbrella (CI: static kubeconform via
 # `make check-tls` + the live `install-tls` kind e2e). Flips the shared switch
-# for every supported internal-CA service link. Managed Longhorn additionally
-# uses the CA for manager-to-instance-manager gRPC mTLS; it does not use this CA
-# for NFS/iSCSI/CSI/replica traffic. The single-node NFS hop is a bounded
-# same-host exposure, while production multi-node storage is HOR-519-gated on
-# encrypted networking. kind/E2E stays plaintext by default (this file is opt-in).
+# for every supported internal-CA service link. AgentPool workspace storage is
+# local ext4 configured by Forge and adds no service transport. kind/E2E stays
+# plaintext by default (this file is opt-in).
 global:
   internalTLS:
     enabled: true

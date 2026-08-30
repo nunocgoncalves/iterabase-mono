@@ -22,8 +22,8 @@ issuance, and the admin bootstrap. HOR-243 adds the permission engine: the
 `runtime` schema + store (workflow_run/step/turn state machines + append-only
 event/audit log) — the data layer HOR-249 (orchestration) and HOR-252 (workflow
 definitions) consume. HOR-245 adds the AgentPool CRD/operator: isolated
-warm-worker pods (SPIFFE certs via the cert-manager CSI driver, shared RWX
-sandbox PVC, deny-by-default NetworkPolicy, deny-by-default workspace-tool
+warm-worker pods (SPIFFE certs via the cert-manager CSI driver, dedicated-class
+same-node RWO sandbox PVC, deny-by-default NetworkPolicy, deny-by-default workspace-tool
 switch, maximum gateway grants + credential-slot bindings) and removes the
 superseded per-sandbox egress proxy (ARCH-009). Sandbox reconciliation (HOR-245)
 lands in its own ticket. HOR-249 adds the durable-dispatch Work server
@@ -292,12 +292,12 @@ declares the maximum gateway capability grants + logical credential-slot
 bindings for work dispatched to the pool. No separate Tool/EgressRoute/
 IntegrationBinding CRD exists in v1.
 
-The operator reconciles, per pool: a shared **sandbox PVC** (per-session
-`0700` subdirs owned by the session UID/GID; `ReadWriteMany` by default and
-required for multi-worker pools — `ReadWriteOnce` is supported as a
-single-worker deployment mode (at most one replica, `spec.replicas <= 1`;
-`replicas == 0` pauses the pool without the storage-mode change, HOR-427), a
-**deny-by-default NetworkPolicy** (`denied` = kube-dns + the three gateways;
+The operator reconciles, per pool: one fixed-class **ReadWriteOnce sandbox
+PVC** on `iterabase-agentpool-local-path`, with per-session `0700` subdirs under
+stable UID/GID isolation. RWO limits a volume to one node, not one pod, so two
+or more workers may mount the claim on the supported single K3s node. Requested
+size is planning metadata rather than a hard local-path quota. It also
+reconciles a **deny-by-default NetworkPolicy** (`denied` = kube-dns + the three gateways;
 `internet` = per-pool opt-in for non-cluster egress — customer-system
 credentialed access still routes through the gateway), a **per-pod config
 ConfigMap** (rendered harness boot config), and the **warm-worker pods**.
@@ -313,15 +313,20 @@ per-turn child as the session UID via `setpriv` (CAP_SETUID/SETGID, which PSS
 `restricted` forbids — hence `baseline`); the child (dropped groups,
 `no_new_privs`) cannot read the key.
 
-For RWX pools, readiness additionally requires the chart-owned installation
-storage contract, exact `Retain`/expandable StorageClass, a live `HOR-469/v1`
-conformance attestation bound to the current class UID/provisioner, a Bound RWX
-Filesystem CSI PVC/PV with usable requested capacity, and—on managed
-Longhorn—a healthy volume and active share-manager once mounted. Stable
-`StorageReady` condition reasons identify class, conformance, PVC/expansion,
-mount-root, backend, share-manager, capacity, and recovery failures. Storage
-loss removes worker pods/scheduling credit; recovery waits for backend health
-and creates fresh workers without automatic turn/effect replay.
+Readiness requires Forge's exact non-default class (`rancher.io/local-path`,
+`WaitForFirstConsumer`, `Delete`, non-expandable), one RWO Filesystem claim,
+and a bound hostPath PV resolving beneath
+`/var/lib/iterabase/agentpool-workspaces` with node affinity. The initial
+WaitForFirstConsumer Pending state does not deadlock worker creation. Wrong
+class/provisioner/path/access mode, default-class fallback, immutable claim
+mutation, unsafe mount ownership, and actual I/O failure fail closed.
+
+The harness measures available blocks on the actual shared filesystem, exports
+free bytes/ratio and gate state, warns below 25%, withholds fresh dispatch
+credit at or below 20%, and reopens only at or above 25%. Crossing the threshold
+alone does not abort an active turn; after its terminal event is ACKed, the next
+credit remains withheld. Zero space or a real write/fsync/mount failure fences
+through the existing worker-loss path without automatic turn/effect replay.
 
 `spec.workspaceTools` is the deny-by-default local-tool switch (ARCH-016):
 `false` exposes none; `true` exposes exactly `read`/`write`/`edit`/`bash`.
@@ -330,7 +335,7 @@ maximum gateway permissions and slot→Secret bindings (values never in the CRD)
 semantic tool-registry validation is the gateway's job (HOR-392/397). Dispatch,
 warm-pool scaling, and the Work server's worker-identity/generation fencing are
 HOR-249; `worker_id` = pod name (stable slot), recorded as an amendment to the
-HOR-381/249 identity contract. Real-cluster PSS/CSI/RWX/isolation validation is
+HOR-381/249 identity contract. Real-cluster PSS/local-path RWO/isolation validation is
 the ticket's stated real-cluster gate (envtest covers assembly + structural
 validation).
 

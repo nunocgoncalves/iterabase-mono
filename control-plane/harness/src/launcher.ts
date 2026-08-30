@@ -6,7 +6,7 @@
 // supervisor — which HOR-245's security context grants only CAP_SETUID /
 // CAP_SETGID — uses this to run model-directed code (pi + extensions) with
 // kernel-enforced isolation: the child can read/write its own 0700 sandbox but
-// receives EACCES for any sibling session root on the shared RWX PVC.
+// receives EACCES for any sibling session root on the same-node shared RWO PVC.
 //
 // setpriv (util-linux) is the production launcher. The full drop is empirically
 // verified in node:24-bookworm-slim (util-linux 2.38.1) — see harness/isolation.

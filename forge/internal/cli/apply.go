@@ -105,14 +105,13 @@ func printApplyResult(out io.Writer, cfg *config.Cluster, res *lifecycle.Result)
 	fmt.Fprintf(out, "  action:     %s\n", res.Plan.Action)
 	fmt.Fprintf(out, "  kubeconfig: %s\n", res.KubeconfigPath)
 	fmt.Fprintf(out, "  node ready: %v\n", res.NodeReady)
+	if res.AgentPoolWorkspace != nil {
+		fmt.Fprintf(out, "  AgentPool workspace: %s (%s, uuid=%s)\n", res.AgentPoolWorkspace.Device, res.AgentPoolWorkspace.State, res.AgentPoolWorkspace.FilesystemUUID)
+	}
+	fmt.Fprintf(out, "  AgentPool local-path ready: %v\n", res.AgentPoolLocalPathReady)
 	if cfg.Spec.Chart.Version != "" {
 		fmt.Fprintf(out, "  chart:      %s\n", cfg.Spec.Chart.Version)
 		fmt.Fprintf(out, "  certificate substrate applied: %v\n", res.CertificateSubstrateApplied)
-		fmt.Fprintf(out, "  rwx storage mode: %s\n", res.RWXStorageMode)
-		if res.RWXStorageMode == "managed-longhorn" {
-			fmt.Fprintf(out, "  rwx storage prerequisites ready: %v\n", res.RWXStoragePrerequisitesReady)
-			fmt.Fprintf(out, "  rwx storage substrate applied: %v\n", res.RWXStorageSubstrateApplied)
-		}
 		fmt.Fprintf(out, "  chart applied: %v\n", res.ChartApplied)
 	}
 	if cfg.Spec.GPU.Enabled {
@@ -160,9 +159,11 @@ func printPlan(cmd *cobra.Command, plan *lifecycle.ReconcilePlan) {
 		fmt.Fprintf(out, "  have:      %s\n", plan.HaveVersion)
 	}
 	fmt.Fprintf(out, "  want:      %s\n", plan.WantVersion)
+	if plan.AgentPoolWorkspace != nil {
+		fmt.Fprintf(out, "  workspace: %s (%s, model=%s serial=%s size=%d)\n", plan.AgentPoolWorkspace.Device, plan.AgentPoolWorkspace.State, plan.AgentPoolWorkspace.Model, plan.AgentPoolWorkspace.Serial, plan.AgentPoolWorkspace.SizeBytes)
+	}
 	if plan.ChartVersion != "" {
 		fmt.Fprintf(out, "  chart:     %s\n", plan.ChartVersion)
-		fmt.Fprintf(out, "  rwx host:  iscsi=%v nfsv4=%v mountPropagation=%v\n", plan.Preflight.HasISCSI, plan.Preflight.HasNFSv4, plan.Preflight.HasMountPropagation)
 	}
 	if plan.GPUEnabled {
 		fmt.Fprintf(out, "  gpu:       %s (enabled)\n", plan.GPUOperatorVersion)

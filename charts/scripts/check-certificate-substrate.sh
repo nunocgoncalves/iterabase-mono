@@ -50,4 +50,4 @@ if grep -R -q 'helm.sh/hook' \
   exit 1
 fi
 
-echo "OK: same-version certificate substrate orders the platform-owned internal CA before managed storage; platform owns hook-free issuers and leaves"
+echo "OK: same-version certificate substrate orders the platform-owned internal CA before dependent platform workloads; platform owns hook-free issuers and leaves"

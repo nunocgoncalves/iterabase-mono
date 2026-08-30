@@ -2,7 +2,7 @@ import { chmodSync, existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { checkSandboxStorageHealth } from "./storage-health.js";
+import { checkSandboxStorageHealth, WorkspaceCapacityGate } from "./storage-health.js";
 
 let base: string;
 
@@ -30,5 +30,23 @@ describe("checkSandboxStorageHealth", () => {
   it("sanitizes a worker identity before using it as a temporary filename", () => {
     checkSandboxStorageHealth(base, "pool/worker:0");
     expect(readdirSync(join(base, ".iterabase-storage-health"))).toEqual([]);
+  });
+});
+
+describe("WorkspaceCapacityGate", () => {
+  it("warns below 25%, gates at 20%, and reopens only at 25%", () => {
+    const gate = new WorkspaceCapacityGate();
+    expect(gate.observe(26, 100)).toMatchObject({ warning: false, creditGated: false });
+    expect(gate.observe(24, 100)).toMatchObject({ warning: true, creditGated: false });
+    expect(gate.observe(20, 100)).toMatchObject({ warning: true, creditGated: true });
+    expect(gate.observe(24, 100)).toMatchObject({ warning: true, creditGated: true });
+    expect(gate.observe(25, 100)).toMatchObject({ warning: false, creditGated: false });
+  });
+
+  it("rejects uncertain capacity observations", () => {
+    const gate = new WorkspaceCapacityGate();
+    expect(() => gate.observe(-1, 100)).toThrow();
+    expect(() => gate.observe(101, 100)).toThrow();
+    expect(() => gate.observe(1, 0)).toThrow();
   });
 });

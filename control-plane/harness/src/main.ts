@@ -9,13 +9,13 @@
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { create } from "@bufbuild/protobuf";
-import { HelloSchema, WorkerMessageSchema } from "./gen/iterabase/harness/v1/harness_pb.js";
+import { HelloSchema, WorkerMessageSchema, WorkspaceStatusSchema } from "./gen/iterabase/harness/v1/harness_pb.js";
 import { loadConfig } from "./config.js";
 import { Probes } from "./probes.js";
 import { Supervisor } from "./supervisor.js";
 import { createChildFactory } from "./child-process.js";
 import { HarnessMetrics } from "./metrics.js";
-import { checkSandboxStorageHealth } from "./storage-health.js";
+import { checkSandboxStorageHealth, WorkspaceCapacityGate, type WorkspaceCapacity } from "./storage-health.js";
 
 /** The compiled pi child entry, sibling to this module's output. */
 const CHILD_SCRIPT = join(dirname(fileURLToPath(import.meta.url)), "child.js");
@@ -23,11 +23,20 @@ const CHILD_SCRIPT = join(dirname(fileURLToPath(import.meta.url)), "child.js");
 export async function runWorker(): Promise<void> {
   const cfg = loadConfig();
   const metrics = new HarnessMetrics();
-  // Ensure the shared RWX sandbox mount root is 0711 root-owned and prove a
-  // complete filesystem transaction before opening dispatch credit.
-  checkSandboxStorageHealth(cfg.sandboxRoot, cfg.worker.workerId);
-  metrics.storageChecks.labels("pass").inc();
-  metrics.storageReady.set(1);
+  const capacityGate = new WorkspaceCapacityGate();
+  const observeWorkspace = (): WorkspaceCapacity => {
+    const observed = checkSandboxStorageHealth(cfg.sandboxRoot, cfg.worker.workerId);
+    const capacity = capacityGate.observe(observed.freeBytes, observed.capacityBytes);
+    metrics.storageChecks.labels("pass").inc();
+    metrics.storageReady.set(1);
+    metrics.workspaceFreeBytes.set(capacity.freeBytes);
+    metrics.workspaceCapacityBytes.set(capacity.capacityBytes);
+    metrics.workspaceFreeRatio.set(capacity.freeRatio);
+    metrics.workspaceCapacityWarning.set(capacity.warning ? 1 : 0);
+    metrics.workspaceCreditGated.set(capacity.creditGated ? 1 : 0);
+    return capacity;
+  };
+  const initialCapacity = observeWorkspace();
   const probes = new Probes(metrics.registry);
   await probes.start(cfg.probe.port);
 
@@ -43,12 +52,20 @@ export async function runWorker(): Promise<void> {
     },
   });
 
+  const toWorkspaceStatus = (capacity: WorkspaceCapacity) => create(WorkspaceStatusSchema, {
+    freeBytes: BigInt(capacity.freeBytes),
+    capacityBytes: BigInt(capacity.capacityBytes),
+    freeRatio: capacity.freeRatio,
+    warning: capacity.warning,
+    creditGated: capacity.creditGated,
+  });
   const sup = new Supervisor({
     cfg,
     hello,
     childFactory: createChildFactory(cfg, CHILD_SCRIPT),
     probes,
     metrics,
+    workspaceStatus: toWorkspaceStatus(initialCapacity),
   });
 
   let draining = false;
@@ -65,9 +82,8 @@ export async function runWorker(): Promise<void> {
   const storageMonitor = setInterval(() => {
     if (storageFailure || draining) return;
     try {
-      checkSandboxStorageHealth(cfg.sandboxRoot, cfg.worker.workerId);
-      metrics.storageChecks.labels("pass").inc();
-      metrics.storageReady.set(1);
+      const capacity = observeWorkspace();
+      sup.updateWorkspaceStatus(toWorkspaceStatus(capacity));
     } catch (error) {
       storageFailure = error as Error;
       console.error(`sandbox storage became unavailable: ${storageFailure.message}`);

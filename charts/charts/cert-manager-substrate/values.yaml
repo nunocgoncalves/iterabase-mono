@@ -1,7 +1,7 @@
 # The same complete values files used for the platform release are passed to
 # this ordered companion. When internal TLS is enabled, its post-install gate
-# creates or verifies the platform-owned internal CA before a managed Longhorn
-# companion can request its gRPC leaf. platformRelease is set explicitly by
+# creates or verifies the platform-owned internal CA before dependent platform
+# workloads start. platformRelease is set explicitly by
 # Forge and otherwise derives from the conventional <platform>-cert-manager
 # release name used by direct operators.
 global:

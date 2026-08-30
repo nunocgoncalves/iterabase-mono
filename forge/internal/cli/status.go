@@ -3,10 +3,12 @@ package cli
 import (
 	"context"
 	"fmt"
+	"io"
 
 	"github.com/spf13/cobra"
 
 	"github.com/nunocgoncalves/iterabase-mono/forge/internal/lifecycle"
+	"github.com/nunocgoncalves/iterabase-mono/forge/internal/provisioner"
 	"github.com/nunocgoncalves/iterabase-mono/forge/internal/sshprovisioner"
 )
 
@@ -49,6 +51,7 @@ func runStatus(cmd *cobra.Command, _ []string) error {
 	}
 	fmt.Fprintf(out, "want:       %s\n", plan.WantVersion)
 	fmt.Fprintf(out, "node ready: %v\n", ready)
+	printWorkspaceStatus(out, plan.AgentPoolWorkspace)
 	if cfg.Spec.Chart.Version != "" {
 		cs, _ := p.Status(ctx, cfg.Spec.Chart.Release, cfg.Spec.Chart.Namespace)
 		if cs != nil && cs.Installed {
@@ -83,6 +86,20 @@ func runStatus(cmd *cobra.Command, _ []string) error {
 		}
 	}
 	return nil
+}
+
+func printWorkspaceStatus(out io.Writer, workspace *provisioner.AgentPoolWorkspaceState) {
+	if workspace == nil {
+		return
+	}
+	fmt.Fprintf(out, "workspace:  %s (%s)\n", workspace.Device, workspace.State)
+	fmt.Fprintf(out, "  resolved: %s\n", workspace.Resolved)
+	fmt.Fprintf(out, "  model:    %s\n", workspace.Model)
+	fmt.Fprintf(out, "  serial:   %s\n", workspace.Serial)
+	fmt.Fprintf(out, "  size:     %d\n", workspace.SizeBytes)
+	if workspace.FilesystemUUID != "" {
+		fmt.Fprintf(out, "  uuid:     %s\n", workspace.FilesystemUUID)
+	}
 }
 
 func boolLabel(b bool, on, off string) string {

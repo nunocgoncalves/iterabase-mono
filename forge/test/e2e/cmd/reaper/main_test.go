@@ -80,8 +80,8 @@ func TestReapVolumesDeletesOnlyExpiredTaggedStorage(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 8, 17, 16, 0, 0, 0, time.UTC)
 	client := &fakeVolumeClient{volumes: []godo.Volume{
-		{ID: "expired", Name: "failed-rwx-ssd", CreatedAt: now.Add(-defaultMaxAge - time.Minute), Tags: []string{"forge-e2e"}},
-		{ID: "active", Name: "active-rwx-ssd", CreatedAt: now.Add(-longestForgeWorkflowTimeout), Tags: []string{"forge-e2e"}},
+		{ID: "expired", Name: "failed-workspace-ssd", CreatedAt: now.Add(-defaultMaxAge - time.Minute), Tags: []string{"forge-e2e"}},
+		{ID: "active", Name: "active-workspace-ssd", CreatedAt: now.Add(-longestForgeWorkflowTimeout), Tags: []string{"forge-e2e"}},
 		{ID: "foreign", Name: "customer-volume", CreatedAt: now.Add(-24 * time.Hour)},
 	}}
 	var output bytes.Buffer
@@ -92,7 +92,7 @@ func TestReapVolumesDeletesOnlyExpiredTaggedStorage(t *testing.T) {
 	if !slices.Equal(client.deletedIDs, []string{"expired"}) {
 		t.Fatalf("deleted block volumes = %v", client.deletedIDs)
 	}
-	if !strings.Contains(output.String(), "failed-rwx-ssd") {
+	if !strings.Contains(output.String(), "failed-workspace-ssd") {
 		t.Fatalf("volume reaper evidence does not identify the orphan:\n%s", output.String())
 	}
 }
