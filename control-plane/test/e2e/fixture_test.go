@@ -273,7 +273,9 @@ func createControlPlaneKindStage(t *testing.T, state *deployedState) {
 
 func configureKindWorkspaceStorage(t *testing.T, state *deployedState) {
 	t.Helper()
-	configJSON := `{"nodePathMap":[{"node":"DEFAULT_PATH_FOR_NON_LISTED_NODES","paths":["/var/local-path-provisioner"]}],"storageClassConfigs":{"standard":{"nodePathMap":[{"node":"DEFAULT_PATH_FOR_NON_LISTED_NODES","paths":["/var/local-path-provisioner"]}]},"iterabase-agentpool-local-path":{"nodePathMap":[{"node":"DEFAULT_PATH_FOR_NON_LISTED_NODES","paths":["/var/lib/iterabase/agentpool-workspaces"]}]}}}`
+	// nodePathMap must be empty when per-class maps are configured; this keeps
+	// Kind's default `standard` claims separate from the AgentPool fixture path.
+	configJSON := `{"nodePathMap":[],"storageClassConfigs":{"standard":{"nodePathMap":[{"node":"DEFAULT_PATH_FOR_NON_LISTED_NODES","paths":["/var/local-path-provisioner"]}]},"iterabase-agentpool-local-path":{"nodePathMap":[{"node":"DEFAULT_PATH_FOR_NON_LISTED_NODES","paths":["/var/lib/iterabase/agentpool-workspaces"]}]}}}`
 	if output, err := state.client.Kubectl(state.ctx, 30*time.Second, "patch", "configmap/local-path-config", "-n", "local-path-storage", "--type=merge", "-p", fmt.Sprintf(`{"data":{"config.json":%q}}`, configJSON)); err != nil {
 		t.Fatalf("configure Kind local-path class isolation: %v\n%s", err, output)
 	}

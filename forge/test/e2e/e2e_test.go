@@ -101,7 +101,7 @@ func deleteWorkspaceVolume(ctx context.Context, client *godo.Client, volumeID st
 			return nil
 		} else {
 			lastErr = err
-			if !strings.Contains(err.Error(), "attached volume cannot be deleted") {
+			if !strings.Contains(strings.ToLower(err.Error()), "attached volume") {
 				return err
 			}
 		}
