@@ -434,12 +434,30 @@ printf 'FORGE_WORKSPACE_RESULT\t%%s\t%%s\t%%s\t%%s\t%%s\t%%s\t%%s\t%%s\t%%s\tcom
 `, shellQuote(spec.InstallName), shellQuote(spec.Device), shellQuote(spec.Filesystem), shellQuote(mode), shellQuote(workspaceContractVersion), shellQuote(provisioner.AgentPoolWorkspaceMount), shellQuote(workspaceFilesystemLabel), shellQuote(workspaceReceiptPath), shellQuote(workspaceMarkerName))
 }
 
+func agentPoolLocalPathSetupScript() string {
+	return fmt.Sprintf(`#!/bin/sh
+set -eu
+mkdir -m 0777 -p "$VOL_DIR"
+case "$VOL_DIR" in
+  %s/*)
+    test "${VOL_DIR%%/*}" != "$VOL_DIR"
+    parent=${VOL_DIR%%/*}
+    test "$parent" = %s
+    chown 0:0 "$parent"
+    chmod 0711 "$parent"
+    ;;
+  *) chmod 0701 "$VOL_DIR/.." ;;
+esac
+`, provisioner.AgentPoolWorkspaceMount, shellQuote(provisioner.AgentPoolWorkspaceMount))
+}
+
 // EnsureAgentPoolLocalPathStorage configures the bundled K3s local-path
 // provisioner with exact per-class path maps while retaining the default class
 // on K3s's normal root-filesystem path.
 func (p *SSHProvisioner) EnsureAgentPoolLocalPathStorage(ctx context.Context) error {
 	configJSON := fmt.Sprintf(`{"nodePathMap":[],"storageClassConfigs":{"local-path":{"nodePathMap":[{"node":"DEFAULT_PATH_FOR_NON_LISTED_NODES","paths":[%q]}]},%q:{"nodePathMap":[{"node":"DEFAULT_PATH_FOR_NON_LISTED_NODES","paths":[%q]}]}}}`,
 		k3sDefaultLocalPath, provisioner.AgentPoolWorkspaceStorageClass, provisioner.AgentPoolWorkspaceMount)
+	setupScript := agentPoolLocalPathSetupScript()
 	current, err := p.run(ctx, `sudo bash -ceu '
 attempt=0
 while ! k3s kubectl get configmap local-path-config -n kube-system >/dev/null 2>&1; do
@@ -455,9 +473,13 @@ k3s kubectl get configmap local-path-config -n kube-system -o jsonpath="{.data.c
 	if err != nil {
 		return fmt.Errorf("wait for/read bundled local-path configuration: %w", err)
 	}
-	changed := strings.TrimSpace(current) != configJSON
+	currentSetup, err := p.run(ctx, `sudo k3s kubectl get configmap local-path-config -n kube-system -o jsonpath='{.data.setup}'`)
+	if err != nil {
+		return fmt.Errorf("read bundled local-path setup script: %w", err)
+	}
+	changed := strings.TrimSpace(current) != configJSON || strings.TrimSpace(currentSetup) != strings.TrimSpace(setupScript)
 	if changed {
-		patch, err := json.Marshal(map[string]any{"data": map[string]string{"config.json": configJSON}})
+		patch, err := json.Marshal(map[string]any{"data": map[string]string{"config.json": configJSON, "setup": setupScript}})
 		if err != nil {
 			return err
 		}
@@ -490,7 +512,9 @@ test "$default" = %s
 agent=$(k3s kubectl get storageclass %s -o jsonpath='{.provisioner}|{.volumeBindingMode}|{.reclaimPolicy}|{.allowVolumeExpansion}|{.metadata.annotations.storageclass\.kubernetes\.io/is-default-class}')
 test "$agent" = %s
 test "$(k3s kubectl get configmap local-path-config -n kube-system -o jsonpath='{.data.config\.json}')" = %s
-`, shellQuote(provisioner.AgentPoolWorkspaceProvisioner+"|WaitForFirstConsumer|Delete|true"), shellQuote(provisioner.AgentPoolWorkspaceStorageClass), shellQuote(provisioner.AgentPoolWorkspaceProvisioner+"|WaitForFirstConsumer|Delete|false|false"), shellQuote(configJSON))))
+setup=$(k3s kubectl get configmap local-path-config -n kube-system -o jsonpath='{.data.setup}')
+test "$setup" = %s
+`, shellQuote(provisioner.AgentPoolWorkspaceProvisioner+"|WaitForFirstConsumer|Delete|true"), shellQuote(provisioner.AgentPoolWorkspaceStorageClass), shellQuote(provisioner.AgentPoolWorkspaceProvisioner+"|WaitForFirstConsumer|Delete|false|false"), shellQuote(configJSON), shellQuote(strings.TrimSpace(setupScript)))))
 	if _, err := p.run(ctx, verify); err != nil {
 		return fmt.Errorf("validate isolated local-path storage contract: %w", err)
 	}

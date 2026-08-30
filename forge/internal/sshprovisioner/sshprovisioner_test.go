@@ -1498,6 +1498,14 @@ func TestAgentPoolWorkspaceCommandIsBoundedAndCrashResumable(t *testing.T) {
 	}
 }
 
+func TestAgentPoolLocalPathSetupPreservesDedicatedMountMode(t *testing.T) {
+	script := agentPoolLocalPathSetupScript()
+	assert.Contains(t, script, provisioner.AgentPoolWorkspaceMount+"/*)")
+	assert.Contains(t, script, `parent=${VOL_DIR%/*}`)
+	assert.Contains(t, script, `chmod 0711 "$parent"`)
+	assert.Contains(t, script, `*) chmod 0701 "$VOL_DIR/.."`)
+}
+
 func TestParseAgentPoolWorkspaceResultIncludesTransportAndFilesystem(t *testing.T) {
 	state, err := parseWorkspaceResult("FORGE_WORKSPACE_RESULT\t/dev/disk/by-id/nvme-ws\t/dev/nvme1n1\tModel\tSerial\tWWN\t107374182400\tnvme\txfs\t11111111-1111-1111-1111-111111111111\tcomplete\n")
 	require.NoError(t, err)
