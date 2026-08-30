@@ -152,7 +152,7 @@ probe_blank_signatures() {
   mounts=$(findmnt -rn -S "$device" -o TARGET 2>/dev/null || true)
   test -z "$mounts" || fail "selected disk is mounted at $mounts"
   set +e
-  wipe_types=$(wipefs -n --noheadings -o TYPE -- "$device" 2>&1)
+  wipe_types=$(wipefs -n --noheadings --output TYPE -- "$device" 2>&1)
   wipe_rc=$?
   set -e
   test "$wipe_rc" = 0 || fail "required wipefs signature probe failed: $wipe_types"
@@ -364,8 +364,8 @@ printf 'FORGE_WORKSPACE_RESULT\t%%s\t%%s\t%%s\t%%s\t%%s\t%%s\t%%s\tcomplete\n' "
 // provisioner with exact per-class path maps while retaining the default class
 // on K3s's normal root-filesystem path.
 func (p *SSHProvisioner) EnsureAgentPoolLocalPathStorage(ctx context.Context) error {
-	configJSON := fmt.Sprintf(`{"nodePathMap":[{"node":"DEFAULT_PATH_FOR_NON_LISTED_NODES","paths":[%q]}],"storageClassConfigs":{"local-path":{"nodePathMap":[{"node":"DEFAULT_PATH_FOR_NON_LISTED_NODES","paths":[%q]}]},%q:{"nodePathMap":[{"node":"DEFAULT_PATH_FOR_NON_LISTED_NODES","paths":[%q]}]}}}`,
-		k3sDefaultLocalPath, k3sDefaultLocalPath, provisioner.AgentPoolWorkspaceStorageClass, provisioner.AgentPoolWorkspaceMount)
+	configJSON := fmt.Sprintf(`{"nodePathMap":[],"storageClassConfigs":{"local-path":{"nodePathMap":[{"node":"DEFAULT_PATH_FOR_NON_LISTED_NODES","paths":[%q]}]},%q:{"nodePathMap":[{"node":"DEFAULT_PATH_FOR_NON_LISTED_NODES","paths":[%q]}]}}}`,
+		k3sDefaultLocalPath, provisioner.AgentPoolWorkspaceStorageClass, provisioner.AgentPoolWorkspaceMount)
 	current, err := p.run(ctx, `sudo k3s kubectl get configmap local-path-config -n kube-system -o jsonpath='{.data.config\.json}'`)
 	if err != nil {
 		return fmt.Errorf("read bundled local-path configuration: %w", err)

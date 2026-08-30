@@ -1482,7 +1482,7 @@ func TestAgentPoolWorkspaceCommandIsBoundedAndCrashResumable(t *testing.T) {
 		InstallName: "opo1", Device: "/dev/disk/by-id/scsi-workspace",
 	}, "reconcile")
 	for _, expected := range []string{
-		"probe_identity_topology", "wipefs -n --noheadings", "blkid -p", "write_receipt planned",
+		"probe_identity_topology", "wipefs -n --noheadings --output TYPE", "blkid -p", "write_receipt planned",
 		"mkfs.ext4 -F", "UUID=$planned_uuid", "nodev,nosuid", workspaceMarkerName,
 	} {
 		assert.Contains(t, script, expected)
