@@ -46,15 +46,22 @@ Every single-node config persists exactly one `spec.agentPoolWorkspace.device`
 stable `/dev/disk/by-id/...` whole-disk selection. `forge init` obtains it from
 the interactive list, `--agentpool-workspace-device`, or
 `FORGE_AGENTPOOL_WORKSPACE_DEVICE`; hand-authored config uses the same field.
-The selection is the sole authorization for Forge's first ext4 format.
+`spec.agentPoolWorkspace.filesystem`, `--agentpool-workspace-filesystem`, and
+`FORGE_AGENTPOOL_WORKSPACE_FILESYSTEM` support `auto|ext4|xfs`. Auto resolves
+only reliably detected NVMe to XFS and uses ext4 for SATA, unknown, and virtual
+transports. Interactive init
+shows transport plus recommended/resolved type and supports explicit overrides.
+The disk selection is the sole authorization for Forge's first format;
+filesystem choice is not a second destructive confirmation.
 
 Before any K3s/chart mutation, apply rejects root/system, removable, volatile,
 partitioned, mounted, held, in-use, recognized-signature, missing, ambiguous, or
 identity-drifted devices. It repeats bounded topology/signature probes
 immediately before format; it does not scan the full device or accept a second
-confirmation, wipe/adopt switch, or root fallback. A fsynced root-owned receipt
-makes format/fstab/mount/marker reconciliation crash-resumable with exact UUID,
-`iterabase-agentpool-workspaces` label, and
+confirmation, wipe/adopt switch, or root fallback. Forge installs/checks the
+required XFS tooling. A fsynced root-owned receipt makes ext4/XFS
+format/fstab/mount/marker reconciliation crash-resumable with exact transport,
+configured/resolved type, UUID, `iterabase-ws` label, and
 `/var/lib/iterabase/agentpool-workspaces` mount identity.
 
 After K3s is Ready, Forge keeps default `local-path` on K3s's normal platform

@@ -30,7 +30,7 @@ func testConfig() *config.Cluster {
 		Metadata:   config.Metadata{Name: "opo1"},
 		Spec: config.Spec{
 			Mode:               config.ModeSingleNode,
-			AgentPoolWorkspace: config.AgentPoolWorkspace{Device: "/dev/disk/by-id/scsi-workspace"},
+			AgentPoolWorkspace: config.AgentPoolWorkspace{Device: "/dev/disk/by-id/scsi-workspace", Filesystem: config.WorkspaceFilesystemAuto},
 			Hosts: []config.Host{{
 				Address: "10.20.0.10", SSHUser: "forge", SSHKeyPath: "/dev/null",
 				Role: config.RoleControlPlaneWorker,
@@ -67,6 +67,8 @@ type fakeProv struct {
 	workspaceInspectErr   error
 	workspaceReconcileErr error
 	workspaceInspectCalls int
+	workspaceToolsErr     error
+	workspaceToolsCalls   []string
 	workspaceApplyCalls   int
 	localPathErr          error
 	localPathCalls        int
@@ -115,14 +117,20 @@ func (f *fakeProv) InspectAgentPoolWorkspace(_ context.Context, spec provisioner
 	if f.workspaceInspectErr != nil {
 		return nil, f.workspaceInspectErr
 	}
-	return &provisioner.AgentPoolWorkspaceState{Device: spec.Device, State: "blank-candidate"}, nil
+	filesystem, _ := config.ResolveWorkspaceFilesystem(spec.Filesystem, "scsi")
+	return &provisioner.AgentPoolWorkspaceState{Device: spec.Device, Transport: "scsi", Filesystem: filesystem, State: "blank-candidate"}, nil
+}
+func (f *fakeProv) EnsureAgentPoolWorkspaceTools(_ context.Context, filesystem string) error {
+	f.workspaceToolsCalls = append(f.workspaceToolsCalls, filesystem)
+	return f.workspaceToolsErr
 }
 func (f *fakeProv) ReconcileAgentPoolWorkspace(_ context.Context, spec provisioner.AgentPoolWorkspaceSpec) (*provisioner.AgentPoolWorkspaceState, error) {
 	f.workspaceApplyCalls++
 	if f.workspaceReconcileErr != nil {
 		return nil, f.workspaceReconcileErr
 	}
-	return &provisioner.AgentPoolWorkspaceState{Device: spec.Device, FilesystemUUID: "11111111-1111-1111-1111-111111111111", State: "complete"}, nil
+	filesystem, _ := config.ResolveWorkspaceFilesystem(spec.Filesystem, "scsi")
+	return &provisioner.AgentPoolWorkspaceState{Device: spec.Device, Transport: "scsi", Filesystem: filesystem, FilesystemUUID: "11111111-1111-1111-1111-111111111111", State: "complete"}, nil
 }
 func (f *fakeProv) EnsureAgentPoolLocalPathStorage(_ context.Context) error {
 	f.localPathCalls++

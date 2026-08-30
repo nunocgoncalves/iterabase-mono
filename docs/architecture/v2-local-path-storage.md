@@ -1,6 +1,6 @@
 # Platform V2 dedicated local-path RWO storage
 
-Status: current repository implementation contract for HOR-538, implementing approved `DES-HOR-469-03`, `DES-HOR-538-01`, and `DES-HOR-538-02` recorded in Obsidian `Platform V2 — Single-Node K3s Local-Path RWO Storage`.
+Status: current repository implementation contract for HOR-538, implementing approved `DES-HOR-469-03`, amended `DES-HOR-538-01`, and `DES-HOR-538-02` recorded in Obsidian `Platform V2 — Single-Node K3s Local-Path RWO Storage`. The approved DES-HOR-538-01 amendment fixes label `iterabase-ws` and the `auto|ext4|xfs` transport policy.
 
 ## Supported topology
 
@@ -12,7 +12,9 @@ Every AgentPool owns one `ReadWriteOnce` claim on fixed non-default `iterabase-a
 
 `spec.agentPoolWorkspace.device` in `forge.yaml` is required and must be one `/dev/disk/by-id/...` whole-disk identity. `forge init` obtains the same value through interactive selection, `--agentpool-workspace-device`, or `FORGE_AGENTPOOL_WORKSPACE_DEVICE`; conflicting explicit sources fail. Hand-authored config uses the same field. Apply never discovers or substitutes a device.
 
-The persisted stable-device selection is the sole authorization for Forge's first ext4 format. Interactive selection shows stable path, model, serial, size, fixed purpose, and the format consequence before selection. There is no post-selection confirmation, force/wipe/adopt switch, or second destructive input.
+`spec.agentPoolWorkspace.filesystem` supports `auto|ext4|xfs` and defaults to `auto`. Init also accepts `--agentpool-workspace-filesystem` and `FORGE_AGENTPOOL_WORKSPACE_FILESYSTEM`; conflicting explicit sources fail. Auto resolves to XFS only when `lsblk` reliably reports the selected whole disk's transport as NVMe. SATA, unknown/empty, and virtual transports resolve to ext4. Interactive init displays detected transport, the auto recommendation/resolution, and explicit ext4/XFS overrides. Forge installs and verifies `xfsprogs` before an XFS reconciliation and verifies the ext4 formatter for ext4.
+
+The persisted stable-device selection is the sole authorization for Forge's first format. Interactive selection shows stable path, model, serial, transport, size, fixed purpose, resolved filesystem, and the format consequence. Filesystem selection is configuration, not a second destructive confirmation. There is no post-selection exact confirmation, force/wipe/adopt switch, or other destructive input.
 
 Before any K3s/chart mutation, and again immediately before first format, Forge uses bounded required probes to reject:
 
@@ -26,19 +28,19 @@ Before any K3s/chart mutation, and again immediately before first format, Forge 
 
 ## Crash-resumable filesystem transaction
 
-Before format, Forge fsyncs a root-owned `0600` receipt at `/var/lib/iterabase/agentpool-workspace.receipt`. It binds contract version, install name, selected by-id value, model/serial/WWN, exact size, planned ext4 UUID/label, fixed mount, and transaction status.
+Before format, Forge fsyncs a root-owned `0600` receipt at `/var/lib/iterabase/agentpool-workspace.receipt`. It binds contract version, install name, selected by-id value, model/serial/WWN, normalized detected transport, exact size, configured and resolved filesystem, planned UUID, exact `iterabase-ws` label, fixed mount, and transaction status.
 
-Forge formats the whole device directly as ext4 with the planned UUID and label `iterabase-agentpool-workspaces`. A retry resumes only from a still-blank candidate matching the receipt or the exact receipt-created ext4 identity. Any other signature or identity mismatch fails closed.
+Forge formats the whole device directly as the resolved ext4 or XFS type with the planned UUID and exact label. A retry resumes only from a still-blank candidate matching the receipt or the exact receipt-created filesystem identity. Any other signature, type, or identity mismatch fails closed. The filesystem choice never authorizes a different device or bypasses the repeated first-format probes.
 
 Reconciliation owns:
 
 - root-owned `/var/lib/iterabase/agentpool-workspaces` at mode `0711`;
-- exactly one UUID-based `/etc/fstab` entry: `ext4 nodev,nosuid 0 2` (never `nofail`);
+- exactly one UUID-based `/etc/fstab` entry using the exact resolved type and `nodev,nosuid` without `nofail` (`0 2` for ext4, `0 0` for XFS);
 - active source, type, options, ownership, duplicate-UUID, and unexpected-consumer checks;
-- a root-owned `0600` `.iterabase-workspace-identity` marker;
+- a root-owned `0600` `.iterabase-workspace-identity` marker binding transport, configured/resolved type, UUID, and label;
 - fsynced receipt transitions through planned, formatted, fstab, mounted, and complete.
 
-A complete transaction refuses marker, device, size, UUID, label, type, conflicting fstab/mount, or consumer drift. Safe same-device repair is limited to recreating the mount directory, restoring a missing exact fstab line, and remounting the exact UUID. `forge destroy` never wipes or removes the filesystem identity.
+A complete transaction refuses marker, device, transport, filesystem selection/resolution, size, UUID, label, type, conflicting fstab/mount, or consumer drift. Safe same-device repair is limited to recreating the mount directory, restoring a missing exact fstab line, and remounting the exact UUID. `forge destroy` never wipes or removes the filesystem identity.
 
 ## Bundled local-path isolation
 

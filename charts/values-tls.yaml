@@ -1,7 +1,7 @@
 # TLS-on preset for the iterabase-platform umbrella (CI: static kubeconform via
 # `make check-tls` + the live `install-tls` kind e2e). Flips the shared switch
 # for every supported internal-CA service link. AgentPool workspace storage is
-# local ext4 configured by Forge and adds no service transport. kind/E2E stays
+# local ext4/XFS configured by Forge and adds no service transport. kind/E2E stays
 # plaintext by default (this file is opt-in).
 global:
   internalTLS:

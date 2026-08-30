@@ -132,7 +132,7 @@ tests:
             exp_annotations:
               summary: An AgentPool worker lost dedicated workspace storage I/O
               description: The supervisor failed its fsync/rename/unlink storage transaction and removed dispatch readiness.
-              first_action: Inspect the AgentPool StorageReady condition, fixed class/PVC/PV path, dedicated ext4 mount identity, actual free-space gate, and node events before allowing fresh workers.
+              first_action: Inspect the AgentPool StorageReady condition, fixed class/PVC/PV path, dedicated receipt-matching ext4/XFS mount identity, actual free-space gate, and node events before allowing fresh workers.
               runbook_url: https://github.com/nunocgoncalves/iterabase-mono/blob/master/docs/runbooks/platform-alerts.md#iterabaseharnessstorageunavailable
 
   - name: workspace warning uses actual filesystem ratio below 25 percent
@@ -195,7 +195,7 @@ tests:
             exp_annotations:
               summary: AgentPool workspace I/O health transaction failed
               description: A real write/fsync/rename/unlink or zero-space check failed; the worker fences its active turn and exits rather than replaying it.
-              first_action: Inspect the exact ext4 mount source/options/ownership, node and disk I/O, free blocks, PVC/PV path, and worker-loss evidence before replacement.
+              first_action: Inspect the exact receipt-matching ext4/XFS mount source/type/options/ownership, node and disk I/O, free blocks, PVC/PV path, and worker-loss evidence before replacement.
               runbook_url: https://github.com/nunocgoncalves/iterabase-mono/blob/master/docs/runbooks/platform-alerts.md#iterabaseworkspacestorageiofailure
 
   - name: warning manager reconciliation threshold fires after the five-minute hold

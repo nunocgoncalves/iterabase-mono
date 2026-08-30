@@ -12,6 +12,7 @@ func agentPoolWorkspaceSpec(cfg *config.Cluster) provisioner.AgentPoolWorkspaceS
 	return provisioner.AgentPoolWorkspaceSpec{
 		InstallName: cfg.Metadata.Name,
 		Device:      cfg.Spec.AgentPoolWorkspace.Device,
+		Filesystem:  cfg.Spec.AgentPoolWorkspace.Filesystem,
 	}
 }
 
@@ -23,7 +24,11 @@ func inspectAgentPoolWorkspace(ctx context.Context, cfg *config.Cluster, p provi
 	return state, nil
 }
 
-func reconcileAgentPoolWorkspace(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner) (*provisioner.AgentPoolWorkspaceState, error) {
+func reconcileAgentPoolWorkspace(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner, filesystem string) (*provisioner.AgentPoolWorkspaceState, error) {
+	if err := p.EnsureAgentPoolWorkspaceTools(ctx, filesystem); err != nil {
+		auditFail(cfg, "apply-agentpool-workspace-tools", err)
+		return nil, fmt.Errorf("AgentPool workspace tooling: %w", err)
+	}
 	state, err := p.ReconcileAgentPoolWorkspace(ctx, agentPoolWorkspaceSpec(cfg))
 	if err != nil {
 		auditFail(cfg, "apply-agentpool-workspace", err)
