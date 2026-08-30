@@ -520,8 +520,11 @@ so the shared umbrella does not hardcode a model.
 ## Immutable artifacts
 
 The MinIO chart provisions `iterabase-artifacts` plus a dedicated bucket-scoped
-credential consumed only by the control-plane API/gateway. Sandboxes and tool
-runners have no object-store credential or direct route. Retention is indefinite
+credential consumed only by the control-plane API/gateway. Its versioned,
+ordinary Helm provisioner Job remains `Complete` and Helm-owned without TTL
+cleanup for the active subchart revision, so later blocking upgrades and exact
+reapplies observe the same Job identity. Sandboxes and tool runners have no
+object-store credential or direct route. Retention is indefinite
 unless `control-plane.artifact.defaultRetention` is configured. See
 [`docs/artifact-operations.md`](docs/artifact-operations.md) for round-trip and
 explicit deletion validation.

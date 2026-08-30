@@ -19,6 +19,13 @@ kubectl get csidriver csi.cert-manager.io
 kubectl wait --for=condition=Ready clusterissuer/platform-spiffe-ca --timeout=2m
 ```
 
+The versioned artifact-provisioner is an ordinary Helm-owned Job, not a hook.
+Its completed Job/Pod is deliberately retained without a TTL for the active
+MinIO subchart revision so a later `helm upgrade --wait` or exact reapply can
+continue to observe the same readiness resource. Treat its `Complete` condition,
+Helm ownership labels, and UID as lifecycle evidence; do not delete or recreate
+it while the release is active.
+
 The workload ArtifactService is available only through the mandatory-mTLS
 `<release>-control-plane-gateway:8090` Service. AgentPools use that Service as
 their `toolGateway`, trust the chart-generated

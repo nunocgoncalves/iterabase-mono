@@ -43,6 +43,25 @@ grep -q 'command: \["/gateway"\]' <<<"$gateway"
 grep -q 'name: artifact-check-minio-artifacts' <<<"$gateway"
 echo "OK: gateway Deployment + Service render with the dedicated artifact Secret"
 
+provisioner=$(helm template artifact-check charts/minio \
+  --show-only templates/artifact-provisioner.yaml)
+grep -q '^kind: Job$' <<<"$provisioner"
+grep -Eq '^  name: artifact-check-minio-artifact-provisioner-[0-9]+(-[0-9]+)+$' <<<"$provisioner"
+grep -q '^    app.kubernetes.io/managed-by: Helm$' <<<"$provisioner"
+grep -Fq 'mc mb --ignore-existing "local/$ARTIFACT_BUCKET"' <<<"$provisioner"
+grep -Fq 'mc admin user add local "$ARTIFACT_ACCESS_KEY" "$ARTIFACT_SECRET_KEY"' <<<"$provisioner"
+grep -Fq 'mc admin policy create local artifact-service /policy/policy.json' <<<"$provisioner"
+grep -Fq 'mc admin policy attach local artifact-service --user "$ARTIFACT_ACCESS_KEY"' <<<"$provisioner"
+if grep -q 'ttlSecondsAfterFinished:' <<<"$provisioner"; then
+  echo "ERROR: artifact-provisioner Job must remain available to Helm for the release lifecycle" >&2
+  exit 1
+fi
+if grep -q 'helm.sh/hook:' <<<"$provisioner"; then
+  echo "ERROR: artifact-provisioner Job must remain an ordinary Helm resource" >&2
+  exit 1
+fi
+echo "OK: MinIO artifact provisioner remains an ordinary retained Job with unchanged idempotent provisioning"
+
 substrate=$(helm template artifact-cert-manager charts/cert-manager-substrate)
 grep -q '^kind: CSIDriver$' <<<"$substrate"
 grep -q '^  name: csi.cert-manager.io$' <<<"$substrate"
