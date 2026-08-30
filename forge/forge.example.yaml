@@ -7,9 +7,12 @@ metadata:
 spec:
   mode: single-node            # single-node | ha | byokubeconfig (v1: single-node)
   agentPoolWorkspace:
-    # Sole authorization for Forge's first ext4 format after fail-closed probes.
+    # Device selection is the sole authorization for Forge's first format after
+    # fail-closed probes; filesystem choice is not another destructive confirmation.
     # Must be one stable non-removable whole disk; no root/partition/mapper fallback.
     device: /dev/disk/by-id/scsi-0DO_Volume_iterabase-workspaces
+    # auto selects XFS only for reliably detected NVMe; all other transports use ext4.
+    filesystem: auto            # auto | ext4 | xfs
   hosts:
     - address: 10.20.0.10
       sshUser: forge           # any sudoer user; preflight validates passwordless sudo

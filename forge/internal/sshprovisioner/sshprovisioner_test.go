@@ -1478,19 +1478,72 @@ func TestEnsureDriverBuildDeps_CommandShape(t *testing.T) {
 }
 
 func TestAgentPoolWorkspaceCommandIsBoundedAndCrashResumable(t *testing.T) {
-	script := workspaceReconcileScript(provisioner.AgentPoolWorkspaceSpec{
-		InstallName: "opo1", Device: "/dev/disk/by-id/scsi-workspace",
-	}, "reconcile")
-	for _, expected := range []string{
-		"probe_identity_topology", "wipefs -n --noheadings --output TYPE", "blkid -p", "write_receipt planned",
-		"mkfs.ext4 -F", "UUID=$planned_uuid", "nodev,nosuid", workspaceMarkerName,
-	} {
-		assert.Contains(t, script, expected)
+	for _, filesystem := range []string{config.WorkspaceFilesystemAuto, config.WorkspaceFilesystemExt4, config.WorkspaceFilesystemXFS} {
+		t.Run(filesystem, func(t *testing.T) {
+			script := workspaceReconcileScript(provisioner.AgentPoolWorkspaceSpec{
+				InstallName: "opo1", Device: "/dev/disk/by-id/scsi-workspace", Filesystem: filesystem,
+			}, "reconcile")
+			for _, expected := range []string{
+				"probe_identity_topology", "wipefs -n --noheadings --output TYPE", "blkid -p", "write_receipt planned",
+				"mkfs.ext4 -F", "mkfs.xfs -f", "filesystem_selection", "transport_b64", "UUID=$planned_uuid",
+				"nodev,nosuid", workspaceFilesystemLabel, workspaceMarkerName,
+			} {
+				assert.Contains(t, script, expected)
+			}
+			for _, forbidden := range []string{"if=/dev/", "FORGE_AGENTPOOL_WORKSPACE_FORCE", "wipefs -a", ">/tmp/forge-workspace"} {
+				assert.NotContains(t, script, forbidden)
+			}
+			assert.LessOrEqual(t, strings.Count(script, "probe_blank_signatures"), 4, "bounded probes are repeated only at the authorization boundary")
+		})
 	}
-	for _, forbidden := range []string{"if=/dev/", "FORGE_AGENTPOOL_WORKSPACE_FORCE", "wipefs -a", ">/tmp/forge-workspace"} {
-		assert.NotContains(t, script, forbidden)
-	}
-	assert.LessOrEqual(t, strings.Count(script, "probe_blank_signatures"), 4, "bounded probes are repeated only at the authorization boundary")
+}
+
+func TestParseAgentPoolWorkspaceResultIncludesTransportAndFilesystem(t *testing.T) {
+	state, err := parseWorkspaceResult("FORGE_WORKSPACE_RESULT\t/dev/disk/by-id/nvme-ws\t/dev/nvme1n1\tModel\tSerial\tWWN\t107374182400\tnvme\txfs\t11111111-1111-1111-1111-111111111111\tcomplete\n")
+	require.NoError(t, err)
+	assert.Equal(t, "nvme", state.Transport)
+	assert.Equal(t, config.WorkspaceFilesystemXFS, state.Filesystem)
+	assert.Equal(t, uint64(107374182400), state.SizeBytes)
+}
+
+func TestEnsureAgentPoolWorkspaceToolsInstallsAndVerifiesXFS(t *testing.T) {
+	verifyCalls := 0
+	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
+		switch {
+		case strings.Contains(cmd, "command -v mkfs.xfs"):
+			verifyCalls++
+			if verifyCalls == 1 {
+				return "", 1
+			}
+			return "", 0
+		case strings.Contains(cmd, "apt-get install -y xfsprogs"):
+			return "", 0
+		default:
+			return "", 1
+		}
+	})
+	defer cleanup()
+	p := newProvisioner(t, addr, cfg)
+	defer p.Close()
+	require.NoError(t, p.EnsureAgentPoolWorkspaceTools(context.Background(), config.WorkspaceFilesystemXFS))
+	assert.Equal(t, 2, verifyCalls)
+}
+
+func TestEnsureAgentPoolWorkspaceToolsChecksExt4WithoutPackageMutation(t *testing.T) {
+	var commands []string
+	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
+		commands = append(commands, cmd)
+		if strings.Contains(cmd, "command -v mkfs.ext4") {
+			return "", 0
+		}
+		return "", 1
+	})
+	defer cleanup()
+	p := newProvisioner(t, addr, cfg)
+	defer p.Close()
+	require.NoError(t, p.EnsureAgentPoolWorkspaceTools(context.Background(), config.WorkspaceFilesystemExt4))
+	require.Len(t, commands, 1)
+	assert.NotContains(t, commands[0], "apt-get")
 }
 
 func TestReadGPUReadiness(t *testing.T) {

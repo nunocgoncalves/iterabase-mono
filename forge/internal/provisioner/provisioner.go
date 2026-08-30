@@ -23,6 +23,7 @@ type WorkspaceDevice struct {
 	Path      string
 	Model     string
 	Serial    string
+	Transport string
 	SizeBytes uint64
 }
 
@@ -31,6 +32,7 @@ type WorkspaceDevice struct {
 type AgentPoolWorkspaceSpec struct {
 	InstallName string
 	Device      string
+	Filesystem  string
 }
 
 // AgentPoolWorkspaceState is bounded, non-secret device/filesystem evidence.
@@ -41,6 +43,8 @@ type AgentPoolWorkspaceState struct {
 	Serial         string
 	WWN            string
 	SizeBytes      uint64
+	Transport      string
+	Filesystem     string
 	FilesystemUUID string
 	State          string
 }
@@ -133,8 +137,11 @@ type Provisioner interface {
 	// InspectAgentPoolWorkspace runs the complete read-only identity/topology/
 	// in-use/partition/signature preflight used by forge apply --dry-run.
 	InspectAgentPoolWorkspace(ctx context.Context, spec AgentPoolWorkspaceSpec) (*AgentPoolWorkspaceState, error)
+	// EnsureAgentPoolWorkspaceTools installs/checks the formatter tooling needed
+	// by the already-resolved ext4/XFS choice. It never touches the selected disk.
+	EnsureAgentPoolWorkspaceTools(ctx context.Context, filesystem string) error
 	// ReconcileAgentPoolWorkspace repeats every required probe immediately before
-	// the first ext4 format, then crash-resumably reconciles receipt, UUID fstab,
+	// the first format, then crash-resumably reconciles type, UUID, label, fstab,
 	// mount, and filesystem marker. It never adopts or selects another device.
 	ReconcileAgentPoolWorkspace(ctx context.Context, spec AgentPoolWorkspaceSpec) (*AgentPoolWorkspaceState, error)
 	// EnsureAgentPoolLocalPathStorage configures K3s's bundled provisioner with

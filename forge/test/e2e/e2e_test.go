@@ -267,9 +267,23 @@ func assertCurrentPlatformStage(t *testing.T, state *digitalOceanCPUState) {
 			t.Fatalf("local-path class-isolation config is missing %q: %s", path, config)
 		}
 	}
-	mount := strings.TrimSpace(mustSSHOutput(t, sc, `findmnt -n -o SOURCE,FSTYPE,OPTIONS --target /var/lib/iterabase/agentpool-workspaces`))
-	if !strings.Contains(mount, "ext4") || !strings.Contains(mount, "nodev") || !strings.Contains(mount, "nosuid") {
-		t.Fatalf("dedicated workspace mount contract = %q", mount)
+	mount := strings.TrimSpace(mustSSHOutput(t, sc, `sudo bash -ceu '
+source=$(findmnt -n -o SOURCE --target /var/lib/iterabase/agentpool-workspaces)
+source=${source%[*}
+device=$(readlink -f -- "$source")
+transport=$(lsblk -dnro TRAN -- "$device" | tr "[:upper:]" "[:lower:]" | xargs)
+printf "%s|%s|%s|%s\n" "${transport:-unknown}" "$(findmnt -n -o FSTYPE --target /var/lib/iterabase/agentpool-workspaces)" "$(blkid -p -s LABEL -o value -- "$device")" "$(findmnt -n -o OPTIONS --target /var/lib/iterabase/agentpool-workspaces)"
+'`))
+	parts := strings.SplitN(mount, "|", 4)
+	if len(parts) != 4 {
+		t.Fatalf("dedicated workspace mount evidence is malformed: %q", mount)
+	}
+	wantFilesystem := "ext4"
+	if parts[0] == "nvme" {
+		wantFilesystem = "xfs"
+	}
+	if parts[1] != wantFilesystem || parts[2] != "iterabase-ws" || !strings.Contains(parts[3], "nodev") || !strings.Contains(parts[3], "nosuid") {
+		t.Fatalf("dedicated workspace mount contract transport/type/label/options = %q", mount)
 	}
 
 	owner := strings.TrimSpace(mustSSHOutput(t, sc,

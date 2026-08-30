@@ -173,8 +173,9 @@ recovery.
 ### Production AgentPool local-path storage
 
 Platform V2 has no chart-selectable storage backend. Before Helm runs, Forge
-requires one persisted stable whole-disk selection, safely prepares it as ext4,
-and mounts it at `/var/lib/iterabase/agentpool-workspaces`. It then configures
+requires one persisted stable whole-disk selection, safely prepares it as the
+resolved ext4/XFS type with label `iterabase-ws`, and mounts it at
+`/var/lib/iterabase/agentpool-workspaces`. It then configures
 K3s's bundled `rancher.io/local-path` provisioner with two isolated class maps:
 
 - the unchanged default `local-path` class remains on K3s's normal platform path;

@@ -46,7 +46,7 @@ func TestE2E(t *testing.T) {
 		sharede2e.Define(sharede2e.Scenario[*digitalOceanCPUState]{
 			Metadata: forgeScenarioMetadata(
 				"digitalocean-workspace",
-				"Fresh exact-head install on one selected stable whole disk proving ext4 receipt/mount identity, separate default and AgentPool local-path classes, multi-worker RWO, persisted bytes, reapply, and worker replacement with no obsolete backend.",
+				"Fresh exact-head install on one selected stable whole disk proving transport-resolved ext4/XFS receipt/mount identity, separate default and AgentPool local-path classes, multi-worker RWO, persisted bytes, reapply, and worker replacement with no obsolete backend.",
 				sharede2e.TierF3,
 				[]string{"HOR-538", "REQ-035", "DES-HOR-538-01", "DES-HOR-538-02"},
 				[]string{"forge", "control-plane", "iterabase-platform-chart"},

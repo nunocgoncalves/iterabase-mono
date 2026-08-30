@@ -17,7 +17,10 @@ import (
 	"github.com/nunocgoncalves/iterabase-mono/forge/internal/sshprovisioner"
 )
 
-const agentPoolWorkspaceDeviceEnv = "FORGE_AGENTPOOL_WORKSPACE_DEVICE"
+const (
+	agentPoolWorkspaceDeviceEnv     = "FORGE_AGENTPOOL_WORKSPACE_DEVICE"
+	agentPoolWorkspaceFilesystemEnv = "FORGE_AGENTPOOL_WORKSPACE_FILESYSTEM"
+)
 
 var discoverAgentPoolWorkspaceDevices = func(ctx context.Context, host config.Host) ([]provisioner.WorkspaceDevice, error) {
 	p, err := sshprovisioner.New(host)
@@ -46,6 +49,7 @@ func newInitCmd() *cobra.Command {
 	cmd.Flags().String("overlay", "", "overlay repo URL (client fork; https:// or file://; empty => no overlay)")
 	cmd.Flags().String("overlay-ref", "master", "overlay ref (branch or tag)")
 	cmd.Flags().String("agentpool-workspace-device", "", "stable whole disk /dev/disk/by-id/... selected for AgentPool workspaces")
+	cmd.Flags().String("agentpool-workspace-filesystem", "", "workspace filesystem policy: auto|ext4|xfs (default auto)")
 	cmd.Flags().Bool("overwrite", false, "overwrite an existing config file (does not authorize disk changes)")
 	return cmd
 }
@@ -75,6 +79,12 @@ func runInit(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+	flagFilesystem, _ := cmd.Flags().GetString("agentpool-workspace-filesystem")
+	envFilesystem := strings.TrimSpace(os.Getenv(agentPoolWorkspaceFilesystemEnv))
+	workspaceFilesystem, err := resolveWorkspaceFilesystemSources(strings.TrimSpace(flagFilesystem), envFilesystem)
+	if err != nil {
+		return err
+	}
 
 	in := bufio.NewReader(cmd.InOrStdin())
 	if !nonInteractive {
@@ -93,18 +103,9 @@ func runInit(cmd *cobra.Command, _ []string) error {
 		Address: address, SSHUser: sshUser, SSHKeyPath: sshKey,
 		Role: config.RoleControlPlaneWorker, Labels: map[string]string{}, Taints: []config.Taint{},
 	}
-	if workspaceDevice == "" {
-		if nonInteractive {
-			return fmt.Errorf("--agentpool-workspace-device or %s is required in non-interactive mode", agentPoolWorkspaceDeviceEnv)
-		}
-		devices, err := discoverAgentPoolWorkspaceDevices(context.Background(), host)
-		if err != nil {
-			return fmt.Errorf("discover AgentPool workspace disks on %s: %w", address, err)
-		}
-		workspaceDevice, err = selectAgentPoolWorkspaceDevice(in, cmd.ErrOrStderr(), devices)
-		if err != nil {
-			return err
-		}
+	workspaceDevice, workspaceFilesystem, err = resolveInitWorkspace(in, cmd.ErrOrStderr(), host, nonInteractive, workspaceDevice, workspaceFilesystem)
+	if err != nil {
+		return err
 	}
 
 	cfg := &config.Cluster{
@@ -114,7 +115,7 @@ func runInit(cmd *cobra.Command, _ []string) error {
 		Spec: config.Spec{
 			Mode:               config.ModeSingleNode,
 			Hosts:              []config.Host{host},
-			AgentPoolWorkspace: config.AgentPoolWorkspace{Device: workspaceDevice},
+			AgentPoolWorkspace: config.AgentPoolWorkspace{Device: workspaceDevice, Filesystem: workspaceFilesystem},
 			K3s: config.K3s{
 				Version:       k3sVersion,
 				ClusterCIDR:   "10.42.0.0/16",
@@ -146,6 +147,42 @@ func runInit(cmd *cobra.Command, _ []string) error {
 	return nil
 }
 
+func resolveInitWorkspace(in *bufio.Reader, out io.Writer, host config.Host, nonInteractive bool, workspaceDevice, workspaceFilesystem string) (string, string, error) {
+	if workspaceDevice == "" && nonInteractive {
+		return "", "", fmt.Errorf("--agentpool-workspace-device or %s is required in non-interactive mode", agentPoolWorkspaceDeviceEnv)
+	}
+	if nonInteractive {
+		return workspaceDevice, workspaceFilesystem, nil
+	}
+	devices, err := discoverAgentPoolWorkspaceDevices(context.Background(), host)
+	if err != nil {
+		return "", "", fmt.Errorf("discover AgentPool workspace disks on %s: %w", host.Address, err)
+	}
+	var selectedDevice provisioner.WorkspaceDevice
+	if workspaceDevice == "" {
+		selectedDevice, err = selectAgentPoolWorkspaceDevice(in, out, devices)
+		if err != nil {
+			return "", "", err
+		}
+		workspaceDevice = selectedDevice.Path
+	} else {
+		for i := range devices {
+			if devices[i].Path == workspaceDevice {
+				selectedDevice = devices[i]
+				break
+			}
+		}
+		if selectedDevice.Path == "" {
+			return "", "", fmt.Errorf("selected AgentPool workspace device %q is not a discovered stable non-removable whole disk", workspaceDevice)
+		}
+	}
+	workspaceFilesystem, err = selectAgentPoolWorkspaceFilesystem(in, out, selectedDevice, workspaceFilesystem)
+	if err != nil {
+		return "", "", err
+	}
+	return workspaceDevice, workspaceFilesystem, nil
+}
+
 func resolveWorkspaceDeviceSources(flagDevice, envDevice string) (string, error) {
 	if flagDevice != "" && envDevice != "" && flagDevice != envDevice {
 		return "", fmt.Errorf("conflicting AgentPool workspace devices: --agentpool-workspace-device=%q and %s=%q", flagDevice, agentPoolWorkspaceDeviceEnv, envDevice)
@@ -156,22 +193,62 @@ func resolveWorkspaceDeviceSources(flagDevice, envDevice string) (string, error)
 	return envDevice, nil
 }
 
-func selectAgentPoolWorkspaceDevice(in *bufio.Reader, out io.Writer, devices []provisioner.WorkspaceDevice) (string, error) {
+func resolveWorkspaceFilesystemSources(flagFilesystem, envFilesystem string) (string, error) {
+	if flagFilesystem != "" && envFilesystem != "" && flagFilesystem != envFilesystem {
+		return "", fmt.Errorf("conflicting AgentPool workspace filesystems: --agentpool-workspace-filesystem=%q and %s=%q", flagFilesystem, agentPoolWorkspaceFilesystemEnv, envFilesystem)
+	}
+	selection := flagFilesystem
+	if selection == "" {
+		selection = envFilesystem
+	}
+	if selection == "" {
+		selection = config.WorkspaceFilesystemAuto
+	}
+	if _, err := config.ResolveWorkspaceFilesystem(selection, ""); err != nil {
+		return "", err
+	}
+	return selection, nil
+}
+
+func selectAgentPoolWorkspaceDevice(in *bufio.Reader, out io.Writer, devices []provisioner.WorkspaceDevice) (provisioner.WorkspaceDevice, error) {
 	if len(devices) == 0 {
-		return "", fmt.Errorf("no stable non-removable whole disks were discovered; Forge never falls back to the root disk")
+		return provisioner.WorkspaceDevice{}, fmt.Errorf("no stable non-removable whole disks were discovered; Forge never falls back to the root disk")
 	}
 	fmt.Fprintln(out, "Select exactly one dedicated AgentPool workspace disk.")
-	fmt.Fprintf(out, "Forge will format the selected whole disk as ext4 and mount it at %s after fail-closed safety checks.\n", provisioner.AgentPoolWorkspaceMount)
-	fmt.Fprintln(out, "This selection is the sole destructive authorization; there is no later confirmation or override.")
+	fmt.Fprintf(out, "Forge will format the selected whole disk as the resolved ext4/XFS filesystem and mount it at %s after fail-closed safety checks.\n", provisioner.AgentPoolWorkspaceMount)
+	fmt.Fprintln(out, "This disk selection is the sole destructive authorization; filesystem selection is configuration, not a second confirmation.")
 	for i, device := range devices {
-		fmt.Fprintf(out, "  %d) %s  model=%q serial=%q size=%s\n", i+1, device.Path, device.Model, device.Serial, formatDeviceSize(device.SizeBytes))
+		transport := displayWorkspaceTransport(device.Transport)
+		recommended, _ := config.ResolveWorkspaceFilesystem(config.WorkspaceFilesystemAuto, device.Transport)
+		fmt.Fprintf(out, "  %d) %s  model=%q serial=%q transport=%q recommended=%s size=%s\n", i+1, device.Path, device.Model, device.Serial, transport, recommended, formatDeviceSize(device.SizeBytes))
 	}
 	choice := prompt(in, "Workspace disk number", "")
 	index, err := strconv.Atoi(choice)
 	if err != nil || index < 1 || index > len(devices) {
-		return "", fmt.Errorf("workspace disk selection %q is invalid; choose one displayed number", choice)
+		return provisioner.WorkspaceDevice{}, fmt.Errorf("workspace disk selection %q is invalid; choose one displayed number", choice)
 	}
-	return devices[index-1].Path, nil
+	return devices[index-1], nil
+}
+
+func selectAgentPoolWorkspaceFilesystem(in *bufio.Reader, out io.Writer, device provisioner.WorkspaceDevice, selection string) (string, error) {
+	transport := displayWorkspaceTransport(device.Transport)
+	recommended, _ := config.ResolveWorkspaceFilesystem(config.WorkspaceFilesystemAuto, device.Transport)
+	fmt.Fprintf(out, "Selected disk transport is %q; auto recommends and resolves to %s. Explicit ext4 or xfs overrides are supported.\n", transport, recommended)
+	choice := prompt(in, "Workspace filesystem (auto|ext4|xfs)", selection)
+	resolved, err := config.ResolveWorkspaceFilesystem(choice, device.Transport)
+	if err != nil {
+		return "", err
+	}
+	fmt.Fprintf(out, "Resolved workspace filesystem: %s (selection=%s, transport=%s). This does not add another destructive confirmation.\n", resolved, choice, transport)
+	return choice, nil
+}
+
+func displayWorkspaceTransport(transport string) string {
+	transport = strings.ToLower(strings.TrimSpace(transport))
+	if transport == "" {
+		return "unknown"
+	}
+	return transport
 }
 
 func formatDeviceSize(size uint64) string {

@@ -268,14 +268,15 @@ func createControlPlaneKindStage(t *testing.T, state *deployedState) {
 	}
 	state.cluster = cluster
 	state.client = kube.Client{Executor: state.runner, Kubeconfig: cluster.Kubeconfig, Redactor: state.redactor}
-	configureKindWorkspaceStorage(t, state)
 }
 
 func configureKindWorkspaceStorage(t *testing.T, state *deployedState) {
 	t.Helper()
-	// nodePathMap must be empty when per-class maps are configured; this keeps
-	// Kind's default `standard` claims separate from the AgentPool fixture path.
-	configJSON := `{"nodePathMap":[],"storageClassConfigs":{"standard":{"nodePathMap":[{"node":"DEFAULT_PATH_FOR_NON_LISTED_NODES","paths":["/var/local-path-provisioner"]}]},"iterabase-agentpool-local-path":{"nodePathMap":[{"node":"DEFAULT_PATH_FOR_NON_LISTED_NODES","paths":["/var/lib/iterabase/agentpool-workspaces"]}]}}}`
+	// Kind's pinned provisioner predates per-class maps. Configure its single map
+	// only after platform-default claims are bound; this synthetic execution
+	// fixture then gives the dedicated class a real isolated path. Forge E2E owns
+	// production per-class separation against K3s's bundled provisioner.
+	configJSON := `{"nodePathMap":[{"node":"DEFAULT_PATH_FOR_NON_LISTED_NODES","paths":["/var/lib/iterabase/agentpool-workspaces"]}]}`
 	if output, err := state.client.Kubectl(state.ctx, 30*time.Second, "patch", "configmap/local-path-config", "-n", "local-path-storage", "--type=merge", "-p", fmt.Sprintf(`{"data":{"config.json":%q}}`, configJSON)); err != nil {
 		t.Fatalf("configure Kind local-path class isolation: %v\n%s", err, output)
 	}

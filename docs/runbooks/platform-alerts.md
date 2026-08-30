@@ -70,7 +70,7 @@ Check the individual harness pod, dispatch DNS/port, certificate validity, and r
 
 ## IterabaseHarnessStorageUnavailable
 
-Stop new AgentPool scheduling and inspect the pool's `StorageReady` reason, fixed `iterabase-agentpool-local-path` class, RWO PVC/PV hostPath, dedicated ext4 mount source/type/options/ownership, available blocks, and node/disk I/O events. A real write/fsync/mount failure fences the active turn and replaces the worker; never replay a lost turn or external effect automatically. Refuse any root/default-path fallback.
+Stop new AgentPool scheduling and inspect the pool's `StorageReady` reason, fixed `iterabase-agentpool-local-path` class, RWO PVC/PV hostPath, dedicated receipt-matching ext4/XFS mount source/type/options/ownership, available blocks, and node/disk I/O events. A real write/fsync/mount failure fences the active turn and replaces the worker; never replay a lost turn or external effect automatically. Refuse any root/default-path fallback.
 
 ## IterabaseWorkspaceCapacityWarning
 

@@ -6,13 +6,15 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/nunocgoncalves/iterabase-mono/forge/internal/config"
 	"github.com/nunocgoncalves/iterabase-mono/forge/internal/provisioner"
 )
 
 const (
-	workspaceContractVersion = "HOR-538/v1"
-	workspaceFilesystemLabel = "iterabase-agentpool-workspaces"
+	workspaceContractVersion = "HOR-538/v2"
+	workspaceFilesystemLabel = "iterabase-ws"
 	workspaceReceiptPath     = "/var/lib/iterabase/agentpool-workspace.receipt"
 	workspaceMarkerName      = ".iterabase-workspace-identity"
 	k3sDefaultLocalPath      = "/var/lib/rancher/k3s/storage"
@@ -33,7 +35,8 @@ for selected in /dev/disk/by-id/*; do
   model=$(lsblk -dnro MODEL -- "$device" | tr "\t\r\n" "   ")
   serial=$(lsblk -dnro SERIAL -- "$device" | tr "\t\r\n" "   ")
   size=$(lsblk -bdnro SIZE -- "$device")
-  printf "FORGE_WORKSPACE_DEVICE\t%s\t%s\t%s\t%s\n" "$selected" "$model" "$serial" "$size"
+  transport=$(lsblk -dnro TRAN -- "$device" | tr "[:upper:]" "[:lower:]" | tr "\t\r\n" "   ")
+  printf "FORGE_WORKSPACE_DEVICE\t%s\t%s\t%s\t%s\t%s\n" "$selected" "$model" "$serial" "$size" "$transport"
 done | sort -u
 '`
 	out, err := p.run(ctx, cmd)
@@ -43,7 +46,7 @@ done | sort -u
 	var devices []provisioner.WorkspaceDevice
 	for _, line := range strings.Split(out, "\n") {
 		parts := strings.Split(line, "\t")
-		if len(parts) != 5 || parts[0] != "FORGE_WORKSPACE_DEVICE" {
+		if len(parts) != 6 || parts[0] != "FORGE_WORKSPACE_DEVICE" {
 			continue
 		}
 		size, parseErr := strconv.ParseUint(strings.TrimSpace(parts[4]), 10, 64)
@@ -51,10 +54,49 @@ done | sort -u
 			return nil, fmt.Errorf("parse workspace device size from %q: %w", line, parseErr)
 		}
 		devices = append(devices, provisioner.WorkspaceDevice{
-			Path: parts[1], Model: strings.TrimSpace(parts[2]), Serial: strings.TrimSpace(parts[3]), SizeBytes: size,
+			Path: parts[1], Model: strings.TrimSpace(parts[2]), Serial: strings.TrimSpace(parts[3]),
+			SizeBytes: size, Transport: strings.TrimSpace(parts[5]),
 		})
 	}
 	return devices, nil
+}
+
+// EnsureAgentPoolWorkspaceTools installs and verifies only the formatter tools
+// needed by the already-resolved filesystem. It never reads or writes the
+// selected device. Ubuntu/apt is the supported Forge host contract.
+func (p *SSHProvisioner) EnsureAgentPoolWorkspaceTools(ctx context.Context, filesystem string) error {
+	switch filesystem {
+	case config.WorkspaceFilesystemExt4:
+		if _, err := p.run(ctx, "command -v mkfs.ext4 >/dev/null"); err != nil {
+			return fmt.Errorf("required ext4 tooling is unavailable: %w", err)
+		}
+		return nil
+	case config.WorkspaceFilesystemXFS:
+		const verify = "command -v mkfs.xfs >/dev/null && command -v xfs_info >/dev/null"
+		if _, err := p.run(ctx, verify); err == nil {
+			return nil
+		}
+		cmd := "sudo apt-get update && sudo apt-get install -y xfsprogs"
+		for attempt := 0; ; attempt++ {
+			out, err := p.run(ctx, cmd)
+			if err == nil {
+				if _, verifyErr := p.run(ctx, verify); verifyErr != nil {
+					return fmt.Errorf("verify required XFS tooling after installing xfsprogs: %w", verifyErr)
+				}
+				return nil
+			}
+			if (!isAptLockHeld(err.Error()) && !isAptLockHeld(out)) || attempt >= 20 {
+				return fmt.Errorf("install required XFS tooling (xfsprogs): %w", err)
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(aptLockRetryInterval):
+			}
+		}
+	default:
+		return fmt.Errorf("unsupported resolved AgentPool workspace filesystem %q", filesystem)
+	}
 }
 
 func (p *SSHProvisioner) InspectAgentPoolWorkspace(ctx context.Context, spec provisioner.AgentPoolWorkspaceSpec) (*provisioner.AgentPoolWorkspaceState, error) {
@@ -85,7 +127,7 @@ func (p *SSHProvisioner) runAgentPoolWorkspace(ctx context.Context, spec provisi
 func parseWorkspaceResult(out string) (*provisioner.AgentPoolWorkspaceState, error) {
 	for _, line := range strings.Split(out, "\n") {
 		parts := strings.Split(line, "\t")
-		if len(parts) != 9 || parts[0] != "FORGE_WORKSPACE_RESULT" {
+		if len(parts) != 11 || parts[0] != "FORGE_WORKSPACE_RESULT" {
 			continue
 		}
 		size, err := strconv.ParseUint(parts[6], 10, 64)
@@ -94,7 +136,7 @@ func parseWorkspaceResult(out string) (*provisioner.AgentPoolWorkspaceState, err
 		}
 		return &provisioner.AgentPoolWorkspaceState{
 			Device: parts[1], Resolved: parts[2], Model: parts[3], Serial: parts[4], WWN: parts[5],
-			SizeBytes: size, FilesystemUUID: parts[7], State: parts[8],
+			SizeBytes: size, Transport: parts[7], Filesystem: parts[8], FilesystemUUID: parts[9], State: parts[10],
 		}, nil
 	}
 	return nil, fmt.Errorf("workspace reconciliation returned no bounded result")
@@ -104,6 +146,7 @@ func workspaceReconcileScript(spec provisioner.AgentPoolWorkspaceSpec, mode stri
 	return fmt.Sprintf(`
 install_name=%s
 selected=%s
+filesystem_selection=%s
 mode=%s
 contract=%s
 mount_path=%s
@@ -113,7 +156,7 @@ marker_name=%s
 
 fail() { printf 'workspace refusal: %%s\n' "$*" >&2; exit 42; }
 need() { command -v "$1" >/dev/null 2>&1 || fail "required probe/tool $1 is unavailable"; }
-for tool in readlink lsblk findmnt blkid wipefs awk grep stat base64 sync mount install mkfs.ext4 find cat dirname mktemp mv chown chmod tr; do need "$tool"; done
+for tool in readlink lsblk findmnt blkid wipefs awk grep stat base64 sync mount install find cat dirname mktemp mv chown chmod tr; do need "$tool"; done
 case "$selected" in /dev/disk/by-id/*) ;; *) fail "selected device is not a stable /dev/disk/by-id identity" ;; esac
 case "$selected" in *-part[0-9]*) fail "selected device is a partition identity" ;; esac
 test -L "$selected" || fail "selected stable identity is missing or not a symlink"
@@ -122,10 +165,28 @@ test -b "$device" || fail "selected identity does not resolve to a block device"
 kname=$(lsblk -dnro KNAME -- "$device")
 test -n "$kname" || fail "cannot determine selected kernel device identity"
 case "$kname" in loop*|dm-*|md*|zd*|nbd*) fail "loop/mapper/RAID/network block devices are unsupported" ;; esac
+transport=$(lsblk -dnro TRAN -- "$device" | tr '[:upper:]' '[:lower:]' | tr '\t\r\n' '   ')
+transport=$(printf '%%s' "$transport" | awk '{$1=$1; print}')
+transport_identity=${transport:-unknown}
+case "$filesystem_selection" in
+  auto) if test "$transport" = nvme; then filesystem=xfs; else filesystem=ext4; fi ;;
+  ext4|xfs) filesystem=$filesystem_selection ;;
+  *) fail "workspace filesystem selection must be auto, ext4, or xfs" ;;
+esac
+if test "$mode" = reconcile; then
+  case "$filesystem" in
+    ext4) need mkfs.ext4 ;;
+    xfs) need mkfs.xfs; need xfs_info ;;
+  esac
+fi
 
 probe_identity_topology() {
   test -L "$selected" || fail "selected stable identity disappeared"
   test "$(readlink -f -- "$selected")" = "$device" || fail "selected stable identity drifted during reconciliation"
+  current_transport=$(lsblk -dnro TRAN -- "$device" | tr '[:upper:]' '[:lower:]' | tr '\t\r\n' '   ')
+  current_transport=$(printf '%%s' "$current_transport" | awk '{$1=$1; print}')
+  current_transport=${current_transport:-unknown}
+  test "$current_transport" = "$transport_identity" || fail "selected disk transport identity drifted during reconciliation"
   test "$(lsblk -dnro TYPE -- "$device")" = disk || fail "selected identity is not a whole disk"
   test "$(lsblk -dnro RM -- "$device")" = 0 || fail "selected disk is removable"
   test "$(lsblk -nrpo PATH -- "$device" | awk 'NF {n++} END {print n+0}')" = 1 || fail "selected disk has partitions or child devices"
@@ -188,7 +249,10 @@ write_receipt() {
     printf 'model_b64=%%s\n' "$(printf '%%s' "$model" | base64 -w0)"
     printf 'serial_b64=%%s\n' "$(printf '%%s' "$serial" | base64 -w0)"
     printf 'wwn_b64=%%s\n' "$(printf '%%s' "$wwn" | base64 -w0)"
+    printf 'transport_b64=%%s\n' "$(printf '%%s' "$transport_identity" | base64 -w0)"
     printf 'size=%%s\n' "$size"
+    printf 'filesystem_selection=%%s\n' "$filesystem_selection"
+    printf 'filesystem=%%s\n' "$filesystem"
     printf 'uuid=%%s\n' "$planned_uuid"
     printf 'label=%%s\n' "$label"
     printf 'mount_b64=%%s\n' "$(printf '%%s' "$mount_path" | base64 -w0)"
@@ -210,7 +274,10 @@ if test -e "$receipt"; then
   test "$(decode_receipt model_b64)" = "$model" || fail "workspace disk model identity mismatch"
   test "$(decode_receipt serial_b64)" = "$serial" || fail "workspace disk serial identity mismatch"
   test "$(decode_receipt wwn_b64)" = "$wwn" || fail "workspace disk WWN identity mismatch"
+  test "$(decode_receipt transport_b64)" = "$transport_identity" || fail "workspace disk transport identity mismatch"
   test "$(receipt_value size)" = "$size" || fail "workspace disk size identity mismatch"
+  test "$(receipt_value filesystem_selection)" = "$filesystem_selection" || fail "workspace filesystem selection differs from the recorded transaction"
+  test "$(receipt_value filesystem)" = "$filesystem" || fail "workspace resolved filesystem mismatch"
   planned_uuid=$(receipt_value uuid)
   case "$planned_uuid" in ????????-????-????-????-????????????) ;; *) fail "workspace receipt UUID is invalid" ;; esac
   test "$(receipt_value label)" = "$label" || fail "workspace filesystem label mismatch"
@@ -218,7 +285,7 @@ if test -e "$receipt"; then
 else
   probe_blank_signatures
   if test "$mode" = inspect; then
-    printf 'FORGE_WORKSPACE_RESULT\t%%s\t%%s\t%%s\t%%s\t%%s\t%%s\t\tblank-candidate\n' "$selected" "$device" "$model" "$serial" "$wwn" "$size"
+    printf 'FORGE_WORKSPACE_RESULT\t%%s\t%%s\t%%s\t%%s\t%%s\t%%s\t%%s\t%%s\t\tblank-candidate\n' "$selected" "$device" "$model" "$serial" "$wwn" "$size" "$transport_identity" "$filesystem"
     exit 0
   fi
   planned_uuid=$(cat /proc/sys/kernel/random/uuid)
@@ -235,38 +302,44 @@ if test "$fs_rc" = 2; then
   test "$status" = planned || fail "recorded workspace filesystem disappeared after format"
   if test "$mode" = inspect; then
     probe_blank_signatures
-    printf 'FORGE_WORKSPACE_RESULT\t%%s\t%%s\t%%s\t%%s\t%%s\t%%s\t%%s\treceipt-blank\n' "$selected" "$device" "$model" "$serial" "$wwn" "$size" "$planned_uuid"
+    printf 'FORGE_WORKSPACE_RESULT\t%%s\t%%s\t%%s\t%%s\t%%s\t%%s\t%%s\t%%s\t%%s\treceipt-blank\n' "$selected" "$device" "$model" "$serial" "$wwn" "$size" "$transport_identity" "$filesystem" "$planned_uuid"
     exit 0
   fi
   # DES-HOR-538-02: repeat every required check immediately before the one
   # authorized first format. wipefs/blkid are bounded signature probes; there is
-  # deliberately no block-wide content scan.
+  # deliberately no block-wide content scan. Filesystem choice is configuration,
+  # not a second destructive confirmation.
   probe_blank_signatures
-  mkfs.ext4 -F -U "$planned_uuid" -L "$label" -- "$device"
+  case "$filesystem" in
+    ext4) mkfs.ext4 -F -U "$planned_uuid" -L "$label" -- "$device" ;;
+    xfs) mkfs.xfs -f -m uuid="$planned_uuid" -L "$label" "$device" ;;
+  esac
   write_receipt formatted
   status=formatted
-elif test "$fs_rc" = 0 && test "$fs_type" = ext4; then
+elif test "$fs_rc" = 0 && test "$fs_type" = "$filesystem"; then
   actual_uuid=$(blkid -p -s UUID -o value -- "$device")
   actual_label=$(blkid -p -s LABEL -o value -- "$device")
   test "$actual_uuid" = "$planned_uuid" || fail "workspace filesystem UUID mismatch"
   test "$actual_label" = "$label" || fail "workspace filesystem label mismatch"
 else
-  fail "selected disk has an unrecognized, ambiguous, or non-Forge filesystem signature"
+  fail "selected disk has an unrecognized, ambiguous, wrong-type, or non-Forge filesystem signature"
 fi
 
+actual_type=$(blkid -p -s TYPE -o value -- "$device")
 actual_uuid=$(blkid -p -s UUID -o value -- "$device")
 actual_label=$(blkid -p -s LABEL -o value -- "$device")
-test "$actual_uuid" = "$planned_uuid" && test "$actual_label" = "$label" || fail "workspace filesystem identity drift"
+test "$actual_type" = "$filesystem" && test "$actual_uuid" = "$planned_uuid" && test "$actual_label" = "$label" || fail "workspace filesystem identity drift"
 test "$(blkid -t UUID="$planned_uuid" -o device | awk 'NF {n++} END {print n+0}')" = 1 || fail "workspace filesystem UUID is missing or duplicated"
 
 if test "$mode" = inspect; then
   inspect_state="resumable-$status"
   if test "$status" = complete; then
     repair_required=false
-    fstab_line="UUID=$planned_uuid $mount_path ext4 nodev,nosuid 0 2"
-    conflicts=$(awk -v uuid="UUID=$planned_uuid" -v target="$mount_path" '
+    if test "$filesystem" = ext4; then fstab_pass=2; else fstab_pass=0; fi
+    fstab_line="UUID=$planned_uuid $mount_path $filesystem nodev,nosuid 0 $fstab_pass"
+    conflicts=$(awk -v uuid="UUID=$planned_uuid" -v target="$mount_path" -v expected="$fstab_line" '
       /^[[:space:]]*#/ || NF == 0 {next}
-      ($1 == uuid || $2 == target) && $0 != uuid " " target " ext4 nodev,nosuid 0 2" {print}
+      ($1 == uuid || $2 == target) && $0 != expected {print}
     ' /etc/fstab)
     test -z "$conflicts" || fail "conflicting completed workspace fstab entry: $conflicts"
     fstab_count=$(grep -Fxc "$fstab_line" /etc/fstab || true)
@@ -280,13 +353,13 @@ if test "$mode" = inspect; then
     else
       mounted_source=${mounted_source%%%%[*}
       test "$(readlink -f -- "$mounted_source")" = "$device" || fail "completed workspace mount source drift"
-      test "$(findmnt -n -o FSTYPE --mountpoint "$mount_path")" = ext4 || fail "completed workspace mount type drift"
+      test "$(findmnt -n -o FSTYPE --mountpoint "$mount_path")" = "$filesystem" || fail "completed workspace mount type drift"
       options=$(findmnt -n -o OPTIONS --mountpoint "$mount_path")
       case ",$options," in *,nodev,*) ;; *) fail "completed workspace mount lacks nodev" ;; esac
       case ",$options," in *,nosuid,*) ;; *) fail "completed workspace mount lacks nosuid" ;; esac
       test "$(stat -c '%%u:%%g:%%a' "$mount_path")" = 0:0:711 || fail "completed workspace mount ownership/mode drift"
       marker="$mount_path/$marker_name"
-      marker_content=$(printf 'contract=%%s\ninstall=%%s\ndevice=%%s\nuuid=%%s\nlabel=%%s\n' "$contract" "$install_name" "$selected" "$planned_uuid" "$label")
+      marker_content=$(printf 'contract=%%s\ninstall=%%s\ndevice=%%s\ntransport=%%s\nfilesystem_selection=%%s\nfilesystem=%%s\nuuid=%%s\nlabel=%%s\n' "$contract" "$install_name" "$selected" "$transport_identity" "$filesystem_selection" "$filesystem" "$planned_uuid" "$label")
       test -f "$marker" && test ! -L "$marker" || fail "completed workspace identity marker is missing or unsafe"
       test "$(stat -c '%%u:%%g:%%a' "$marker")" = 0:0:600 || fail "completed workspace marker ownership/mode drift"
       test "$(cat "$marker")" = "$marker_content" || fail "completed workspace marker content drift"
@@ -295,7 +368,7 @@ if test "$mode" = inspect; then
     fi
     if test "$repair_required" = true; then inspect_state=repair-required; else inspect_state=complete; fi
   fi
-  printf 'FORGE_WORKSPACE_RESULT\t%%s\t%%s\t%%s\t%%s\t%%s\t%%s\t%%s\t%%s\n' "$selected" "$device" "$model" "$serial" "$wwn" "$size" "$planned_uuid" "$inspect_state"
+  printf 'FORGE_WORKSPACE_RESULT\t%%s\t%%s\t%%s\t%%s\t%%s\t%%s\t%%s\t%%s\t%%s\t%%s\n' "$selected" "$device" "$model" "$serial" "$wwn" "$size" "$transport_identity" "$filesystem" "$planned_uuid" "$inspect_state"
   exit 0
 fi
 
@@ -303,10 +376,11 @@ mounted_targets=$(findmnt -rn -S "$device" -o TARGET 2>/dev/null || true)
 unexpected_targets=$(printf '%%s\n' "$mounted_targets" | awk -v expected="$mount_path" 'NF && $0 != expected {print}')
 test -z "$unexpected_targets" || fail "workspace disk is mounted by an unexpected consumer: $unexpected_targets"
 
-fstab_line="UUID=$planned_uuid $mount_path ext4 nodev,nosuid 0 2"
-conflicts=$(awk -v uuid="UUID=$planned_uuid" -v target="$mount_path" '
+if test "$filesystem" = ext4; then fstab_pass=2; else fstab_pass=0; fi
+fstab_line="UUID=$planned_uuid $mount_path $filesystem nodev,nosuid 0 $fstab_pass"
+conflicts=$(awk -v uuid="UUID=$planned_uuid" -v target="$mount_path" -v expected="$fstab_line" '
   /^[[:space:]]*#/ || NF == 0 {next}
-  ($1 == uuid || $2 == target) && $0 != uuid " " target " ext4 nodev,nosuid 0 2" {print}
+  ($1 == uuid || $2 == target) && $0 != expected {print}
 ' /etc/fstab)
 test -z "$conflicts" || fail "conflicting workspace fstab entry: $conflicts"
 count=$(grep -Fxc "$fstab_line" /etc/fstab || true)
@@ -322,7 +396,7 @@ if test -n "$mounted_source"; then
 else
   mount "$mount_path"
 fi
-test "$(findmnt -n -o FSTYPE --mountpoint "$mount_path")" = ext4 || fail "workspace mount filesystem type mismatch"
+test "$(findmnt -n -o FSTYPE --mountpoint "$mount_path")" = "$filesystem" || fail "workspace mount filesystem type mismatch"
 options=$(findmnt -n -o OPTIONS --mountpoint "$mount_path")
 case ",$options," in *,nodev,*) ;; *) fail "workspace mount lacks nodev" ;; esac
 case ",$options," in *,nosuid,*) ;; *) fail "workspace mount lacks nosuid" ;; esac
@@ -335,7 +409,7 @@ else
 fi
 
 marker="$mount_path/$marker_name"
-marker_content=$(printf 'contract=%%s\ninstall=%%s\ndevice=%%s\nuuid=%%s\nlabel=%%s\n' "$contract" "$install_name" "$selected" "$planned_uuid" "$label")
+marker_content=$(printf 'contract=%%s\ninstall=%%s\ndevice=%%s\ntransport=%%s\nfilesystem_selection=%%s\nfilesystem=%%s\nuuid=%%s\nlabel=%%s\n' "$contract" "$install_name" "$selected" "$transport_identity" "$filesystem_selection" "$filesystem" "$planned_uuid" "$label")
 if test "$status" = complete; then
   test -f "$marker" && test ! -L "$marker" || fail "completed workspace identity marker is missing or unsafe"
   test "$(stat -c '%%u:%%g:%%a' "$marker")" = 0:0:600 || fail "workspace identity marker ownership/mode drift"
@@ -356,8 +430,8 @@ fi
 
 unexpected=$(findmnt -rn -S "$device" -o TARGET | awk -v expected="$mount_path" '$0 != expected {print}')
 test -z "$unexpected" || fail "workspace disk has an unexpected active consumer: $unexpected"
-printf 'FORGE_WORKSPACE_RESULT\t%%s\t%%s\t%%s\t%%s\t%%s\t%%s\t%%s\tcomplete\n' "$selected" "$device" "$model" "$serial" "$wwn" "$size" "$planned_uuid"
-`, shellQuote(spec.InstallName), shellQuote(spec.Device), shellQuote(mode), shellQuote(workspaceContractVersion), shellQuote(provisioner.AgentPoolWorkspaceMount), shellQuote(workspaceFilesystemLabel), shellQuote(workspaceReceiptPath), shellQuote(workspaceMarkerName))
+printf 'FORGE_WORKSPACE_RESULT\t%%s\t%%s\t%%s\t%%s\t%%s\t%%s\t%%s\t%%s\t%%s\tcomplete\n' "$selected" "$device" "$model" "$serial" "$wwn" "$size" "$transport_identity" "$filesystem" "$planned_uuid"
+`, shellQuote(spec.InstallName), shellQuote(spec.Device), shellQuote(spec.Filesystem), shellQuote(mode), shellQuote(workspaceContractVersion), shellQuote(provisioner.AgentPoolWorkspaceMount), shellQuote(workspaceFilesystemLabel), shellQuote(workspaceReceiptPath), shellQuote(workspaceMarkerName))
 }
 
 // EnsureAgentPoolLocalPathStorage configures the bundled K3s local-path

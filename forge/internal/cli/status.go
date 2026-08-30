@@ -96,6 +96,8 @@ func printWorkspaceStatus(out io.Writer, workspace *provisioner.AgentPoolWorkspa
 	fmt.Fprintf(out, "  resolved: %s\n", workspace.Resolved)
 	fmt.Fprintf(out, "  model:    %s\n", workspace.Model)
 	fmt.Fprintf(out, "  serial:   %s\n", workspace.Serial)
+	fmt.Fprintf(out, "  transport:  %s\n", workspace.Transport)
+	fmt.Fprintf(out, "  filesystem: %s\n", workspace.Filesystem)
 	fmt.Fprintf(out, "  size:     %d\n", workspace.SizeBytes)
 	if workspace.FilesystemUUID != "" {
 		fmt.Fprintf(out, "  uuid:     %s\n", workspace.FilesystemUUID)

@@ -106,7 +106,7 @@ func printApplyResult(out io.Writer, cfg *config.Cluster, res *lifecycle.Result)
 	fmt.Fprintf(out, "  kubeconfig: %s\n", res.KubeconfigPath)
 	fmt.Fprintf(out, "  node ready: %v\n", res.NodeReady)
 	if res.AgentPoolWorkspace != nil {
-		fmt.Fprintf(out, "  AgentPool workspace: %s (%s, uuid=%s)\n", res.AgentPoolWorkspace.Device, res.AgentPoolWorkspace.State, res.AgentPoolWorkspace.FilesystemUUID)
+		fmt.Fprintf(out, "  AgentPool workspace: %s (%s, transport=%s, filesystem=%s, uuid=%s)\n", res.AgentPoolWorkspace.Device, res.AgentPoolWorkspace.State, res.AgentPoolWorkspace.Transport, res.AgentPoolWorkspace.Filesystem, res.AgentPoolWorkspace.FilesystemUUID)
 	}
 	fmt.Fprintf(out, "  AgentPool local-path ready: %v\n", res.AgentPoolLocalPathReady)
 	if cfg.Spec.Chart.Version != "" {
@@ -160,7 +160,7 @@ func printPlan(cmd *cobra.Command, plan *lifecycle.ReconcilePlan) {
 	}
 	fmt.Fprintf(out, "  want:      %s\n", plan.WantVersion)
 	if plan.AgentPoolWorkspace != nil {
-		fmt.Fprintf(out, "  workspace: %s (%s, model=%s serial=%s size=%d)\n", plan.AgentPoolWorkspace.Device, plan.AgentPoolWorkspace.State, plan.AgentPoolWorkspace.Model, plan.AgentPoolWorkspace.Serial, plan.AgentPoolWorkspace.SizeBytes)
+		fmt.Fprintf(out, "  workspace: %s (%s, model=%s serial=%s transport=%s filesystem=%s size=%d)\n", plan.AgentPoolWorkspace.Device, plan.AgentPoolWorkspace.State, plan.AgentPoolWorkspace.Model, plan.AgentPoolWorkspace.Serial, plan.AgentPoolWorkspace.Transport, plan.AgentPoolWorkspace.Filesystem, plan.AgentPoolWorkspace.SizeBytes)
 	}
 	if plan.ChartVersion != "" {
 		fmt.Fprintf(out, "  chart:     %s\n", plan.ChartVersion)

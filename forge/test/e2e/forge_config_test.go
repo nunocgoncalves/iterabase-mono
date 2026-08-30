@@ -66,6 +66,7 @@ spec:
   mode: single-node
   agentPoolWorkspace:
     device: %s
+    filesystem: auto
   hosts:
     - address: %s
       sshUser: forge

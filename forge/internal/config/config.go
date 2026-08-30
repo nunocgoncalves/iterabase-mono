@@ -23,6 +23,10 @@ const (
 	RoleControlPlaneWorker = "control-plane+worker"
 	RoleControlPlane       = "control-plane"
 	RoleWorker             = "worker"
+
+	WorkspaceFilesystemAuto = "auto"
+	WorkspaceFilesystemExt4 = "ext4"
+	WorkspaceFilesystemXFS  = "xfs"
 )
 
 var (
@@ -59,7 +63,31 @@ type Spec struct {
 // AgentPool session workspaces. The stable by-id value is the sole first-format
 // authorization; forge apply never auto-selects or substitutes another device.
 type AgentPoolWorkspace struct {
-	Device string `yaml:"device"`
+	Device     string `yaml:"device"`
+	Filesystem string `yaml:"filesystem"`
+}
+
+func (w *AgentPoolWorkspace) applyDefaults() {
+	if w.Filesystem == "" {
+		w.Filesystem = WorkspaceFilesystemAuto
+	}
+}
+
+// ResolveWorkspaceFilesystem applies the approved deterministic auto policy.
+// Only a reliable, exact NVMe transport observation selects XFS; every other
+// transport (including empty/unknown and virtual transports) selects ext4.
+func ResolveWorkspaceFilesystem(selection, transport string) (string, error) {
+	switch selection {
+	case WorkspaceFilesystemAuto:
+		if strings.EqualFold(strings.TrimSpace(transport), "nvme") {
+			return WorkspaceFilesystemXFS, nil
+		}
+		return WorkspaceFilesystemExt4, nil
+	case WorkspaceFilesystemExt4, WorkspaceFilesystemXFS:
+		return selection, nil
+	default:
+		return "", fmt.Errorf("agentPoolWorkspace.filesystem %q is invalid (expected auto|ext4|xfs)", selection)
+	}
 }
 
 func (w AgentPoolWorkspace) validate() error {
@@ -72,7 +100,8 @@ func (w AgentPoolWorkspace) validate() error {
 	if strings.ContainsAny(w.Device, " \t\r\n") || workspacePartitionRe.MatchString(w.Device) {
 		return fmt.Errorf("agentPoolWorkspace.device %q must identify a whole disk, not a partition or volatile path", w.Device)
 	}
-	return nil
+	_, err := ResolveWorkspaceFilesystem(w.Filesystem, "")
+	return err
 }
 
 // Host describes a single target VM/host.
@@ -341,6 +370,7 @@ func (c *Cluster) Validate() error {
 	}
 	c.Spec.Chart.applyDefaults(c.Metadata.Name)
 	c.Spec.GPU.applyDefaults(c.Metadata.Name)
+	c.Spec.AgentPoolWorkspace.applyDefaults()
 	c.Spec.Overlay.applyDefaults()
 	c.Spec.Flux.applyDefaults()
 	return c.Spec.validate()

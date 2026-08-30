@@ -214,7 +214,7 @@ func Apply(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner, 
 		return res, fmt.Errorf("%s", plan.Reason)
 	}
 
-	workspace, err := reconcileAgentPoolWorkspace(ctx, cfg, p)
+	workspace, err := reconcileAgentPoolWorkspace(ctx, cfg, p, plan.AgentPoolWorkspace.Filesystem)
 	if err != nil {
 		return res, err
 	}

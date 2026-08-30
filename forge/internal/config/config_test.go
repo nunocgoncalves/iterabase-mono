@@ -66,6 +66,7 @@ func TestParse_Valid(t *testing.T) {
 	assert.Equal(t, "NoSchedule", h.Taints[0].Effect)
 	assert.True(t, c.Spec.K3s.DualStack)
 	assert.Equal(t, []string{"traefik", "servicelb"}, c.Spec.K3s.Disable)
+	assert.Equal(t, WorkspaceFilesystemAuto, c.Spec.AgentPoolWorkspace.Filesystem)
 }
 
 func TestParse_DualStackDisabledNoV6Required(t *testing.T) {
@@ -119,6 +120,30 @@ func TestParse_WorkspaceDeviceRequiredAndStable(t *testing.T) {
 			assert.Contains(t, err.Error(), tc.want)
 		})
 	}
+}
+
+func TestWorkspaceFilesystemPolicy(t *testing.T) {
+	for _, tc := range []struct {
+		selection string
+		transport string
+		want      string
+	}{
+		{selection: WorkspaceFilesystemAuto, transport: "nvme", want: WorkspaceFilesystemXFS},
+		{selection: WorkspaceFilesystemAuto, transport: "NVME", want: WorkspaceFilesystemXFS},
+		{selection: WorkspaceFilesystemAuto, transport: "sata", want: WorkspaceFilesystemExt4},
+		{selection: WorkspaceFilesystemAuto, transport: "virtio", want: WorkspaceFilesystemExt4},
+		{selection: WorkspaceFilesystemAuto, transport: "", want: WorkspaceFilesystemExt4},
+		{selection: WorkspaceFilesystemExt4, transport: "nvme", want: WorkspaceFilesystemExt4},
+		{selection: WorkspaceFilesystemXFS, transport: "sata", want: WorkspaceFilesystemXFS},
+	} {
+		t.Run(tc.selection+"-"+tc.transport, func(t *testing.T) {
+			got, err := ResolveWorkspaceFilesystem(tc.selection, tc.transport)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+	_, err := Parse(yamlFor(t, func(c *Cluster) { c.Spec.AgentPoolWorkspace.Filesystem = "btrfs" }))
+	require.ErrorContains(t, err, "auto|ext4|xfs")
 }
 
 func TestParse_NoHosts(t *testing.T) {

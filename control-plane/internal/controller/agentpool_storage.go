@@ -249,7 +249,7 @@ func workerStorageFailure(ctx context.Context, c client.Client, pool *v1alpha1.A
 		statuses = append(statuses, pod.Status.ContainerStatuses...)
 		for _, status := range statuses {
 			if status.State.Terminated != nil && status.State.Terminated.ExitCode != 0 {
-				return fmt.Sprintf("worker %s/%s container %s exited during workspace mount/I/O validation (reason=%s message=%s); inspect the dedicated ext4 mount, local-path PV, ownership, and capacity", pod.Namespace, pod.Name, status.Name, status.State.Terminated.Reason, status.State.Terminated.Message)
+				return fmt.Sprintf("worker %s/%s container %s exited during workspace mount/I/O validation (reason=%s message=%s); inspect the dedicated receipt-matching ext4/XFS mount, local-path PV, ownership, and capacity", pod.Namespace, pod.Name, status.Name, status.State.Terminated.Reason, status.State.Terminated.Message)
 			}
 			if status.State.Waiting != nil {
 				reason := status.State.Waiting.Reason

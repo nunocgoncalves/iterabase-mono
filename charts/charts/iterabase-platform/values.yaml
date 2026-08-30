@@ -4,7 +4,7 @@
 # When true, supported in-cluster service links use the Iterabase internal CA:
 # Postgres (ssl=on + hostssl), Redis (TLS + AUTH), control-plane API (HTTPS),
 # verified gateway clients, and observability HTTPS. AgentPool workspace storage
-# is node-local ext4 configured by Forge and does not introduce another service
+# is node-local ext4/XFS configured by Forge and does not introduce another service
 # transport. Propagated via `global.internalTLS`; default false keeps dev/kind
 # plaintext.
 # The CA Secret remains <release>-internal-ca-root, so overlays set only enabled.
