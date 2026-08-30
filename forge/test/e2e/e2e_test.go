@@ -87,11 +87,31 @@ func (provisioner *doCPUVMProvisioner) PublicIP(ctx context.Context, id int) (st
 
 func (provisioner *doCPUVMProvisioner) Destroy(ctx context.Context, id int) error {
 	_, dropletErr := provisioner.client.Droplets.Delete(ctx, id)
-	var volumeErr error
-	if provisioner.workspaceVolume != "" {
-		_, volumeErr = provisioner.client.Storage.DeleteVolume(ctx, provisioner.workspaceVolume)
+	return errors.Join(dropletErr, deleteWorkspaceVolume(ctx, provisioner.client, provisioner.workspaceVolume))
+}
+
+func deleteWorkspaceVolume(ctx context.Context, client *godo.Client, volumeID string) error {
+	if volumeID == "" {
+		return nil
 	}
-	return errors.Join(dropletErr, volumeErr)
+	deadline := time.Now().Add(2 * time.Minute)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		if _, err := client.Storage.DeleteVolume(ctx, volumeID); err == nil {
+			return nil
+		} else {
+			lastErr = err
+			if !strings.Contains(err.Error(), "attached volume cannot be deleted") {
+				return err
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return errors.Join(lastErr, ctx.Err())
+		case <-time.After(2 * time.Second):
+		}
+	}
+	return fmt.Errorf("workspace volume %s remained attached after droplet deletion: %w", volumeID, lastErr)
 }
 
 type digitalOceanCPUState struct {
@@ -156,7 +176,6 @@ func provisionCPUStage(t *testing.T, state *digitalOceanCPUState) {
 	if err := provisionCPUHost(state); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv(workspaceDeviceEnv, state.workspaceDevice)
 	t.Logf("droplet ip %s workspace=%s", state.ip, state.workspaceDevice)
 }
 
@@ -184,6 +203,7 @@ func provisionCPUHost(state *digitalOceanCPUState) error {
 	if err := waitForWorkspaceDevice(state.ctx, ip, state.privKeyPath, workspaceDevice); err != nil {
 		return err
 	}
+	rememberWorkspaceDevice(ip, workspaceDevice)
 	return nil
 }
 
@@ -569,6 +589,7 @@ func (state *digitalOceanCPUState) cleanup(t *testing.T) {
 
 func (state *digitalOceanCPUState) destroyCPUHost() error {
 	state.diagnostics.setDomain(failureDomainCleanup)
+	workspaceDevicesByAddress.Delete(state.ip)
 	return state.provisioner.Destroy(state.ctx, state.droplet.ID)
 }
 
