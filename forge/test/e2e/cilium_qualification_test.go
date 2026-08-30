@@ -212,9 +212,8 @@ printf '%s  /tmp/cilium-%s.tgz\n' | sudo sha256sum -c -
 sudo helm --kubeconfig /etc/rancher/k3s/k3s.yaml upgrade --install cilium /tmp/cilium-%s.tgz \
   --namespace kube-system \
   --set operator.replicas=1 \
-  --set ipam.mode=kubernetes \
-  --set k8s.requireIPv4PodCIDR=true \
-  --set k8s.requireIPv6PodCIDR=false \
+  --set ipam.mode=cluster-pool \
+  --set 'ipam.operator.clusterPoolIPv4PodCIDRList={10.42.0.0/16}' \
   --set ipv4.enabled=true \
   --set ipv6.enabled=false \
   --set kubeProxyReplacement=false \
@@ -222,19 +221,33 @@ sudo helm --kubeconfig /etc/rancher/k3s/k3s.yaml upgrade --install cilium /tmp/c
   --set routingMode=tunnel \
   --set tunnelProtocol=vxlan \
   --set cni.exclusive=true \
-  --set cni.binPath=/var/lib/rancher/k3s/data/cni \
-  --set cni.confPath=/var/lib/rancher/k3s/agent/etc/cni/net.d \
   --set policyEnforcementMode=default \
   --set hubble.relay.enabled=false \
   --set hubble.ui.enabled=false \
   --wait --timeout 15m
 sudo k3s kubectl rollout status -n kube-system daemonset/cilium --timeout=10m
 sudo k3s kubectl rollout status -n kube-system deployment/cilium-operator --timeout=10m
-sudo k3s kubectl wait --for=condition=Ready node --all --timeout=10m
-sudo k3s kubectl rollout status -n kube-system deployment/coredns --timeout=5m
 `, ciliumQualificationVersion, ciliumQualificationVersion, ciliumQualificationChartHash,
 		ciliumQualificationVersion, ciliumQualificationVersion)
 	mustSSHOutput(t, client, installCilium)
+	readyOutput, readyErr := sshOutput(client, `sudo k3s kubectl wait --for=condition=Ready node --all --timeout=5m
+sudo k3s kubectl rollout status -n kube-system deployment/coredns --timeout=5m`)
+	if readyErr != nil {
+		diagnostics, _ := sshOutput(client, `{
+  echo '=== node ==='
+  sudo k3s kubectl get node -o yaml
+  echo '=== Cilium pods and logs ==='
+  sudo k3s kubectl get pods -n kube-system -o wide
+  for pod in $(sudo k3s kubectl get pods -n kube-system -l k8s-app=cilium -o name); do sudo k3s kubectl logs -n kube-system "$pod" -c cilium-agent --tail=300; done
+  for pod in $(sudo k3s kubectl get pods -n kube-system -l io.cilium/app=operator -o name); do sudo k3s kubectl logs -n kube-system "$pod" --all-containers --tail=300; done
+  echo '=== CNI paths ==='
+  sudo find -L /etc/cni/net.d /var/lib/rancher/k3s/agent/etc/cni/net.d /opt/cni/bin /var/lib/rancher/k3s/data/cni -maxdepth 2 -type f -print 2>&1 || true
+  echo '=== recent k3s journal ==='
+  sudo journalctl -u k3s --no-pager -n 500
+} 2>&1`)
+		writeCiliumQualificationEvidence(t, state, "cilium-node-readiness-failure.txt", readyOutput+"\n"+diagnostics)
+		t.Fatalf("Cilium did not make the clean K3s node Ready: %v\n%s\n%s", readyErr, readyOutput, diagnostics)
+	}
 
 	evidence := mustSSHOutput(t, client, ciliumBaselineEvidenceCommand())
 	for _, marker := range []string{
@@ -284,15 +297,19 @@ printf 'cilium-helm-identity=%s|%s|%s\n' "$cilium_chart" "$cilium_version" "$cil
 sudo helm --kubeconfig /etc/rancher/k3s/k3s.yaml get values cilium -n kube-system --all -o yaml
 cilium_config=$(sudo k3s kubectl get configmap cilium-config -n kube-system -o json)
 printf '%s\n' "$cilium_config"
-printf '%s' "$cilium_config" | jq -e '.data.ipam=="kubernetes" and .data["routing-mode"]=="tunnel" and .data["tunnel-protocol"]=="vxlan" and .data["kube-proxy-replacement"]=="false" and .data["enable-k8s-networkpolicy"]=="true" and .data["enable-ipv4"]=="true" and .data["enable-ipv6"]=="false"'
+printf '%s' "$cilium_config" | jq -e '.data.ipam=="cluster-pool" and .data["cluster-pool-ipv4-cidr"]=="10.42.0.0/16" and .data["routing-mode"]=="tunnel" and .data["tunnel-protocol"]=="vxlan" and .data["kube-proxy-replacement"]=="false" and .data["enable-k8s-networkpolicy"]=="true" and .data["enable-ipv4"]=="true" and .data["enable-ipv6"]=="false"'
 printf '%s\n' '=== Cilium readiness and authority ==='
 sudo k3s kubectl get daemonset/cilium deployment/cilium-operator -n kube-system -o wide
 sudo k3s kubectl get ciliumnodes.cilium.io,ciliumendpoints.cilium.io -A -o wide
 cilium_pod=$(sudo k3s kubectl get pods -n kube-system -l k8s-app=cilium -o jsonpath='{.items[0].metadata.name}')
 sudo k3s kubectl exec -n kube-system "$cilium_pod" -c cilium-agent -- cilium-dbg status --brief
-find /var/lib/rancher/k3s/agent/etc/cni/net.d -maxdepth 1 -type f -print -exec cat {} \;
-test "$(find /var/lib/rancher/k3s/agent/etc/cni/net.d -maxdepth 1 -type f | wc -l)" -eq 1
-grep -R '"type"[[:space:]]*:[[:space:]]*"cilium-cni"' /var/lib/rancher/k3s/agent/etc/cni/net.d
+cni_files=$(sudo find -L /etc/cni/net.d /var/lib/rancher/k3s/agent/etc/cni/net.d -maxdepth 1 -type f 2>/dev/null | sort -u)
+test -n "$cni_files"
+for file in $cni_files; do
+  printf '%s\n' "--- $file ---"
+  sudo cat "$file"
+  sudo grep -Eq '"type"[[:space:]]*:[[:space:]]*"cilium-cni"' "$file"
+done
 printf '%s\n' '=== Cilium image identities ==='
 sudo k3s kubectl get pods -n kube-system -l 'k8s-app in (cilium,cilium-operator)' -o json | jq -c '[.items[] | {name:.metadata.name,containers:[.spec.containers[] | {name,image}],runtime:[.status.containerStatuses[]? | {name,imageID}]}]'
 `
