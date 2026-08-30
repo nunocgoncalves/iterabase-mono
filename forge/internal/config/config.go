@@ -25,7 +25,10 @@ const (
 	RoleWorker             = "worker"
 )
 
-var nameRe = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
+var (
+	nameRe               = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
+	workspacePartitionRe = regexp.MustCompile(`-part[0-9]+$`)
+)
 
 // Cluster is the top-level forge.yaml document.
 type Cluster struct {
@@ -42,13 +45,34 @@ type Metadata struct {
 
 // Spec is the cluster substrate specification.
 type Spec struct {
-	Mode    string  `yaml:"mode"`
-	Hosts   []Host  `yaml:"hosts"`
-	K3s     K3s     `yaml:"k3s"`
-	Flux    Flux    `yaml:"flux"`
-	Overlay Overlay `yaml:"overlay"`
-	Chart   Chart   `yaml:"chart"`
-	GPU     GPU     `yaml:"gpu"`
+	Mode               string             `yaml:"mode"`
+	Hosts              []Host             `yaml:"hosts"`
+	K3s                K3s                `yaml:"k3s"`
+	Flux               Flux               `yaml:"flux"`
+	Overlay            Overlay            `yaml:"overlay"`
+	Chart              Chart              `yaml:"chart"`
+	GPU                GPU                `yaml:"gpu"`
+	AgentPoolWorkspace AgentPoolWorkspace `yaml:"agentPoolWorkspace"`
+}
+
+// AgentPoolWorkspace selects the one dedicated whole disk Forge prepares for
+// AgentPool session workspaces. The stable by-id value is the sole first-format
+// authorization; forge apply never auto-selects or substitutes another device.
+type AgentPoolWorkspace struct {
+	Device string `yaml:"device"`
+}
+
+func (w AgentPoolWorkspace) validate() error {
+	if w.Device == "" {
+		return fmt.Errorf("agentPoolWorkspace.device is required")
+	}
+	if !strings.HasPrefix(w.Device, "/dev/disk/by-id/") || strings.Contains(strings.TrimPrefix(w.Device, "/dev/disk/by-id/"), "/") {
+		return fmt.Errorf("agentPoolWorkspace.device %q must be one stable /dev/disk/by-id/<identity> whole-disk path", w.Device)
+	}
+	if strings.ContainsAny(w.Device, " \t\r\n") || workspacePartitionRe.MatchString(w.Device) {
+		return fmt.Errorf("agentPoolWorkspace.device %q must identify a whole disk, not a partition or volatile path", w.Device)
+	}
+	return nil
 }
 
 // Host describes a single target VM/host.
@@ -339,6 +363,9 @@ func (s *Spec) validate() error {
 		}
 	}
 	if err := s.GPU.validate(s.Mode); err != nil {
+		return err
+	}
+	if err := s.AgentPoolWorkspace.validate(); err != nil {
 		return err
 	}
 	if err := s.Overlay.validate(); err != nil {

@@ -38,7 +38,7 @@ intent; path selection may inform the proposal but cannot choose it.
 | `forge` | `forge/VERSION` | Linux/macOS × amd64/arm64 archives in one GitHub Release |
 | `control-plane-chart` | chart `Chart.yaml` | control-plane OCI chart |
 | `inference-gateway-chart` | chart `Chart.yaml` | inference-gateway OCI chart |
-| `iterabase-platform-chart` | chart `Chart.yaml` | platform chart plus same-version certificate and managed-RWX substrate companions |
+| `iterabase-platform-chart` | chart `Chart.yaml` | platform chart plus same-version certificate substrate companion |
 
 The protected Git tags remain `control-plane-v<version>`, `inference-gateway-v<version>`, `forge-v<version>`, and `<chart>-<version>`. Targets keep independent versions and namespaced releases, but one product change may release any coherent subset together. Forge's platform matrix is one target, not four releases.
 
@@ -58,7 +58,7 @@ The workflow trims and validates the explicit target set, rejects empty, unknown
 5. A generated bundle bill of materials records source SHA, selected target/version pairs, exact artifact identities, published baselines, native chart dependencies, fixture inputs, and validation result. There is no hand-maintained global compatibility manifest.
 6. The final `release-candidate` Actions artifact contains the canonical plan, evidence, exact chart/Forge files, checksums, SBOMs, and image digest metadata. It is retained for 90 days pending promotion or expiry.
 
-Real-machine assertions remain bounded rather than relying on fixed timing. Scenarios that deploy product workloads wait up to 10 minutes for every control-plane Deployment to report its current generation Available before inspecting requested digests and CRI image IDs. The platform-chart-only RWX/internal-TLS scenario deliberately disables product workloads and does not claim image handoff; the complete CPU scenario owns exact product-image evidence for coordinated candidates. Managed AgentPool readiness retains its 10-minute bound; a timeout emits the AgentPool condition/message, worker/PVC/PV/Longhorn volume/share-manager state, and recent platform/storage events. When the mandatory GPU gate exhausts all offered DigitalOcean regions/sizes, the candidate remains failed and is classified as blocked by an evidenced external-capacity dependency. It is retried when capacity returns; it is never converted to a skip under `FORGE_E2E_REQUIRE_CAPACITY=true`.
+Real-machine assertions remain bounded rather than relying on fixed timing. Scenarios that deploy product workloads wait up to 10 minutes for every control-plane Deployment to report its current generation Available before inspecting requested digests and CRI image IDs. The dedicated-workspace exact-candidate scenario uses full product workloads and owns fixed mount/class/RWO evidence; the complete CPU scenario also owns migration and exact product-image handoff for coordinated candidates. AgentPool readiness retains its 10-minute bound; a timeout emits the AgentPool condition/message, worker/PVC/PV hostPath, workspace mount/capacity state, and recent platform/storage events. When the mandatory GPU gate exhausts all offered DigitalOcean regions/sizes, the candidate remains failed and is classified as blocked by an evidenced external-capacity dependency. It is retried when capacity returns; it is never converted to a skip under `FORGE_E2E_REQUIRE_CAPACITY=true`.
 
 ## Promotion flow
 

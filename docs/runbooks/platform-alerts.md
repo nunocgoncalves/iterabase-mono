@@ -10,12 +10,7 @@ These alerts describe internal operator health. They never assert customer-resul
 4. Do not repeat a consequential tool action when its outcome is unknown.
 5. Prefer disabling new work or rolling back immutable pins over deleting durable state.
 
-For managed storage, `50 — Data and Storage` is a quick-glance orientation view,
-not a replacement for PromQL or the alert-specific evidence below. Its compact
-Longhorn panels cover manager scrape availability, unhealthy volumes, minimum
-node/disk headroom, unavailable CSI nodes/share-managers, and active replica
-rebuilds. Empty panels in external mode do not assert a customer backend is
-healthy.
+For AgentPool storage, `50 — Data and Storage` is a quick-glance orientation view, not a replacement for the alert-specific evidence below. Its workspace panels show actual filesystem free bytes/ratio, warning state, and fresh-credit gate state. Requested PVC size is planning metadata and must not be interpreted as a hard quota.
 
 ## IterabasePlatformTargetDown
 
@@ -63,7 +58,7 @@ Compare the failing Flux revision/digest with the last successful generation. Va
 
 ## IterabaseDispatchWithoutWorkers
 
-Check AgentPool replicas/status, worker pod readiness, RWX/RWO constraints, CSI-issued SPIFFE leaves, NetworkPolicy egress, and dispatch mTLS. Pending durable work must remain queued; do not synthesize assignments.
+Check AgentPool replicas/status, fixed-class RWO PVC/PV path, worker pod readiness, CSI-issued SPIFFE leaves, NetworkPolicy egress, workspace capacity gate, and dispatch mTLS. Pending durable work must remain queued; do not synthesize assignments.
 
 ## IterabaseDispatchWorkerLosses
 
@@ -75,57 +70,19 @@ Check the individual harness pod, dispatch DNS/port, certificate validity, and r
 
 ## IterabaseHarnessStorageUnavailable
 
-Stop new AgentPool scheduling and inspect the pool's `StorageReady` reason,
-exact StorageClass/PVC/PV, CSI/mount events, available filesystem capacity, and
-managed Longhorn volume/replica/share-manager/node health. Restore backend
-health first; existing NFS clients are not trusted after an outage. Let the
-operator create fresh workers and verify committed files. Do not replay a lost
-turn or external effect automatically, expose session filenames/content, or
-claim seamless failover.
+Stop new AgentPool scheduling and inspect the pool's `StorageReady` reason, fixed `iterabase-agentpool-local-path` class, RWO PVC/PV hostPath, dedicated ext4 mount source/type/options/ownership, available blocks, and node/disk I/O events. A real write/fsync/mount failure fences the active turn and replaces the worker; never replay a lost turn or external effect automatically. Refuse any root/default-path fallback.
 
-## IterabaseLonghornNodeCapacityLow
+## IterabaseWorkspaceCapacityWarning
 
-Stop unbounded new claim growth. Compare Longhorn node capacity, usage, reservation, and scheduled bytes with the topology multiplier and required rebuild/snapshot reserve. Add reviewed physical capacity or reap explicitly eligible data; do not raise over-provisioning or count requested-but-unusable expansion as capacity.
+Actual free space is below 25%. Record `control_plane_harness_workspace_free_bytes`, capacity, ratio, affected pods, largest eligible session data, and current active turns. Pause avoidable growth and notify the customer-owned capacity response. Requested PVC size is not a quota and changing it cannot expand local-path storage. Do not delete session data without explicit lifecycle authority.
 
-## IterabaseLonghornDiskCapacityLow
+## IterabaseWorkspaceCreditGated
 
-Identify the dedicated disk and its node, then inspect used, reserved, scheduled, snapshot, and rebuilding replica bytes. Verify the fixed data-path mount still targets the approved SSD. Add capacity under the maintenance procedure rather than reducing the minimum-free reserve.
+The filesystem is at or below 20% free, or a prior gate has not yet reached the 25% reopen threshold. Confirm every worker reports the gate and that no unspent fresh dispatch credit remains. Do not abort an active turn solely for crossing the threshold; let it reach its normal terminal/ACK boundary, then verify no next credit appears. Reopen only after actual free ratio is at least 25%. Disk expansion/replacement/migration is a separate approved procedure; never switch to the root/default path.
 
-## IterabaseLonghornDiskUnschedulable
+## IterabaseWorkspaceStorageIOFailure
 
-Inspect the Longhorn disk `Schedulable` condition/reason, node readiness, fixed data-path mount source/UUID, filesystem health, and free capacity. Keep new starts closed until the exact dedicated disk is mounted and Longhorn reports it schedulable again; never substitute the root disk silently.
-
-## IterabaseLonghornVolumeCapacityHigh
-
-Map the volume to its PVC and AgentPool. Check requested versus actual allocation and physical capacity for every replica plus rebuild reserve. If growth is approved, close or bound starts, prove backend health/headroom, expand the PVC monotonically, and wait for controller plus filesystem capacity before reopening.
-
-## IterabaseLonghornVolumeDegraded
-
-Stop unsafe new scheduling credit for the affected pool. Inspect volume robustness, engine, every replica, failed node/disk, rebuild events, share-manager, and committed-data evidence. Restore or rebuild to the profile's required replica count before creating fresh workers; do not claim uninterrupted RWX service or replay a lost turn.
-
-## IterabaseLonghornReplicaRebuildStalled
-
-Inspect the starting replica and its source/destination nodes, engines, network, destination disk schedulability, and capacity. Do not delete healthy source replicas or force a second maintenance operation while the volume lacks the approved replica count.
-
-## IterabasePVCExpansionStalled
-
-Compare PVC request, PVC status capacity, PV capacity, and mounted filesystem `df`. Inspect resizer and node-plugin logs plus PVC/PV/mount events. Keep the pool unready when usable capacity trails the request; retry only supported growth after physical-headroom proof and never attempt shrink.
-
-## IterabaseRWXConformanceStale
-
-Confirm the attestation still names the exact live StorageClass UID/provisioner. Record backend/CSI/Kubernetes/node-image/network identities, then rerun the same-release disposable two-worker conformance gate. A successful run deliberately recreates the deterministic attestation ConfigMap so `metadata.creationTimestamp` and `data.validatedAt` both advance; verify those timestamps and that the alert resolves. A recreated class or changed backend requires fresh evidence rather than relabeling the old ConfigMap.
-
-## IterabaseLonghornShareManagerUnavailable
-
-Stop scheduling the affected AgentPool and identify the exact PVC/PV/volume/share-manager. Inspect its Service/endpoints, pod events/logs, attached engine, replicas, DNS, and node. Restore backend and share-manager health first, terminate stale clients, and use fresh workers; never treat a Ready replacement Service as proof that old NFS clients recovered.
-
-## IterabaseLonghornCSIUnavailable
-
-Identify nodes missing `longhorn-csi-plugin` readiness. Inspect CSINode driver registration, plugin/controller pods, mount propagation, iSCSI/NFS packages and services, kubelet/containerd, and attach/mount/expand events. Restore CSI on every required worker/storage node before replacing workers or starting expansion.
-
-## IterabaseRetainedRwxPVRequiresDisposition
-
-Find the former AgentPool/PVC, Longhorn volume, owner, and approved recovery need. Settle/reap sessions, then follow an explicit transfer or delete/sanitize plan. Verify PV and backend-volume removal plus reclaimed physical capacity, and retain only content-free audit evidence. Never auto-adopt or force-uninstall a retained volume.
+Treat this as actual storage failure rather than a capacity warning. Capture bounded worker-loss, turn fencing, filesystem, kernel, mount, PVC/PV, and device evidence. Verify the exact Forge receipt/UUID/label/by-id identity before any repair. Restore only the same recorded disk and mount; changed hardware, UUID, label, size, marker, fstab conflict, or unexpected consumer fails closed. Do not reformat, adopt, wipe, or replay work automatically.
 
 ## IterabaseHarnessReplayBacklog
 

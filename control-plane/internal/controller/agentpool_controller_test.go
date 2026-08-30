@@ -65,6 +65,7 @@ func newAgentPoolTestEnv(t *testing.T, store PoolMaterializer) (client.Client, c
 
 	adminClient, err := client.New(cfg, client.Options{Scheme: scheme})
 	require.NoError(t, err)
+	seedLocalPathClass(t, adminClient, ctx)
 	saCfg := rbacManagerConfig(t, ctx, cfg, scheme)
 
 	mgr, err := ctrl.NewManager(saCfg, ctrl.Options{
@@ -107,8 +108,8 @@ func validAgentPool(name, ns string) *v1alpha1.AgentPool {
 				CertMountPath: "/etc/harness/tls",
 			},
 			Sandbox: v1alpha1.SandboxSpec{
-				StorageClassName: "rwx-fast",
-				AccessMode:       corev1.ReadWriteMany,
+				StorageClassName: agentPoolWorkspaceStorageClass,
+				AccessMode:       corev1.ReadWriteOnce,
 				Size:             resource.MustParse("10Gi"),
 				MountPath:        "/data/sandboxes",
 			},
@@ -134,34 +135,23 @@ func gwSelector(app string) v1alpha1.GatewayPodSelector {
 	return v1alpha1.GatewayPodSelector{PodSelector: metav1.LabelSelector{MatchLabels: map[string]string{"app.kubernetes.io/name": app}}}
 }
 
-func seedRWXContract(t *testing.T, c client.Client, ctx context.Context, namespace, className, provisioner string) {
+func seedLocalPathClass(t *testing.T, c client.Client, ctx context.Context) {
 	t.Helper()
-	reclaim := corev1.PersistentVolumeReclaimRetain
-	expand := true
-	class := &storagev1.StorageClass{
-		ObjectMeta:           metav1.ObjectMeta{Name: className},
-		Provisioner:          provisioner,
-		ReclaimPolicy:        &reclaim,
-		AllowVolumeExpansion: &expand,
+	reclaim := corev1.PersistentVolumeReclaimDelete
+	binding := storagev1.VolumeBindingWaitForFirstConsumer
+	expand := false
+	err := c.Create(ctx, &storagev1.StorageClass{
+		ObjectMeta:  metav1.ObjectMeta{Name: agentPoolWorkspaceStorageClass, Annotations: map[string]string{"storageclass.kubernetes.io/is-default-class": "false"}},
+		Provisioner: agentPoolWorkspaceProvisioner, ReclaimPolicy: &reclaim,
+		VolumeBindingMode: &binding, AllowVolumeExpansion: &expand,
+	})
+	if err != nil && !errors.IsAlreadyExists(err) {
+		require.NoError(t, err)
 	}
-	require.NoError(t, c.Create(ctx, class))
-	require.NoError(t, c.Get(ctx, types.NamespacedName{Name: className}, class))
-	require.NoError(t, c.Create(ctx, &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{Name: "platform-rwx-storage-contract", Namespace: namespace, Labels: map[string]string{storageContractLabel: "true"}},
-		Data:       map[string]string{"contractVersion": storageContractVersion, "mode": storageModeExternal, "storageClassName": className, "topology": ""},
-	}))
-	require.NoError(t, c.Create(ctx, &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{Name: "iterabase-rwx-conformance-test", Namespace: namespace, Labels: map[string]string{storageConformanceLabel: "true"}},
-		Data: map[string]string{
-			"contractVersion": storageContractVersion, "storageClassName": className,
-			"storageClassUID": string(class.UID), "provisioner": provisioner,
-			"result": "pass", "validatedAt": "2026-08-25T00:00:00Z",
-		},
-	}))
 }
 
 // TestAgentPoolReconcile exercises the full assembly UNDER RBAC: creating an
-// AgentPool materializes the RWX PVC, the deny-by-default NetworkPolicy, the
+// AgentPool materializes the fixed-class RWO PVC, the deny-by-default NetworkPolicy, the
 // per-pod config ConfigMaps, and the warm-worker pods (with the cert-manager
 // CSI TLS volume + SPIFFE URI SAN). envtest has no kubelet, so pods never
 // become Ready (status stays not-ready) — this asserts object assembly, not
@@ -181,22 +171,22 @@ func TestAgentPoolReconcile(t *testing.T) {
 		StringData: map[string]string{"token": "secret-value"},
 	}))
 
-	seedRWXContract(t, adminClient, ctx, ns, "rwx-fast", "example.csi.test")
+	seedLocalPathClass(t, adminClient, ctx)
 
 	pool := validAgentPool("walter-pool", ns)
 	require.NoError(t, adminClient.Create(ctx, pool))
 
 	nn := types.NamespacedName{Name: "walter-pool", Namespace: ns}
 
-	// PVC created as RWX.
+	// PVC created as RWO while two same-node workers are accepted.
 	require.Eventually(t, func() bool {
 		var pvc corev1.PersistentVolumeClaim
 		if err := adminClient.Get(ctx, types.NamespacedName{Name: "walter-pool-sandbox", Namespace: ns}, &pvc); err != nil {
 			return false
 		}
 		access := pvc.Spec.AccessModes
-		return len(access) == 1 && access[0] == corev1.ReadWriteMany
-	}, 15*time.Second, 200*time.Millisecond, "sandbox PVC should be created as RWX")
+		return len(access) == 1 && access[0] == corev1.ReadWriteOnce
+	}, 15*time.Second, 200*time.Millisecond, "sandbox PVC should be created as RWO")
 
 	// NetworkPolicy: deny-by-default egress, no internet IPBlock rule (denied mode).
 	var np networkingv1.NetworkPolicy
@@ -354,41 +344,28 @@ func TestAgentPoolValidation(t *testing.T) {
 	assert.Contains(t, err.Error(), "must be https://")
 	assert.NotErrorAs(t, err, &missingDependency)
 
-	// Single-replica ReadWriteOnce is valid (HOR-427 RWO single-worker mode).
-	rwoOk := validAgentPool("b5", ns)
-	rwoOk.Spec.Replicas = 1
-	rwoOk.Spec.CredentialBindings = nil
-	rwoOk.Spec.Sandbox.AccessMode = corev1.ReadWriteOnce
-	assert.NoError(t, newReconciler(ca, creds).validateSpec(ctx, rwoOk))
+	// RWO is valid at zero, one, and multiple replicas because every worker is
+	// constrained to the one supported K3s node.
+	for _, replicas := range []int32{0, 1, 2, 4} {
+		rwo := validAgentPool(fmt.Sprintf("b5-%d", replicas), ns)
+		rwo.Spec.Replicas = replicas
+		rwo.Spec.CredentialBindings = nil
+		assert.NoError(t, newReconciler(ca, creds).validateSpec(ctx, rwo))
+	}
 
-	// Scaled-to-zero ReadWriteOnce is valid: an operator may pause the single
-	// RWO worker (replicas == 0) without switching the sandbox to RWX
-	// (user-approved rescope of the literal "== 1" wording).
-	rwoPaused := validAgentPool("b5z", ns)
-	rwoPaused.Spec.Replicas = 0
-	rwoPaused.Spec.CredentialBindings = nil
-	rwoPaused.Spec.Sandbox.AccessMode = corev1.ReadWriteOnce
-	assert.NoError(t, newReconciler(ca, creds).validateSpec(ctx, rwoPaused))
-
-	// Multi-replica ReadWriteOnce -> rejected before any workload rollout
-	// (HOR-427 fail-closed: RWO is single-worker only). Also covers rejecting
-	// changing a live multi-replica pool to RWO.
-	badAccess := validAgentPool("b5b", ns)
-	badAccess.Spec.Replicas = 2
-	badAccess.Spec.CredentialBindings = nil
-	badAccess.Spec.Sandbox.AccessMode = corev1.ReadWriteOnce
-	err = newReconciler(ca, creds).validateSpec(ctx, badAccess)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "at most one replica")
-
-	// Unknown access mode -> rejected.
 	badMode := validAgentPool("b5c", ns)
-	badMode.Spec.Replicas = 1
 	badMode.Spec.CredentialBindings = nil
-	badMode.Spec.Sandbox.AccessMode = corev1.PersistentVolumeAccessMode("ReadWritePod")
+	badMode.Spec.Sandbox.AccessMode = corev1.ReadWriteMany
 	err = newReconciler(ca, creds).validateSpec(ctx, badMode)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "accessMode must be ReadWriteMany or ReadWriteOnce")
+	assert.Contains(t, err.Error(), "must be ReadWriteOnce")
+
+	badClass := validAgentPool("b5d", ns)
+	badClass.Spec.CredentialBindings = nil
+	badClass.Spec.Sandbox.StorageClassName = "local-path"
+	err = newReconciler(ca, creds).validateSpec(ctx, badClass)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), agentPoolWorkspaceStorageClass)
 
 	// Duplicate (toolName, slot) binding -> rejected (ARCH-018/HOR-245).
 	dupBinding := validAgentPool("b6", ns)
@@ -450,7 +427,7 @@ func TestAgentPoolTransientSecretReadRecovery(t *testing.T) {
 	ca := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "platform-ca", Namespace: "default"}}
 	creds := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "graph-creds", Namespace: "default"}}
 	recorder := &recordingMaterializer{}
-	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&v1alpha1.AgentPool{}).WithObjects(pool, ca, creds).Build()
+	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&v1alpha1.AgentPool{}).WithObjects(pool, ca, creds, localPathClass()).Build()
 	injected := fmt.Errorf("injected API reader timeout")
 	reader := &failOnceSecretReader{Reader: c, err: injected}
 	r := &AgentPoolReconciler{Client: c, Scheme: scheme, APIReader: reader, Store: recorder}
@@ -503,7 +480,7 @@ func TestAgentPoolLateSecretRecovery(t *testing.T) {
 	pool.Spec.Replicas = 0
 	pool.Spec.Sandbox.AccessMode = corev1.ReadWriteOnce
 	recorder := &recordingMaterializer{}
-	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&v1alpha1.AgentPool{}).WithObjects(pool).Build()
+	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&v1alpha1.AgentPool{}).WithObjects(pool, localPathClass()).Build()
 	r := &AgentPoolReconciler{Client: c, Scheme: scheme, APIReader: c, Store: recorder}
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: pool.Name, Namespace: pool.Namespace}}
 
@@ -897,12 +874,9 @@ func TestAgentPoolGatewayRevocationIndependentOfAssembly(t *testing.T) {
 		"assembly must still be failing (ObservedGeneration pinned), yet revocation converged")
 }
 
-// TestAgentPoolSingleReplicaRWOReconcile exercises the HOR-427 single-worker
-// RWO deployment mode end-to-end under RBAC: a one-replica AgentPool with a
-// ReadWriteOnce sandbox reconciles the sandbox PVC with ReadWriteOnce access
-// mode and exactly one warm-worker pod (the RWO acceptance mode). Requires
-// KUBEBUILDER_ASSETS (envtest).
-func TestAgentPoolSingleReplicaRWOReconcile(t *testing.T) {
+// TestAgentPoolMultiReplicaRWOReconcile proves RWO constrains one node rather
+// than one pod: a multi-replica pool reconciles one RWO claim and two workers.
+func TestAgentPoolMultiReplicaRWOReconcile(t *testing.T) {
 	adminClient, ctx := newAgentPoolTestEnv(t, nil)
 	ns := "default"
 
@@ -915,8 +889,9 @@ func TestAgentPoolSingleReplicaRWOReconcile(t *testing.T) {
 		StringData: map[string]string{"token": "v"},
 	}))
 
+	seedLocalPathClass(t, adminClient, ctx)
 	pool := validAgentPool("rwo-pool", ns)
-	pool.Spec.Replicas = 1
+	pool.Spec.Replicas = 2
 	pool.Spec.Sandbox.AccessMode = corev1.ReadWriteOnce
 	require.NoError(t, adminClient.Create(ctx, pool))
 
@@ -930,25 +905,20 @@ func TestAgentPoolSingleReplicaRWOReconcile(t *testing.T) {
 		return len(access) == 1 && access[0] == corev1.ReadWriteOnce
 	}, 15*time.Second, 200*time.Millisecond, "sandbox PVC should be created as ReadWriteOnce")
 
-	// Exactly one warm-worker pod (RWO is single-worker-only).
+	// Two warm-worker pods share the one node-local RWO claim.
 	require.Eventually(t, func() bool {
 		var pods corev1.PodList
 		if err := adminClient.List(ctx, &pods, client.InNamespace(ns), client.MatchingLabels{"platform.iterabase.com/agentpool": "rwo-pool"}); err != nil {
 			return false
 		}
-		return len(pods.Items) == 1
-	}, 15*time.Second, 200*time.Millisecond, "exactly one warm-worker pod should be created for RWO")
+		return len(pods.Items) == 2
+	}, 15*time.Second, 200*time.Millisecond, "two warm-worker pods should be created for same-node RWO")
 }
 
-// TestAgentPoolRWOMutationPreservesPVC proves the HOR-427 fail-closed contract
-// for RWO<->RWX mutation: toggling the sandbox access mode on a live pool must
-// NOT silently recreate or drop the bound PVC (which would destroy session
-// data). The reconciler's ensurePVC uses CreateOrUpdate, so the PVC object is
-// updated in place and its identity (UID) is preserved across the mutation —
-// the controller never deletes/recreates it. envtest has no provisioner, so the
-// PVC stays unbound; this asserts the no-recreate identity property, not
-// runtime binding. Requires KUBEBUILDER_ASSETS (envtest).
-func TestAgentPoolRWOMutationPreservesPVC(t *testing.T) {
+// TestAgentPoolLocalPathSizeMutationPreservesPVC proves the non-expandable
+// contract: changing requested size never recreates or silently mutates the
+// existing claim.
+func TestAgentPoolLocalPathSizeMutationPreservesPVC(t *testing.T) {
 	adminClient, ctx := newAgentPoolTestEnv(t, nil)
 	ns := "default"
 
@@ -961,6 +931,7 @@ func TestAgentPoolRWOMutationPreservesPVC(t *testing.T) {
 		StringData: map[string]string{"token": "v"},
 	}))
 
+	seedLocalPathClass(t, adminClient, ctx)
 	pool := validAgentPool("mut-pool", ns)
 	pool.Spec.Replicas = 1
 	pool.Spec.Sandbox.AccessMode = corev1.ReadWriteOnce
@@ -980,19 +951,16 @@ func TestAgentPoolRWOMutationPreservesPVC(t *testing.T) {
 		return firstUID != "" && len(pvc.Spec.AccessModes) == 1 && pvc.Spec.AccessModes[0] == corev1.ReadWriteOnce
 	}, 15*time.Second, 200*time.Millisecond, "RWO sandbox PVC should be created")
 
-	// Toggle the pool to RWX (replicas stays 1, so the spec is still valid).
-	// PVC accessModes are immutable after creation, so the controller MUST NOT
-	// silently mutate or delete/recreate the PVC: it fails closed, surfacing the
-	// immutable error and preserving the PVC identity (no data loss). This is
-	// the HOR-427 fail-closed contract for RWO<->RWX mutation.
+	// Request online expansion. The fixed local-path class is non-expandable, so
+	// the controller must preserve the existing claim and surface the refusal.
 	require.Eventually(t, func() bool {
 		var got v1alpha1.AgentPool
 		if err := adminClient.Get(ctx, poolNN, &got); err != nil {
 			return false
 		}
-		got.Spec.Sandbox.AccessMode = corev1.ReadWriteMany
+		got.Spec.Sandbox.Size = resource.MustParse("20Gi")
 		return adminClient.Update(ctx, &got) == nil
-	}, 15*time.Second, 200*time.Millisecond, "should toggle the pool spec to ReadWriteMany")
+	}, 15*time.Second, 200*time.Millisecond, "should update requested planning size")
 
 	// Fail-closed: the PVC is NOT recreated (same UID), its access mode is NOT
 	// silently rewritten, and the reconcile surfaces the immutability error in
@@ -1006,8 +974,8 @@ func TestAgentPoolRWOMutationPreservesPVC(t *testing.T) {
 		if err := adminClient.Get(ctx, poolNN, &got); err != nil {
 			return false
 		}
-		return pvc.UID == firstUID &&
-			len(pvc.Spec.AccessModes) == 1 && pvc.Spec.AccessModes[0] == corev1.ReadWriteOnce &&
-			strings.Contains(got.Status.Message, "immutable")
-	}, 15*time.Second, 200*time.Millisecond, "PVC must not be recreated or silently rewritten; the immutable accessMode error is surfaced (fail-closed)")
+		current := pvc.Spec.Resources.Requests[corev1.ResourceStorage]
+		return pvc.UID == firstUID && current.Cmp(resource.MustParse("10Gi")) == 0 &&
+			strings.Contains(got.Status.Message, "size is immutable")
+	}, 15*time.Second, 200*time.Millisecond, "PVC must not be recreated or expanded; the immutable size error is surfaced")
 }

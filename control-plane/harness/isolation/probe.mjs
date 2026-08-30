@@ -8,7 +8,7 @@
 //
 // Config arrives via env (the launcher's spawn({env}) — the supervisor's env is
 // not inherited). Prints `PASS/FAIL <assertion>` lines and exits 0 only if all
-// pass. This is the HOR-381 gate (bullets 1-5); bullets 6-7 (RWX-CSI cross-pod
+// pass. This is the HOR-381 gate (bullets 1-5); bullets 6-7 (RWO local-path cross-pod
 // ownership + Pod Security admission) are HOR-245's gate.
 
 import fs from "node:fs";

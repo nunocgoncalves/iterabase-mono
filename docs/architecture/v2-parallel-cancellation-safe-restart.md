@@ -5,7 +5,7 @@
 - **Architecture ticket:** [HOR-457](https://linear.app/horizonshift/issue/HOR-457/v2-approve-parallel-cancellation-and-safe-restart-runtime-contract)
 - **Product contract:** Obsidian `Platform V2 — Managed Digital Workforce — Product Requirements`, especially `REQ-018`–`REQ-024`, `SCN-012`–`SCN-015`, and `SCN-018`
 - **Related authority:** [`v2-authentication-authority.md`](v2-authentication-authority.md), [`v2-chat-tool-confirmation.md`](v2-chat-tool-confirmation.md), and [`v2-artifact-processing.md`](v2-artifact-processing.md)
-- **Implementation owners:** HOR-468, HOR-466, HOR-464, HOR-463, HOR-516, HOR-424, HOR-469, and the release-validation owner identified in section 22
+- **Implementation owners:** HOR-468, HOR-466, HOR-464, HOR-463, HOR-516, HOR-538, and the release-validation owner identified in section 22
 
 This record is the repository authority for V2 structured parallel graphs, execution lanes, branch sessions and outputs, join-all scheduling, cyclic review/remediation, customer work projections, required-branch failure, cancellation fencing, consequence handling, declared checkpoints, immutable-output reuse, fresh-attempt restart, and the OPO1 runtime reset boundary. It does not implement, deploy, reset, or delete data.
 
@@ -38,7 +38,7 @@ The founder approved the exact revised package below on 2026-08-24. The complete
 - **Approved by:** Nuno Gonçalves
 - **Approved on:** 2026-08-24
 - **Scope:** Attempt/branch identity, pi sessions, sandbox isolation, and the storage prerequisite.
-- **Decision:** Every attempt owns a durable root execution lane. Each fork visit creates a durable fork activation ID; each declared branch receives a durable branch execution ID keyed by activation plus branch key and its own lane. At most one node execution is active per lane, while an attempt may have multiple active branch lanes. Every visit/output retains attempt, lane, activation, branch, node, visit sequence, and exact execution identity. Root and branch turns retain separate pi session identities; every branch uses a distinct sandbox/session/UID lifecycle, and IDs are never reused. Branch data crosses lanes only through PostgreSQL-committed validated outputs and immutable artifact references—never through another branch’s live filesystem. Production parallel validation requires a multi-worker AgentPool backed by an RWX-capable session substrate; HOR-424/HOR-469 select and provision that substrate, and HOR-457 selects no competing RWX mechanism.
+- **Decision:** Every attempt owns a durable root execution lane. Each fork visit creates a durable fork activation ID; each declared branch receives a durable branch execution ID keyed by activation plus branch key and its own lane. At most one node execution is active per lane, while an attempt may have multiple active branch lanes. Every visit/output retains attempt, lane, activation, branch, node, visit sequence, and exact execution identity. Root and branch turns retain separate pi session identities; every branch uses a distinct sandbox/session/UID lifecycle, and IDs are never reused. Branch data crosses lanes only through PostgreSQL-committed validated outputs and immutable artifact references—never through another branch’s live filesystem. Production parallel validation requires a multi-worker AgentPool backed by the fixed same-node local-path RWO session substrate; HOR-538 prepares and validates that substrate. RWO constrains the claim to the one supported node, not to one worker pod.
 - **Consequences:** Parallelism requires lane-aware runtime records and isolated branch sessions; shared filesystem state is not a branch communication channel.
 - **Evidence:** Founder approval recorded in HOR-457 on 2026-08-24 before repository edits.
 
@@ -154,7 +154,7 @@ The founder approved the exact revised package below on 2026-08-24. The complete
 - Branch/node/turn automatic retry, stopped-attempt resume in place, session resurrection, or inferred checkpoints.
 - Compensation, universal undo, reversal claims, or a second consequence ledger.
 - Customer graph/checkpoint authoring or customer configuration of workers, sessions, storage, tools, or models.
-- Selection or provisioning of the production RWX backend.
+- Selection or provisioning of the dedicated local-path RWO workspace substrate.
 
 ### Non-negotiable invariants
 
@@ -435,7 +435,7 @@ The join node's platform output is:
 - Attempt creation creates the root lane and a new root pi session/sandbox identity.
 - Fork activation creates a distinct session/sandbox identity and UID lifecycle for every branch before the branch becomes runnable.
 - A worker may execute successive visits from the same lane/session, including configured review cycles. It cannot execute two simultaneous turns for that session.
-- Another worker may execute a later visit after the prior turn settled; RWX permits the same durable session to move between workers under assignment fencing.
+- Another worker may execute a later visit after the prior turn settled; same-node RWO permits the same durable session to move between workers under assignment fencing.
 - Branch arrival makes its session cleanup-eligible after all committed event ACKs. Downstream work never needs the live branch filesystem.
 - Root session remains available while the root lane waits for a join and resumes after join. It is cleanup-eligible only when the attempt stops/finishes.
 - Session cleanup/control delivery is durable and idempotent. UID/session identity is not reused until the existing reap confirmation and grace contract permits it.
@@ -900,7 +900,7 @@ Operator runtime events retain exact lane/branch/node/turn/assignment/fence/targ
 | Restart path has running invocation | Restart ineligible | Wait for ledger reconciliation | Stopped; effect still in flight | Re-propose after terminal/unknown. |
 | Crash during new-attempt transaction | Old attempt remains current or full new attempt exists | Idempotent proposal decision returns committed result | One new attempt at most | No partial reuse/session. |
 | PostgreSQL unavailable | No authoritative transition | Fail closed; send no new work/effect | Temporary unavailable | Retry command/claim before effect boundary. |
-| RWX unavailable/ambiguous | Parallel production preflight fails | Do not activate production parallel work | Operator-visible unavailable | HOR-424/HOR-469 remediation. |
+| Dedicated workspace mount/class/PV unavailable or ambiguous | Parallel production preflight fails | Do not activate production parallel work | Operator-visible unavailable | HOR-538 remediation. |
 
 ## 16. Security and privacy boundaries
 
@@ -925,7 +925,7 @@ Required bounded metrics:
 - active/late/outcome-unknown work consequences;
 - checkpoint attainments, selected/fallback/invalidated restart counts;
 - restart proposal stale reasons;
-- session cleanup backlog and RWX preflight status.
+- session cleanup backlog and dedicated-workspace preflight status.
 
 Reconciliation loops:
 
@@ -938,7 +938,7 @@ Reconciliation loops:
 - checkpoint attainments whose immutable references fail integrity checks (operator incident; never silently rewrite);
 - gateway work invocations whose leases require existing outcome classification.
 
-Alerts cover stuck runnable lanes with available worker credit, overdue stop targets, unknown work consequences, failed session cleanup, invalid graph reconciliation, and RWX readiness loss. Alerts never auto-retry execution.
+Alerts cover stuck runnable lanes with available worker credit, overdue stop targets, unknown work consequences, failed session cleanup, invalid graph reconciliation, and dedicated workspace readiness/capacity loss. Alerts never auto-retry execution.
 
 ## 18. Executable validation strategy
 
@@ -989,7 +989,7 @@ Run at least two scheduler replicas and many goroutines with deterministic failp
 - Target-state matrix tests prove `delivered` is nonterminal; turn/invocation `unreachable` requires its independent fence/ledger proof; session `unreachable` preserves the never-reusable session and UID/GID allocation; and the stop intent settles only under the complete section 9.1 predicate.
 - Late worker sequences append/dedup after-terminal evidence and never arrive/join.
 - Write cancellation after send preserves `succeeded|outcome_unknown`; no test accepts a fabricated failed/undone state.
-- Distinct branch sessions/UIDs can execute on separate workers over the approved RWX substrate and cannot read each other's live directories.
+- Distinct branch sessions/UIDs can execute on separate workers over the approved dedicated local-path RWO substrate and cannot read each other's live directories.
 
 ### 18.5 Work projection tests
 
@@ -1023,7 +1023,7 @@ Use deterministic barriers before/after fork commit, turn creation, assignment c
 
 ### 18.8 OPO1 reset rehearsal
 
-On a disposable OPO1 database and RWX copy:
+On a disposable OPO1 database and dedicated-workspace copy:
 
 1. seed current sequential/cyclic definitions, work items, attempts, blockers, assignments, session UID fences/directories (including a leaked sandbox), and work-scoped invocations;
 2. prove cutover preflight rejects every authoritative nonterminal run state, including a blocked `runtime.workflow_runs.state='awaiting_approval'` row with its open `work.blockers` record and `runtime.node_executions.state='blocked'`, as well as active turns/assignments and `dispatching|running|outcome_unknown` work invocations;
@@ -1062,7 +1062,7 @@ The cutover coordinator distinguishes a fail-closed **admission fence** from the
 - With the required API, runtime/dispatch, Tool Gateway, artifact, harness, and bounded reconciliation writers still running under that allowlist, drain or explicitly stop every workflow run/turn/assignment and settle every stop target. This is the only phase allowed to turn already-authorized in-flight work into terminal evidence.
 - Against the authoritative OPO1 schema, require zero `runtime.workflow_runs` row with `state IN ('pending','running','awaiting_approval')` or `finished_at IS NULL`, zero `runtime.turns` row with `state IN ('pending','running')` or `settled_at IS NULL`, and zero `runtime.turn_assignments.state='active'`. Any inconsistent timestamp/state pair fails closed. Also require zero `dispatching|running|outcome_unknown` work-scoped gateway invocation; unknown effects must be definitively reconciled or the cutover aborts.
 - Only after all zero predicates pass may the coordinator CAS from `admission_fenced` to `maintenance_fenced`. Revoke/fence every application, gateway, worker, controller, reconciler, object-store, and human writer; wait for existing allowlisted transactions to drain. The audited maintenance coordinator is then the sole temporary writer and rechecks the zero predicates under the full fence. A premature transition is rejected rather than freezing work that still needs terminalization.
-- Before deleting any session reference or UID allocation, inventory every reset session's exact sandbox path and UID/GID. Use the existing owner/symlink/persist-after-remove safety contract (or an equivalent offline maintenance reaper) to reap each path, verify it absent on the approved RWX substrate, and only then mark its allocation releasable. A missing path is an idempotent success; a foreign-owned, symlinked, unreachable, or persistent path aborts cutover and leaves its allocation fence intact.
+- Before deleting any session reference or UID allocation, inventory every reset session's exact sandbox path and UID/GID. Use the existing owner/symlink/persist-after-remove safety contract (or an equivalent offline maintenance reaper) to reap each path, verify it absent on the approved dedicated local-path RWO substrate, and only then mark its allocation releasable. A missing path is an idempotent success; a foreign-owned, symlinked, unreachable, or persistent path aborts cutover and leaves its allocation fence intact.
 - Disconnect the maintenance coordinator and prove no PostgreSQL write-capable session/transaction or retained-object mutation source remains. Then take and verify one cold PostgreSQL snapshot. It is rollback protection, not a backfill source; retained object mutation stays frozen so snapshot restore cannot produce metadata/byte divergence.
 
 ### Phase C — process stop and destructive reset
@@ -1070,7 +1070,7 @@ The cutover coordinator distinguishes a fail-closed **admission fence** from the
 With every mutation source already fenced, scale Product API, runtime/scheduler/dispatch, Tool Gateway, harness workers, identity/artifact writers, controllers/reconcilers, and maintenance jobs to zero and verify none remains. Then:
 
 - clear work execution data: work items, attempts, blockers, feedback, execution-linked artifact references, timeline/value execution rows, checkpoints, reuse, and control proposals;
-- re-verify the reset-session manifest, then clear runtime workflow runs, lanes, activations, branches, node visits/routes/arrivals/joins, turns/events, assignments, run-pool bindings, stop outboxes, session references, and session UID/cleanup allocations only for sessions whose RWX paths are proved absent; if any proof is missing, abort and preserve the reference/fence;
+- re-verify the reset-session manifest, then clear runtime workflow runs, lanes, activations, branches, node visits/routes/arrivals/joins, turns/events, assignments, run-pool bindings, stop outboxes, session references, and session UID/cleanup allocations only for sessions whose dedicated-workspace paths are proved absent; if any proof is missing, abort and preserve the reference/fence;
 - clear work-attempt tool pins and work-scoped Tool Gateway invocations/related retained execution rows;
 - clear materialized workflow definitions and definition-owned pool bindings that will be reconciled from declarative configuration;
 - create/validate the V2 runtime/work schema in foreign-key-safe order.
@@ -1081,7 +1081,7 @@ Retain identity/authentication authority, artifact metadata and immutable bytes,
 
 - Deploy one uniform V2 API/runtime/dispatch/gateway/harness protocol set while starts remain closed.
 - Reconcile every workflow definition from declarative configuration.
-- Fail closed if any graph, cyclic region, checkpoint, pool, model, tool, artifact-input, or session/RWX prerequisite does not validate.
+- Fail closed if any graph, cyclic region, checkpoint, pool, model, tool, artifact-input, or session/dedicated-storage prerequisite does not validate.
 - Verify no old pod/process remains before opening any writer.
 - Run the approved smoke suite and record exact image/chart/schema/definition identities.
 - Reopen starts only after all checks pass.
@@ -1153,8 +1153,8 @@ sequenceDiagram
 - **HOR-464:** cookie-only cancel proposals/confirmation, attempt stop transaction, dispatch/gateway/session target outbox, stopped subtype/retry eligibility, late consequence projection, and race tests.
 - **HOR-463:** checkpoint schema/validation/attainment, input digest, restart proposal/confirmation, lineage selection, immutable reuse references, entry fallback, path-reachable consequence review, and UI/API attempt history.
 - **HOR-516:** interaction/presentation design must consume these status, blocker, consequence, checkpoint, and stopped-work semantics without redefining them.
-- **HOR-424/HOR-469:** select/provision/validate the production RWX/BYO substrate; they do not redefine lane/session semantics.
-- **Shared release validation:** exact multi-worker RWX E2E, process recovery, consequence integrity, clean-reset rehearsal, deployment evidence, and rollback boundary.
+- **HOR-538:** prepare and validate the fixed dedicated local-path RWO substrate; they do not redefine lane/session semantics.
+- **Shared release validation:** exact same-node multi-worker RWO E2E, process recovery, consequence integrity, clean-reset rehearsal, deployment evidence, and rollback boundary.
 
 HOR-468 should establish the schema and attempt-terminal lock seam consumed by HOR-464/HOR-463. HOR-464 must land before restart execution is enabled, because restart eligibility depends on settled stop/consequence state. HOR-466 may build projections after the runtime records are stable. No Todo/cycle placement bypasses these dependency gates.
 
@@ -1163,7 +1163,7 @@ HOR-468 should establish the schema and attempt-terminal lock seam consumed by H
 HOR-457's architecture deliverable is complete when review confirms:
 
 - [x] Founder-approved `DES-HOR-457-01` through `DES-HOR-457-13` are durable in Linear and reproduced exactly here.
-- [x] Graph schema, validation, join-all, branch identity/output, scheduler/recovery, and session/RWX assumptions are explicit.
+- [x] Graph schema, validation, join-all, branch identity/output, scheduler/recovery, and session/same-node RWO assumptions are explicit.
 - [x] Sequential and one-branch review/remediation cycles are valid, while every fork/join-crossing cycle is explicitly rejected.
 - [x] State machines, transaction/lock/fence invariants, sequence diagrams, failure matrix, customer projections, and consequence authority are explicit.
 - [x] Checkpoint declaration/attainment, applicability, immutable reuse, revised-input invalidation, consequence confirmation, entry fallback, and fresh-attempt lineage are explicit.

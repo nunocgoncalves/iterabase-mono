@@ -22,16 +22,13 @@ spec:
       name: platform-ca
     certMountPath: /etc/harness/tls
 
-  # Shared sandbox PVC. ReadWriteMany is required for multi-worker pools and
-  # must match the platform chart's exact managed/external class plus a current
-  # HOR-469/v1 live conformance attestation. ReadWriteOnce is supported only
-  # as a single-worker deployment mode (replicas: 1) on an ordinary RWO
-  # StorageClass, and is not the production multi-worker storage backend.
-  # Per-session subdirs are 0700 owned by the session UID/GID (provisioning by
-  # the supervisor, HOR-381). The PVC request is the per-pool storage quota.
+  # One dedicated-class node-local RWO PVC. RWO constrains the volume to the
+  # single supported K3s node, not one pod, so every replica may mount it.
+  # Per-session subdirs remain 0700 under stable UID/GID isolation. The PVC
+  # request is planning metadata because local-path provides no hard quota.
   sandbox:
-    storageClassName: iterabase-rwx
-    accessMode: ReadWriteMany
+    storageClassName: iterabase-agentpool-local-path
+    accessMode: ReadWriteOnce
     size: 100Gi
     mountPath: /data/sandboxes
 

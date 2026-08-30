@@ -81,9 +81,8 @@ const (
 	workerTemplateHashAnnotation = "platform.iterabase.com/pod-template-hash"
 )
 
-// AgentPoolReconciler maintains a bounded set of isolated warm-worker pods +
-// the shared sandbox PVC (RWX or RWO per the pool's access mode) + a
-// deny-by-default NetworkPolicy for each
+// AgentPoolReconciler maintains isolated warm-worker pods plus one fixed-class
+// node-local RWO sandbox PVC and a deny-by-default NetworkPolicy for each
 // AgentPool CR (HOR-245). Per-pod SPIFFE certs are issued by the cert-manager
 // CSI driver (annotated on each pod); the operator never holds the CA key.
 type AgentPoolReconciler struct {
@@ -111,7 +110,6 @@ type AgentPoolReconciler struct {
 // +kubebuilder:rbac:groups="",resources=persistentvolumes,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get
 // +kubebuilder:rbac:groups=storage.k8s.io,resources=storageclasses,verbs=get;list;watch
-// +kubebuilder:rbac:groups=longhorn.io,resources=volumes,verbs=get;list;watch
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
 
 // PoolMaterializer is the contract by which the AgentPool reconciler
@@ -206,6 +204,13 @@ func (r *AgentPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		_ = r.patchStatus(ctx, &pool, false, 0, fmt.Sprintf("materialize gateway: %v", err), false)
 		return ctrl.Result{}, err
 	}
+	// Validate the fixed StorageClass before creating or mutating a claim. A
+	// missing/wrong/default/expandable class must fail without leaving a new PVC.
+	storagePreflight := r.assessAgentPoolStorage(ctx, &pool)
+	if !storagePreflight.CanMount {
+		_ = r.patchStatus(ctx, &pool, false, 0, storagePreflight.Message, false, &storagePreflight)
+		return ctrl.Result{RequeueAfter: healthRequeueInterval}, nil
+	}
 	if err := r.ensurePVC(ctx, &pool); err != nil {
 		var mutationErr *agentPoolStorageMutationError
 		if stderrors.As(err, &mutationErr) {
@@ -272,25 +277,6 @@ func (r *AgentPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		_ = r.patchStatus(ctx, &pool, false, readyReplicas, storage.Message, false, &storage)
 		return ctrl.Result{RequeueAfter: healthRequeueInterval}, nil
 	}
-	replacementPending := storageWorkerReplacementPending(&pool)
-	verifyAttachedBackend := readyReplicas > 0 || (storageWasOperationallyReady(&pool) && !replacementPending)
-	if storage.Mode == storageModeManagedLonghorn && verifyAttachedBackend {
-		if failure := r.managedLonghornVolumeHealth(ctx, storage.VolumeHandle, true); failure != nil {
-			failure.Mode = storage.Mode
-			failure.ClassName = storage.ClassName
-			failure.PVName = storage.PVName
-			failure.VolumeHandle = storage.VolumeHandle
-			if err := r.quiesceWorkers(ctx, &pool); err != nil {
-				return ctrl.Result{}, err
-			}
-			failure.Reason = storageReasonRecoveryPending
-			failure.Message += "; workers were removed and no turn/effect will be replayed automatically"
-			failure.ReplacementPending = true
-			_ = r.patchStatus(ctx, &pool, false, 0, failure.Message, false, failure)
-			return ctrl.Result{RequeueAfter: healthRequeueInterval}, nil
-		}
-	}
-
 	ready := readyReplicas > 0 || pool.Spec.Replicas == 0
 	msg := storage.Message
 	if pool.Spec.Replicas == 0 {
@@ -315,8 +301,8 @@ func (r *AgentPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 }
 
 // validateSpec validates structural correctness (ARCH-018): required fields,
-// sandbox access mode (RWX multi-worker / RWO single-worker with replicas==1),
-// egress mode, no duplicate gateway grants, and existence of referenced
+// fixed dedicated-class RWO storage, egress mode, no duplicate gateway grants,
+// and existence of referenced
 // Secrets (credential bindings + CA). Semantic validation that a granted tool
 // is registered is the gateway's responsibility (HOR-392/397).
 //
@@ -331,27 +317,11 @@ func (r *AgentPoolReconciler) validateSpec(ctx context.Context, pool *v1alpha1.A
 	if pool.Spec.PodSecurity != "baseline" {
 		return fmt.Errorf("spec.podSecurity must be \"baseline\" (per-turn UID launch requires CAP_SETUID/SETGID, which PSS restricted forbids)")
 	}
-	if pool.Spec.Sandbox.StorageClassName == "" {
-		return fmt.Errorf("spec.sandbox.storageClassName is required")
+	if pool.Spec.Sandbox.StorageClassName != agentPoolWorkspaceStorageClass {
+		return fmt.Errorf("spec.sandbox.storageClassName must be %q; default, alternate, and BYO classes are unsupported", agentPoolWorkspaceStorageClass)
 	}
-	switch pool.Spec.Sandbox.AccessMode {
-	case corev1.ReadWriteMany:
-		// RWX is required for interchangeable/concurrent workers and supports
-		// any replica count (HOR-427 preserves existing multi-worker behavior).
-	case corev1.ReadWriteOnce:
-		// RWO is a single-worker deployment mode only: a bound RWO PVC can be
-		// mounted by exactly one node/pod, so more than one replica would break
-		// at schedule time. Reject both creating a multi-replica RWO pool and
-		// changing a live multi-replica pool to RWO before any workload is
-		// rolled out (HOR-427). A scaled-to-zero (replicas == 0) pool is
-		// permitted so an operator can pause the single RWO worker without
-		// switching the sandbox to RWX (user-approved rescope of the literal
-		// "== 1" wording).
-		if pool.Spec.Replicas > 1 {
-			return fmt.Errorf("spec.sandbox.accessMode ReadWriteOnce supports at most one replica (single-worker RWO mode); set replicas to 0 or 1, or use ReadWriteMany")
-		}
-	default:
-		return fmt.Errorf("spec.sandbox.accessMode must be ReadWriteMany or ReadWriteOnce")
+	if pool.Spec.Sandbox.AccessMode != corev1.ReadWriteOnce {
+		return fmt.Errorf("spec.sandbox.accessMode must be ReadWriteOnce; RWO permits multiple pods on the supported single node")
 	}
 	if pool.Spec.Sandbox.Size.IsZero() {
 		return fmt.Errorf("spec.sandbox.size is required and must be positive")
@@ -603,8 +573,7 @@ func (r *AgentPoolReconciler) secretExists(ctx context.Context, ns, name string)
 	return nil
 }
 
-// ensurePVC creates/updates the shared sandbox PVC (RWX or RWO per the
-// pool's spec.sandbox.accessMode).
+// ensurePVC creates/updates the one fixed-class RWO sandbox PVC.
 func (r *AgentPoolReconciler) ensurePVC(ctx context.Context, pool *v1alpha1.AgentPool) error {
 	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: sandboxPVCName(pool), Namespace: pool.Namespace}}
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, pvc, func() error {
@@ -627,10 +596,10 @@ func (r *AgentPoolReconciler) ensurePVC(ctx context.Context, pool *v1alpha1.Agen
 				}
 			}
 			current := pvc.Spec.Resources.Requests[corev1.ResourceStorage]
-			if current.Cmp(pool.Spec.Sandbox.Size) > 0 {
+			if current.Cmp(pool.Spec.Sandbox.Size) != 0 {
 				return &agentPoolStorageMutationError{
 					reason:  storageReasonPVCExpansionFailed,
-					message: fmt.Sprintf("PVCExpansionFailed: sandbox PVC shrink from %s to %s is unsupported; create/copy/cut over under a reviewed migration plan", current.String(), pool.Spec.Sandbox.Size.String()),
+					message: fmt.Sprintf("PVCExpansionFailed: local-path sandbox PVC size is immutable (current %s requested %s); online expansion and shrink are unsupported", current.String(), pool.Spec.Sandbox.Size.String()),
 				}
 			}
 		} else {
@@ -799,8 +768,7 @@ func (r *AgentPoolReconciler) countReadyWorkers(ctx context.Context, pool *v1alp
 }
 
 // buildWorkerPodSpec renders the warm-worker pod: supervisor container with
-// the cert-manager CSI TLS volume, the shared sandbox PVC (RWX or RWO per
-// the pool spec), the WAL
+// the cert-manager CSI TLS volume, the shared node-local RWO sandbox PVC, the WAL
 // emptyDir, the per-pod config ConfigMap, and read-only piDirs (placeholder
 // mounts; overlay content is HOR-393). The supervisor runs as root (UID 0) to
 // read the CSI driver's root-owned 0600 key and launch the per-turn child as

@@ -12,6 +12,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -32,21 +33,23 @@ import (
 
 const (
 	region      = "fra1"
-	size        = "s-2vcpu-4gb" // published/external baseline; s-1vcpu-2gb timed out on helm --wait
-	managedSize = "s-4vcpu-8gb" // full platform plus Longhorn's approved 4-vCPU minimum needs independent headroom
+	size        = "s-2vcpu-4gb" // smallest published baseline fixture
+	managedSize = "s-4vcpu-8gb" // full platform plus two concurrent workers needs independent headroom
 	image       = "ubuntu-24-04-x64"
 	k3sPort     = 6443
 )
 
 type cpuVMProvisioner interface {
 	Create(context.Context, string, string) (*godo.Droplet, error)
+	AttachWorkspace(context.Context, string, int) (string, error)
 	PublicIP(context.Context, int) (string, error)
 	Destroy(context.Context, int) error
 }
 
 type doCPUVMProvisioner struct {
-	client *godo.Client
-	size   string
+	client          *godo.Client
+	size            string
+	workspaceVolume string
 }
 
 func (provisioner *doCPUVMProvisioner) Create(ctx context.Context, runID, pubKey string) (*godo.Droplet, error) {
@@ -58,13 +61,37 @@ func (provisioner *doCPUVMProvisioner) Create(ctx context.Context, runID, pubKey
 	return droplet, err
 }
 
+func (provisioner *doCPUVMProvisioner) AttachWorkspace(ctx context.Context, runID string, dropletID int) (string, error) {
+	name := runID + "-workspaces"
+	volume, _, err := provisioner.client.Storage.CreateVolume(ctx, newWorkspaceVolumeRequest(runID, name, region))
+	if err != nil {
+		return "", fmt.Errorf("create dedicated workspace volume: %w", err)
+	}
+	provisioner.workspaceVolume = volume.ID
+	if _, _, err := provisioner.client.StorageActions.Attach(ctx, volume.ID, dropletID); err != nil {
+		return "", fmt.Errorf("attach dedicated workspace volume: %w", err)
+	}
+	return "/dev/disk/by-id/scsi-0DO_Volume_" + name, nil
+}
+
+func newWorkspaceVolumeRequest(runID, name, targetRegion string) *godo.VolumeCreateRequest {
+	return &godo.VolumeCreateRequest{
+		Region: targetRegion, Name: name, Description: "HOR-538 dedicated AgentPool workspace filesystem", SizeGigaBytes: 25,
+		Tags: []string{"forge-e2e", runID},
+	}
+}
+
 func (provisioner *doCPUVMProvisioner) PublicIP(ctx context.Context, id int) (string, error) {
 	return waitForIP(ctx, provisioner.client, id)
 }
 
 func (provisioner *doCPUVMProvisioner) Destroy(ctx context.Context, id int) error {
-	_, err := provisioner.client.Droplets.Delete(ctx, id)
-	return err
+	_, dropletErr := provisioner.client.Droplets.Delete(ctx, id)
+	var volumeErr error
+	if provisioner.workspaceVolume != "" {
+		_, volumeErr = provisioner.client.Storage.DeleteVolume(ctx, provisioner.workspaceVolume)
+	}
+	return errors.Join(dropletErr, volumeErr)
 }
 
 type digitalOceanCPUState struct {
@@ -80,7 +107,8 @@ type digitalOceanCPUState struct {
 	forgeBin            string
 	forgeHome           string
 	chartVersion        string
-	managedRWX          bool
+	workspaceDevice     string
+	freshInstall        bool
 	storagePVCUID       string
 	storagePV           string
 	agentPoolPVCUID     string
@@ -92,8 +120,10 @@ func newDigitalOceanCPUState(t *testing.T) *digitalOceanCPUState {
 	return newDigitalOceanCPUStateForScenario(t, "digitalocean-cpu")
 }
 
-func newDigitalOceanRWXTLSState(t *testing.T) *digitalOceanCPUState {
-	return newDigitalOceanCPUStateForScenario(t, "digitalocean-rwx-tls")
+func newDigitalOceanWorkspaceState(t *testing.T) *digitalOceanCPUState {
+	state := newDigitalOceanCPUStateForScenario(t, "digitalocean-workspace")
+	state.freshInstall = true
+	return state
 }
 
 func newDigitalOceanCPUStateForScenario(t *testing.T, scenario string) *digitalOceanCPUState {
@@ -105,32 +135,20 @@ func newDigitalOceanCPUStateForScenario(t *testing.T, scenario string) *digitalO
 		t.Skip("DIGITALOCEAN_TOKEN not set; skipping DigitalOcean CPU scenario")
 	}
 
-	managedRWX := os.Getenv(storageChartArchiveEnv) != "" && os.Getenv(forceExternalStorageEnv) != "true"
 	state := &digitalOceanCPUState{
 		ctx:         context.Background(),
-		provisioner: &doCPUVMProvisioner{client: godo.NewFromToken(token), size: cpuScenarioSize(managedRWX)},
+		provisioner: &doCPUVMProvisioner{client: godo.NewFromToken(token), size: managedSize},
 		ready:       waitForHostReady,
 		runID:       fmt.Sprintf("forge-e2e-%d", time.Now().Unix()),
 		keep:        os.Getenv("FORGE_E2E_KEEP") != "",
 		forgeHome:   t.TempDir(),
-		managedRWX:  managedRWX,
 		diagnostics: newForgeDiagnostics(t, scenario),
 	}
 	state.pubKey, state.privKeyPath = generateKey(t)
 	state.forgeBin = buildForge(t)
 	state.chartVersion = platformChartVersion(t, "")
-	if os.Getenv(requireManagedTLSEnv) == "true" && !state.managedRWX {
-		t.Fatalf("mandatory managed-storage/internal-TLS evidence requires %s and forbids %s=true", storageChartArchiveEnv, forceExternalStorageEnv)
-	}
-	t.Logf("run %s (keep=%v managedRWX=%v)", state.runID, state.keep, state.managedRWX)
+	t.Logf("run %s (keep=%v)", state.runID, state.keep)
 	return state
-}
-
-func cpuScenarioSize(managedRWX bool) string {
-	if managedRWX {
-		return managedSize
-	}
-	return size
 }
 
 func provisionCPUStage(t *testing.T, state *digitalOceanCPUState) {
@@ -138,7 +156,8 @@ func provisionCPUStage(t *testing.T, state *digitalOceanCPUState) {
 	if err := provisionCPUHost(state); err != nil {
 		t.Fatal(err)
 	}
-	t.Logf("droplet ip %s", state.ip)
+	t.Setenv(workspaceDeviceEnv, state.workspaceDevice)
+	t.Logf("droplet ip %s workspace=%s", state.ip, state.workspaceDevice)
 }
 
 func provisionCPUHost(state *digitalOceanCPUState) error {
@@ -149,6 +168,11 @@ func provisionCPUHost(state *digitalOceanCPUState) error {
 	// Retain the resource identity immediately so shared scenario cleanup owns
 	// every failure after the cloud API accepts creation.
 	state.droplet = droplet
+	workspaceDevice, err := state.provisioner.AttachWorkspace(state.ctx, state.runID, droplet.ID)
+	if err != nil {
+		return err
+	}
+	state.workspaceDevice = workspaceDevice
 	ip, err := state.provisioner.PublicIP(state.ctx, droplet.ID)
 	if err != nil {
 		return fmt.Errorf("wait for droplet IP: %w", err)
@@ -156,6 +180,9 @@ func provisionCPUHost(state *digitalOceanCPUState) error {
 	state.ip = ip
 	if err := state.ready(state.ctx, ip, state.privKeyPath); err != nil {
 		return fmt.Errorf("wait for host readiness: %w", err)
+	}
+	if err := waitForWorkspaceDevice(state.ctx, ip, state.privKeyPath, workspaceDevice); err != nil {
+		return err
 	}
 	return nil
 }
@@ -203,9 +230,28 @@ func assertCurrentPlatformStage(t *testing.T, state *digitalOceanCPUState) {
 
 	assertRemoteHelmChartVersion(t, sc, state.runID, "iterabase-system", state.chartVersion)
 	assertRemoteHelmChartVersion(t, sc, state.runID+"-cert-manager", "iterabase-system", state.chartVersion)
-	if state.managedRWX {
-		assertRemoteHelmChartVersion(t, sc, state.runID+"-rwx-storage", "longhorn-system", state.chartVersion)
+	if _, err := sshOutput(sc, "sudo k3s kubectl get namespace longhorn-system"); err == nil {
+		t.Fatal("obsolete Longhorn namespace exists in the dedicated local-path release")
 	}
+	class := strings.TrimSpace(mustSSHOutput(t, sc, `sudo k3s kubectl get storageclass iterabase-agentpool-local-path -o jsonpath='{.provisioner}|{.reclaimPolicy}|{.volumeBindingMode}|{.allowVolumeExpansion}|{.metadata.annotations.storageclass\.kubernetes\.io/is-default-class}'`))
+	if class != "rancher.io/local-path|Delete|WaitForFirstConsumer|false|false" {
+		t.Fatalf("AgentPool local-path StorageClass contract = %q", class)
+	}
+	defaultClass := strings.TrimSpace(mustSSHOutput(t, sc, `sudo k3s kubectl get storageclass local-path -o jsonpath='{.provisioner}|{.metadata.annotations.storageclass\.kubernetes\.io/is-default-class}'`))
+	if defaultClass != "rancher.io/local-path|true" {
+		t.Fatalf("default local-path class drifted: %q", defaultClass)
+	}
+	config := mustSSHOutput(t, sc, `sudo k3s kubectl get configmap local-path-config -n kube-system -o jsonpath='{.data.config\.json}'`)
+	for _, path := range []string{"/var/lib/rancher/k3s/storage", "/var/lib/iterabase/agentpool-workspaces", "iterabase-agentpool-local-path"} {
+		if !strings.Contains(config, path) {
+			t.Fatalf("local-path class-isolation config is missing %q: %s", path, config)
+		}
+	}
+	mount := strings.TrimSpace(mustSSHOutput(t, sc, `findmnt -n -o SOURCE,FSTYPE,OPTIONS --target /var/lib/iterabase/agentpool-workspaces`))
+	if !strings.Contains(mount, "ext4") || !strings.Contains(mount, "nodev") || !strings.Contains(mount, "nosuid") {
+		t.Fatalf("dedicated workspace mount contract = %q", mount)
+	}
+
 	owner := strings.TrimSpace(mustSSHOutput(t, sc,
 		`sudo k3s kubectl get crd certificates.cert-manager.io -o jsonpath='{.metadata.annotations.meta\.helm\.sh/release-name}'`))
 	wantOwner := state.runID + "-cert-manager"
@@ -217,28 +263,14 @@ func assertCurrentPlatformStage(t *testing.T, state *digitalOceanCPUState) {
 		t.Fatalf("current platform has no exact Ready Flux artifact: ready=%v revision=%q digest=%q", ready, revision, digest)
 	}
 	mustSSHOutput(t, sc, fmt.Sprintf("sudo k3s kubectl rollout status -n iterabase-system deployment/%s-tool-runner --timeout=300s", state.runID))
-	if state.managedRWX {
-		storageClass := strings.TrimSpace(mustSSHOutput(t, sc, `sudo k3s kubectl get storageclass iterabase-rwx -o jsonpath='{.provisioner}|{.reclaimPolicy}|{.allowVolumeExpansion}|{.parameters.dataEngine}|{.parameters.numberOfReplicas}'`))
-		if storageClass != "driver.longhorn.io|Retain|true|v1|1" {
-			t.Fatalf("managed RWX StorageClass contract = %q", storageClass)
-		}
-		attestations := strings.TrimSpace(mustSSHOutput(t, sc, `sudo k3s kubectl get configmap -n iterabase-system -l platform.iterabase.com/storage-conformance=true -o jsonpath='{range .items[*]}{.data.storageClassName}|{.data.contractVersion}|{.data.result}{"\n"}{end}'`))
-		if !strings.Contains(attestations, "iterabase-rwx|HOR-469/v1|pass") {
-			t.Fatalf("managed RWX conformance attestation missing: %q", attestations)
-		}
-	}
 
 	kcPath := filepath.Join(state.forgeHome, state.runID, "kubeconfig.yaml")
 	checkGatewayRunning(t, kcPath)
 	checkGatewayNodePortHealth(t, kcPath, state.ip)
 }
 
-func seedManagedRWXReapplyStage(t *testing.T, state *digitalOceanCPUState) {
+func seedLocalPathReapplyStage(t *testing.T, state *digitalOceanCPUState) {
 	t.Helper()
-	if !state.managedRWX {
-		t.Log("published platform baseline predates managed RWX; dedicated exact-candidate storage gates own this stage")
-		return
-	}
 	sc, err := sshDial(state.ip, state.privKeyPath)
 	if err != nil {
 		t.Fatalf("ssh dial %s: %v", state.ip, err)
@@ -248,18 +280,18 @@ func seedManagedRWXReapplyStage(t *testing.T, state *digitalOceanCPUState) {
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: forge-rwx-reapply
+  name: forge-local-path-reapply
   namespace: iterabase-system
 spec:
-  accessModes: [ReadWriteMany]
-  storageClassName: iterabase-rwx
+  accessModes: [ReadWriteOnce]
+  storageClassName: iterabase-agentpool-local-path
   resources:
     requests: {storage: 1Gi}
 ---
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: forge-rwx-writer
+  name: forge-local-path-writer
   namespace: iterabase-system
 spec:
   backoffLimit: 0
@@ -270,41 +302,42 @@ spec:
         - name: writer
           image: debian:13-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132
           command: [bash, -ceu]
-          args: ['printf HOR-469-reapply > /sessions/marker && sync -f /sessions/marker']
+          args: ['printf HOR-538-reapply > /sessions/marker && sync -f /sessions/marker']
           volumeMounts: [{name: sessions, mountPath: /sessions}]
       volumes:
         - name: sessions
-          persistentVolumeClaim: {claimName: forge-rwx-reapply}
+          persistentVolumeClaim: {claimName: forge-local-path-reapply}
 YAML`
 	mustSSHOutput(t, sc, manifest)
-	mustSSHOutput(t, sc, "sudo k3s kubectl wait -n iterabase-system --for=condition=complete job/forge-rwx-writer --timeout=10m")
-	identity := strings.TrimSpace(mustSSHOutput(t, sc, `sudo k3s kubectl get pvc forge-rwx-reapply -n iterabase-system -o jsonpath='{.metadata.uid}|{.spec.volumeName}'`))
+	mustSSHOutput(t, sc, "sudo k3s kubectl wait -n iterabase-system --for=condition=complete job/forge-local-path-writer --timeout=10m")
+	identity := strings.TrimSpace(mustSSHOutput(t, sc, `sudo k3s kubectl get pvc forge-local-path-reapply -n iterabase-system -o jsonpath='{.metadata.uid}|{.spec.volumeName}'`))
 	parts := strings.Split(identity, "|")
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		t.Fatalf("managed RWX seed claim has incomplete identity: %q", identity)
+		t.Fatalf("local-path seed claim has incomplete identity: %q", identity)
 	}
 	state.storagePVCUID, state.storagePV = parts[0], parts[1]
+	path := strings.TrimSpace(mustSSHOutput(t, sc, fmt.Sprintf(`sudo k3s kubectl get pv %s -o jsonpath='{.spec.hostPath.path}'`, state.storagePV)))
+	if !strings.HasPrefix(path, "/var/lib/iterabase/agentpool-workspaces/") {
+		t.Fatalf("dedicated-class PV escaped workspace mount: %q", path)
+	}
 }
 
-func assertManagedRWXReapplyStage(t *testing.T, state *digitalOceanCPUState) {
+func assertLocalPathReapplyStage(t *testing.T, state *digitalOceanCPUState) {
 	t.Helper()
-	if !state.managedRWX {
-		return
-	}
 	sc, err := sshDial(state.ip, state.privKeyPath)
 	if err != nil {
 		t.Fatalf("ssh dial %s: %v", state.ip, err)
 	}
 	defer sc.Close()
-	identity := strings.TrimSpace(mustSSHOutput(t, sc, `sudo k3s kubectl get pvc forge-rwx-reapply -n iterabase-system -o jsonpath='{.metadata.uid}|{.spec.volumeName}'`))
+	identity := strings.TrimSpace(mustSSHOutput(t, sc, `sudo k3s kubectl get pvc forge-local-path-reapply -n iterabase-system -o jsonpath='{.metadata.uid}|{.spec.volumeName}'`))
 	if identity != state.storagePVCUID+"|"+state.storagePV {
-		t.Fatalf("managed RWX reapply replaced the claim: before=%s|%s after=%s", state.storagePVCUID, state.storagePV, identity)
+		t.Fatalf("Forge reapply replaced the local-path claim: before=%s|%s after=%s", state.storagePVCUID, state.storagePV, identity)
 	}
 	manifest := `cat <<'YAML' | sudo k3s kubectl apply -f -
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: forge-rwx-replacement
+  name: forge-local-path-replacement
   namespace: iterabase-system
 spec:
   backoffLimit: 0
@@ -315,28 +348,26 @@ spec:
         - name: reader
           image: debian:13-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132
           command: [bash, -ceu]
-          args: ['test "$(cat /sessions/marker)" = HOR-469-reapply && printf replacement-persistence=pass']
+          args: ['test "$(cat /sessions/marker)" = HOR-538-reapply && printf replacement-persistence=pass']
           volumeMounts: [{name: sessions, mountPath: /sessions}]
       volumes:
         - name: sessions
-          persistentVolumeClaim: {claimName: forge-rwx-reapply}
+          persistentVolumeClaim: {claimName: forge-local-path-reapply}
 YAML`
 	mustSSHOutput(t, sc, manifest)
-	mustSSHOutput(t, sc, "sudo k3s kubectl wait -n iterabase-system --for=condition=complete job/forge-rwx-replacement --timeout=10m")
-	logs := mustSSHOutput(t, sc, "sudo k3s kubectl logs -n iterabase-system job/forge-rwx-replacement")
+	mustSSHOutput(t, sc, "sudo k3s kubectl wait -n iterabase-system --for=condition=complete job/forge-local-path-replacement --timeout=10m")
+	logs := mustSSHOutput(t, sc, "sudo k3s kubectl logs -n iterabase-system job/forge-local-path-replacement")
 	if !strings.Contains(logs, "replacement-persistence=pass") {
-		t.Fatalf("replacement worker did not preserve committed RWX bytes: %s", logs)
+		t.Fatalf("replacement pod did not preserve committed local-path bytes: %s", logs)
 	}
 }
 
-func setupManagedAgentPoolStage(t *testing.T, state *digitalOceanCPUState) {
+func setupLocalPathAgentPoolStage(t *testing.T, state *digitalOceanCPUState) {
 	t.Helper()
-	if !state.managedRWX {
-		return
-	}
 	repository, tag := os.Getenv("HARNESS_IMAGE_REPO"), os.Getenv("HARNESS_IMAGE_TAG")
 	if repository == "" || tag == "" {
-		t.Fatal("managed AgentPool readiness evidence requires an exact HARNESS_IMAGE_REPO/HARNESS_IMAGE_TAG fixture")
+		t.Log("exact harness image is unavailable in the baseline CPU fixture; dedicated workspace scenario owns AgentPool runtime evidence")
+		return
 	}
 	sc, err := sshDial(state.ip, state.privKeyPath)
 	if err != nil {
@@ -357,8 +388,8 @@ spec:
     trustDomain: iterabase.local
     caSecretRef: {name: %s-control-plane-gateway-ca}
   sandbox:
-    storageClassName: iterabase-rwx
-    accessMode: ReadWriteMany
+    storageClassName: iterabase-agentpool-local-path
+    accessMode: ReadWriteOnce
     size: 2Gi
   gateways:
     controlPlane:
@@ -377,54 +408,41 @@ spec:
   workspaceTools: false
 YAML`, repository, tag, state.runID, state.runID, state.runID, state.runID, state.runID, state.runID, state.runID)
 	mustSSHOutput(t, sc, manifest)
-	waitForManagedAgentPoolReady(t, sc, 10*time.Minute)
+	waitForLocalPathAgentPoolReady(t, sc, 10*time.Minute)
 	status := strings.TrimSpace(mustSSHOutput(t, sc, `sudo k3s kubectl get agentpool forge-storage-pool -n iterabase-system -o jsonpath='{.status.readyReplicas}|{.status.conditions[?(@.type=="StorageReady")].reason}'`))
 	if status != "2|StorageReady" {
-		t.Fatalf("managed AgentPool readiness = %q, want 2|StorageReady", status)
+		t.Fatalf("local-path AgentPool readiness = %q, want 2|StorageReady", status)
 	}
 	state.agentPoolPVCUID = strings.TrimSpace(mustSSHOutput(t, sc, `sudo k3s kubectl get pvc forge-storage-pool-sandbox -n iterabase-system -o jsonpath='{.metadata.uid}'`))
 	state.initialWorkerPodUID = strings.TrimSpace(mustSSHOutput(t, sc, `sudo k3s kubectl get pods -n iterabase-system -l platform.iterabase.com/agentpool=forge-storage-pool -o jsonpath='{range .items[*]}{.metadata.uid}{"\n"}{end}'`))
 	if state.agentPoolPVCUID == "" || len(strings.Fields(state.initialWorkerPodUID)) != 2 {
-		t.Fatalf("managed AgentPool identities incomplete: pvc=%q workers=%q", state.agentPoolPVCUID, state.initialWorkerPodUID)
+		t.Fatalf("local-path AgentPool identities incomplete: pvc=%q workers=%q", state.agentPoolPVCUID, state.initialWorkerPodUID)
 	}
 }
 
-func waitForManagedAgentPoolReady(t *testing.T, client *ssh.Client, timeout time.Duration) {
+func waitForLocalPathAgentPoolReady(t *testing.T, client *ssh.Client, timeout time.Duration) {
 	t.Helper()
 	command := fmt.Sprintf("sudo k3s kubectl wait -n iterabase-system --for=jsonpath='{.status.ready}'=true agentpool/forge-storage-pool --timeout=%s", timeout)
 	output, err := sshOutput(client, command)
 	if err == nil {
 		return
 	}
-
 	diagnostics, diagnosticsErr := sshOutput(client, `{
-  echo '=== AgentPool ==='
   sudo k3s kubectl get agentpool forge-storage-pool -n iterabase-system -o yaml || true
-  echo '=== workers and claim ==='
-  sudo k3s kubectl get pods -n iterabase-system -l platform.iterabase.com/agentpool=forge-storage-pool -o wide || true
-  sudo k3s kubectl get pvc forge-storage-pool-sandbox -n iterabase-system -o wide || true
+  sudo k3s kubectl get pods,pvc -n iterabase-system -l platform.iterabase.com/agentpool=forge-storage-pool -o wide || true
   pv=$(sudo k3s kubectl get pvc forge-storage-pool-sandbox -n iterabase-system -o jsonpath='{.spec.volumeName}' 2>/dev/null || true)
-  if [ -n "$pv" ]; then
-    sudo k3s kubectl get pv "$pv" -o wide || true
-    volume=$(sudo k3s kubectl get pv "$pv" -o jsonpath='{.spec.csi.volumeHandle}' 2>/dev/null || true)
-    if [ -n "$volume" ]; then
-      sudo k3s kubectl get volumes.longhorn.io "$volume" -n longhorn-system -o custom-columns=NAME:.metadata.name,STATE:.status.state,ROBUSTNESS:.status.robustness,NODE:.status.currentNodeID || true
-      sudo k3s kubectl get pods -n longhorn-system -l longhorn.io/component=share-manager -o wide | grep -E "(^NAME|$volume)" || true
-    fi
-  fi
-  echo '=== recent storage and worker events ==='
+  test -z "$pv" || sudo k3s kubectl get pv "$pv" -o yaml || true
   sudo k3s kubectl get events -n iterabase-system --sort-by=.metadata.creationTimestamp | tail -100 || true
-  sudo k3s kubectl get events -n longhorn-system --sort-by=.metadata.creationTimestamp | tail -100 || true
 } 2>&1`)
 	if diagnosticsErr != nil {
 		diagnostics += "\ncollect AgentPool timeout diagnostics: " + diagnosticsErr.Error()
 	}
-	t.Fatalf("managed AgentPool did not become Ready within %s: %v\n%s\n%s", timeout, err, output, diagnostics)
+	t.Fatalf("local-path AgentPool did not become Ready within %s: %v\n%s\n%s", timeout, err, output, diagnostics)
 }
 
-func exerciseManagedShareManagerFailureStage(t *testing.T, state *digitalOceanCPUState) {
+func exerciseWorkspaceCapacityGateStage(t *testing.T, state *digitalOceanCPUState) {
 	t.Helper()
-	if !state.managedRWX {
+	if os.Getenv("HARNESS_IMAGE_REPO") == "" {
 		return
 	}
 	sc, err := sshDial(state.ip, state.privKeyPath)
@@ -432,39 +450,51 @@ func exerciseManagedShareManagerFailureStage(t *testing.T, state *digitalOceanCP
 		t.Fatalf("ssh dial %s: %v", state.ip, err)
 	}
 	defer sc.Close()
-	volume := strings.TrimSpace(mustSSHOutput(t, sc, `pv=$(sudo k3s kubectl get pvc forge-storage-pool-sandbox -n iterabase-system -o jsonpath='{.spec.volumeName}'); sudo k3s kubectl get pv "$pv" -o jsonpath='{.spec.csi.volumeHandle}'`))
-	if volume == "" {
-		t.Fatal("managed AgentPool PV has no Longhorn volume handle")
-	}
-	shareManager := strings.TrimSpace(mustSSHOutput(t, sc, fmt.Sprintf(`sudo k3s kubectl get pods -n longhorn-system -l longhorn.io/component=share-manager -o name | grep %s | head -1`, volume)))
-	if shareManager == "" {
-		t.Fatalf("no active share-manager for %s", volume)
-	}
-	mustSSHOutput(t, sc, fmt.Sprintf("sudo k3s kubectl delete -n longhorn-system %s --grace-period=0 --force --wait=false", shareManager))
-	mustSSHOutput(t, sc, fmt.Sprintf("sudo k3s kubectl annotate agentpool forge-storage-pool -n iterabase-system --overwrite platform.iterabase.com/storage-fault-trigger=%d", time.Now().UnixNano()))
-
-	deadline := time.Now().Add(3 * time.Minute)
-	last := ""
-	for time.Now().Before(deadline) {
-		out, commandErr := sshOutput(sc, `sudo k3s kubectl get agentpool forge-storage-pool -n iterabase-system -o jsonpath='{.status.ready}|{.status.readyReplicas}|{.status.conditions[?(@.type=="StorageReady")].reason}|{.status.message}'`)
-		last = strings.TrimSpace(out)
-		parts := strings.SplitN(last, "|", 4)
-		if commandErr == nil && len(parts) == 4 && parts[0] == "false" && parts[1] == "0" && parts[2] == "StorageRecoveryPending" {
-			break
+	const filler = "/var/lib/iterabase/agentpool-workspaces/.forge-e2e-capacity-fill"
+	mustSSHOutput(t, sc, `sudo bash -ceu '
+mount=/var/lib/iterabase/agentpool-workspaces
+read -r size avail < <(df -B1 --output=size,avail "$mount" | tail -1)
+target=$((size * 19 / 100))
+allocate=$((avail - target))
+test "$allocate" -gt 0
+fallocate -l "$allocate" `+filler+`
+sync -f `+filler+`
+'`)
+	t.Cleanup(func() {
+		if cleanup, dialErr := sshDial(state.ip, state.privKeyPath); dialErr == nil {
+			_, _ = sshOutput(cleanup, "sudo rm -f "+filler+" && sync")
+			cleanup.Close()
 		}
-		time.Sleep(time.Second)
+	})
+	waitMetrics := func(want string) {
+		t.Helper()
+		command := fmt.Sprintf(`for i in $(seq 1 60); do
+  ok=0; total=0
+  for pod in $(sudo k3s kubectl get pods -n iterabase-system -l platform.iterabase.com/agentpool=forge-storage-pool -o name | cut -d/ -f2); do
+    total=$((total+1))
+    metrics=$(sudo k3s kubectl get --raw "/api/v1/namespaces/iterabase-system/pods/$pod:8081/proxy/metrics" 2>/dev/null || true)
+    if printf '%%s\n' "$metrics" | grep -Eq '^control_plane_harness_workspace_credit_gated %s(\\.0+)?$'; then ok=$((ok+1)); fi
+  done
+  test "$total" -ge 2 && test "$ok" = "$total" && exit 0
+  sleep 2
+done
+exit 1`, want)
+		if output, commandErr := sshOutput(sc, command); commandErr != nil {
+			t.Fatalf("workspace capacity gate did not reach %s on every worker: %v\n%s", want, commandErr, output)
+		}
 	}
-	if !strings.HasPrefix(last, "false|0|StorageRecoveryPending|") {
-		t.Fatalf("AgentPool did not fail closed on share-manager loss: %q", last)
+	waitMetrics("1")
+	metrics := mustSSHOutput(t, sc, `pod=$(sudo k3s kubectl get pods -n iterabase-system -l platform.iterabase.com/agentpool=forge-storage-pool -o jsonpath='{.items[0].metadata.name}'); sudo k3s kubectl get --raw "/api/v1/namespaces/iterabase-system/pods/$pod:8081/proxy/metrics"`)
+	if !strings.Contains(metrics, "control_plane_harness_workspace_capacity_warning 1") {
+		t.Fatalf("controlled fill gated credit without the 25%% warning metric:\n%s", metrics)
 	}
-	if count := strings.TrimSpace(mustSSHOutput(t, sc, `sudo k3s kubectl get pods -n iterabase-system -l platform.iterabase.com/agentpool=forge-storage-pool --no-headers 2>/dev/null | wc -l`)); count != "0" {
-		t.Fatalf("storage-unready AgentPool retained %s worker pods/scheduling credits", count)
-	}
+	mustSSHOutput(t, sc, "sudo rm -f "+filler+" && sync")
+	waitMetrics("0")
 }
 
-func assertManagedStorageRecoveryStage(t *testing.T, state *digitalOceanCPUState) {
+func replaceWorkspaceWorkerStage(t *testing.T, state *digitalOceanCPUState) {
 	t.Helper()
-	if !state.managedRWX {
+	if os.Getenv("HARNESS_IMAGE_REPO") == "" {
 		return
 	}
 	sc, err := sshDial(state.ip, state.privKeyPath)
@@ -472,23 +502,16 @@ func assertManagedStorageRecoveryStage(t *testing.T, state *digitalOceanCPUState
 		t.Fatalf("ssh dial %s: %v", state.ip, err)
 	}
 	defer sc.Close()
-	waitForManagedAgentPoolReady(t, sc, 10*time.Minute)
+	pod := strings.Fields(mustSSHOutput(t, sc, `sudo k3s kubectl get pods -n iterabase-system -l platform.iterabase.com/agentpool=forge-storage-pool -o name`))[0]
+	mustSSHOutput(t, sc, "sudo k3s kubectl delete -n iterabase-system "+pod+" --wait=true --timeout=5m")
+	waitForLocalPathAgentPoolReady(t, sc, 10*time.Minute)
 	identity := strings.TrimSpace(mustSSHOutput(t, sc, `sudo k3s kubectl get pvc forge-storage-pool-sandbox -n iterabase-system -o jsonpath='{.metadata.uid}'`))
 	if identity != state.agentPoolPVCUID {
-		t.Fatalf("storage recovery replaced the AgentPool PVC: before=%s after=%s", state.agentPoolPVCUID, identity)
+		t.Fatalf("worker replacement changed AgentPool PVC: before=%s after=%s", state.agentPoolPVCUID, identity)
 	}
 	workers := strings.TrimSpace(mustSSHOutput(t, sc, `sudo k3s kubectl get pods -n iterabase-system -l platform.iterabase.com/agentpool=forge-storage-pool -o jsonpath='{range .items[*]}{.metadata.uid}{"\n"}{end}'`))
-	if len(strings.Fields(workers)) != 2 {
-		t.Fatalf("storage recovery has incomplete fresh worker set: %q", workers)
-	}
-	for _, oldUID := range strings.Fields(state.initialWorkerPodUID) {
-		if strings.Contains(workers, oldUID) {
-			t.Fatalf("storage recovery reused affected worker %s instead of a fresh worker set", oldUID)
-		}
-	}
-	status := strings.TrimSpace(mustSSHOutput(t, sc, `sudo k3s kubectl get agentpool forge-storage-pool -n iterabase-system -o jsonpath='{.status.ready}|{.status.readyReplicas}|{.status.conditions[?(@.type=="StorageReady")].reason}'`))
-	if status != "true|2|StorageReady" {
-		t.Fatalf("managed storage recovery status=%q", status)
+	if len(strings.Fields(workers)) != 2 || workers == state.initialWorkerPodUID {
+		t.Fatalf("worker replacement did not produce a fresh two-worker set: before=%q after=%q", state.initialWorkerPodUID, workers)
 	}
 }
 
@@ -500,12 +523,7 @@ func reapplyCurrentPlatformStage(t *testing.T, state *digitalOceanCPUState) {
 		t, state.runID, state.ip, state.privKeyPath, state.chartVersion, plan,
 	)
 	out := applyOnce(t, state.forgeBin, state.forgeHome, cfgPath)
-	markers := []string{"action:     skip", "node ready: true", "certificate substrate applied: true", "chart applied: true", "overlay applied: true"}
-	if state.managedRWX {
-		markers = append(markers, "rwx storage mode: managed-longhorn", "rwx storage prerequisites ready: true", "rwx storage substrate applied: true")
-	} else {
-		markers = append(markers, "rwx storage mode: external")
-	}
+	markers := []string{"action:     skip", "node ready: true", "AgentPool workspace:", "AgentPool local-path ready: true", "certificate substrate applied: true", "chart applied: true", "overlay applied: true"}
 	if plan.flux {
 		markers = append(markers, "flux installed: true")
 	}
@@ -663,6 +681,26 @@ func waitForHostReady(ctx context.Context, ip, keyPath string) error {
 		}
 	}
 	return fmt.Errorf("host %s never became ready (SSH up + cloud-init done) within %s (last status %q, last error %v)", ip, deadline, lastStatus, lastErr)
+}
+
+func waitForWorkspaceDevice(ctx context.Context, ip, keyPath, device string) error {
+	end := time.Now().Add(2 * time.Minute)
+	for time.Now().Before(end) {
+		client, err := sshDial(ip, keyPath)
+		if err == nil {
+			_, probeErr := sshOutput(client, "test -L "+candidateShellQuote(device)+" && test -b \"$(readlink -f "+candidateShellQuote(device)+")\"")
+			client.Close()
+			if probeErr == nil {
+				return nil
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(2 * time.Second):
+		}
+	}
+	return fmt.Errorf("dedicated workspace device %s did not appear on %s", device, ip)
 }
 
 // sshOutput runs a command over an SSH client and returns its combined output.

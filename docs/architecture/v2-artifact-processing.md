@@ -12,7 +12,7 @@ This record is the repository authority for V2 artifact admission, quarantine, M
 
 ## 1. Approved design decisions
 
-The founder approved the original complete package below for HOR-460 on 2026-08-23; that approval and its consequences are durable in the Linear issue. The exact RWX signature-transport amendment to `DES-HOR-460-07` and its operational consequences are durable in Obsidian `HOR-460 — FreshClam RWX Signature Topology Decision`. A product-behavior change or a different inherited datastore, component, transport, isolation, failure, or lifecycle model requires a new durable decision rather than an implementation-local interpretation.
+The founder approved the original complete package below for HOR-460 on 2026-08-23; that approval and its consequences are durable in the Linear issue. The historical RWX signature-transport amendment to `DES-HOR-460-07` was superseded for V2 by approved `DES-HOR-469-03` / `DES-HOR-538-01`: all processor pods run on the one K3s node, so the reconstructible signature bundle uses one default-class local-path RWO claim outside the dedicated AgentPool workspace filesystem. A product-behavior change or a different inherited datastore, component, transport, isolation, failure, or lifecycle model requires a new durable decision rather than an implementation-local interpretation.
 
 ### DES-HOR-460-01 — Preserve PostgreSQL and MinIO as the artifact authorities
 
@@ -73,9 +73,9 @@ The founder approved the original complete package below for HOR-460 on 2026-08-
 - **Approved by:** Nuno Gonçalves
 - **Approved on:** 2026-08-23
 - **Scope:** Deployment topology, service transport, credentials, filesystem, network, and resource isolation.
-- **Decision:** A trusted control-plane-owned coordinator alone holds bounded PostgreSQL and MinIO credentials and leases work. Separate scanner and extractor pods accept one bounded stream over internal mTLS, hold no database, artifact, Kubernetes, or customer credential, use no service-account token, run non-root with read-only roots, seccomp, capability drop, and bounded scratch, and have deny-by-default ingress and zero egress. A separate FreshClam updater pod and network identity is the only signature-source client; it atomically writes a dedicated ReadWriteMany signature PVC that scanner pods mount read-only, so no updater or synchronizer shares the scanner network namespace.
-- **Consequences:** Malformed bytes never execute in an API, gateway, coordinator, or credentialed parser process. Processor resources and replicas may be operator-sized without making scanner or parser choice customer-configurable. Artifact processing requires a supported ReadWriteMany StorageClass or approved BYO equivalent and fails enablement when that capability or its access-mode/identity enforcement is absent or ambiguous. Updater, source, or RWX-storage failure may leave scanners on the last validated bundle only while it remains within the 24-hour freshness limit; after that, scanners are unready and issue no clean verdict. Signature-volume data is reconstructible non-customer security data rather than artifact or backup authority, so recovery refetches and validates it. Preflight, monitoring, tests, and runbooks must cover atomic publication, sole-writer/read-only enforcement, capacity and availability, outage/freshness behavior, recovery, and multi-replica visibility.
-- **Evidence:** Original package approval is recorded in HOR-460. Nuno Gonçalves explicitly approved this exact updater/RWX amendment and all listed consequences on 2026-08-23 in Obsidian `HOR-460 — FreshClam RWX Signature Topology Decision`.
+- **Decision:** A trusted control-plane-owned coordinator alone holds bounded PostgreSQL and MinIO credentials and leases work. Separate scanner and extractor pods accept one bounded stream over internal mTLS, hold no database, artifact, Kubernetes, or customer credential, use no service-account token, run non-root with read-only roots, seccomp, capability drop, and bounded scratch, and have deny-by-default ingress and zero egress. A separate FreshClam updater pod and network identity is the only signature-source client; it atomically writes a dedicated default-class `ReadWriteOnce` signature PVC that same-node scanner pods mount read-only, so no updater or synchronizer shares the scanner network namespace. The claim remains on K3s's normal platform path and never uses `iterabase-agentpool-local-path`.
+- **Consequences:** Malformed bytes never execute in an API, gateway, coordinator, or credentialed parser process. Processor resources and replicas may be operator-sized without making scanner or parser choice customer-configurable. Artifact processing requires the fixed one-node default local-path RWO contract and fails enablement when access-mode, class, node, sole-writer/read-only, or identity enforcement is absent or ambiguous. Updater, source, or signature-volume failure may leave scanners on the last validated bundle only while it remains within the 24-hour freshness limit; after that, scanners are unready and issue no clean verdict. Signature-volume data is reconstructible non-customer security data rather than artifact or backup authority, so recovery refetches and validates it. Preflight, monitoring, tests, and runbooks must cover atomic publication, sole-writer/read-only enforcement, capacity and availability, outage/freshness behavior, recovery, and multi-replica same-node visibility.
+- **Evidence:** Original package approval is recorded in HOR-460. The 2026-08-23 RWX amendment remains historical evidence in Obsidian `HOR-460 — FreshClam RWX Signature Topology Decision`; `DES-HOR-469-03` / `DES-HOR-538-01` supersede only its storage transport/class for the one-node V2 release.
 
 ### DES-HOR-460-08 — Use append-only attempts, fenced leases, and bounded retries
 
@@ -207,7 +207,7 @@ Artifact coordinator (trusted control-plane binary)
                          ^
                          | read-only filesystem mount
                          |
-             dedicated signature RWX PVC
+             dedicated default-class RWO signature PVC
                          ^
                          | sole read-write mount; atomic version publish
                          |
@@ -596,10 +596,10 @@ The final project-owned scanner adapter, extractor image with Portuguese data, a
 ### Signature and image update policy
 
 - FreshClam in the separate updater pod checks the official Cisco/ClamAV source or an operator-controlled exact mirror at least every two hours.
-- The updater validates the database using ClamAV tooling, records version/time/checksum, writes a new immutable version directory to the dedicated ReadWriteMany signature PVC, and atomically changes a bounded current-manifest only after validation. It never receives artifact, MinIO, database, or Kubernetes credentials.
+- The updater validates the database using ClamAV tooling, records version/time/checksum, writes a new immutable version directory to the dedicated default-class ReadWriteOnce signature PVC, and atomically changes a bounded current-manifest only after validation. It never receives artifact, MinIO, database, or Kubernetes credentials.
 - Scanner pods mount the PVC read-only, have no sync sidecar and zero egress, and configure `clamd` self-check/reload to adopt only the complete manifest-selected version. Readiness returns only after the adapter verifies engine/database self-test, version, checksum, and age.
 - Signature age over 24 hours prevents a new clean verdict. Pending work remains unavailable and reports retryable scanner state.
-- An updater, source, or RWX-volume failure alerts but does not rewrite prior attempt evidence. Scanners may continue with the last validated bundle only while it remains within the 24-hour freshness limit; loss of a usable fresh bundle makes them unready and fail closed. A known-bad signature release is rolled back to the last validated bundle with explicit operational evidence; new verdicts record that exact version.
+- An updater, source, or signature-volume failure alerts but does not rewrite prior attempt evidence. Scanners may continue with the last validated bundle only while it remains within the 24-hour freshness limit; loss of a usable fresh bundle makes them unready and fail closed. A known-bad signature release is rolled back to the last validated bundle with explicit operational evidence; new verdicts record that exact version.
 - Signature-volume contents are reconstructible non-customer security data, not artifact or backup authority. Recovery refetches and validates a complete bundle before readiness; an unverified copied or restored volume never establishes signature authority.
 - Engine/parser/base-image CVE review runs for every release candidate. Critical exploitable findings block release or require an explicit recorded exception; tags alone are never deployment authority.
 - No customer artifact bytes, digests, filenames, or scan results are sent to update servers.
@@ -642,7 +642,7 @@ Coordinator requires only:
 
 The separate FreshClam updater pod requires only update-source HTTPS/DNS and the sole read-write signature PVC mount. Its NetworkPolicy cannot reach PostgreSQL, MinIO/artifact zones, API/gateway, scanner processing port, extractor, or customer systems; scanner pods cannot reach the updater or its update source.
 
-The chart must bind the signature claim to an exact supported ReadWriteMany StorageClass or approved BYO equivalent and fail enablement when RWX access, sole-writer/read-only mounts, or identity enforcement cannot be proved. The volume contains only signature versions and the current manifest. Capacity must cover one staged bundle, the current bundle, and the retained validated rollback bundle with headroom; usage and backend availability are monitored rather than allowing a partial publish.
+The chart must bind the signature claim to an fixed default local-path StorageClass with ReadWriteOnce on the one node and fail enablement when same-node RWO access, sole-writer/read-only mounts, or identity enforcement cannot be proved. The volume contains only signature versions and the current manifest. Capacity must cover one staged bundle, the current bundle, and the retained validated rollback bundle with headroom; usage and backend availability are monitored rather than allowing a partial publish.
 
 ### Reference resource profile
 
@@ -945,7 +945,7 @@ Fail V2 artifact enablement when any of the following is absent or ambiguous:
 - active V2 identity/action authority and owner/actor attribution;
 - supported PostgreSQL schema/index/procedure and object-store backup evidence;
 - distinct quarantine-write, cleared-read, and lifecycle credentials with no broad/default policy;
-- an exact supported ReadWriteMany StorageClass or approved BYO equivalent and a dedicated signature PVC with exactly one updater read-write identity, scanner read-only mounts, sufficient monitored capacity for staging/current/rollback bundles, and no scanner/synchronizer network egress;
+- an fixed default local-path StorageClass with ReadWriteOnce on the one node and a dedicated signature PVC with exactly one updater read-write identity, scanner read-only mounts, sufficient monitored capacity for staging/current/rollback bundles, and no scanner/synchronizer network egress;
 - scanner/extractor exact identities, protocols, images, licenses, resources, and NetworkPolicies;
 - fresh validated ClamAV signature set and EN/PT/OCR self-test;
 - format/malicious/resource corpus pass;
@@ -1013,7 +1013,7 @@ Assertions cover permanent versus transient classification, immediate rejected-b
 
 ### Component and extraction tests
 
-- ClamAV engine/config/signature version capture; fresh/current/stale/corrupt/missing signature readiness; updater source/mirror/RWX-volume failure before and after the freshness limit; validated rollback and refetch recovery without trusting copied volume state.
+- ClamAV engine/config/signature version capture; fresh/current/stale/corrupt/missing signature readiness; updater source/mirror/signature-volume failure before and after the freshness limit; validated rollback and refetch recovery without trusting copied volume state.
 - Tika text/table extraction for PDF/DOCX/CSV/XLSX/TXT and Tesseract EN/PT/mixed/orientation OCR for JPEG/PNG/TIFF/scanned PDFs.
 - Formula/macro/external-resource non-execution; XML entity/URL/SSRF negative tests.
 - Digital, scanned, and mixed PDF coverage; page/sheet/table provenance and canonical deterministic bytes/digests across repeated attempts.
@@ -1027,7 +1027,7 @@ Assertions cover permanent versus transient classification, immediate rejected-b
 - Scanner/extractor cannot reach PostgreSQL, artifact zones, Product API, Internet, DNS, Kubernetes API, metadata endpoints, each other, updater, or customer systems; extractor cannot resolve/fetch an embedded URL.
 - Engine containers cannot read adapter TLS key, updater state, service-account token, or another container filesystem.
 - Scanner receives only the read-only validated signature PVC and cannot alter it; the separately selected updater can reach the signature source but cannot reach customer artifact paths or scanner processing endpoints.
-- Missing or wrong-access-mode RWX storage blocks enablement. Full/outage/corrupt-volume and updater-restart tests preserve the freshness fail-closed boundary, refetch and revalidate before recovery, and never treat volume contents as backup authority.
+- Missing or wrong-class/access-mode signature storage blocks enablement. Full/outage/corrupt-volume and updater-restart tests preserve the freshness fail-closed boundary, refetch and revalidate before recovery, and never treat volume contents as backup authority.
 - Concurrent scanner replicas observe only complete manifest-selected versions; updater/scanner races, sole-writer enforcement, mount modes, backend interruption, and capacity exhaustion cannot expose a partial bundle or issue a clean verdict without a fresh validated set.
 - Resource limit, process crash, adapter restart, packet loss, and mTLS rotation preserve documented failure state and no unsafe promotion.
 
@@ -1080,7 +1080,7 @@ Required scenario evidence:
 | HOR-460 schemas/APIs/state/failure/lifecycle/metrics/tests | Sections 7–9 and 12–20. |
 | Unsafe or unscanned bytes never become input/reusable | Invariants 1–4; storage credential split; current-state checks in sections 13 and 15. |
 | Derived bytes/lineage immutable and attributable | `DES-HOR-460-09`, sections 8.4–8.5 and extraction tests. |
-| Open architecture choices resolved | `DES-HOR-460-01`–`12`, including the approved RWX amendment evidenced by Obsidian `HOR-460 — FreshClam RWX Signature Topology Decision`; future LLM/component/format/storage changes require separate decisions. |
+| Open architecture choices resolved | `DES-HOR-460-01`–`12`, including the historical signature-volume decision as superseded for V2 by `DES-HOR-469-03` / `DES-HOR-538-01`; future LLM/component/format/storage changes require separate decisions. |
 
 ## 22. Implementation ownership and sequencing
 

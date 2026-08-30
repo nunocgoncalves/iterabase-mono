@@ -2,14 +2,13 @@
 
 > Canonical source: [`iterabase-mono/charts`](https://github.com/nunocgoncalves/iterabase-mono/tree/master/charts). The former standalone source repository is historical and read-only; the existing `ghcr.io/nunocgoncalves/iterabase-charts` package namespace remains the stable artifact identity.
 
-Helm charts for the [iterabase](https://iterabase.com) platform. The `cert-manager-substrate` release establishes certificate CRDs, webhook, controller, CSI driver, and—when internal TLS is selected—the platform-owned internal CA before dependent workloads. Managed storage then installs the same-version `rwx-storage-substrate`; the `iterabase-platform` umbrella follows. [Forge](https://github.com/nunocgoncalves/iterabase-mono/tree/master/forge) enforces this ordering automatically; direct Helm users preserve the same order.
+Helm charts for the [iterabase](https://iterabase.com) platform. The `cert-manager-substrate` release establishes certificate CRDs, webhook, controller, CSI driver, and—when internal TLS is selected—the platform-owned internal CA before the `iterabase-platform` umbrella. [Forge](https://github.com/nunocgoncalves/iterabase-mono/tree/master/forge) also prepares the required dedicated AgentPool filesystem and configures K3s's bundled local-path provisioner before Helm runs.
 
 ## Charts
 
 | Chart | Description | Released individually |
 |---|---|---|
 | `cert-manager-substrate` | Ordered certificate operator, CRDs, webhook, and CSI substrate | ✅, alongside platform |
-| `rwx-storage-substrate` | Managed Longhorn 1.12.1 RWX substrate and conformance/uninstall gates | ✅, alongside platform when managed mode is selected |
 | `iterabase-platform` | Application umbrella — composes all platform components | ✅ |
 | `inference-gateway` | Model-access service | ✅ |
 | `control-plane` | Durable workflow/control APIs, operator, and immutable artifact service | ✅ |
@@ -171,66 +170,33 @@ a changed one-replica gateway, an injected failure before admission post-hooks,
 fail-closed reapply, the explicit legacy rollback above, and current forward
 recovery.
 
-### Production AgentPool RWX storage
+### Production AgentPool local-path storage
 
-The platform values select exactly one storage mode and class. Managed mode with
-internal TLS uses certificate substrate → RWX substrate → platform ordering. The
-first release creates/verifies platform-owned CA resources; the second waits for
-the CA-backed `longhorn-grpc-tls` leaf before Longhorn starts:
+Platform V2 has no chart-selectable storage backend. Before Helm runs, Forge
+requires one persisted stable whole-disk selection, safely prepares it as ext4,
+and mounts it at `/var/lib/iterabase/agentpool-workspaces`. It then configures
+K3s's bundled `rancher.io/local-path` provisioner with two isolated class maps:
 
-```sh
-helm upgrade --install iterabase-cert-manager \
-  oci://ghcr.io/nunocgoncalves/iterabase-charts/cert-manager-substrate \
-  --version <platform-version> -n iterabase-system --create-namespace \
-  -f values-tls.yaml -f values-managed-rwx-single-node.yaml \
-  --set global.internalTLS.platformRelease=iterabase --wait --timeout 15m
-helm upgrade --install iterabase-rwx-storage \
-  oci://ghcr.io/nunocgoncalves/iterabase-charts/rwx-storage-substrate \
-  --version <platform-version> -n longhorn-system --create-namespace \
-  -f values-managed-rwx-single-node.yaml \
-  --set global.internalTLS.enabled=true \
-  --set validation.attestationNamespace=iterabase-system --wait --timeout 65m
-helm upgrade --install iterabase \
-  oci://ghcr.io/nunocgoncalves/iterabase-charts/iterabase-platform \
-  --version <platform-version> -n iterabase-system --create-namespace \
-  -f values-tls.yaml -f values-managed-rwx-single-node.yaml --wait
-```
+- the unchanged default `local-path` class remains on K3s's normal platform path;
+- fixed non-default `iterabase-agentpool-local-path` uses only the dedicated mount.
 
-The managed single-node NFSv4.1 hop is a bounded unencrypted same-host data-plane
-exposure. The Iterabase CA secures Longhorn manager-to-instance-manager gRPC; it
-does not secure NFS, iSCSI, CSI, engine, share-manager, or replica traffic. The
-install gate proves every current instance-manager service accepts authenticated
-mTLS and rejects unauthenticated TLS and plaintext before conformance runs.
+Every AgentPool declares one `ReadWriteOnce` claim on the fixed class. RWO limits
+the volume to the one supported node, not one pod, so multiple same-pool workers
+may mount it concurrently while per-session UID/GID and directory isolation
+remain enforced. The controller rejects another class, provisioner, reclaim
+policy, expansion mode, access mode, or bound PV path outside the dedicated
+mount. PostgreSQL, MinIO, and ordinary default-class claims cannot land there.
 
-`values-managed-rwx-three-node.yaml` remains a reference/qualification profile
-for at least three healthy storage nodes with dedicated SSD capacity. It is not
-production-qualified until HOR-519 selects encrypted inter-node networking and
-proves both NFS and replica traffic traverse it. Three replicas do not remove the
-active share-manager interruption boundary. Forge supports the managed `single-node`
-reference substrate and derives it from these chart values; `forge.yaml` has no
-storage provider toggle.
+The class is `WaitForFirstConsumer`, `Delete`, and non-expandable. Requested PVC
+sizes are planning metadata, not hard quotas. The node-local filesystem is
+non-HA, has no online expansion or secure-erasure guarantee, and is not session
+backup/DR authority. Customers own capacity response, infrastructure encryption,
+node/disk protection, and backup. Multi-node, RWX, BYO classes, existing
+filesystem adoption, and root-disk fallback are unsupported.
 
-For a customer-operated class, install no RWX companion. Set the exact external
-class with `values-external-rwx.yaml`, run
-`docs/architecture/validation/hor-424-rwx-conformance.sh` with
-`HOR424_STORAGE_CLASS` and `HOR424_ATTEST_NAMESPACE`, then install/reconcile the
-platform. AgentPools remain storage-unready if the chart contract, class UID,
-static properties, live attestation, PVC/PV, mount, or backend health evidence
-is missing or stale.
-
-The exact reviewed Longhorn `1.12.1` chart archive is repository-owned under
-`charts/vendor/` and copied into the companion only after its approved SHA-256
-and metadata pass. This keeps builds deterministic after the upstream chart
-release URL disappeared without modifying or repacking the dependency.
-
-The managed companion runs the same disposable two-worker/isolation/expansion
-gate after install and upgrade. Its pre-delete hook refuses active consumers,
-retained PVs, or remaining Longhorn volumes; settle/reap sessions and record an
-explicit delete/sanitize or transfer disposition before uninstall. Session PVCs
-are not authoritative product DR data, and disk encryption remains customer
-infrastructure responsibility. See
-[`../docs/architecture/v2-rwx-storage.md`](../docs/architecture/v2-rwx-storage.md)
-and [`docs/rwx-storage-operations.md`](docs/rwx-storage-operations.md).
+Direct Helm installation does not replace the Forge substrate gate: the exact
+filesystem, mount, bundled-provisioner configuration, and fixed StorageClass
+must already have been reconciled by Forge before AgentPools are created.
 
 ### Private control-plane ingress
 

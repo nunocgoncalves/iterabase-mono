@@ -46,14 +46,6 @@ rules:
   - update
   - watch
 - apiGroups:
-  - longhorn.io
-  resources:
-  - volumes
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
   - networking.k8s.io
   resources:
   - networkpolicies

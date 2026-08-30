@@ -6,6 +6,10 @@ metadata:
   name: opo1
 spec:
   mode: single-node            # single-node | ha | byokubeconfig (v1: single-node)
+  agentPoolWorkspace:
+    # Sole authorization for Forge's first ext4 format after fail-closed probes.
+    # Must be one stable non-removable whole disk; no root/partition/mapper fallback.
+    device: /dev/disk/by-id/scsi-0DO_Volume_iterabase-workspaces
   hosts:
     - address: 10.20.0.10
       sshUser: forge           # any sudoer user; preflight validates passwordless sudo
@@ -14,7 +18,7 @@ spec:
       labels: {}               # verbatim at install; GPU labels come from the operator's gpu-feature-discovery (HOR-240)
       taints: []
   k3s:
-    version: v1.34.10+k3s1      # HOR-469 reference baseline; full tag (vX.Y.Z+k3sN)
+    version: v1.34.10+k3s1      # Platform V2 reference baseline; full tag (vX.Y.Z+k3sN)
     clusterCIDR: 10.42.0.0/16
     serviceCIDR: 10.43.0.0/16
     dualStack: true

@@ -22,6 +22,7 @@ import (
 	"github.com/nunocgoncalves/iterabase-mono/forge/internal/config"
 	"github.com/nunocgoncalves/iterabase-mono/forge/internal/deployer"
 	"github.com/nunocgoncalves/iterabase-mono/forge/internal/k3s"
+	"github.com/nunocgoncalves/iterabase-mono/forge/internal/provisioner"
 )
 
 // handler returns canned stdout + exit code for a given remote command.
@@ -225,9 +226,6 @@ func TestPreflight(t *testing.T) {
 	assert.True(t, r.HasIPv6)
 	assert.True(t, r.HasNVIDIAGPU)
 	assert.True(t, r.KernelHeadersInstalled)
-	assert.True(t, r.HasISCSI)
-	assert.True(t, r.HasNFSv4)
-	assert.True(t, r.HasMountPropagation)
 }
 
 func TestInstall_CommandShape(t *testing.T) {
@@ -1374,7 +1372,7 @@ func TestDeployer_UninstallChart_PropagatesHookRefusal(t *testing.T) {
 		case strings.Contains(cmd, "'status'"):
 			return "STATUS: deployed\n", 0
 		case strings.Contains(cmd, "'uninstall'"):
-			return "refusing managed RWX uninstall: retained PV remains\n", 1
+			return "refusing platform uninstall: active consumer remains\n", 1
 		default:
 			return "", 1
 		}
@@ -1382,9 +1380,9 @@ func TestDeployer_UninstallChart_PropagatesHookRefusal(t *testing.T) {
 	defer cleanup()
 	p := newProvisioner(t, addr, cfg)
 	defer p.Close()
-	err := p.UninstallChart(context.Background(), "opo1-rwx-storage", "longhorn-system")
+	err := p.UninstallChart(context.Background(), "opo1", "iterabase-system")
 	require.ErrorContains(t, err, "uninstall Helm release")
-	require.ErrorContains(t, err, "refusing managed RWX uninstall")
+	require.ErrorContains(t, err, "refusing platform uninstall")
 }
 
 func TestDeployer_UninstallChart_MissingReleaseIsIdempotent(t *testing.T) {
@@ -1479,30 +1477,20 @@ func TestEnsureDriverBuildDeps_CommandShape(t *testing.T) {
 	assert.Contains(t, got, "apt-get install -y linux-headers-$(uname -r)")
 }
 
-func TestEnsureRWXStoragePrerequisites_CommandShape(t *testing.T) {
-	var got string
-	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
-		got = cmd
-		if strings.Contains(cmd, "apt-get install -y open-iscsi nfs-common") {
-			return "", 0
-		}
-		return "", 1
-	})
-	defer cleanup()
-	p := newProvisioner(t, addr, cfg)
-	defer p.Close()
-	require.NoError(t, p.EnsureRWXStoragePrerequisites(context.Background()))
+func TestAgentPoolWorkspaceCommandIsBoundedAndCrashResumable(t *testing.T) {
+	script := workspaceReconcileScript(provisioner.AgentPoolWorkspaceSpec{
+		InstallName: "opo1", Device: "/dev/disk/by-id/scsi-workspace",
+	}, "reconcile")
 	for _, expected := range []string{
-		"systemctl enable --now iscsid",
-		"modprobe iscsi_tcp",
-		"command -v \"$tool\"",
-		"findmnt -n -o PROPAGATION /",
-		"findmnt -n -o FSTYPE --target /var/lib/longhorn",
-		"ext4|xfs",
-		"node.longhorn.io/create-default-disk=true",
+		"probe_identity_topology", "wipefs -n --noheadings", "blkid -p", "write_receipt planned",
+		"mkfs.ext4 -F", "UUID=$planned_uuid", "nodev,nosuid", workspaceMarkerName,
 	} {
-		assert.Contains(t, got, expected)
+		assert.Contains(t, script, expected)
 	}
+	for _, forbidden := range []string{"if=/dev/", "FORGE_AGENTPOOL_WORKSPACE_FORCE", "wipefs -a", ">/tmp/forge-workspace"} {
+		assert.NotContains(t, script, forbidden)
+	}
+	assert.LessOrEqual(t, strings.Count(script, "probe_blank_signatures"), 4, "bounded probes are repeated only at the authorization boundary")
 }
 
 func TestReadGPUReadiness(t *testing.T) {

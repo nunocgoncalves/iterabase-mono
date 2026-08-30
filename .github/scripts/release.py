@@ -526,7 +526,6 @@ def make_plan(
             "inference-gateway",
             "iterabase-platform",
             "cert-manager-substrate",
-            "rwx-storage-substrate",
         )
     }
     fixtures = fixture_versions(root)

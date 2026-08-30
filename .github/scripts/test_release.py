@@ -188,8 +188,7 @@ class ReleaseContractTests(unittest.TestCase):
                 "control-plane/deployed-work-recovery",
                 "forge/digitalocean-cpu",
                 "forge/digitalocean-gpu",
-                "forge/digitalocean-rwx-three-node",
-                "forge/digitalocean-rwx-tls",
+                "forge/digitalocean-workspace",
                 "charts/certificate-ownership-migration",
                 "charts/fresh-install",
                 "charts/feature-enable-upgrade",
@@ -213,7 +212,7 @@ class ReleaseContractTests(unittest.TestCase):
         # HOR-512 release intent: iterabase-platform-chart is the sole candidate.
         # Forge v0.8.6 is already published, so it is recorded as an immutable
         # baseline rather than a co-published member; platform and its same-version
-        # cert-manager and managed-RWX companions remain the coordinated chart release.
+        # cert-manager remains the coordinated same-version chart companion.
         # The compiled metadata must record the platform+companion set and the
         # forge baseline so candidate preflight never co-publishes existing tags.
         plan = self.plan("iterabase-platform-chart")
@@ -231,8 +230,8 @@ class ReleaseContractTests(unittest.TestCase):
             if item["chart"] == "iterabase-platform"
         )
         self.assertEqual(platform["version"], "0.3.23")
-        self.assertEqual(platform["companions"], ["cert-manager-substrate", "rwx-storage-substrate"])
-        for companion in ("cert-manager-substrate", "rwx-storage-substrate"):
+        self.assertEqual(platform["companions"], ["cert-manager-substrate"])
+        for companion in ("cert-manager-substrate",):
             self.assertEqual(
                 plan["tested_with"]["chart_metadata"][companion]["version"],
                 "0.3.23",
@@ -243,7 +242,7 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertEqual(
             {item["name"] for item in plan["real_machine_matrix"]}, {"cpu", "gpu"}
         )
-        for scenario in ("forge/digitalocean-cpu", "forge/digitalocean-gpu", "forge/digitalocean-rwx-tls", "charts/metallb-upgrade-reapply"):
+        for scenario in ("forge/digitalocean-cpu", "forge/digitalocean-gpu", "forge/digitalocean-workspace", "charts/metallb-upgrade-reapply"):
             self.assertIn(scenario, plan["selected_scenarios"])
 
     def test_candidate_accepts_and_canonicalizes_an_explicit_target_set(self) -> None:
@@ -320,7 +319,7 @@ class ReleaseContractTests(unittest.TestCase):
     def test_chart_version_and_dependencies_come_from_chart_source(self) -> None:
         plan = self.plan("iterabase-platform-chart")
         self.assertEqual(plan["releases"][0]["version"], "0.3.23")
-        self.assertEqual(plan["chart_matrix"][0]["companions"], ["cert-manager-substrate", "rwx-storage-substrate"])
+        self.assertEqual(plan["chart_matrix"][0]["companions"], ["cert-manager-substrate"])
         selected_dependencies = {
             item["chart"]: {dependency["name"]: dependency["version"] for dependency in item["dependencies"]}
             for item in plan["tested_with"]["selected_chart_dependencies"]
@@ -333,7 +332,6 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertEqual(dependencies["ingress-nginx"], "4.15.1")
         self.assertEqual(dependencies["internal-ingress-nginx"], "4.15.1")
         self.assertEqual(dependencies["metallb-config"], "0.2.0")
-        self.assertEqual(selected_dependencies["rwx-storage-substrate"]["longhorn"], "1.12.1")
         self.assertEqual(
             plan["tested_with"]["chart_metadata"]["control-plane"]["appVersion"],
             "0.0.31",
@@ -588,7 +586,6 @@ class ReleaseContractTests(unittest.TestCase):
             assets.mkdir(parents=True)
             (assets / "iterabase-platform-0.3.23.tgz").write_bytes(b"platform")
             (assets / "cert-manager-substrate-0.3.23.tgz").write_bytes(b"substrate")
-            (assets / "rwx-storage-substrate-0.3.23.tgz").write_bytes(b"rwx")
             (assets / "checksums-iterabase-platform.txt").write_text(
                 "fixture\n", encoding="utf-8"
             )
@@ -604,7 +601,6 @@ class ReleaseContractTests(unittest.TestCase):
                 ("control-plane", "0.4.13"),
                 ("iterabase-platform", "0.3.23"),
                 ("cert-manager-substrate", "0.3.23"),
-                ("rwx-storage-substrate", "0.3.23"),
             ):
                 (assets / f"{chart}-{version}.tgz").write_bytes(chart.encode())
             for chart in ("control-plane", "iterabase-platform"):
@@ -889,10 +885,6 @@ class ReleaseContractTests(unittest.TestCase):
             "helm show chart oci://ghcr.io/nunocgoncalves/iterabase-charts/cert-manager-substrate --version 0.3.23",
             commands,
         )
-        self.assertIn(
-            "helm show chart oci://ghcr.io/nunocgoncalves/iterabase-charts/rwx-storage-substrate --version 0.3.23",
-            commands,
-        )
 
     def test_candidate_preflight_fails_closed_when_registry_is_unavailable(self) -> None:
         result, _ = self.check_availability(
@@ -1035,7 +1027,6 @@ class ReleaseContractTests(unittest.TestCase):
                 ("control-plane", "0.4.13"),
                 ("iterabase-platform", "0.3.23"),
                 ("cert-manager-substrate", "0.3.23"),
-                ("rwx-storage-substrate", "0.3.23"),
             ):
                 (assets / f"{chart}-{version}.tgz").write_bytes(chart.encode())
             for chart in ("control-plane", "iterabase-platform"):
@@ -1079,7 +1070,7 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertNotIn("FORGE_E2E_USE_LATEST_RELEASE", workflow)
         self.assertNotIn("published-latest", workflow)
         self.assertIn("ITERABASE_E2E_FIXTURE_MODE: source", workflow)
-        self.assertEqual(workflow.count("ITERABASE_E2E_SOURCE_INPUTS:"), 5)
+        self.assertEqual(workflow.count("ITERABASE_E2E_SOURCE_INPUTS:"), 4)
         self.assertNotIn("ITERABASE_E2E_FIXTURE_MODE: published", workflow)
         self.assertIn("forge/test/e2e/published-fixture.json", workflow)
         candidate = (ROOT / ".github" / "workflows" / "release-candidate.yml").read_text()

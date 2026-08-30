@@ -35,13 +35,8 @@ func applyInferencePlatformStage(t *testing.T, state *digitalOceanGPUState) {
 		t, state.runID, state.vm.IP, state.privKeyPath, state.chartVersion, plan,
 	)
 	out := applyOnceArgs(t, state.forgeBin, state.forgeHome, candidateConfig, "--skip-gpu")
-	markers := []string{"action:     skip", "node ready: true", "certificate substrate applied: true",
+	markers := []string{"action:     skip", "node ready: true", "AgentPool workspace:", "AgentPool local-path ready: true", "certificate substrate applied: true",
 		"chart applied: true", "overlay applied: true", "flux installed: true", "gitrepository: ready=True"}
-	if os.Getenv(storageChartArchiveEnv) != "" && os.Getenv(forceExternalStorageEnv) != "true" {
-		markers = append(markers, "rwx storage mode: managed-longhorn", "rwx storage prerequisites ready: true", "rwx storage substrate applied: true")
-	} else {
-		markers = append(markers, "rwx storage mode: external")
-	}
 	assertApplyMarkers(t, out, markers...)
 	t.Logf("apply output:\n%s", out)
 	candidateCluster := remotecluster.Use(t, filepath.Join(state.forgeHome, state.runID, "kubeconfig.yaml"))

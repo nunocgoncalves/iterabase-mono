@@ -175,11 +175,8 @@ if [[ -d candidate-local/selected/iterabase-platform ]]; then
   cp -R candidate-local/selected/iterabase-platform candidate-local/runtime/
   companion_version=$(selected_chart_version iterabase-platform)
   companion="$candidate_dir/charts/cert-manager-substrate-$companion_version.tgz"
-  storage_companion="$candidate_dir/charts/rwx-storage-substrate-$companion_version.tgz"
   [[ -f "$companion" ]]
-  [[ -f "$storage_companion" ]]
   tar -xzf "$companion" -C candidate-local/runtime
-  tar -xzf "$storage_companion" -C candidate-local/runtime
 elif [[ -d candidate-local/baselines/iterabase-platform ]]; then
   cp -R candidate-local/baselines/iterabase-platform candidate-local/runtime/
   [[ -d candidate-local/baselines/cert-manager-substrate ]]
@@ -202,7 +199,6 @@ if [[ -d "$platform_dir" ]]; then
   set_env "ITERABASE_CHART_VERSION=$platform_version"
 
   substrate_dir=candidate-local/runtime/cert-manager-substrate
-  storage_substrate_dir=candidate-local/runtime/rwx-storage-substrate
   [[ -d "$substrate_dir" ]]
   tar -czf candidate-local/runtime-iterabase-platform.tgz \
     -C candidate-local/runtime iterabase-platform
@@ -210,11 +206,6 @@ if [[ -d "$platform_dir" ]]; then
     -C candidate-local/runtime cert-manager-substrate
   set_env "FORGE_E2E_PLATFORM_CHART_ARCHIVE=$PWD/candidate-local/runtime-iterabase-platform.tgz"
   set_env "FORGE_E2E_SUBSTRATE_CHART_ARCHIVE=$PWD/candidate-local/runtime-cert-manager-substrate.tgz"
-  if [[ -d "$storage_substrate_dir" ]]; then
-    tar -czf candidate-local/runtime-rwx-storage-substrate.tgz \
-      -C candidate-local/runtime rwx-storage-substrate
-    set_env "FORGE_E2E_RWX_STORAGE_CHART_ARCHIVE=$PWD/candidate-local/runtime-rwx-storage-substrate.tgz"
-  fi
 elif [[ -d candidate-local/baselines/cert-manager-substrate ]]; then
   # The tool-runner scenario asks for the substrate as a sibling of the
   # platform path even though it does not install the platform chart itself.

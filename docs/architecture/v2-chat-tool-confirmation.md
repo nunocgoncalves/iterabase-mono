@@ -1022,7 +1022,7 @@ Authorization filters execute before ranking/snippet generation. Search logs con
 ### Backup and restore
 
 - Authoritative backup set: PostgreSQL plus the artifact/object store and existing gateway/work ledgers under the platform backup contract.
-- RWX/PVC pi session directories are excluded from required backup and disaster-recovery evidence.
+- node-local RWO/PVC pi session directories are excluded from required backup and disaster-recovery evidence.
 - Restore validates database/artifact consistency, fences all restored nonterminal Chat assignments/generations, and treats every restored confirmed write command/in-flight invocation conservatively.
 - A command with no proof that dispatch never began is not automatically delivered after catastrophic restore. An invocation that might have crossed the effect boundary remains/re-enters `outcome_unknown` until reconciled.
 - The next new message reconstructs context into a new generation. Restore never fabricates an assistant answer, reruns a prior user turn, or repeats a tool/workflow effect.

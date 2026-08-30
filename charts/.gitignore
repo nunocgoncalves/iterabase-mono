@@ -3,9 +3,4 @@
 charts/*/charts/
 charts/*/Chart.lock
 *.tgz
-# Longhorn 1.12.1's upstream chart release URL was removed after HOR-469
-# qualification. Preserve the already reviewed byte-identical archive as the
-# deterministic source dependency; build scripts verify its approved digest.
-!vendor/
-!vendor/longhorn-1.12.1.tgz
 .cr-release/

@@ -130,207 +130,73 @@ tests:
               severity: critical
               component: storage
             exp_annotations:
-              summary: An AgentPool worker lost shared sandbox storage I/O
+              summary: An AgentPool worker lost dedicated workspace storage I/O
               description: The supervisor failed its fsync/rename/unlink storage transaction and removed dispatch readiness.
-              first_action: Inspect the AgentPool StorageReady condition, PVC/PV events, Longhorn volume/share-manager/node health, and capacity before allowing fresh workers.
+              first_action: Inspect the AgentPool StorageReady condition, fixed class/PVC/PV path, dedicated ext4 mount identity, actual free-space gate, and node events before allowing fresh workers.
               runbook_url: https://github.com/nunocgoncalves/iterabase-mono/blob/master/docs/runbooks/platform-alerts.md#iterabaseharnessstorageunavailable
 
-  - name: warning Longhorn node capacity precedes exhaustion
+  - name: workspace warning uses actual filesystem ratio below 25 percent
     interval: 1m
     input_series:
-      - series: 'longhorn_node_storage_capacity_bytes{node="storage-0"}'
-        values: '100x25'
-      - series: 'longhorn_node_storage_usage_bytes{node="storage-0"}'
-        values: '70x25'
-      - series: 'longhorn_node_storage_reservation_bytes{node="storage-0"}'
-        values: '15x25'
-    alert_rule_test:
-      - eval_time: 20m
-        alertname: IterabaseLonghornNodeCapacityLow
-        exp_alerts:
-          - exp_labels:
-              node: storage-0
-              severity: warning
-              component: storage
-            exp_annotations:
-              summary: Longhorn node storage-0 has less than 20% schedulable capacity
-              description: Physical node headroom is below the rebuild and expansion safety threshold.
-              first_action: Close new storage growth and inspect node scheduled, used, reserved, and physical capacity before expanding or rebuilding.
-              runbook_url: https://github.com/nunocgoncalves/iterabase-mono/blob/master/docs/runbooks/platform-alerts.md#iterabaselonghornnodecapacitylow
-
-  - name: critical unschedulable Longhorn disk is not hidden by remaining bytes
-    interval: 1m
-    input_series:
-      - series: 'longhorn_disk_capacity_bytes{node="storage-0",disk="dedicated"}'
-        values: '100x15'
-    alert_rule_test:
-      - eval_time: 12m
-        alertname: IterabaseLonghornDiskUnschedulable
-        exp_alerts:
-          - exp_labels:
-              node: storage-0
-              disk: dedicated
-              severity: critical
-              component: storage
-            exp_annotations:
-              summary: Longhorn disk dedicated on storage-0 is not schedulable
-              description: The expected managed data disk no longer reports a true schedulable condition.
-              first_action: Inspect Longhorn disk conditions, node readiness, mount identity, filesystem, and remaining capacity.
-              runbook_url: https://github.com/nunocgoncalves/iterabase-mono/blob/master/docs/runbooks/platform-alerts.md#iterabaselonghorndiskunschedulable
-
-  - name: warning Longhorn actual allocation approaches requested volume capacity
-    interval: 1m
-    input_series:
-      - series: 'longhorn_volume_actual_size_bytes{node="storage-0",volume="vol-a",pvc="pool-sandbox",pvc_namespace="iterabase-system"}'
-        values: '85x20'
-      - series: 'longhorn_volume_capacity_bytes{node="storage-0",volume="vol-a",pvc="pool-sandbox",pvc_namespace="iterabase-system"}'
-        values: '100x20'
-    alert_rule_test:
-      - eval_time: 18m
-        alertname: IterabaseLonghornVolumeCapacityHigh
-        exp_alerts:
-          - exp_labels:
-              pvc_namespace: iterabase-system
-              pvc: pool-sandbox
-              volume: vol-a
-              severity: warning
-              component: storage
-            exp_annotations:
-              summary: Longhorn volume vol-a actual/requested use exceeds 80%
-              description: Replica allocation is approaching the PVC-requested capacity boundary.
-              first_action: Identify the AgentPool claim, close unbounded growth, and prove physical replica headroom before monotonic expansion.
-              runbook_url: https://github.com/nunocgoncalves/iterabase-mono/blob/master/docs/runbooks/platform-alerts.md#iterabaselonghornvolumecapacityhigh
-
-  - name: critical degraded Longhorn volume fires with backend identity
-    interval: 1m
-    input_series:
-      - series: 'longhorn_volume_robustness{node="storage-0",volume="vol-a",pvc="pool-sandbox",pvc_namespace="iterabase-system",state="degraded"}'
-        values: '1x10'
+      - series: 'control_plane_harness_workspace_free_ratio{namespace="iterabase-system",pod="pool-worker-0"}'
+        values: '0.30 0.24x10'
     alert_rule_test:
       - eval_time: 7m
-        alertname: IterabaseLonghornVolumeDegraded
+        alertname: IterabaseWorkspaceCapacityWarning
         exp_alerts:
           - exp_labels:
-              pvc_namespace: iterabase-system
-              pvc: pool-sandbox
-              volume: vol-a
-              state: degraded
+              namespace: iterabase-system
+              pod: pool-worker-0
+              severity: warning
+              component: storage
+            exp_annotations:
+              summary: AgentPool workspace filesystem is below 25% free
+              description: Actual available blocks on the dedicated workspace filesystem crossed the capacity warning threshold.
+              first_action: Pause avoidable growth, inspect workspace free bytes and largest eligible session data, then add customer-owned capacity through an explicit replacement/migration plan.
+              runbook_url: https://github.com/nunocgoncalves/iterabase-mono/blob/master/docs/runbooks/platform-alerts.md#iterabaseworkspacecapacitywarning
+
+  - name: workspace credit gate reports the hysteretic closed state
+    interval: 1m
+    input_series:
+      - series: 'control_plane_harness_workspace_credit_gated{namespace="iterabase-system",pod="pool-worker-0"}'
+        values: '0 1x5 0x3'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: IterabaseWorkspaceCreditGated
+        exp_alerts:
+          - exp_labels:
+              namespace: iterabase-system
+              pod: pool-worker-0
               severity: critical
               component: storage
             exp_annotations:
-              summary: Longhorn volume vol-a is degraded
-              description: A managed volume has lost healthy replica evidence.
-              first_action: Stop unsafe new AgentPool capacity and inspect volume, replica, engine, node, disk, and rebuild events.
-              runbook_url: https://github.com/nunocgoncalves/iterabase-mono/blob/master/docs/runbooks/platform-alerts.md#iterabaselonghornvolumedegraded
-
-  - name: warning PVC requested capacity remains above usable capacity
-    interval: 1m
-    input_series:
-      - series: 'kube_persistentvolumeclaim_resource_requests_storage_bytes{namespace="iterabase-system",persistentvolumeclaim="pool-sandbox"}'
-        values: '20x20'
-      - series: 'kube_persistentvolumeclaim_status_capacity_bytes{namespace="iterabase-system",persistentvolumeclaim="pool-sandbox"}'
-        values: '10x20'
-    alert_rule_test:
-      - eval_time: 18m
-        alertname: IterabasePVCExpansionStalled
-        exp_alerts:
-          - exp_labels:
-              namespace: iterabase-system
-              persistentvolumeclaim: pool-sandbox
-              severity: warning
-              component: storage
-            exp_annotations:
-              summary: PVC iterabase-system/pool-sandbox expansion is incomplete
-              description: Requested storage remains above controller/filesystem-reported usable capacity.
-              first_action: Inspect PVC/PV conditions, CSI resizer/node plugin, mount events, and physical capacity; never report or attempt shrink.
-              runbook_url: https://github.com/nunocgoncalves/iterabase-mono/blob/master/docs/runbooks/platform-alerts.md#iterabasepvcexpansionstalled
-
-  - name: warning RWX conformance age fires then resolves after successful rerun recreates the attestation
-    interval: 1m
-    input_series:
-      - series: 'kube_configmap_created{namespace="iterabase-system",configmap="iterabase-rwx-conformance-abcd"}'
-        values: '60x11580 694860x120'
-    alert_rule_test:
-      - eval_time: 8d1h
-        alertname: IterabaseRWXConformanceStale
-        exp_alerts:
-          - exp_labels:
-              namespace: iterabase-system
-              configmap: iterabase-rwx-conformance-abcd
-              severity: warning
-              component: storage
-            exp_annotations:
-              summary: RWX conformance attestation iterabase-system/iterabase-rwx-conformance-abcd is older than seven days
-              description: The exact class/backend evidence is too old for continued release confidence.
-              first_action: Re-run the same-release disposable conformance gate after confirming backend, CSI, node image, and class identity.
-              runbook_url: https://github.com/nunocgoncalves/iterabase-mono/blob/master/docs/runbooks/platform-alerts.md#iterabaserwxconformancestale
-      - eval_time: 8d2h
-        alertname: IterabaseRWXConformanceStale
+              summary: Fresh AgentPool dispatch credit is gated by workspace capacity
+              description: Actual workspace free space is at or below 20%, or has not yet recovered to the 25% reopen threshold. Active turns are not aborted solely by this gate.
+              first_action: Keep fresh work closed, inspect exact free bytes/ratio and customer capacity response, and reopen only after the metric reaches at least 25%.
+              runbook_url: https://github.com/nunocgoncalves/iterabase-mono/blob/master/docs/runbooks/platform-alerts.md#iterabaseworkspacecreditgated
+      - eval_time: 8m
+        alertname: IterabaseWorkspaceCreditGated
         exp_alerts: []
 
-  - name: critical share manager readiness loss is actionable
+  - name: real workspace I/O failure fences instead of replaying
     interval: 1m
     input_series:
-      - series: 'kube_pod_status_ready{namespace="longhorn-system",pod="share-manager-vol-a",condition="true"}'
-        values: '0x6'
+      - series: 'control_plane_harness_storage_checks_total{namespace="iterabase-system",pod="pool-worker-0",result="fail"}'
+        values: '0 1x5'
     alert_rule_test:
-      - eval_time: 4m
-        alertname: IterabaseLonghornShareManagerUnavailable
+      - eval_time: 2m
+        alertname: IterabaseWorkspaceStorageIOFailure
         exp_alerts:
           - exp_labels:
-              namespace: longhorn-system
-              pod: share-manager-vol-a
+              namespace: iterabase-system
+              pod: pool-worker-0
               severity: critical
               component: storage
             exp_annotations:
-              summary: Longhorn share-manager share-manager-vol-a is unavailable
-              description: The singular NFS server for an RWX volume is not Ready.
-              first_action: Stop AgentPool scheduling, restore volume/share-manager health, then recycle affected workers without replay.
-              runbook_url: https://github.com/nunocgoncalves/iterabase-mono/blob/master/docs/runbooks/platform-alerts.md#iterabaselonghornsharemanagerunavailable
-
-  - name: critical CSI daemonset readiness loss blocks storage confidence
-    interval: 1m
-    input_series:
-      - series: 'kube_daemonset_status_desired_number_scheduled{namespace="longhorn-system",daemonset="longhorn-csi-plugin"}'
-        values: '3x8'
-      - series: 'kube_daemonset_status_number_ready{namespace="longhorn-system",daemonset="longhorn-csi-plugin"}'
-        values: '2x8'
-    alert_rule_test:
-      - eval_time: 6m
-        alertname: IterabaseLonghornCSIUnavailable
-        exp_alerts:
-          - exp_labels:
-              namespace: longhorn-system
-              daemonset: longhorn-csi-plugin
-              severity: critical
-              component: storage
-            exp_annotations:
-              summary: Longhorn CSI node plugin is unavailable on one or more nodes
-              description: The CSI DaemonSet does not have every desired node plugin Ready.
-              first_action: Inspect CSI plugin pods, CSINodes, mount propagation, iSCSI/NFS packages, and node events before replacing workers.
-              runbook_url: https://github.com/nunocgoncalves/iterabase-mono/blob/master/docs/runbooks/platform-alerts.md#iterabaselonghorncsiunavailable
-
-  - name: warning released managed PV requires explicit disposition
-    interval: 1m
-    input_series:
-      - series: 'kube_persistentvolume_status_phase{persistentvolume="pool-pv",phase="Released"}'
-        values: '1x75'
-      - series: 'kube_persistentvolume_info{persistentvolume="pool-pv",storageclass="iterabase-rwx"}'
-        values: '1x75'
-    alert_rule_test:
-      - eval_time: 70m
-        alertname: IterabaseRetainedRwxPVRequiresDisposition
-        exp_alerts:
-          - exp_labels:
-              persistentvolume: pool-pv
-              phase: Released
-              severity: warning
-              component: storage
-            exp_annotations:
-              summary: Retained Iterabase RWX PV pool-pv requires disposition
-              description: A released Retain volume still consumes backend capacity and cannot be silently adopted or destroyed.
-              first_action: Identify the pool and approved recovery need, then explicitly transfer or delete/sanitize the PV and backend volume with audit evidence.
-              runbook_url: https://github.com/nunocgoncalves/iterabase-mono/blob/master/docs/runbooks/platform-alerts.md#iterabaseretainedrwxpvrequiresdisposition
+              summary: AgentPool workspace I/O health transaction failed
+              description: A real write/fsync/rename/unlink or zero-space check failed; the worker fences its active turn and exits rather than replaying it.
+              first_action: Inspect the exact ext4 mount source/options/ownership, node and disk I/O, free blocks, PVC/PV path, and worker-loss evidence before replacement.
+              runbook_url: https://github.com/nunocgoncalves/iterabase-mono/blob/master/docs/runbooks/platform-alerts.md#iterabaseworkspacestorageiofailure
 
   - name: warning manager reconciliation threshold fires after the five-minute hold
     interval: 1m

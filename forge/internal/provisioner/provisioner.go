@@ -10,6 +10,41 @@ import (
 	"fmt"
 )
 
+// Fixed Platform V2 workspace identities shared by Forge and its callers.
+const (
+	AgentPoolWorkspaceMount        = "/var/lib/iterabase/agentpool-workspaces"
+	AgentPoolWorkspaceStorageClass = "iterabase-agentpool-local-path"
+	AgentPoolWorkspaceProvisioner  = "rancher.io/local-path"
+)
+
+// WorkspaceDevice is a read-only stable whole-disk choice shown by interactive
+// forge init before the operator selects the destructive workspace target.
+type WorkspaceDevice struct {
+	Path      string
+	Model     string
+	Serial    string
+	SizeBytes uint64
+}
+
+// AgentPoolWorkspaceSpec binds host reconciliation to one install and one
+// persisted stable by-id device. No method may discover a replacement.
+type AgentPoolWorkspaceSpec struct {
+	InstallName string
+	Device      string
+}
+
+// AgentPoolWorkspaceState is bounded, non-secret device/filesystem evidence.
+type AgentPoolWorkspaceState struct {
+	Device         string
+	Resolved       string
+	Model          string
+	Serial         string
+	WWN            string
+	SizeBytes      uint64
+	FilesystemUUID string
+	State          string
+}
+
 // HostState is the actual host-level state of k3s, read for reconcile.
 // Node-level state (labels/taints) is applied at install time via k3s flags in
 // v1 and reconciled via the API in a later version.
@@ -31,9 +66,6 @@ type PreflightResult struct {
 	HasIPv6                bool   // host has IPv6 (relevant when dualStack)
 	HasNVIDIAGPU           bool   // an NVIDIA GPU is on the PCI bus (GPU preflight; S11 passthrough precondition)
 	KernelHeadersInstalled bool   // linux-headers-$(uname -r) present (GPU driver build dep)
-	HasISCSI               bool   // iscsiadm exists and iscsid is active (managed Longhorn prerequisite)
-	HasNFSv4               bool   // mount.nfs exists (managed RWX client prerequisite)
-	HasMountPropagation    bool   // the host root mount is shared/rshared
 }
 
 // GPUReadiness is one coherent observation of the GPU operator and the
@@ -95,11 +127,19 @@ type Provisioner interface {
 	// via the GPU operator's driver container (installs matching linux-headers on
 	// Ubuntu). Idempotent. Only called when GPU is enabled.
 	EnsureDriverBuildDeps(ctx context.Context) error
-	// EnsureRWXStoragePrerequisites idempotently installs and verifies the
-	// iSCSI/NFSv4/kernel/filesystem/mount-propagation capabilities required by
-	// the approved managed Longhorn reference substrate. It is derived from the
-	// chart storage selection; forge.yaml does not gain a provider toggle.
-	EnsureRWXStoragePrerequisites(ctx context.Context) error
+	// ListAgentPoolWorkspaceDevices returns stable non-removable whole-disk
+	// identities for the interactive init selection. It is strictly read-only.
+	ListAgentPoolWorkspaceDevices(ctx context.Context) ([]WorkspaceDevice, error)
+	// InspectAgentPoolWorkspace runs the complete read-only identity/topology/
+	// in-use/partition/signature preflight used by forge apply --dry-run.
+	InspectAgentPoolWorkspace(ctx context.Context, spec AgentPoolWorkspaceSpec) (*AgentPoolWorkspaceState, error)
+	// ReconcileAgentPoolWorkspace repeats every required probe immediately before
+	// the first ext4 format, then crash-resumably reconciles receipt, UUID fstab,
+	// mount, and filesystem marker. It never adopts or selects another device.
+	ReconcileAgentPoolWorkspace(ctx context.Context, spec AgentPoolWorkspaceSpec) (*AgentPoolWorkspaceState, error)
+	// EnsureAgentPoolLocalPathStorage configures K3s's bundled provisioner with
+	// separate fixed default and AgentPool class paths and validates both classes.
+	EnsureAgentPoolLocalPathStorage(ctx context.Context) error
 	// ReadGPUReadiness returns one coherent ClusterPolicy/node observation,
 	// evaluated against the requested driver. Missing resources and transitional
 	// states return Ready=false; query/parse failures return an error. Polled as

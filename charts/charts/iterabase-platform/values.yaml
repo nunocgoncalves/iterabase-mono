@@ -3,28 +3,14 @@
 # --- Internal TLS (opt-in; the prod overlay flips this one switch) ---
 # When true, supported in-cluster service links use the Iterabase internal CA:
 # Postgres (ssl=on + hostssl), Redis (TLS + AUTH), control-plane API (HTTPS),
-# verified gateway clients, observability HTTPS, and—when the managed companion
-# is selected—Longhorn manager-to-instance-manager gRPC mTLS. The managed
-# single-node RWX NFSv4.1 hop is an explicitly unencrypted same-host data-plane
-# exposure; this CA does not secure NFS/iSCSI/CSI/replica traffic. Production
-# multi-node storage requires separately approved encrypted networking (HOR-519).
-# Propagated via `global.internalTLS`; default false keeps dev/kind plaintext.
+# verified gateway clients, and observability HTTPS. AgentPool workspace storage
+# is node-local ext4 configured by Forge and does not introduce another service
+# transport. Propagated via `global.internalTLS`; default false keeps dev/kind
+# plaintext.
 # The CA Secret remains <release>-internal-ca-root, so overlays set only enabled.
 global:
   internalTLS:
     enabled: false
-
-# --- Production AgentPool RWX storage contract (DES-HOR-424 / DES-HOR-469-01) ---
-# This umbrella records and validates the semantic selection. Managed Longhorn
-# is a same-version rwx-storage-substrate companion release installed first;
-# external mode installs no backend. The deliberately non-working external
-# class default keeps generic renders portable while requiring every production
-# overlay to select one exact conforming class. No default-class fallback or
-# auto-detection exists.
-storage:
-  rwx:
-    mode: external
-    storageClassName: external-rwx-required
 
 # --- Data deps (self-contained subcharts; disable + override to BYO) ---
 # Postgres is provided by the control-plane chart (pgvector); the gateway reads

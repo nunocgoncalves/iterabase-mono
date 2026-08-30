@@ -109,79 +109,37 @@ func prepareCandidateOverlay(t *testing.T, runID, ip, keyPath string) candidateO
 }
 
 func candidateOverlayValues(t *testing.T) string {
-	t.Helper()
 	imageValues := func(repositoryEnv, tagEnv, digestEnv, prefix string) string {
-		digest := os.Getenv(digestEnv)
-		if digest == "" {
+		repository, tag, digest := os.Getenv(repositoryEnv), os.Getenv(tagEnv), os.Getenv(digestEnv)
+		if repository == "" || tag == "" {
 			return ""
 		}
-		if !strings.HasPrefix(digest, "sha256:") {
-			t.Fatalf("%s=%q is not a canonical sha256 digest", digestEnv, digest)
-		}
-		repository := os.Getenv(repositoryEnv)
-		tag := os.Getenv(tagEnv)
-		if repository == "" || tag == "" || !strings.HasSuffix(tag, "@"+digest) {
-			t.Fatalf("%s requires repository and immutable tag ending in @%s", digestEnv, digest)
+		if digest != "" && !strings.Contains(tag, "@"+digest) {
+			t.Fatalf("candidate image %s/%s tag %q does not carry selected digest %s", repositoryEnv, tagEnv, tag, digest)
 		}
 		return fmt.Sprintf("%srepository: %q\n%stag: %q\n", prefix, repository, prefix, tag)
 	}
 
-	controlPlane := imageValues(
-		"CONTROL_PLANE_IMAGE_REPO", "CONTROL_PLANE_IMAGE_TAG", controlPlaneDigestEnv, "    ",
-	)
-	toolRunner := imageValues(
-		"TOOL_RUNNER_IMAGE_REPO", "TOOL_RUNNER_IMAGE_TAG", toolRunnerDigestEnv, "      ",
-	)
-	inference := imageValues(
-		"INFERENCE_GATEWAY_IMAGE_REPO", "INFERENCE_GATEWAY_IMAGE_TAG", inferenceGatewayDigestEnv, "    ",
-	)
+	controlPlane := imageValues("CONTROL_PLANE_IMAGE_REPO", "CONTROL_PLANE_IMAGE_TAG", controlPlaneDigestEnv, "    ")
+	toolRunner := imageValues("TOOL_RUNNER_IMAGE_REPO", "TOOL_RUNNER_IMAGE_TAG", toolRunnerDigestEnv, "      ")
+	inference := imageValues("INFERENCE_GATEWAY_IMAGE_REPO", "INFERENCE_GATEWAY_IMAGE_TAG", inferenceGatewayDigestEnv, "    ")
 
-	// These real-machine scenarios prove Forge/bootstrap, managed-RWX storage
-	// readiness, and exact candidate installation. Dispatch is enabled only so
-	// two idle harness workers can establish real AgentPool readiness; the
-	// synthetic model permission is never used for a customer turn.
+	// Storage has no overlay-selectable backend, class, path, or access mode.
+	// Forge reconciles the fixed dedicated local-path substrate before Helm.
 	var values strings.Builder
 	values.WriteString("\n# Forge real-machine fixture values.\n")
-	managedStorage := os.Getenv(storageChartArchiveEnv) != "" && os.Getenv(forceExternalStorageEnv) != "true"
-	storageTLSOnly := os.Getenv(storageTLSOnlyEnv) == "true"
-	if storageTLSOnly && !managedStorage {
-		t.Fatalf("%s=true requires the exact managed storage companion", storageTLSOnlyEnv)
+	values.WriteString("control-plane:\n  dispatch:\n    enabled: true\n    defaultModel:\n      id: storage-readiness-fixture\n      api: openai-completions\n")
+	if controlPlane != "" {
+		values.WriteString("  image:\n")
+		values.WriteString(controlPlane)
 	}
-	if managedStorage {
-		// The exact-candidate single-node path is the mandatory combined proof for
-		// DES-HOR-469-02: the ordered certificate substrate establishes the
-		// internal CA before Longhorn, and the platform keeps its normal TLS-on
-		// behavior. Reloader owns leaf-renewal restarts for chart workloads.
-		values.WriteString("global:\n  internalTLS:\n    enabled: true\nreloader:\n  enabled: true\n")
+	if toolRunner != "" {
+		values.WriteString("  toolRunner:\n    image:\n")
+		values.WriteString(toolRunner)
 	}
-	values.WriteString("storage:\n  rwx:\n")
-	if managedStorage {
-		values.WriteString("    mode: managed-longhorn\n    storageClassName: iterabase-rwx\n    managedLonghorn:\n      topology: single-node\n")
-	} else {
-		// Ordinary PR source E2E intentionally composes with the published
-		// platform baseline, which predates DES-HOR-469-01. Exact-candidate and
-		// dedicated storage scenarios provide the managed companion archive.
-		values.WriteString("    mode: external\n    storageClassName: external-rwx-required\n")
-	}
-	if storageTLSOnly {
-		// The dedicated DES-HOR-469-02 gate exercises the exact certificate and
-		// storage companions without depending on unpublished product images.
-		// The ordinary CPU scenario retains the complete platform/Forge journey.
-		values.WriteString("redis: {enabled: false}\nminio: {enabled: false}\ninference-gateway: {enabled: false}\ncontrol-plane: {enabled: false}\ningress-nginx: {enabled: false}\ninternal-ingress-nginx: {enabled: false}\nmetallb: {enabled: false}\nmetallb-config: {enabled: false}\ncert-issuers: {enabled: false}\nexternal-dns: {enabled: false}\nobservability: {enabled: false}\n")
-	} else {
-		values.WriteString("control-plane:\n  dispatch:\n    enabled: true\n    defaultModel:\n      id: storage-readiness-fixture\n      api: openai-completions\n")
-		if controlPlane != "" {
-			values.WriteString("  image:\n")
-			values.WriteString(controlPlane)
-		}
-		if toolRunner != "" {
-			values.WriteString("  toolRunner:\n    image:\n")
-			values.WriteString(toolRunner)
-		}
-		if inference != "" {
-			values.WriteString("inference-gateway:\n  image:\n")
-			values.WriteString(inference)
-		}
+	if inference != "" {
+		values.WriteString("inference-gateway:\n  image:\n")
+		values.WriteString(inference)
 	}
 	return values.String()
 }
@@ -209,7 +167,6 @@ func TestCandidateOverlayValues(t *testing.T) {
 		"dispatch:":                 {},
 		"enabled: true":             {},
 		"storage-readiness-fixture": {},
-		"mode: external":            {},
 		"repository: \"ghcr.io/example/control-plane\"": {},
 		"tag: \"candidate-run@" + digest + "\"":         {},
 	} {
@@ -219,27 +176,12 @@ func TestCandidateOverlayValues(t *testing.T) {
 	}
 }
 
-func TestCandidateOverlayValuesSelectManagedStorageOnlyWithExactCompanion(t *testing.T) {
-	t.Setenv(storageChartArchiveEnv, "/tmp/rwx-storage-substrate.tgz")
+func TestCandidateOverlayValuesContainNoStorageBackendSelection(t *testing.T) {
 	values := candidateOverlayValues(t)
-	for _, expected := range []string{"internalTLS:\n    enabled: true", "reloader:\n  enabled: true", "mode: managed-longhorn", "storageClassName: iterabase-rwx", "topology: single-node"} {
-		if !strings.Contains(values, expected) {
-			t.Fatalf("managed exact-candidate values missing %q:\n%s", expected, values)
+	for _, forbidden := range []string{"storage.rwx", "managed-longhorn", "external-rwx", "iterabase-rwx", "longhorn"} {
+		if strings.Contains(strings.ToLower(values), forbidden) {
+			t.Fatalf("candidate values retain obsolete storage selector %q:\n%s", forbidden, values)
 		}
-	}
-}
-
-func TestCandidateOverlayValuesSelectStorageTLSOnlyRuntime(t *testing.T) {
-	t.Setenv(storageChartArchiveEnv, "/tmp/rwx-storage-substrate.tgz")
-	t.Setenv(storageTLSOnlyEnv, "true")
-	values := candidateOverlayValues(t)
-	for _, expected := range []string{"internalTLS:\n    enabled: true", "mode: managed-longhorn", "control-plane: {enabled: false}", "inference-gateway: {enabled: false}", "cert-issuers: {enabled: false}"} {
-		if !strings.Contains(values, expected) {
-			t.Fatalf("managed TLS-only values missing %q:\n%s", expected, values)
-		}
-	}
-	if strings.Contains(values, "storage-readiness-fixture") {
-		t.Fatalf("managed TLS-only values must not enable unpublished product workloads:\n%s", values)
 	}
 }
 

@@ -38,6 +38,7 @@ message WorkerMessage {
     Heartbeat heartbeat = 3;
     TurnEvent turn_event = 4;   // durable, sequenced, cumulatively ACKed
     TokenDelta token_delta = 5; // ephemeral, live token streaming
+    WorkspaceStatus workspace_status = 6; // actual filesystem capacity + fresh-credit gate
   }
 }
 
@@ -53,11 +54,26 @@ message Hello {
   repeated string capabilities = 5;
 }
 
-// Ready advertises one dispatch credit. Legal only after Welcome, after any
-// audit replay, with no live child, no pending cleanup, and no unacknowledged
+// Ready advertises one dispatch credit. Legal only after Welcome and a current
+// non-gated WorkspaceStatus, after any audit replay, with no live child, no
+// pending cleanup, and no unacknowledged
 // final outcome. A second assignment before the next Ready is a protocol
 // violation (stream closed fail-closed).
 message Ready {}
+
+// WorkspaceStatus reports bounded capacity from statfs on the actual mounted
+// dedicated workspace filesystem. It is sent after Welcome and periodically,
+// including while idle and gated, so it renews the worker lease and can revoke
+// an unspent Ready credit. credit_gated never aborts an active turn; it only
+// suppresses the next assignment/credit. I/O or zero-space failure closes the
+// worker through the existing fencing path instead of reporting a healthy gate.
+message WorkspaceStatus {
+  uint64 free_bytes = 1;
+  uint64 capacity_bytes = 2;
+  double free_ratio = 3;
+  bool warning = 4;
+  bool credit_gated = 5;
+}
 
 // Heartbeat is ephemeral control data, not a runtime audit event. Any worker
 // message renews the server-side lease; a heartbeat is needed only after an
@@ -350,7 +366,8 @@ message ArtifactMaterialization {
   string relative_path = 2;
 }
 
-// SandboxRef identifies the session's private filesystem on the shared RWX PVC.
+// SandboxRef identifies the session's private filesystem on the pool's shared
+// node-local RWO PVC. Multiple workers mount it on the one supported node.
 // Under the HOR-381 provisioning rescope (founder-approved 2026-08-02), the
 // supervisor itself provisions this sandbox at AssignTurn: provisionSandbox
 // creates <sandbox-id>/{root,home,tmp,session,workspace} at mode 0700, chowned
@@ -407,7 +424,7 @@ message EventAck {
 }
 
 // SessionEnd tells the worker a session has terminated and its per-session
-// sandbox may be reaped from the shared RWX PVC. The supervisor (which
+// sandbox may be reaped from the shared node-local RWO PVC. The supervisor (which
 // provisioned the sandbox at AssignTurn under the HOR-245 provisioning
 // rescope) recursively removes `<sandbox-id>/` only after verifying it is a
 // non-symlink directory owned by the session (uid, gid); it never follows

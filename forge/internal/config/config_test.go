@@ -17,7 +17,8 @@ func validCluster() *Cluster {
 		Kind:       Kind,
 		Metadata:   Metadata{Name: "opo1"},
 		Spec: Spec{
-			Mode: ModeSingleNode,
+			Mode:               ModeSingleNode,
+			AgentPoolWorkspace: AgentPoolWorkspace{Device: "/dev/disk/by-id/scsi-workspace-disk"},
 			Hosts: []Host{{
 				Address:    "10.20.0.10",
 				SSHUser:    "forge",
@@ -99,6 +100,25 @@ func TestParse_InvalidMode(t *testing.T) {
 	_, err := Parse(yamlFor(t, func(c *Cluster) { c.Spec.Mode = "bogus" }))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid")
+}
+
+func TestParse_WorkspaceDeviceRequiredAndStable(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		device string
+		want   string
+	}{
+		{name: "missing", want: "is required"},
+		{name: "volatile", device: "/dev/sdb", want: "/dev/disk/by-id"},
+		{name: "partition", device: "/dev/disk/by-id/scsi-workspace-part1", want: "whole disk"},
+		{name: "nested", device: "/dev/disk/by-id/nested/device", want: "stable"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Parse(yamlFor(t, func(c *Cluster) { c.Spec.AgentPoolWorkspace.Device = tc.device }))
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.want)
+		})
+	}
 }
 
 func TestParse_NoHosts(t *testing.T) {

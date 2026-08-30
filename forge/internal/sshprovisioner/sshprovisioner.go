@@ -206,15 +206,6 @@ func (p *SSHProvisioner) Preflight(ctx context.Context) (*provisioner.PreflightR
 	if _, err := p.run(ctx, "test -d /usr/src/linux-headers-$(uname -r)"); err == nil {
 		r.KernelHeadersInstalled = true
 	}
-	if _, err := p.run(ctx, "command -v iscsiadm >/dev/null && systemctl is-active --quiet iscsid"); err == nil {
-		r.HasISCSI = true
-	}
-	if _, err := p.run(ctx, "command -v mount.nfs >/dev/null"); err == nil {
-		r.HasNFSv4 = true
-	}
-	if _, err := p.run(ctx, "findmnt -n -o PROPAGATION / | grep -Eq '(^|,)r?shared(,|$)'"); err == nil {
-		r.HasMountPropagation = true
-	}
 	return r, nil
 }
 
@@ -292,53 +283,6 @@ func (p *SSHProvisioner) EnsureDriverBuildDeps(ctx context.Context) error {
 		lockHeld := isAptLockHeld(err.Error()) || isAptLockHeld(out)
 		if !lockHeld || attempt >= 20 {
 			return fmt.Errorf("install kernel headers: %w", err)
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(aptLockRetryInterval):
-		}
-	}
-}
-
-// EnsureRWXStoragePrerequisites installs and verifies the exact host capability
-// boundary required by DES-HOR-424-01/02. It does not select a provider; the
-// lifecycle calls it only after resolving managed-longhorn from chart values.
-func (p *SSHProvisioner) EnsureRWXStoragePrerequisites(ctx context.Context) error {
-	cmd := `sudo bash -ceu '
-. /etc/os-release
-case "$ID" in
-  ubuntu|debian)
-    apt-get update
-    DEBIAN_FRONTEND=noninteractive apt-get install -y open-iscsi nfs-common
-    ;;
-  fedora|rhel|centos|rocky|almalinux)
-    dnf install -y iscsi-initiator-utils nfs-utils
-    ;;
-  *)
-    echo "unsupported managed Longhorn host OS: $ID" >&2
-    exit 1
-    ;;
-esac
-systemctl enable --now iscsid
-modprobe iscsi_tcp
-install -d -m 0750 /var/lib/longhorn
-for tool in bash curl findmnt grep awk blkid lsblk iscsiadm mount.nfs; do
-  command -v "$tool" >/dev/null || { echo "missing managed RWX prerequisite: $tool" >&2; exit 1; }
-done
-systemctl is-active --quiet iscsid
-findmnt -n -o PROPAGATION / | grep -Eq "(^|,)r?shared(,|$)"
-findmnt -n -o FSTYPE --target /var/lib/longhorn | grep -Eq "^(ext4|xfs)$"
-k3s kubectl label nodes --all --overwrite node.longhorn.io/create-default-disk=true >/dev/null
-'`
-	for attempt := 0; ; attempt++ {
-		out, err := p.run(ctx, cmd)
-		if err == nil {
-			return nil
-		}
-		lockHeld := isAptLockHeld(err.Error()) || isAptLockHeld(out)
-		if !lockHeld || attempt >= 20 {
-			return fmt.Errorf("install/verify iSCSI, NFSv4, mount propagation, and Longhorn data path: %w", err)
 		}
 		select {
 		case <-ctx.Done():

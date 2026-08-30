@@ -72,7 +72,7 @@ func deployedExecutionContractsScenario() sharede2e.Definition {
 			"deployed-execution-contracts",
 			"Proves source-built AgentPool, dispatch, disposable harness children, model/tool gateways, immutable tools and artifacts, consequences, isolation, and durable recovery on fresh Kind.",
 			"test-e2e-execution", 55,
-			[]string{"HOR-477", "HOR-438", "HOR-488", "HOR-489", "REQ-005", "REQ-009", "REQ-010", "REQ-026", "SCN-008", "SCN-009"},
+			[]string{"HOR-477", "HOR-438", "HOR-488", "HOR-489", "HOR-538", "REQ-005", "REQ-009", "REQ-010", "REQ-018", "REQ-035", "SCN-008", "SCN-009", "SCN-012"},
 		),
 		NewState: newDeployedState,
 		Stages: []sharede2e.Stage[*deployedState]{
@@ -88,7 +88,8 @@ func deployedExecutionContractsScenario() sharede2e.Definition {
 			{Name: "setup-execution-resources", DependsOn: []string{"assert-execution-platform-ready"}, Run: setupExecutionResourcesStage},
 			{Name: "exercise-agentpool-late-secret-recovery", DependsOn: []string{"setup-execution-resources"}, Run: exerciseAgentPoolLateSecretRecoveryStage},
 			{Name: "exercise-worker-loss-cancellation", DependsOn: []string{"exercise-agentpool-late-secret-recovery"}, Run: exerciseWorkerLossCancellationStage},
-			{Name: "exercise-immutable-tool-generation", DependsOn: []string{"exercise-worker-loss-cancellation"}, Run: exerciseImmutableToolGenerationStage},
+			{Name: "exercise-concurrent-same-pool-rwo", DependsOn: []string{"exercise-worker-loss-cancellation"}, Run: exerciseConcurrentSamePoolWorkStage},
+			{Name: "exercise-immutable-tool-generation", DependsOn: []string{"exercise-concurrent-same-pool-rwo"}, Run: exerciseImmutableToolGenerationStage},
 			{Name: "exercise-representative-execution", DependsOn: []string{"exercise-immutable-tool-generation"}, Run: exerciseRepresentativeExecutionStage},
 			{Name: "exercise-idempotent-invocation-race", DependsOn: []string{"exercise-representative-execution"}, Run: exerciseIdempotentInvocationRaceStage},
 			{Name: "exercise-isolation-composition", DependsOn: []string{"exercise-idempotent-invocation-race"}, Run: exerciseIsolationCompositionStage},

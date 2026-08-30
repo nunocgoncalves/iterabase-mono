@@ -8,4 +8,3 @@ helm repo add external-dns https://kubernetes-sigs.github.io/external-dns/
 helm repo add stakater https://stakater.github.io/stakater-charts
 helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
 helm repo add grafana https://grafana.github.io/helm-charts
-helm repo add longhorn https://charts.longhorn.io

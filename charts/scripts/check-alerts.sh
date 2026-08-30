@@ -2,7 +2,6 @@
 set -euo pipefail
 
 base=$(helm template alert-contract charts/observability --show-only templates/iterabase-alerts.yaml)
-longhorn_monitor=$(helm template alert-contract charts/observability --show-only templates/longhorn-servicemonitor.yaml)
 configured=$(helm template alert-contract charts/observability --show-only templates/iterabase-alerts.yaml \
   --set alerts.performance.apiP95Seconds=2 \
   --set alerts.performance.inferenceP95Seconds=30 \
@@ -42,12 +41,13 @@ grep -Fq 'controller_runtime_reconcile_total{result="error",component="manager"}
   echo 'ERROR: manager reconciliation alert must target the stable component="manager" scrape identity' >&2
   exit 1
 }
-grep -Fq 'name: alert-contract-longhorn-manager' <<<"$longhorn_monitor" || {
-  echo 'ERROR: Longhorn backend alerts have no manager ServiceMonitor' >&2
-  exit 1
-}
-grep -Fq 'matchNames: [longhorn-system]' <<<"$longhorn_monitor" || {
-  echo 'ERROR: Longhorn manager ServiceMonitor must select the backend namespace explicitly' >&2
-  exit 1
-}
-echo "OK: $alerts invariant alerts carry runbooks/actions; six performance alerts are threshold-gated; recording rules and Longhorn scrape render"
+for contract in \
+  'control_plane_harness_workspace_free_ratio) < 0.25' \
+  'control_plane_harness_workspace_credit_gated) == 1' \
+  'control_plane_harness_storage_checks_total{result="fail"}'; do
+  grep -Fq "$contract" <<<"$base" || {
+    echo "ERROR: missing dedicated workspace alert contract: $contract" >&2
+    exit 1
+  }
+done
+echo "OK: $alerts invariant alerts carry runbooks/actions; six performance alerts are threshold-gated; dedicated workspace capacity/I/O alerts render"

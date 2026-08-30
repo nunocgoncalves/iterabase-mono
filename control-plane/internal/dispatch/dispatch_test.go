@@ -186,6 +186,11 @@ func (e *dispatchEnv) connectWorker(t *testing.T) *fakeWorker {
 }
 
 func (w *fakeWorker) ready() error {
+	if err := w.stream.Send(&v1.WorkerMessage{Kind: &v1.WorkerMessage_WorkspaceStatus{WorkspaceStatus: &v1.WorkspaceStatus{
+		FreeBytes: 30, CapacityBytes: 100, FreeRatio: 0.30,
+	}}}); err != nil {
+		return err
+	}
 	return w.stream.Send(&v1.WorkerMessage{Kind: &v1.WorkerMessage_Ready{Ready: &v1.Ready{}}})
 }
 

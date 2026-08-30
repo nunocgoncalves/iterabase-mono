@@ -35,7 +35,7 @@ export interface HarnessConfig {
   poolWorkspaceTools?: boolean;
   /** mTLS (certs provisioned by HOR-245; re-read each reconnect for rotation). */
   tls: { cert: string; key: string; ca: string };
-  /** Sandbox mount root (the shared RWX PVC; per-sandbox-id subdirs). */
+  /** Sandbox mount root (the same-node shared RWO PVC; per-sandbox-id subdirs). */
   sandboxRoot: string; // e.g. /data/sandboxes
   /** Read-only extension/package paths (pool-bound; the overlay pi/ tree). */
   piDirs: string[]; // [/pi/product, /pi/client]

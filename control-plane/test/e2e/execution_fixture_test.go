@@ -236,6 +236,24 @@ export async function invoke(context,args){
 			},
 		},
 		{
+			name: "platform.fixture_barrier", effect: "read_only",
+			bundle: fmt.Sprintf(`export const identity={name:"platform.fixture_barrier",version:%q};
+const waiters=[];
+export async function invoke(){
+ return await new Promise((resolve,reject)=>{
+  const entry={resolve,reject,timer:null};
+  entry.timer=setTimeout(()=>{const i=waiters.indexOf(entry);if(i>=0)waiters.splice(i,1);reject(new Error("concurrency barrier timeout"));},8000);
+  waiters.push(entry);
+  if(waiters.length>=2){
+   const batch=waiters.splice(0,waiters.length);
+   for(const waiter of batch){clearTimeout(waiter.timer);waiter.resolve({result:{simultaneous:true,participants:batch.length}});}
+  }
+ });
+}
+`, version),
+			extra: map[string]any{"timeoutMs": 10000},
+		},
+		{
 			name: "platform.fixture_upsert", effect: "idempotent_write",
 			bundle: fmt.Sprintf(`export const identity={name:"platform.fixture_upsert",version:%q};
 export async function invoke(context,args){
