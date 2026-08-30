@@ -108,11 +108,7 @@ func (p *doGPUVMProvisioner) Provision(ctx context.Context, runID, pubKeyStr, pr
 
 func (p *doGPUVMProvisioner) Destroy(ctx context.Context, id int) error {
 	_, dropletErr := p.client.Droplets.Delete(ctx, id)
-	var volumeErr error
-	if p.workspaceVolume != "" {
-		_, volumeErr = p.client.Storage.DeleteVolume(ctx, p.workspaceVolume)
-	}
-	return errors.Join(dropletErr, volumeErr)
+	return errors.Join(dropletErr, deleteWorkspaceVolume(ctx, p.client, p.workspaceVolume))
 }
 
 type gpuCandidate struct {
@@ -218,7 +214,7 @@ func provisionGPUStage(t *testing.T, state *digitalOceanGPUState) {
 		t.Skipf("GPU e2e skipped — no GPU capacity (try later or add Verda): %v", err)
 	}
 	require.NoError(t, err)
-	t.Setenv(workspaceDeviceEnv, state.vm.WorkspaceDevice)
+	rememberWorkspaceDevice(state.vm.IP, state.vm.WorkspaceDevice)
 	t.Logf("gpu vm ip %s workspace=%s (keep=%v)", state.vm.IP, state.vm.WorkspaceDevice, state.keep)
 }
 
@@ -258,6 +254,7 @@ func (state *digitalOceanGPUState) cleanup(t *testing.T) {
 
 func (state *digitalOceanGPUState) destroyGPUHost() error {
 	state.diagnostics.setDomain(failureDomainCleanup)
+	workspaceDevicesByAddress.Delete(state.vm.IP)
 	return state.provisioner.Destroy(state.ctx, state.vm.ID)
 }
 

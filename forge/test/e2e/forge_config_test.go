@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -12,6 +13,14 @@ import (
 // writers vary only the fields relevant to the contract they exercise, so the
 // common k3s/host recipe cannot drift across files.
 const workspaceDeviceEnv = "FORGE_E2E_AGENTPOOL_WORKSPACE_DEVICE"
+
+var workspaceDevicesByAddress sync.Map
+
+func rememberWorkspaceDevice(address, device string) {
+	if address != "" && device != "" {
+		workspaceDevicesByAddress.Store(address, device)
+	}
+}
 
 type forgeConfigSpec struct {
 	Name             string
@@ -39,6 +48,9 @@ func workspaceDevice(spec forgeConfigSpec) string {
 	}
 	if device := os.Getenv(workspaceDeviceEnv); device != "" {
 		return device
+	}
+	if device, ok := workspaceDevicesByAddress.Load(spec.Address); ok {
+		return device.(string)
 	}
 	return "/dev/disk/by-id/scsi-forge-e2e-workspaces"
 }
