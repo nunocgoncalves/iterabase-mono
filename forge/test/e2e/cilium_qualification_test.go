@@ -561,18 +561,21 @@ func assertCiliumQualificationCandidateIdentities(t *testing.T, state *ciliumQua
 	defer client.Close()
 	evidence := mustSSHOutput(t, client, fmt.Sprintf(`set -eu
 sudo k3s --version
-sudo helm --kubeconfig /etc/rancher/k3s/k3s.yaml get metadata %s -n iterabase-system -o json | jq -e '.chart=="iterabase-platform" and .version=="0.3.23"'
-sudo helm --kubeconfig /etc/rancher/k3s/k3s.yaml get metadata %s-cert-manager -n iterabase-system -o json | jq -e '.chart=="cert-manager-substrate" and .version=="0.3.23"'
-sudo helm --kubeconfig /etc/rancher/k3s/k3s.yaml get metadata %s-rwx-storage -n longhorn-system -o json | jq -e '.chart=="rwx-storage-substrate" and .version=="0.3.23" and ((.appVersion // .app_version // .appversion)=="1.12.1")'
+platform_metadata=$(sudo helm --kubeconfig /etc/rancher/k3s/k3s.yaml get metadata %s -n iterabase-system -o json)
+certificate_metadata=$(sudo helm --kubeconfig /etc/rancher/k3s/k3s.yaml get metadata %s-cert-manager -n iterabase-system -o json)
+storage_metadata=$(sudo helm --kubeconfig /etc/rancher/k3s/k3s.yaml get metadata %s-rwx-storage -n longhorn-system -o json)
+printf '%%s\n%%s\n%%s\n' "$platform_metadata" "$certificate_metadata" "$storage_metadata"
+printf '%%s' "$platform_metadata" | jq -e '.chart=="iterabase-platform" and .version=="0.3.23"' >/dev/null
+printf '%%s' "$certificate_metadata" | jq -e '.chart=="cert-manager-substrate" and .version=="0.3.23"' >/dev/null
+printf '%%s' "$storage_metadata" | jq -e '.chart=="rwx-storage-substrate" and .version=="0.3.23" and ((.appVersion // .app_version // .appversion)=="1.12.1")' >/dev/null
+printf '%%s\n' 'candidate-chart-identity=iterabase-platform|0.3.23 cert-manager-substrate|0.3.23 rwx-storage-substrate|0.3.23|1.12.1'
 sudo k3s kubectl get daemonset longhorn-manager -n longhorn-system -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'
 sudo k3s kubectl get networkpolicy,ciliumendpoints.cilium.io -A -o wide
 sudo k3s kubectl get pods -A -o json | jq -c '[.items[] | {namespace:.metadata.namespace,name:.metadata.name,images:[.spec.initContainers[]?.image,.spec.containers[]?.image],runtime:[.status.initContainerStatuses[]?.imageID,.status.containerStatuses[]?.imageID]}]'
 %s
 `, state.runID, state.runID, state.runID, ciliumBaselineEvidenceCommand()))
 	for _, marker := range []string{
-		`"chart": "iterabase-platform"`,
-		`"chart": "cert-manager-substrate"`,
-		`"chart": "rwx-storage-substrate"`,
+		"candidate-chart-identity=iterabase-platform|0.3.23 cert-manager-substrate|0.3.23 rwx-storage-substrate|0.3.23|1.12.1",
 		"longhorn-manager:v1.12.1@sha256:83b79f57043fe1405e68bc0d4c7987accbc6bb512def3e0db12b31966c070801",
 		"cilium-helm-identity=cilium|1.19.7|1.19.7",
 	} {
