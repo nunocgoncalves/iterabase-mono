@@ -255,7 +255,7 @@ sudo k3s kubectl rollout status -n kube-system deployment/coredns --timeout=5m`)
 		"cilium-helm-identity=cilium|1.19.7|1.19.7",
 		"--flannel-backend=none",
 		"--disable-network-policy",
-		"Cilium:",
+		"\nOK\n",
 	} {
 		if !strings.Contains(evidence, marker) {
 			t.Fatalf("clean Cilium bootstrap evidence missing %q:\n%s", marker, evidence)
