@@ -215,41 +215,45 @@ func TestAssessManagedRWXStorageRejectsDegradedBackend(t *testing.T) {
 	assert.Contains(t, assessment.Message, "replica/node/disk capacity")
 }
 
-func TestAssessManagedRWXUnknownDetachedIsInitialOnlyBeforeOperationalReadiness(t *testing.T) {
-	pool := validAgentPool("managed-pool", "platform")
-	pool.Spec.CredentialBindings = nil
-	pool.Spec.Sandbox.StorageClassName = managedLonghornStorageClass
-	objects := storageTestObjects(pool, storageModeManagedLonghorn, managedLonghornStorageClass, managedLonghornProvisioner)
-	objects = append(objects, &unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": "longhorn.io/v1beta2", "kind": "Volume",
-		"metadata": map[string]any{"name": "pool-volume", "namespace": managedLonghornNamespace},
-		"status":   map[string]any{"robustness": "unknown", "state": "detached"},
-	}})
-	r := storageTestReconciler(t, objects...)
+func TestAssessManagedRWXUnknownTransitionIsInitialOnlyBeforeOperationalReadiness(t *testing.T) {
+	for _, state := range []string{"detached", "attached"} {
+		t.Run(state, func(t *testing.T) {
+			pool := validAgentPool("managed-pool", "platform")
+			pool.Spec.CredentialBindings = nil
+			pool.Spec.Sandbox.StorageClassName = managedLonghornStorageClass
+			objects := storageTestObjects(pool, storageModeManagedLonghorn, managedLonghornStorageClass, managedLonghornProvisioner)
+			objects = append(objects, &unstructured.Unstructured{Object: map[string]any{
+				"apiVersion": "longhorn.io/v1beta2", "kind": "Volume",
+				"metadata": map[string]any{"name": "pool-volume", "namespace": managedLonghornNamespace},
+				"status":   map[string]any{"robustness": "unknown", "state": state},
+			}})
+			r := storageTestReconciler(t, objects...)
 
-	assessment := r.assessAgentPoolStorage(context.Background(), pool)
-	assert.False(t, assessment.Ready)
-	assert.True(t, assessment.CanMount)
-	assert.Equal(t, storageReasonInitialConvergence, assessment.Reason)
-	assert.Contains(t, assessment.Message, "retain the desired workers")
+			assessment := r.assessAgentPoolStorage(context.Background(), pool)
+			assert.False(t, assessment.Ready)
+			assert.True(t, assessment.CanMount)
+			assert.Equal(t, storageReasonInitialConvergence, assessment.Reason)
+			assert.Contains(t, assessment.Message, "retain the desired workers")
 
-	pool.Status.Conditions = []metav1.Condition{{
-		Type: storageConditionOperationalReadinessReached, Status: metav1.ConditionTrue,
-		Reason: storageReasonOperationalReadinessReached,
-	}}
-	assessment = r.assessAgentPoolStorage(context.Background(), pool)
-	assert.False(t, assessment.Ready)
-	assert.False(t, assessment.CanMount)
-	assert.Equal(t, storageReasonBackendDegraded, assessment.Reason)
+			pool.Status.Conditions = []metav1.Condition{{
+				Type: storageConditionOperationalReadinessReached, Status: metav1.ConditionTrue,
+				Reason: storageReasonOperationalReadinessReached,
+			}}
+			assessment = r.assessAgentPoolStorage(context.Background(), pool)
+			assert.False(t, assessment.Ready)
+			assert.False(t, assessment.CanMount)
+			assert.Equal(t, storageReasonBackendDegraded, assessment.Reason)
 
-	pool.Status.Conditions = append(pool.Status.Conditions, metav1.Condition{
-		Type: storageConditionWorkerReplacementPending, Status: metav1.ConditionTrue,
-		Reason: storageReasonRecoveryPending,
-	})
-	assessment = r.assessAgentPoolStorage(context.Background(), pool)
-	assert.False(t, assessment.Ready)
-	assert.False(t, assessment.CanMount)
-	assert.Equal(t, storageReasonBackendDegraded, assessment.Reason)
+			pool.Status.Conditions = append(pool.Status.Conditions, metav1.Condition{
+				Type: storageConditionWorkerReplacementPending, Status: metav1.ConditionTrue,
+				Reason: storageReasonRecoveryPending,
+			})
+			assessment = r.assessAgentPoolStorage(context.Background(), pool)
+			assert.False(t, assessment.Ready)
+			assert.False(t, assessment.CanMount)
+			assert.Equal(t, storageReasonBackendDegraded, assessment.Reason)
+		})
+	}
 }
 
 func TestManagedRWXStorageRequiresReadyShareManagerWhenAttached(t *testing.T) {
@@ -311,7 +315,7 @@ func TestStorageWasOperationallyReadyUsesDurableMarkerAndLegacyAggregate(t *test
 	}
 }
 
-func TestReconcileManagedRWXInitialUnknownDetachedConvergesWithoutWorkerChurn(t *testing.T) {
+func TestReconcileManagedRWXInitialUnknownDetachedToAttachedConvergesWithoutWorkerChurn(t *testing.T) {
 	pool := validAgentPool("managed-pool", "platform")
 	pool.UID = types.UID("pool-uid")
 	pool.Finalizers = []string{agentPoolFinalizer}
@@ -354,6 +358,25 @@ func TestReconcileManagedRWXInitialUnknownDetachedConvergesWithoutWorkerChurn(t 
 	assert.Equal(t, metav1.ConditionFalse, condition.Status)
 	assert.Equal(t, storageReasonInitialConvergence, condition.Reason)
 	assert.Contains(t, got.Status.Message, "initial convergence")
+	assert.Nil(t, meta.FindStatusCondition(got.Status.Conditions, storageConditionOperationalReadinessReached))
+	assert.Nil(t, meta.FindStatusCondition(got.Status.Conditions, storageConditionWorkerReplacementPending))
+
+	require.NoError(t, unstructured.SetNestedField(volume.Object, "attached", "status", "state"))
+	require.NoError(t, r.Update(context.Background(), volume))
+	for range 2 {
+		result, err := r.Reconcile(context.Background(), request)
+		require.NoError(t, err)
+		assert.Equal(t, healthRequeueInterval, result.RequeueAfter)
+		for _, worker := range workers {
+			var retained corev1.Pod
+			require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(worker), &retained), "initial workers must remain while attached robustness is still unknown")
+		}
+	}
+	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(pool), &got))
+	condition = meta.FindStatusCondition(got.Status.Conditions, storageConditionReady)
+	require.NotNil(t, condition)
+	assert.Equal(t, metav1.ConditionFalse, condition.Status)
+	assert.Equal(t, storageReasonInitialConvergence, condition.Reason)
 	assert.Nil(t, meta.FindStatusCondition(got.Status.Conditions, storageConditionOperationalReadinessReached))
 	assert.Nil(t, meta.FindStatusCondition(got.Status.Conditions, storageConditionWorkerReplacementPending))
 

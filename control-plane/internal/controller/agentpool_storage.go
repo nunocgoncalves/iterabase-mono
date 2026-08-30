@@ -248,12 +248,12 @@ func (r *AgentPoolReconciler) managedLonghornVolumeHealth(ctx context.Context, p
 	}
 	robustness, _, _ := unstructured.NestedString(volume.Object, "status", "robustness")
 	state, _, _ := unstructured.NestedString(volume.Object, "status", "state")
-	if robustness == "unknown" && state == "detached" && !storageWasOperationallyReady(pool) {
+	if robustness == "unknown" && (state == "detached" || state == "attached") && !storageWasOperationallyReady(pool) {
 		return &agentPoolStorageAssessment{
 			CanMount: true,
 			Reason:   storageReasonInitialConvergence,
 			Message: fmt.Sprintf(
-				"Longhorn volume %s/%s is in initial convergence with robustness=%q state=%q; retain the desired workers to drive first attachment while AgentPool readiness stays closed until the backend, share-manager, and workers are Ready",
+				"Longhorn volume %s/%s is in initial convergence with robustness=%q state=%q; retain the desired workers through first attachment while AgentPool readiness stays closed until the backend, share-manager, and workers are Ready",
 				managedLonghornNamespace, volumeHandle, robustness, state,
 			),
 		}
