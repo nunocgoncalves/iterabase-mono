@@ -327,6 +327,7 @@ class ReleaseContractTests(unittest.TestCase):
             if item["target"] == "iterabase-platform-chart"
         }
         dependencies = selected_dependencies["iterabase-platform"]
+        self.assertEqual(dependencies["minio"], "0.2.3")
         self.assertEqual(dependencies["control-plane"], "0.4.13")
         self.assertEqual(dependencies["inference-gateway"], "0.2.13")
         self.assertEqual(dependencies["ingress-nginx"], "4.15.1")
