@@ -440,9 +440,20 @@ printf 'FORGE_WORKSPACE_RESULT\t%%s\t%%s\t%%s\t%%s\t%%s\t%%s\t%%s\t%%s\t%%s\tcom
 func (p *SSHProvisioner) EnsureAgentPoolLocalPathStorage(ctx context.Context) error {
 	configJSON := fmt.Sprintf(`{"nodePathMap":[],"storageClassConfigs":{"local-path":{"nodePathMap":[{"node":"DEFAULT_PATH_FOR_NON_LISTED_NODES","paths":[%q]}]},%q:{"nodePathMap":[{"node":"DEFAULT_PATH_FOR_NON_LISTED_NODES","paths":[%q]}]}}}`,
 		k3sDefaultLocalPath, provisioner.AgentPoolWorkspaceStorageClass, provisioner.AgentPoolWorkspaceMount)
-	current, err := p.run(ctx, `sudo k3s kubectl get configmap local-path-config -n kube-system -o jsonpath='{.data.config\.json}'`)
+	current, err := p.run(ctx, `sudo bash -ceu '
+attempt=0
+while ! k3s kubectl get configmap local-path-config -n kube-system >/dev/null 2>&1; do
+  attempt=$((attempt + 1))
+  if test "$attempt" -ge 150; then
+    printf "timed out waiting for the bundled local-path ConfigMap\n" >&2
+    exit 1
+  fi
+  sleep 2
+done
+k3s kubectl get configmap local-path-config -n kube-system -o jsonpath="{.data.config\.json}"
+'`)
 	if err != nil {
-		return fmt.Errorf("read bundled local-path configuration: %w", err)
+		return fmt.Errorf("wait for/read bundled local-path configuration: %w", err)
 	}
 	changed := strings.TrimSpace(current) != configJSON
 	if changed {
