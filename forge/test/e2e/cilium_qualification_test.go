@@ -19,31 +19,46 @@ import (
 )
 
 const (
-	ciliumQualificationEnv       = "FORGE_E2E_CILIUM_QUALIFICATION"
-	ciliumSourceImageArchiveEnv  = "FORGE_E2E_SOURCE_IMAGE_ARCHIVE"
-	hor527CandidateSourceSHA     = "e76f12a14db99b7d8e44fa3e62d95d1d7195caee"
-	hor527CandidateChartVersion  = "0.3.23"
-	ciliumQualificationVersion   = "1.19.7"
-	ciliumQualificationChartHash = "af6aeba999b438b897e71452051aab2c014bb89369ab34ca46a33003eb0d017e"
-	ciliumPolicyProbeImage       = "docker.io/library/busybox:1.37.0@sha256:9db7b59979c38555a39def84a31fb98b5296952f9e3afd4f6f11f05b07adfab0"
-	ciliumRecoveryLimit          = 60 * time.Second
+	ciliumQualificationEnv        = "FORGE_E2E_CILIUM_QUALIFICATION"
+	ciliumSourceImageArchiveEnv   = "FORGE_E2E_SOURCE_IMAGE_ARCHIVE"
+	hor527CandidateSourceSHA      = "e76f12a14db99b7d8e44fa3e62d95d1d7195caee"
+	hor527CandidateChartVersion   = "0.3.23"
+	ciliumQualificationVersion    = "1.19.7"
+	ciliumQualificationChartHash  = "af6aeba999b438b897e71452051aab2c014bb89369ab34ca46a33003eb0d017e"
+	ciliumPolicyProbeImage        = "docker.io/library/busybox:1.37.0@sha256:9db7b59979c38555a39def84a31fb98b5296952f9e3afd4f6f11f05b07adfab0"
+	ciliumAutonomousRecoveryLimit = 30 * time.Second
+	ciliumRecoveryLimit           = 60 * time.Second
+)
+
+type ciliumRecoveryPath string
+
+const (
+	ciliumRecoveryPathPending    ciliumRecoveryPath = ""
+	ciliumRecoveryPathAutonomous ciliumRecoveryPath = "longhorn-autonomous"
+	ciliumRecoveryPathFallback   ciliumRecoveryPath = "agentpool-fallback"
 )
 
 type ciliumQualificationState struct {
 	*digitalOceanCPUState
-	candidateChecksums     string
-	agentPoolPVCUID        string
-	longhornVolume         string
-	initialWorkerUIDs      map[string]string
-	initialShareManager    string
-	initialShareManagerUID string
-	priorPayload           string
-	priorChecksum          string
-	postChecksum           string
-	faultStartedAt         time.Time
-	faultAcceptedAt        time.Time
-	recoveredAt            time.Time
-	lastObservation        ciliumRecoveryObservation
+	candidateChecksums      string
+	agentPoolPVCUID         string
+	longhornVolume          string
+	initialWorkerUIDs       map[string]string
+	initialShareManager     string
+	initialShareManagerUID  string
+	priorPayload            string
+	priorChecksum           string
+	postChecksum            string
+	faultStartedAt          time.Time
+	faultAcceptedAt         time.Time
+	branchDecidedAt         time.Time
+	autonomousIOAttemptedAt time.Time
+	autonomousIOCompletedAt time.Time
+	autonomousIOEvidence    string
+	autonomousIOFailure     string
+	recoveredAt             time.Time
+	recoveryPath            ciliumRecoveryPath
+	lastObservation         ciliumRecoveryObservation
 }
 
 // TestCiliumCleanClusterLonghornRecoveryQualification is the bounded
@@ -61,7 +76,7 @@ func TestCiliumCleanClusterLonghornRecoveryQualification(t *testing.T) {
 	suite.Add(sharede2e.Define(sharede2e.Scenario[*ciliumQualificationState]{
 		Metadata: sharede2e.ScenarioMetadata{
 			Name:         "clean-cluster-longhorn-recovery",
-			Description:  "Bootstraps a clean K3s host directly with checksum-pinned Cilium and proves the exact HOR-527 candidate autonomously restores fresh-worker RWX read/write integrity within 60 seconds of established share-manager loss.",
+			Description:  "Bootstraps a clean K3s host directly with checksum-pinned Cilium and proves the exact HOR-527 candidate restores RWX integrity autonomously on unchanged workers within 30 seconds or through AgentPool-owned fresh-worker fallback within 60 seconds of established share-manager loss.",
 			Tier:         sharede2e.TierF3,
 			References:   []string{"HOR-537", "DES-HOR-537-01", "HOR-527"},
 			FixtureModes: []sharede2e.FixtureMode{sharede2e.FixtureSource},
@@ -803,22 +818,72 @@ func qualifyCiliumRecovery(t *testing.T, state *ciliumQualificationState) {
 	if deleteErr != nil {
 		t.Fatalf("share-manager fault injection was not accepted: %v\n%s", deleteErr, deleteOutput)
 	}
-	deadline := state.faultStartedAt.Add(ciliumRecoveryLimit)
-	for time.Now().Before(deadline) {
+	autonomousDeadline := state.faultAcceptedAt.Add(ciliumAutonomousRecoveryLimit)
+	recoveryDeadline := state.faultAcceptedAt.Add(ciliumRecoveryLimit)
+	for time.Now().UTC().Before(recoveryDeadline) {
 		observation, observationErr := readCiliumRecoveryObservation(client, state.longhornVolume)
 		if observationErr != nil {
 			t.Fatalf("read recovery observation: %v", observationErr)
 		}
 		state.lastObservation = observation
-		if ciliumRecoveryConverged(state, observation) {
-			postEvidence := executeCiliumPostRecoveryIO(t, client, state)
-			state.recoveredAt = time.Now().UTC()
-			elapsed := state.recoveredAt.Sub(state.faultStartedAt)
-			if elapsed > ciliumRecoveryLimit {
-				t.Fatalf("post-recovery I/O completed after the 60-second deadline: %s", elapsed)
+		observedAt := time.Now().UTC()
+		elapsed := observedAt.Sub(state.faultAcceptedAt)
+
+		if state.recoveryPath == ciliumRecoveryPathPending &&
+			state.autonomousIOAttemptedAt.IsZero() &&
+			ciliumRecoveryPathForObservation(state, observation, elapsed) == ciliumRecoveryPathAutonomous {
+			state.autonomousIOAttemptedAt = observedAt
+			postEvidence, postErr := executeCiliumPostRecoveryIO(client, state)
+			state.autonomousIOCompletedAt = time.Now().UTC()
+			state.autonomousIOEvidence = postEvidence
+			if postErr != nil {
+				state.autonomousIOFailure = postErr.Error()
+			} else if state.autonomousIOCompletedAt.After(autonomousDeadline) {
+				state.autonomousIOFailure = fmt.Sprintf("successful unchanged-worker I/O completed after the autonomous boundary: %s", state.autonomousIOCompletedAt.Sub(state.faultAcceptedAt))
+			} else {
+				state.recoveryPath = ciliumRecoveryPathAutonomous
+				state.branchDecidedAt = state.autonomousIOCompletedAt
+				state.recoveredAt = state.autonomousIOCompletedAt
+				recordCiliumRecoverySuccess(t, client, state, observation, deleteOutput, postEvidence)
+				return
 			}
-			policy := assertStrictRecoveryBackendPolicy(t, state)
-			finalNetwork := mustSSHOutput(t, client, `set -eu
+		}
+
+		if state.recoveryPath == ciliumRecoveryPathPending && !time.Now().UTC().Before(autonomousDeadline) {
+			state.recoveryPath = ciliumRecoveryPathFallback
+			state.branchDecidedAt = time.Now().UTC()
+			observationJSON, _ := json.MarshalIndent(observation, "", "  ")
+			decisionEvidence := fmt.Sprintf("fault_delete_accepted=%s\nautonomous_boundary=%s\nbranch_decided=%s\nrecovery_path=%s\nautonomous_io_attempted=%s\nautonomous_io_completed=%s\nautonomous_io_failure=%s\nautonomous_io=%s\nobservation=%s\n",
+				state.faultAcceptedAt.Format(time.RFC3339Nano), autonomousDeadline.Format(time.RFC3339Nano),
+				state.branchDecidedAt.Format(time.RFC3339Nano), state.recoveryPath,
+				formatQualificationTime(state.autonomousIOAttemptedAt), formatQualificationTime(state.autonomousIOCompletedAt),
+				state.autonomousIOFailure, state.autonomousIOEvidence, observationJSON)
+			writeCiliumQualificationEvidence(t, state, "recovery-branch-decision.txt", decisionEvidence)
+		}
+
+		if state.recoveryPath == ciliumRecoveryPathFallback &&
+			ciliumRecoveryPathForObservation(state, observation, time.Now().UTC().Sub(state.faultAcceptedAt)) == ciliumRecoveryPathFallback {
+			postEvidence, postErr := executeCiliumPostRecoveryIO(client, state)
+			if postErr != nil {
+				t.Fatalf("AgentPool fallback reached fresh Ready workers but post-recovery I/O failed: %v", postErr)
+			}
+			state.recoveredAt = time.Now().UTC()
+			if state.recoveredAt.After(recoveryDeadline) {
+				t.Fatalf("post-recovery I/O completed after the 60-second deadline: %s", state.recoveredAt.Sub(state.faultAcceptedAt))
+			}
+			recordCiliumRecoverySuccess(t, client, state, observation, deleteOutput, postEvidence)
+			return
+		}
+		time.Sleep(time.Second)
+	}
+	last, _ := json.MarshalIndent(state.lastObservation, "", "  ")
+	t.Fatalf("HOR-537 qualification blocker remains: recovery path %q did not prove applicable RWX I/O and integrity within %s of accepted share-manager deletion; last observation=%s", state.recoveryPath, ciliumRecoveryLimit, last)
+}
+
+func recordCiliumRecoverySuccess(t *testing.T, client *ssh.Client, state *ciliumQualificationState, observation ciliumRecoveryObservation, deleteOutput, postEvidence string) {
+	t.Helper()
+	policy := assertStrictRecoveryBackendPolicy(t, state)
+	finalNetwork := mustSSHOutput(t, client, `set -eu
 sudo k3s kubectl get ciliumendpoints.cilium.io -A -o wide
 sudo k3s kubectl get networkpolicy longhorn-recovery-backend -n longhorn-system -o yaml
 cilium_pod=$(sudo k3s kubectl get pods -n kube-system -l k8s-app=cilium -o jsonpath='{.items[0].metadata.name}')
@@ -828,19 +893,23 @@ sudo k3s kubectl get agentpool forge-storage-pool -n iterabase-system -o yaml
 sudo k3s kubectl get pods -n iterabase-system -l platform.iterabase.com/agentpool=forge-storage-pool -o wide
 printf 'desired=%s\n' "$(sudo k3s kubectl get agentpool forge-storage-pool -n iterabase-system -o jsonpath='{.spec.replicas}')"
 `)
-			observationJSON, _ := json.MarshalIndent(observation, "", "  ")
-			evidence := fmt.Sprintf("fault_delete_started=%s\nfault_delete_accepted=%s\nrecovered=%s\nelapsed=%s\ndelete_output=%s\nobservation=%s\npost_io=%s\npost_checksum=%s\nstrict_policy=%s\n%s",
-				state.faultStartedAt.Format(time.RFC3339Nano), state.faultAcceptedAt.Format(time.RFC3339Nano),
-				state.recoveredAt.Format(time.RFC3339Nano), elapsed, deleteOutput, observationJSON,
-				postEvidence, state.postChecksum, policy, finalNetwork)
-			writeCiliumQualificationEvidence(t, state, "recovery-success.txt", evidence)
-			t.Logf("HOR-537 Cilium qualification recovered exact prior data and fresh RWX I/O in %s", elapsed)
-			return
-		}
-		time.Sleep(time.Second)
+	observationJSON, _ := json.MarshalIndent(observation, "", "  ")
+	elapsed := state.recoveredAt.Sub(state.faultAcceptedAt)
+	evidence := fmt.Sprintf("fault_delete_started=%s\nfault_delete_accepted=%s\nautonomous_boundary=%s\nend_to_end_deadline=%s\nrecovery_path=%s\nbranch_decided=%s\nrecovered=%s\nelapsed_from_acceptance=%s\ndelete_output=%s\nobservation=%s\nautonomous_io_attempted=%s\nautonomous_io_completed=%s\nautonomous_io_failure=%s\nautonomous_io=%s\npost_io=%s\npost_checksum=%s\nstrict_policy=%s\n%s",
+		state.faultStartedAt.Format(time.RFC3339Nano), state.faultAcceptedAt.Format(time.RFC3339Nano),
+		state.faultAcceptedAt.Add(ciliumAutonomousRecoveryLimit).Format(time.RFC3339Nano), state.faultAcceptedAt.Add(ciliumRecoveryLimit).Format(time.RFC3339Nano),
+		state.recoveryPath, state.branchDecidedAt.Format(time.RFC3339Nano), state.recoveredAt.Format(time.RFC3339Nano), elapsed,
+		deleteOutput, observationJSON, formatQualificationTime(state.autonomousIOAttemptedAt), formatQualificationTime(state.autonomousIOCompletedAt),
+		state.autonomousIOFailure, state.autonomousIOEvidence, postEvidence, state.postChecksum, policy, finalNetwork)
+	writeCiliumQualificationEvidence(t, state, "recovery-success.txt", evidence)
+	t.Logf("HOR-537 Cilium qualification selected %s and recovered exact prior data plus fresh RWX I/O in %s from accepted deletion", state.recoveryPath, elapsed)
+}
+
+func formatQualificationTime(value time.Time) string {
+	if value.IsZero() {
+		return "not-attempted"
 	}
-	last, _ := json.MarshalIndent(state.lastObservation, "", "  ")
-	t.Fatalf("HOR-537 qualification blocker remains: no fresh-worker RWX recovery within %s of accepted share-manager deletion; last observation=%s", ciliumRecoveryLimit, last)
+	return value.Format(time.RFC3339Nano)
 }
 
 func ciliumFaultInjectionCommand(shareManager string) string {
@@ -867,26 +936,57 @@ printf '{"claimUID":"%%s","agent":%%s,"workers":%%s,"volume":%%s,"shareManagers"
 	return observation, nil
 }
 
-func ciliumRecoveryConverged(state *ciliumQualificationState, observation ciliumRecoveryObservation) bool {
+func ciliumRecoveryPathForObservation(state *ciliumQualificationState, observation ciliumRecoveryObservation, elapsed time.Duration) ciliumRecoveryPath {
+	if elapsed < ciliumAutonomousRecoveryLimit && ciliumAutonomousRecoveryConverged(state, observation) {
+		return ciliumRecoveryPathAutonomous
+	}
+	if elapsed >= ciliumAutonomousRecoveryLimit && ciliumFallbackRecoveryConverged(state, observation) {
+		return ciliumRecoveryPathFallback
+	}
+	return ciliumRecoveryPathPending
+}
+
+func ciliumAutonomousRecoveryConverged(state *ciliumQualificationState, observation ciliumRecoveryObservation) bool {
+	return ciliumRecoveryBackendConverged(state, observation) && ciliumWorkerSetMatches(state, observation, false)
+}
+
+func ciliumFallbackRecoveryConverged(state *ciliumQualificationState, observation ciliumRecoveryObservation) bool {
+	return ciliumRecoveryBackendConverged(state, observation) &&
+		observation.Agent.ReplacementStatus == "False" && observation.Agent.ReplacementReason == "FreshWorkersReady" &&
+		ciliumWorkerSetMatches(state, observation, true)
+}
+
+func ciliumRecoveryBackendConverged(state *ciliumQualificationState, observation ciliumRecoveryObservation) bool {
 	if observation.ClaimUID != state.agentPoolPVCUID ||
 		observation.Agent.Desired != 2 || !observation.Agent.Ready || observation.Agent.ReadyReplicas != 2 ||
 		observation.Agent.StorageReason != "StorageReady" || observation.Agent.Operational != "True" ||
-		observation.Agent.ReplacementStatus != "False" || observation.Agent.ReplacementReason != "FreshWorkersReady" ||
 		observation.Volume.Name != state.longhornVolume || observation.Volume.Robustness != "healthy" || observation.Volume.State != "attached" || observation.Volume.ShareState != "running" ||
 		len(observation.Workers) != 2 || len(observation.ShareManagers) != 1 {
 		return false
-	}
-	for _, worker := range observation.Workers {
-		if worker.Ready != "True" || worker.UID == "" || state.initialWorkerUIDs[worker.Name] == "" || state.initialWorkerUIDs[worker.Name] == worker.UID {
-			return false
-		}
 	}
 	shareManager := observation.ShareManagers[0]
 	return shareManager.Ready == "True" && shareManager.Phase == "Running" && shareManager.UID != "" && shareManager.UID != state.initialShareManagerUID
 }
 
-func executeCiliumPostRecoveryIO(t *testing.T, client *ssh.Client, state *ciliumQualificationState) string {
-	t.Helper()
+func ciliumWorkerSetMatches(state *ciliumQualificationState, observation ciliumRecoveryObservation, requireFresh bool) bool {
+	seen := make(map[string]struct{}, len(observation.Workers))
+	for _, worker := range observation.Workers {
+		initialUID := state.initialWorkerUIDs[worker.Name]
+		if worker.Ready != "True" || worker.UID == "" || initialUID == "" {
+			return false
+		}
+		if _, duplicate := seen[worker.Name]; duplicate {
+			return false
+		}
+		seen[worker.Name] = struct{}{}
+		if requireFresh == (worker.UID == initialUID) {
+			return false
+		}
+	}
+	return len(seen) == len(state.initialWorkerUIDs)
+}
+
+func executeCiliumPostRecoveryIO(client *ssh.Client, state *ciliumQualificationState) (string, error) {
 	postPayload := "HOR-537-post-recovery|" + hor527CandidateSourceSHA + "|" + state.runID
 	state.postChecksum = fmt.Sprintf("%x", sha256.Sum256([]byte(postPayload+"\n")))
 	writeScript := fmt.Sprintf(`set -eu
@@ -899,7 +999,7 @@ sync
 `, candidateShellQuote(postPayload), candidateShellQuote(state.postChecksum))
 	writerOutput, err := sshOutput(client, fmt.Sprintf("sudo k3s kubectl exec -n iterabase-system forge-storage-pool-worker-0 -- /bin/sh -ceu %s", candidateShellQuote(writeScript)))
 	if err != nil {
-		t.Fatalf("single post-recovery RWX writer attempt failed (no application retry is permitted): %v\n%s", err, writerOutput)
+		return "writer=" + writerOutput, fmt.Errorf("single post-recovery RWX writer attempt failed (no application retry is permitted): %w: %s", err, writerOutput)
 	}
 	readScript := `set -eu
 cd /data/sandboxes/hor537
@@ -909,14 +1009,14 @@ printf 'prior-payload=%s\npost-payload=%s\n' "$(cat prior-data)" "$(cat post-rec
 `
 	readerOutput, err := sshOutput(client, fmt.Sprintf("sudo k3s kubectl exec -n iterabase-system forge-storage-pool-worker-1 -- /bin/sh -ceu %s", candidateShellQuote(readScript)))
 	if err != nil {
-		t.Fatalf("single post-recovery RWX reader attempt failed (no application retry is permitted): %v\n%s", err, readerOutput)
+		return "writer=" + writerOutput + "reader=" + readerOutput, fmt.Errorf("single post-recovery RWX reader attempt failed (no application retry is permitted): %w: %s", err, readerOutput)
 	}
 	for _, marker := range []string{"prior-data: OK", "post-recovery-data: OK", state.priorPayload, postPayload} {
 		if !strings.Contains(writerOutput+readerOutput, marker) {
-			t.Fatalf("post-recovery checksum evidence missing %q: writer=%q reader=%q", marker, writerOutput, readerOutput)
+			return "writer=" + writerOutput + "reader=" + readerOutput, fmt.Errorf("post-recovery checksum evidence missing %q: writer=%q reader=%q", marker, writerOutput, readerOutput)
 		}
 	}
-	return "writer=" + writerOutput + "reader=" + readerOutput
+	return "writer=" + writerOutput + "reader=" + readerOutput, nil
 }
 
 type ciliumQualificationWatcher struct {
@@ -1083,8 +1183,11 @@ sudo k3s kubectl get events -A --sort-by=.metadata.creationTimestamp 2>&1 | tail
 	})
 	if !state.faultStartedAt.IsZero() {
 		last, _ := json.MarshalIndent(state.lastObservation, "", "  ")
-		evidence := fmt.Sprintf("fault_delete_started=%s\nfault_delete_accepted=%s\nlast_observation=%s\n",
-			state.faultStartedAt.Format(time.RFC3339Nano), state.faultAcceptedAt.Format(time.RFC3339Nano), last)
+		evidence := fmt.Sprintf("fault_delete_started=%s\nfault_delete_accepted=%s\nautonomous_boundary=%s\nend_to_end_deadline=%s\nrecovery_path=%s\nbranch_decided=%s\nautonomous_io_attempted=%s\nautonomous_io_completed=%s\nautonomous_io_failure=%s\nautonomous_io=%s\nlast_observation=%s\n",
+			state.faultStartedAt.Format(time.RFC3339Nano), state.faultAcceptedAt.Format(time.RFC3339Nano),
+			state.faultAcceptedAt.Add(ciliumAutonomousRecoveryLimit).Format(time.RFC3339Nano), state.faultAcceptedAt.Add(ciliumRecoveryLimit).Format(time.RFC3339Nano),
+			state.recoveryPath, formatQualificationTime(state.branchDecidedAt), formatQualificationTime(state.autonomousIOAttemptedAt),
+			formatQualificationTime(state.autonomousIOCompletedAt), state.autonomousIOFailure, state.autonomousIOEvidence, last)
 		writeCiliumQualificationEvidence(t, state, "recovery-failure-boundary.txt", evidence)
 	}
 	kubeconfig := filepath.Join(state.forgeHome, state.runID, "kubeconfig.yaml")
@@ -1127,6 +1230,51 @@ func TestCiliumQualificationWatcherIsBoundedAndEventDriven(t *testing.T) {
 	}
 }
 
+func TestCiliumQualificationRecoveryBranches(t *testing.T) {
+	t.Parallel()
+	state := &ciliumQualificationState{
+		agentPoolPVCUID:        "claim-uid",
+		longhornVolume:         "volume-uid",
+		initialShareManagerUID: "share-old",
+		initialWorkerUIDs: map[string]string{
+			"forge-storage-pool-worker-0": "worker-0-old",
+			"forge-storage-pool-worker-1": "worker-1-old",
+		},
+	}
+	var observation ciliumRecoveryObservation
+	fixture := `{
+		"claimUID":"claim-uid",
+		"agent":{"desired":2,"ready":true,"readyReplicas":2,"storageReason":"StorageReady","operational":"True","replacementStatus":"","replacementReason":""},
+		"workers":[
+			{"name":"forge-storage-pool-worker-0","uid":"worker-0-old","ready":"True"},
+			{"name":"forge-storage-pool-worker-1","uid":"worker-1-old","ready":"True"}
+		],
+		"volume":{"name":"volume-uid","robustness":"healthy","state":"attached","shareState":"running"},
+		"shareManagers":[{"name":"share-manager-volume-uid","uid":"share-new","phase":"Running","ready":"True"}]
+	}`
+	if err := json.Unmarshal([]byte(fixture), &observation); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := ciliumRecoveryPathForObservation(state, observation, 8*time.Second); got != ciliumRecoveryPathAutonomous {
+		t.Fatalf("unchanged workers with a healthy replacement share-manager path=%q want=%q", got, ciliumRecoveryPathAutonomous)
+	}
+	if got := ciliumRecoveryPathForObservation(state, observation, ciliumAutonomousRecoveryLimit); got != ciliumRecoveryPathPending {
+		t.Fatalf("unchanged workers alone satisfied post-boundary fallback: %q", got)
+	}
+
+	observation.Agent.ReplacementStatus = "False"
+	observation.Agent.ReplacementReason = "FreshWorkersReady"
+	observation.Workers[0].UID = "worker-0-fresh"
+	observation.Workers[1].UID = "worker-1-fresh"
+	if got := ciliumRecoveryPathForObservation(state, observation, ciliumAutonomousRecoveryLimit-time.Nanosecond); got != ciliumRecoveryPathPending {
+		t.Fatalf("fresh-worker fallback was selected before the autonomous boundary: %q", got)
+	}
+	if got := ciliumRecoveryPathForObservation(state, observation, ciliumAutonomousRecoveryLimit); got != ciliumRecoveryPathFallback {
+		t.Fatalf("fresh Ready workers after the boundary path=%q want=%q", got, ciliumRecoveryPathFallback)
+	}
+}
+
 func TestCiliumQualificationFaultHasNoRepairAction(t *testing.T) {
 	t.Parallel()
 	command := ciliumFaultInjectionCommand("share-manager-pvc-fixture")
@@ -1148,7 +1296,7 @@ func TestCiliumQualificationBootstrapPinsCleanAuthority(t *testing.T) {
 			t.Fatalf("Cilium baseline proof missing %q", required)
 		}
 	}
-	if ciliumRecoveryLimit != 60*time.Second || ciliumQualificationChartHash == "" || hor527CandidateSourceSHA == "" {
-		t.Fatal("qualification identities/deadline must remain exact")
+	if ciliumAutonomousRecoveryLimit != 30*time.Second || ciliumRecoveryLimit != 60*time.Second || ciliumQualificationChartHash == "" || hor527CandidateSourceSHA == "" {
+		t.Fatal("qualification identities/deadlines must remain exact")
 	}
 }
