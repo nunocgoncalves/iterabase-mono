@@ -31,7 +31,6 @@ metadata:
     {{- include "minio.artifactLabels" . | nindent 4 }}
 spec:
   backoffLimit: 10
-  ttlSecondsAfterFinished: 600
   template:
     metadata:
       labels:

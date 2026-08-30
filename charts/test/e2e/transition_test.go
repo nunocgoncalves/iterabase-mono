@@ -72,9 +72,15 @@ type bundledCRD struct {
 }
 
 type lifecycleSnapshot struct {
-	Secrets map[string]string
-	PVCs    map[string]string
-	Pods    map[string]string
+	Secrets                map[string]string
+	PVCs                   map[string]string
+	Pods                   map[string]string
+	ArtifactProvisionerJob artifactProvisionerJobIdentity
+}
+
+type artifactProvisionerJobIdentity struct {
+	Name string
+	UID  string
 }
 
 type helmHistoryEntry struct {
@@ -90,7 +96,7 @@ func nMinusOneUpgradeScenario() sharede2e.Definition {
 			"n-minus-one-upgrade",
 			"Upgrades the checksum-pinned supported predecessor to the exact current chart pair and proves schema ownership, persistent state, immutable Secrets, PVCs, Jobs, hooks, and rollout health.",
 			"test-e2e-upgrade", 40,
-			[]string{"HOR-415", "HOR-418", "HOR-475"},
+			[]string{"HOR-415", "HOR-418", "HOR-475", "HOR-530"},
 			[]string{"control-plane-chart", "inference-gateway-chart", "iterabase-platform-chart"},
 		),
 		NewState: newChartState,
@@ -177,9 +183,9 @@ func reapplyRollbackRecoveryScenario() sharede2e.Definition {
 	return sharede2e.Define(sharede2e.Scenario[*chartState]{
 		Metadata: transitionScenarioMetadata(
 			"reapply-rollback-recovery",
-			"Reapplies current intent without rolling stable workloads, then exercises the supported inverse rollback to the declared predecessor and forward recovery while retaining state.",
+			"Reapplies current intent with --wait without rolling stable workloads or replacing the completed Helm-owned artifact provisioner, then exercises the supported inverse rollback and forward recovery while retaining state.",
 			"test-e2e-reapply-rollback", 45,
-			[]string{"HOR-415", "HOR-418", "HOR-475"},
+			[]string{"HOR-415", "HOR-418", "HOR-475", "HOR-530"},
 			[]string{"control-plane-chart", "inference-gateway-chart", "iterabase-platform-chart"},
 		),
 		NewState: newChartState,
@@ -852,7 +858,9 @@ func capturePredecessorStateStage(t *testing.T, state *chartState) {
 func captureCurrentStateStage(t *testing.T, state *chartState) {
 	assertLifecycleHealth(t, state)
 	assertPersistedState(t, state)
-	state.snapshots["current"] = captureLifecycleSnapshot(t, state)
+	snapshot := captureLifecycleSnapshot(t, state)
+	snapshot.ArtifactProvisionerJob = currentArtifactProvisionerJobIdentity(t, state)
+	state.snapshots["current"] = snapshot
 }
 
 func captureLifecycleSnapshot(t *testing.T, state *chartState) lifecycleSnapshot {
@@ -984,6 +992,9 @@ func retainedStateError(before, after lifecycleSnapshot, includePods bool) error
 	if includePods && !mapsEqual(before.Pods, after.Pods) {
 		return fmt.Errorf("idempotent reapply rolled workloads: before=%v after=%v", before.Pods, after.Pods)
 	}
+	if includePods && before.ArtifactProvisionerJob != after.ArtifactProvisionerJob {
+		return fmt.Errorf("idempotent reapply replaced the completed artifact-provisioner Job: before=%+v after=%+v", before.ArtifactProvisionerJob, after.ArtifactProvisionerJob)
+	}
 	return nil
 }
 
@@ -1018,6 +1029,124 @@ func assertSchemaOwnership(t *testing.T, state *chartState) {
 	}
 }
 
+func artifactProvisionerJobName(manifest []byte, release string) (string, error) {
+	decoder := yaml.NewDecoder(strings.NewReader(string(manifest)))
+	var names []string
+	for {
+		var document struct {
+			Kind     string `yaml:"kind"`
+			Metadata struct {
+				Name        string            `yaml:"name"`
+				Labels      map[string]string `yaml:"labels"`
+				Annotations map[string]string `yaml:"annotations"`
+			} `yaml:"metadata"`
+		}
+		if err := decoder.Decode(&document); err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return "", fmt.Errorf("decode Helm release manifest: %w", err)
+		}
+		if document.Kind != "Job" || document.Metadata.Labels["app.kubernetes.io/component"] != "artifact-provisioner" {
+			continue
+		}
+		if document.Metadata.Name == "" {
+			return "", errors.New("artifact-provisioner Job has no name")
+		}
+		if managedBy := document.Metadata.Labels["app.kubernetes.io/managed-by"]; managedBy != "Helm" {
+			return "", fmt.Errorf("artifact-provisioner Job managed-by=%q want Helm", managedBy)
+		}
+		if instance := document.Metadata.Labels["app.kubernetes.io/instance"]; instance != release {
+			return "", fmt.Errorf("artifact-provisioner Job instance=%q want %q", instance, release)
+		}
+		if hook := document.Metadata.Annotations["helm.sh/hook"]; hook != "" {
+			return "", fmt.Errorf("artifact-provisioner Job unexpectedly renders as Helm hook %q", hook)
+		}
+		names = append(names, document.Metadata.Name)
+	}
+	if len(names) != 1 {
+		return "", fmt.Errorf("Helm release manifest has %d artifact-provisioner Jobs, want 1: %v", len(names), names)
+	}
+	return names[0], nil
+}
+
+func currentArtifactProvisionerJobIdentity(t *testing.T, state *chartState) artifactProvisionerJobIdentity {
+	t.Helper()
+	// Helm release manifests contain Secret data whose key names can look
+	// credential-shaped to text redaction. Keep the exact manifest in a private
+	// temporary file so redaction cannot make its YAML invalid before parsing.
+	manifestPath := filepath.Join(t.TempDir(), "platform-manifest.yaml")
+	if err := os.WriteFile(manifestPath, nil, 0o600); err != nil {
+		t.Fatalf("create private Helm manifest file: %v", err)
+	}
+	if _, err := state.runner.Run(state.ctx, process.Command{
+		Name: "bash", Args: []string{"-o", "pipefail", "-c", `helm get manifest "$RELEASE" -n "$NAMESPACE" --kubeconfig "$KUBECONFIG_PATH" > "$MANIFEST_OUTPUT"`},
+		Env: map[string]string{
+			"RELEASE": testRelease, "NAMESPACE": testNamespace, "KUBECONFIG_PATH": state.cluster.Kubeconfig, "MANIFEST_OUTPUT": manifestPath,
+		},
+		Timeout: 60 * time.Second,
+	}); err != nil {
+		t.Fatalf("read exact Helm release manifest: %v", err)
+	}
+	manifest, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatalf("read private Helm manifest file: %v", err)
+	}
+	name, err := artifactProvisionerJobName(manifest, testRelease)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.kubectl(t, 4*time.Minute, "wait", "--for=condition=Complete", "job/"+name, "-n", testNamespace, "--timeout=3m")
+	identity, err := readArtifactProvisionerJobIdentity(state, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return identity
+}
+
+func readArtifactProvisionerJobIdentity(state *chartState, name string) (artifactProvisionerJobIdentity, error) {
+	raw, err := state.client.Kubectl(state.ctx, 30*time.Second, "get", "job/"+name, "-n", testNamespace, "-o", "json")
+	if err != nil {
+		return artifactProvisionerJobIdentity{}, fmt.Errorf("read artifact-provisioner Job %s: %w", name, err)
+	}
+	var job struct {
+		Metadata struct {
+			Name   string            `json:"name"`
+			UID    string            `json:"uid"`
+			Labels map[string]string `json:"labels"`
+		} `json:"metadata"`
+		Status struct {
+			Conditions []struct {
+				Type   string `json:"type"`
+				Status string `json:"status"`
+			} `json:"conditions"`
+		} `json:"status"`
+	}
+	if err := json.Unmarshal([]byte(raw), &job); err != nil {
+		return artifactProvisionerJobIdentity{}, fmt.Errorf("decode artifact-provisioner Job %s: %w", name, err)
+	}
+	if job.Metadata.Name != name || job.Metadata.UID == "" {
+		return artifactProvisionerJobIdentity{}, fmt.Errorf("artifact-provisioner Job identity name=%q uid=%q want name=%q and a UID", job.Metadata.Name, job.Metadata.UID, name)
+	}
+	if managedBy := job.Metadata.Labels["app.kubernetes.io/managed-by"]; managedBy != "Helm" {
+		return artifactProvisionerJobIdentity{}, fmt.Errorf("live artifact-provisioner Job managed-by=%q want Helm", managedBy)
+	}
+	if instance := job.Metadata.Labels["app.kubernetes.io/instance"]; instance != testRelease {
+		return artifactProvisionerJobIdentity{}, fmt.Errorf("live artifact-provisioner Job instance=%q want %q", instance, testRelease)
+	}
+	complete := false
+	for _, condition := range job.Status.Conditions {
+		if condition.Type == "Complete" && condition.Status == "True" {
+			complete = true
+			break
+		}
+	}
+	if !complete {
+		return artifactProvisionerJobIdentity{}, fmt.Errorf("artifact-provisioner Job %s is not Complete", name)
+	}
+	return artifactProvisionerJobIdentity{Name: name, UID: job.Metadata.UID}, nil
+}
+
 func assertReleaseMechanics(t *testing.T, state *chartState) {
 	t.Helper()
 	hooks := state.process(t, 60*time.Second, "helm", "get", "hooks", testRelease+"-cert-manager", "-n", testNamespace,
@@ -1025,8 +1154,7 @@ func assertReleaseMechanics(t *testing.T, state *chartState) {
 	if !strings.Contains(hooks, "startupapicheck") || !strings.Contains(hooks, "helm.sh/hook: post-install") {
 		t.Fatalf("certificate substrate does not retain its startup API hook: %s", stateSafeBody([]byte(hooks)))
 	}
-	state.kubectl(t, 4*time.Minute, "wait", "--for=condition=Complete", "job", "-n", testNamespace,
-		"-l", "app.kubernetes.io/name=minio,app.kubernetes.io/component=artifact-provisioner", "--timeout=3m")
+	_ = currentArtifactProvisionerJobIdentity(t, state)
 }
 
 func assertLifecycleHealth(t *testing.T, state *chartState) {
@@ -1484,6 +1612,7 @@ func reapplyCurrentPairStage(t *testing.T, state *chartState) {
 func assertIdempotentReapplyStage(t *testing.T, state *chartState) {
 	before := state.snapshots["current"]
 	after := captureLifecycleSnapshot(t, state)
+	after.ArtifactProvisionerJob = currentArtifactProvisionerJobIdentity(t, state)
 	assertRetainedState(t, before, after, true)
 	assertPersistedState(t, state)
 	assertLifecycleHealth(t, state)
@@ -1671,12 +1800,41 @@ func TestUnitOperatorCRDsMustBeEstablishedBeforeFeatureEnable(t *testing.T) {
 	}
 }
 
-func TestUnitRetainedStateRejectsSecretPVCAndReapplyRolloutChanges(t *testing.T) {
-	baseline := lifecycleSnapshot{Secrets: map[string]string{"secret": "a"}, PVCs: map[string]string{"pvc": "b"}, Pods: map[string]string{"pods": "c"}}
+func TestUnitArtifactProvisionerManifestRequiresOrdinaryHelmOwnership(t *testing.T) {
+	valid := `apiVersion: batch/v1
+kind: Job
+metadata:
+  name: iterabase-minio-artifact-provisioner-0-2-3
+  labels:
+    app.kubernetes.io/component: artifact-provisioner
+    app.kubernetes.io/instance: iterabase
+    app.kubernetes.io/managed-by: Helm
+`
+	if name, err := artifactProvisionerJobName([]byte(valid), "iterabase"); err != nil || name != "iterabase-minio-artifact-provisioner-0-2-3" {
+		t.Fatalf("valid ordinary provisioner rejected: name=%q err=%v", name, err)
+	}
+	for name, changed := range map[string]string{
+		"wrong owner": strings.Replace(valid, "managed-by: Helm", "managed-by: controller", 1),
+		"hook":        strings.Replace(valid, "  labels:\n", "  annotations:\n    helm.sh/hook: post-install\n  labels:\n", 1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := artifactProvisionerJobName([]byte(changed), "iterabase"); err == nil {
+				t.Fatal("invalid artifact-provisioner ownership passed")
+			}
+		})
+	}
+}
+
+func TestUnitRetainedStateRejectsSecretPVCReapplyRolloutAndProvisionerChanges(t *testing.T) {
+	baseline := lifecycleSnapshot{
+		Secrets: map[string]string{"secret": "a"}, PVCs: map[string]string{"pvc": "b"}, Pods: map[string]string{"pods": "c"},
+		ArtifactProvisionerJob: artifactProvisionerJobIdentity{Name: "provisioner", UID: "job-uid"},
+	}
 	changes := []lifecycleSnapshot{
-		{Secrets: map[string]string{"secret": "changed"}, PVCs: baseline.PVCs, Pods: baseline.Pods},
-		{Secrets: baseline.Secrets, PVCs: map[string]string{"pvc": "changed"}, Pods: baseline.Pods},
-		{Secrets: baseline.Secrets, PVCs: baseline.PVCs, Pods: map[string]string{"pods": "changed"}},
+		{Secrets: map[string]string{"secret": "changed"}, PVCs: baseline.PVCs, Pods: baseline.Pods, ArtifactProvisionerJob: baseline.ArtifactProvisionerJob},
+		{Secrets: baseline.Secrets, PVCs: map[string]string{"pvc": "changed"}, Pods: baseline.Pods, ArtifactProvisionerJob: baseline.ArtifactProvisionerJob},
+		{Secrets: baseline.Secrets, PVCs: baseline.PVCs, Pods: map[string]string{"pods": "changed"}, ArtifactProvisionerJob: baseline.ArtifactProvisionerJob},
+		{Secrets: baseline.Secrets, PVCs: baseline.PVCs, Pods: baseline.Pods, ArtifactProvisionerJob: artifactProvisionerJobIdentity{Name: "provisioner", UID: "replacement-uid"}},
 	}
 	for index, changed := range changes {
 		if err := retainedStateError(baseline, changed, true); err == nil {

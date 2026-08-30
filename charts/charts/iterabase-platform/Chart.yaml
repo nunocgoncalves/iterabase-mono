@@ -10,7 +10,7 @@ dependencies:
     repository: file://../redis
     condition: redis.enabled
   - name: minio
-    version: 0.2.2
+    version: 0.2.3
     repository: file://../minio
     condition: minio.enabled
   - name: inference-gateway
