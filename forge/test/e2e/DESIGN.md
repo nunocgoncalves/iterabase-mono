@@ -31,6 +31,14 @@ Stages:
 
 The old release is an intentional migration input, never the desired test target. Only migration setup needs a fresh host. Current-platform, secret-sync, and Flux checks compose on that host so this scenario covers the exact `0.2.2` → `0.3+` ownership and Helm-status path used by OPO1.
 
+### HOR-537 Cilium clean-cluster qualification — one-shot exception
+
+`DES-HOR-537-01` authorizes one bounded qualification path for exact HOR-527 / PR #65 source `e76f12a14db99b7d8e44fa3e62d95d1d7195caee`. `TestCiliumCleanClusterLonghornRecoveryQualification` is deliberately outside the compiled scheduled/release catalogue and requires `FORGE_E2E_CILIUM_QUALIFICATION=true`; ordinary unit execution skips it. This preserves the existing required aggregate and unrelated scenario selection instead of adopting Cilium as a recurring Forge or release contract.
+
+The path provisions a clean host, installs K3s `v1.34.10+k3s1` directly with `--flannel-backend=none` and `--disable-network-policy`, then installs checksum-pinned Cilium `1.19.7`. Before any candidate artifact is installed it proves Cilium health, sole-CNI identity, and real allow/deny `NetworkPolicy` enforcement, while proving Flannel and embedded kube-router policy state are absent. It then installs checksummed PR #65 charts and source images through Forge's existing chart lifecycle without adding a CNI field to `forge.yaml`.
+
+Acceptance is one pass or one retained blocker: an operationally Ready two-worker managed-RWX AgentPool writes and reads checksummed bytes, the test deletes only the established share-manager, and the unchanged desired pool must regain healthy storage, a Ready replacement share-manager, fresh Ready workers, prior-byte integrity, and fresh cross-worker read/write within 60 seconds. There is no annotation, scaling/spec mutation, attachment reset, application retry, repair, pass-on-rerun, or deadline extension. Success and failure artifacts retain the exact inputs, bounded timestamps, Cilium configuration/endpoints, strict TCP/9503 policy, share-manager attempts/logs, Longhorn transitions, workers, and I/O checksums.
+
 ### DigitalOcean GPU — one VM
 
 Stages:
@@ -92,6 +100,7 @@ Forge retains its exact candidate overlay/chart/image-digest tests, GPU transiti
 One `e2e.yml` workflow owns:
 
 - fast harness compilation, unit tests, and nested-module lint;
+- the path-selected, non-aggregate HOR-537 one-shot qualification job against its exact approved PR source;
 - one serialized CPU cloud job against reviewed published releases;
 - one serialized GPU cloud job against reviewed published releases;
 - owner-local control-plane and chart Kind jobs, selected by those owners rather than Forge;

@@ -50,6 +50,9 @@ def is_documentation(path: str) -> bool:
 
 def selection(paths: list[str], select_all: bool = False) -> dict[str, object]:
     selected = {name: select_all for name in OUTPUTS}
+    # DES-HOR-537-01 is a one-shot qualification, not part of --all, nightly,
+    # release, or the existing required aggregate. Its exact owner file opts in.
+    selected["cilium_qualification"] = False
     selected_images: set[str] = set()
 
     if select_all:
@@ -185,6 +188,10 @@ def selection(paths: list[str], select_all: bool = False) -> dict[str, object]:
             if path.startswith("forge/"):
                 selected["forge"] = True
                 relative = path.removeprefix("forge/")
+                if relative == "test/e2e/cilium_qualification_test.go":
+                    selected["forge_e2e"] = True
+                    selected["cilium_qualification"] = True
+                    continue
                 affects_e2e = (
                     relative.startswith("cmd/")
                     or relative.startswith("internal/")

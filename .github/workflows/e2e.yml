@@ -48,6 +48,7 @@ jobs:
       inference_gateway: ${{ steps.select.outputs.inference_gateway }}
       forge_e2e: ${{ steps.select.outputs.forge_e2e }}
       forge_real_e2e: ${{ steps.select.outputs.forge_real_e2e }}
+      cilium_qualification: ${{ steps.select.outputs.cilium_qualification }}
       charts: ${{ steps.select.outputs.charts }}
       nightly_kind_matrix: ${{ steps.nightly.outputs.nightly_kind_matrix }}
       nightly_real_machine_matrix: ${{ steps.nightly.outputs.nightly_real_machine_matrix }}
@@ -169,6 +170,72 @@ jobs:
           path: ${{ runner.temp }}/forge-diagnostics/digitalocean-cpu
           if-no-files-found: ignore
           retention-days: 7
+
+  cilium-clean-cluster-qualification:
+    name: cilium-clean-cluster-qualification
+    needs: [changes, harness]
+    if: >-
+      needs.changes.outputs.cilium_qualification == 'true' &&
+      github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    concurrency:
+      group: e2e-digitalocean-cilium-qualification
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/setup-go
+        with:
+          go-version: 1.26.5
+          cache-dependency-path: ${{ env.GO_CACHE_DEPENDENCIES }}
+          cache-scope: e2e-cilium-qualification
+      - uses: ./.github/actions/setup-kubernetes-tools
+      - name: Refuse rerun-based qualification
+        env:
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: test "$RUN_ATTEMPT" = 1
+      - name: Materialize exact HOR-527 PR source
+        env:
+          CANDIDATE_SOURCE_SHA: e76f12a14db99b7d8e44fa3e62d95d1d7195caee
+          CANDIDATE_SOURCE_DIR: ${{ runner.temp }}/hor527-source
+        run: |
+          git fetch --no-tags origin refs/pull/65/head
+          git cat-file -e "$CANDIDATE_SOURCE_SHA^{commit}"
+          git worktree add --detach "$CANDIDATE_SOURCE_DIR" "$CANDIDATE_SOURCE_SHA"
+          test "$(git -C "$CANDIDATE_SOURCE_DIR" rev-parse HEAD)" = "$CANDIDATE_SOURCE_SHA"
+      - name: Build exact PR #65 charts and source images
+        env:
+          CANDIDATE_SOURCE_DIR: ${{ runner.temp }}/hor527-source
+        run: >-
+          "$CANDIDATE_SOURCE_DIR/.github/scripts/prepare_pr_managed_runtime.sh"
+          '${{ runner.temp }}/hor527-managed-runtime'
+          "$GITHUB_ENV"
+          with-source-images
+      - name: Qualify Cilium clean-cluster recovery once
+        run: make test-e2e-cilium-recovery
+        working-directory: forge
+        env:
+          DIGITALOCEAN_TOKEN: ${{ secrets.DIGITALOCEAN_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FORGE_E2E_CILIUM_QUALIFICATION: "true"
+          FORGE_E2E_REQUIRE_CAPACITY: "true"
+          ITERABASE_E2E_FIXTURE_MODE: source
+          ITERABASE_E2E_SOURCE_SHA: e76f12a14db99b7d8e44fa3e62d95d1d7195caee
+          ITERABASE_E2E_SOURCE_DIRTY: "false"
+          ITERABASE_E2E_SOURCE_INPUTS: ${{ github.workspace }}/forge/test/e2e/published-fixture.json
+          ITERABASE_E2E_DIAGNOSTICS: ${{ runner.temp }}/forge-diagnostics
+      - name: Retain bounded HOR-537 qualification evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: forge-diagnostics-cilium-clean-cluster-qualification
+          path: |
+            ${{ runner.temp }}/forge-diagnostics/cilium-clean-cluster-recovery
+            ${{ runner.temp }}/hor527-managed-runtime/checksums.txt
+          if-no-files-found: warn
+          retention-days: 30
 
   digitalocean-rwx-tls:
     name: digitalocean-rwx-tls

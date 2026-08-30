@@ -32,6 +32,19 @@ class PathSelectionFixtures(unittest.TestCase):
         result = selection([], select_all=True)
         self.assertTrue(all(result[name] for name in OUTPUTS))
         self.assertEqual(5, len(result["image_matrix"]))
+        self.assertFalse(result["cilium_qualification"])
+
+    def test_hor537_qualification_is_isolated_from_recurring_real_machine_selection(self) -> None:
+        result = selection(["forge/test/e2e/cilium_qualification_test.go"])
+        self.assertTrue(result["forge"])
+        self.assertTrue(result["forge_e2e"])
+        self.assertTrue(result["cilium_qualification"])
+        self.assertFalse(result["forge_real_e2e"])
+        self.assertFalse(result["charts"])
+
+        unrelated = selection(["forge/test/e2e/e2e_test.go"])
+        self.assertTrue(unrelated["forge_real_e2e"])
+        self.assertFalse(unrelated["cilium_qualification"])
 
 
 class ChangedPathCollectionFixtures(unittest.TestCase):
@@ -109,6 +122,26 @@ class ChangedPathCollectionFixtures(unittest.TestCase):
                 )
                 self.assertNotIn("git diff --name-only", workflow)
                 self.assertIn(f"name: {workflow_name} / required", workflow)
+
+    def test_hor537_cilium_qualification_is_exact_one_shot_and_non_aggregate(self) -> None:
+        workflow = (ROOT / ".github/workflows/e2e.yml").read_text()
+        job = workflow.split("  cilium-clean-cluster-qualification:\n", 1)[1].split(
+            "\n  digitalocean-rwx-tls:\n", 1
+        )[0]
+        for contract in (
+            "needs.changes.outputs.cilium_qualification == 'true'",
+            "github.event_name == 'pull_request'",
+            "run: test \"$RUN_ATTEMPT\" = 1",
+            "e76f12a14db99b7d8e44fa3e62d95d1d7195caee",
+            "refs/pull/65/head",
+            "with-source-images",
+            "run: make test-e2e-cilium-recovery",
+            "if: always()",
+            "retention-days: 30",
+        ):
+            self.assertIn(contract, job)
+        required = workflow.split("  required:\n", 1)[1]
+        self.assertNotIn("- cilium-clean-cluster-qualification", required)
 
     def test_pr_has_required_exact_head_managed_storage_internal_tls_job(self) -> None:
         workflow = (ROOT / ".github/workflows/e2e.yml").read_text()
