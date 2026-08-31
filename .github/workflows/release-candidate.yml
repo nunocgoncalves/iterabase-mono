@@ -310,65 +310,7 @@ jobs:
         if: matrix.name == 'control-plane-harness'
         env:
           IMAGE: ${{ matrix.repository }}@${{ steps.build.outputs.digest }}
-        run: |
-          smoke_dir="$RUNNER_TEMP/harness-candidate-smoke"
-          mkdir -p "$smoke_dir"
-          cat > "$smoke_dir/config.yaml" <<'YAML'
-          controlPlane:
-            url: https://127.0.0.1:65535
-            serverName: localhost
-          worker:
-            workerId: release-smoke
-            poolId: release-smoke
-          tls:
-            cert: /smoke/tls.crt
-            key: /smoke/tls.key
-            ca: /smoke/ca.crt
-          sandboxRoot: /tmp/harness-smoke-sandboxes
-          piDirs: []
-          toolGateway:
-            url: https://127.0.0.1:65535
-            serverName: localhost
-          inferenceGateway:
-            url: https://127.0.0.1:65535
-            serverName: localhost
-          walDir: /tmp/harness-smoke-wal
-          reconnect:
-            initialBackoffMs: 100
-            maxBackoffMs: 100
-            resetAfterMs: 100
-          YAML
-          printf '%s\n' 'release candidate smoke fixture' > "$smoke_dir/tls.crt"
-          cp "$smoke_dir/tls.crt" "$smoke_dir/tls.key"
-          cp "$smoke_dir/tls.crt" "$smoke_dir/ca.crt"
-          chmod -R a+rX "$smoke_dir"
-
-          container=""
-          # shellcheck disable=SC2329 # invoked by the EXIT trap
-          cleanup() {
-            if [ -n "$container" ]; then docker rm -f "$container" >/dev/null 2>&1 || true; fi
-          }
-          trap cleanup EXIT
-          docker pull "$IMAGE"
-          expected="$(docker image inspect --format '{{.Id}}' "$IMAGE")"
-          container="$(docker run --detach --env HARNESS_CONFIG=/smoke/config.yaml \
-            --mount "type=bind,source=$smoke_dir,target=/smoke,readonly" \
-            --publish 127.0.0.1::8081 "$IMAGE")"
-          test "$(docker inspect --format '{{.Image}}' "$container")" = "$expected"
-          port="$(docker port "$container" 8081/tcp | awk -F: 'NR == 1 {print $NF}')"
-          for _ in $(seq 1 30); do
-            if body="$(curl --fail --silent "http://127.0.0.1:$port/healthz" 2>/dev/null)"; then
-              test "$body" = ok
-              exit 0
-            fi
-            test "$(docker inspect --format '{{.State.Running}}' "$container")" = true || {
-              docker logs "$container"
-              exit 1
-            }
-            sleep 1
-          done
-          docker logs "$container"
-          exit 1
+        run: bash control-plane/harness/smoke/smoke-production-image.sh "$IMAGE"
       - name: Record immutable image identity
         env:
           DIGEST: ${{ steps.build.outputs.digest }}

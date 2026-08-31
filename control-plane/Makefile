@@ -283,6 +283,10 @@ harness-lint: ## Typecheck the harness (tsc --noEmit).
 harness-image: ## Build the harness container image.
 	$(CONTAINER_TOOL) build -t $(HARNESS_IMG) -f harness/Dockerfile harness/
 
+.PHONY: harness-smoke-test
+harness-smoke-test: harness-image ## Smoke the exact production harness image against the root-owned cert-manager AtomicWriter TLS fixture (valid + fail-closed negative). Requires docker and passwordless sudo/root to materialize the root-owned fixture.
+	bash harness/smoke/smoke-production-image.sh "$(HARNESS_IMG)"
+
 .PHONY: harness-isolation-image harness-isolation-test harness-isolation-negative-test
 harness-isolation-image: ## Build the Linux sandbox isolation fixture image.
 	$(CONTAINER_TOOL) build -t $(HARNESS_ISOLATION_IMG) -f harness/isolation/Dockerfile harness/
