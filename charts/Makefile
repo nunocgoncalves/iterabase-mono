@@ -35,7 +35,7 @@ else
 E2E_BUILD_DEPS := build-deps
 endif
 
-.PHONY: build-deps lint template kubeconform template-controlplane kubeconform-controlplane template-tls kubeconform-tls template-observability kubeconform-observability template-observability-tls kubeconform-observability-tls template-internal-observability kubeconform-internal-observability check-internal-observability template-private-control-plane kubeconform-private-control-plane check-private-control-plane check-certificate-substrate check-service-selectors check-redis-exporter-auth check-artifact-config check-tool-runner check-manager-contract check-workload-ca check-dup-yaml-keys check-metrics-contract check-alerts test-alert-rules check-dashboards check-observability-tls check check-tls check-observability test-e2e test-e2e-unit test-e2e-certificate-migration test-e2e-install test-e2e-upgrade test-e2e-feature-enable test-e2e-observability-ingress-recovery test-e2e-reapply-rollback test-e2e-metallb-transition test-e2e-observability test-e2e-observability-tls test-e2e-internal-tls clean
+.PHONY: test-build-dependency-retry build-deps lint template kubeconform template-controlplane kubeconform-controlplane template-tls kubeconform-tls template-observability kubeconform-observability template-observability-tls kubeconform-observability-tls template-internal-observability kubeconform-internal-observability check-internal-observability template-private-control-plane kubeconform-private-control-plane check-private-control-plane check-certificate-substrate check-service-selectors check-redis-exporter-auth check-artifact-config check-tool-runner check-manager-contract check-workload-ca check-dup-yaml-keys check-metrics-contract check-alerts test-alert-rules check-dashboards check-observability-tls check check-tls check-observability test-e2e test-e2e-unit test-e2e-certificate-migration test-e2e-install test-e2e-upgrade test-e2e-feature-enable test-e2e-observability-ingress-recovery test-e2e-reapply-rollback test-e2e-metallb-transition test-e2e-observability test-e2e-observability-tls test-e2e-internal-tls clean
 
 # Compile the owner entrypoint and run hermetic mechanics plus intentional break
 # fixtures without provisioning infrastructure.
@@ -79,11 +79,14 @@ test-e2e-internal-tls: $(E2E_BUILD_DEPS)
 # control-plane has its own file:// dep (postgresql) and observability has its
 # own upstream deps (kube-prometheus-stack + loki); build them first so the
 # umbrella vendors each with its nested dependencies baked in.
+test-build-dependency-retry:
+	bash scripts/test-build-chart-dependency.sh
+
 build-deps:
-	helm dependency build $(CHARTS_DIR)/$(CONTROLPLANE)
-	helm dependency build $(CHARTS_DIR)/$(OBSERVABILITY)
-	helm dependency build $(CHARTS_DIR)/$(CERT_MANAGER_SUBSTRATE)
-	helm dependency build $(CHARTS_DIR)/$(UMBRELLA)
+	bash scripts/build-chart-dependency.sh $(CHARTS_DIR)/$(CONTROLPLANE)
+	bash scripts/build-chart-dependency.sh $(CHARTS_DIR)/$(OBSERVABILITY)
+	bash scripts/build-chart-dependency.sh $(CHARTS_DIR)/$(CERT_MANAGER_SUBSTRATE)
+	bash scripts/build-chart-dependency.sh $(CHARTS_DIR)/$(UMBRELLA)
 
 lint: build-deps
 	@for c in $(CHARTS); do echo ":: helm lint $$c"; helm lint $(CHARTS_DIR)/$$c || exit 1; done
@@ -156,7 +159,7 @@ test-alert-rules: build-deps
 check-dashboards: build-deps
 	./scripts/check-dashboards.sh
 
-check: lint kubeconform kubeconform-controlplane kubeconform-observability check-internal-observability check-private-control-plane check-certificate-substrate check-service-selectors check-redis-exporter-auth check-artifact-config check-tool-runner check-manager-contract check-workload-ca check-dup-yaml-keys check-metrics-contract check-alerts check-dashboards
+check: test-build-dependency-retry lint kubeconform kubeconform-controlplane kubeconform-observability check-internal-observability check-private-control-plane check-certificate-substrate check-service-selectors check-redis-exporter-auth check-artifact-config check-tool-runner check-manager-contract check-workload-ca check-dup-yaml-keys check-metrics-contract check-alerts check-dashboards
 
 check-tls: kubeconform-tls kubeconform-observability-tls check-internal-observability check-private-control-plane check-redis-exporter-auth check-observability-tls
 
