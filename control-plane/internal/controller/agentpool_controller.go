@@ -783,9 +783,10 @@ func (r *AgentPoolReconciler) countReadyWorkers(ctx context.Context, pool *v1alp
 // the cert-manager CSI TLS volume, the shared node-local RWO sandbox PVC, the WAL
 // emptyDir, the per-pod config ConfigMap, and read-only piDirs (placeholder
 // mounts; overlay content is HOR-393). The supervisor runs as root (UID 0) to
-// read the CSI driver's root-owned 0600 key and launch the per-turn child as
-// the session UID via setpriv. It retains runtime-default capabilities and
-// explicitly adds SETUID/SETGID; no pod fsGroup grants key or PVC access.
+// read the cert-manager CSI AtomicWriter chain's exact root:root 0440 resolved
+// tls.key and launch the per-turn child as the session UID via setpriv. It
+// retains runtime-default capabilities and explicitly adds SETUID/SETGID; no pod
+// fsGroup grants key or PVC access.
 func buildWorkerPodSpec(pool *v1alpha1.AgentPool, name string) corev1.PodSpec {
 	probePort := pool.Spec.Probe.Port
 	if probePort == 0 {

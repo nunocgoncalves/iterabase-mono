@@ -36,6 +36,12 @@
     "images": ["control-plane-harness", "control-plane-harness-isolation"]
   },
   {
+    "name": "harness smoke fixture selects the harness image",
+    "paths": ["control-plane/harness/smoke/smoke-production-image.sh"],
+    "true": ["harness", "images"],
+    "images": ["control-plane-harness"]
+  },
+  {
     "name": "inference gateway selects gateway and image",
     "paths": ["inference-gateway/internal/proxy/handler.go"],
     "true": ["inference_gateway", "images"],

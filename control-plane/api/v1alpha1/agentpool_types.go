@@ -57,8 +57,9 @@ type AgentPoolSpec struct {
 	// operator never holds the CA key (cert-manager owns the CA). Servers
 	// (gateway/inference/future Work server) trust caSecretRef's cert as
 	// ClientCAs. No fsGroup grants access: the trusted root supervisor validates
-	// and reads the exact root-owned 0600 key, while the disposable child has
-	// cleared groups/capabilities and receives EACCES.
+	// the cert-manager CSI AtomicWriter chain and reads the exact root:root 0440
+	// resolved key, while the disposable child has cleared groups/capabilities
+	// and receives EACCES.
 	// +kubebuilder:validation:Required
 	Identity PoolIdentitySpec `json:"identity"`
 

@@ -95,7 +95,7 @@ try {
 ok("cannot read sibling session file (EACCES)", readSib);
 
 // The cert-manager CSI key is mounted in the supervisor container namespace,
-// but exact root:0600 permissions must make the real child open fail EACCES.
+// but exact root:0440 permissions must make the real child open fail EACCES.
 let keyDenied = false;
 try {
   fs.openSync(TLS_KEY, "r");
