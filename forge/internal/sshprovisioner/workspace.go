@@ -269,21 +269,27 @@ probe_active_raw_consumers() {
       fd="$process/fd/$fd_name"
       fd_rc=1
       fd_number=
-      for fd_attempt in 1 2 3; do
-        set +e
-        fd_number=$(stat -Lc '%%t:%%T' "$fd" 2>&1)
-        fd_rc=$?
-        set -e
+      fd_gone=false
+      for fd_round in 1 2 3; do
+        for fd_attempt in 1 2 3; do
+          set +e
+          fd_number=$(stat -Lc '%%t:%%T' "$fd" 2>&1)
+          fd_rc=$?
+          set -e
+          test "$fd_rc" = 0 && break
+        done
         test "$fd_rc" = 0 && break
-      done
-      if test "$fd_rc" != 0; then
-        # A descriptor may close while /proc is inspected. Re-enumerate the
-        # directory and ignore only a descriptor number that is provably gone;
-        # persistent or unreadable entries remain fail-closed uncertainty.
+        # A descriptor may close and its number may be reused while /proc is
+        # inspected. Re-enumerate: absence proves closure; continued presence
+        # gets another bounded inspection round for the current descriptor.
         remaining_fds=$(list_process_fds "$process")
-        if ! printf '%%s\n' "$remaining_fds" | grep -Fxq "$fd_name"; then continue; fi
-        fail "active-open probe could not inspect $fd after 3 attempts: $fd_number"
-      fi
+        if ! printf '%%s\n' "$remaining_fds" | grep -Fxq "$fd_name"; then
+          fd_gone=true
+          break
+        fi
+      done
+      test "$fd_gone" = false || continue
+      test "$fd_rc" = 0 || fail "active-open probe could not inspect $fd after 3 bounded rounds: $fd_number"
       if test "$fd_number" = "$device_number"; then
         fail "selected disk is held open as a raw block device by process ${process##*/}"
       fi

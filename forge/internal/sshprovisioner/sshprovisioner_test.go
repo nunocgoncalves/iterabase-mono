@@ -1524,7 +1524,7 @@ func TestAgentPoolWorkspaceCommandIsBoundedAndCrashResumable(t *testing.T) {
 				InstallName: "opo1", Device: "/dev/disk/by-id/scsi-workspace", Filesystem: filesystem,
 			}, "reconcile")
 			for _, expected := range []string{
-				"probe_identity_topology", "list_process_ids", "list_process_fds", "probe_active_raw_consumers", "process_ids=$(list_process_ids)", "LC_ALL=C ls -1U", "set -o pipefail", "head -n 65537", "65536-/proc-entry limit", "65536-descriptor limit", "could not enumerate /proc", "current_process_ids=$(list_process_ids)", "remaining_fds=$(list_process_fds", "for fd_attempt in 1 2 3", "stat -Lc '%t:%T'", "after 3 attempts", "wipefs -n --noheadings --output TYPE", "blkid -p", "write_receipt planned",
+				"probe_identity_topology", "list_process_ids", "list_process_fds", "probe_active_raw_consumers", "process_ids=$(list_process_ids)", "LC_ALL=C ls -1U", "set -o pipefail", "head -n 65537", "65536-/proc-entry limit", "65536-descriptor limit", "could not enumerate /proc", "current_process_ids=$(list_process_ids)", "remaining_fds=$(list_process_fds", "for fd_round in 1 2 3", "for fd_attempt in 1 2 3", "stat -Lc '%t:%T'", "after 3 bounded rounds", "wipefs -n --noheadings --output TYPE", "blkid -p", "write_receipt planned",
 				"mkfs.ext4 -F", "mkfs.xfs -f", "filesystem_selection", "transport_b64", "UUID=$planned_uuid",
 				"nodev,nosuid", workspaceFilesystemLabel, workspaceMarkerName,
 			} {
@@ -1598,7 +1598,27 @@ exit 13
 		var exitErr *exec.ExitError
 		require.ErrorAs(t, err, &exitErr)
 		assert.Equal(t, 42, exitErr.ExitCode())
-		assert.Contains(t, output, "/100/fd/9 after 3 attempts: descriptor unreadable")
+		assert.Contains(t, output, "/100/fd/9 after 3 bounded rounds: descriptor unreadable")
+	})
+
+	t.Run("a reused descriptor number is inspected in the next bounded round", func(t *testing.T) {
+		output, err := runWorkspaceActiveOpenProbe(t, `#!/bin/bash
+set -eu
+path="${!#}"
+if [[ "$path" == "$TEST_PROC_ROOT" ]]; then printf '100\n'; exit 0; fi
+if [[ "$path" == "$TEST_PROC_ROOT/100/fd" ]]; then printf '9\n'; exit 0; fi
+exit 2
+`, `#!/bin/bash
+set -eu
+path="${!#}"
+if [[ "$path" == "$TEST_DEVICE" ]]; then printf '8:1\n'; exit 0; fi
+count=0
+if [[ -f "$TEST_STAT_STATE" ]]; then read -r count < "$TEST_STAT_STATE"; fi
+printf '%s\n' "$((count + 1))" > "$TEST_STAT_STATE"
+if [[ "$count" -lt 3 ]]; then printf 'descriptor changed\n' >&2; exit 1; fi
+printf '8:2\n'
+`)
+		require.NoError(t, err, output)
 	})
 
 	t.Run("descriptor disappearance proven by successful re-enumeration is ignored", func(t *testing.T) {
@@ -1633,6 +1653,7 @@ func runWorkspaceActiveOpenProbe(t *testing.T, lsScript, statScript string) (str
 	device := filepath.Join(root, "device")
 	require.NoError(t, os.WriteFile(device, nil, 0o600))
 	state := filepath.Join(root, "ls-state")
+	statState := filepath.Join(root, "stat-state")
 	bin := filepath.Join(root, "bin")
 	require.NoError(t, os.Mkdir(bin, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(bin, "ls"), []byte(lsScript), 0o755))
@@ -1654,6 +1675,7 @@ func runWorkspaceActiveOpenProbe(t *testing.T, lsScript, statScript string) (str
 		"TEST_PROC_ROOT="+procRoot,
 		"TEST_DEVICE="+device,
 		"TEST_STATE="+state,
+		"TEST_STAT_STATE="+statState,
 	)
 	output, err := cmd.CombinedOutput()
 	return string(output), err
