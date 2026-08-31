@@ -156,7 +156,7 @@ marker_name=%s
 
 fail() { printf 'workspace refusal: %%s\n' "$*" >&2; exit 42; }
 need() { command -v "$1" >/dev/null 2>&1 || fail "required probe/tool $1 is unavailable"; }
-for tool in readlink lsblk findmnt blkid wipefs awk grep stat base64 sync mount install find cat dirname mktemp mv chown chmod tr; do need "$tool"; done
+for tool in readlink lsblk findmnt blkid wipefs awk grep stat base64 sync mount install find cat dirname mktemp mv chown chmod tr ls head; do need "$tool"; done
 case "$selected" in /dev/disk/by-id/*) ;; *) fail "selected device is not a stable /dev/disk/by-id identity" ;; esac
 case "$selected" in *-part[0-9]*) fail "selected device is a partition identity" ;; esac
 test -L "$selected" || fail "selected stable identity is missing or not a symlink"
@@ -208,15 +208,65 @@ probe_identity_topology() {
   done < /proc/swaps
 }
 
+list_process_ids() {
+  process_list_error=
+  for process_list_attempt in 1 2 3; do
+    set +e
+    process_list=$(set -o pipefail; LC_ALL=C ls -1U -- /proc 2>&1 | head -n 65537)
+    process_list_rc=$?
+    set -e
+    if test "$process_list_rc" = 0; then
+      test -n "$process_list" || fail "active-open probe found an empty /proc process table"
+      process_entry_count=$(printf '%%s\n' "$process_list" | awk 'END {print NR+0}')
+      test "$process_entry_count" -le 65536 || fail "active-open probe exceeded its bounded 65536-/proc-entry limit"
+      printf '%%s\n' "$process_list" | awk '/^[0-9]+$/'
+      return 0
+    fi
+    process_list_error=$process_list
+  done
+  fail "active-open probe could not enumerate /proc after 3 attempts: $process_list_error"
+}
+
+list_process_fds() {
+  process_path=$1
+  fd_list_error=
+  for fd_list_attempt in 1 2 3; do
+    set +e
+    # Read at most one entry beyond the global bound. Unlike a shell glob,
+    # this has a status that distinguishes an empty directory from a directory
+    # that could not be enumerated.
+    fd_list=$(set -o pipefail; LC_ALL=C ls -1U -- "$process_path/fd" 2>&1 | head -n 65537)
+    fd_list_rc=$?
+    set -e
+    if test "$fd_list_rc" = 0; then
+      printf '%%s' "$fd_list"
+      return 0
+    fi
+    fd_list_error=$fd_list
+    # Ignore only a PID that is absent from a fresh, successfully enumerated
+    # process table. Directory stat/read failures for a still-visible process
+    # are required-probe uncertainty, not evidence that the process exited.
+    current_process_ids=$(list_process_ids)
+    process_id=${process_path##*/}
+    if ! printf '%%s\n' "$current_process_ids" | grep -Fxq "$process_id"; then return 0; fi
+  done
+  fail "active-open probe could not enumerate $process_path/fd after 3 attempts: $fd_list_error"
+}
+
 probe_active_raw_consumers() {
   device_number=$(stat -Lc '%%t:%%T' "$device" 2>/dev/null) || fail "cannot determine selected disk device number for the active-open probe"
   scanned_fds=0
-  for process in /proc/[0-9]*; do
-    test -d "$process/fd" || continue
-    for fd in "$process"/fd/[0-9]*; do
-      test -L "$fd" || continue
+  process_ids=$(list_process_ids)
+  test -n "$process_ids" || fail "active-open probe found no visible processes"
+  while IFS= read -r process_id; do
+    process="/proc/$process_id"
+    fd_names=$(list_process_fds "$process")
+    test -n "$fd_names" || continue
+    while IFS= read -r fd_name; do
+      case "$fd_name" in ''|*[!0-9]*) fail "active-open probe found an invalid descriptor entry under $process/fd: $fd_name" ;; esac
       scanned_fds=$((scanned_fds + 1))
       test "$scanned_fds" -le 65536 || fail "active-open probe exceeded its bounded 65536-descriptor limit"
+      fd="$process/fd/$fd_name"
       fd_rc=1
       fd_number=
       for fd_attempt in 1 2 3; do
@@ -225,21 +275,24 @@ probe_active_raw_consumers() {
         fd_rc=$?
         set -e
         test "$fd_rc" = 0 && break
-        test -L "$fd" || break
       done
       if test "$fd_rc" != 0; then
-        # A process may close and quickly reuse one descriptor number while
-        # /proc is inspected. Retry that exact path three times, then ignore
-        # only a proven disappearance; every persistently unreadable descriptor
-        # remains uncertain and therefore refuses first format.
-        test ! -L "$fd" || fail "active-open probe could not inspect $fd after 3 attempts: $fd_number"
-        continue
+        # A descriptor may close while /proc is inspected. Re-enumerate the
+        # directory and ignore only a descriptor number that is provably gone;
+        # persistent or unreadable entries remain fail-closed uncertainty.
+        remaining_fds=$(list_process_fds "$process")
+        if ! printf '%%s\n' "$remaining_fds" | grep -Fxq "$fd_name"; then continue; fi
+        fail "active-open probe could not inspect $fd after 3 attempts: $fd_number"
       fi
       if test "$fd_number" = "$device_number"; then
         fail "selected disk is held open as a raw block device by process ${process##*/}"
       fi
-    done
-  done
+    done <<EOF
+$fd_names
+EOF
+  done <<EOF
+$process_ids
+EOF
 }
 
 probe_blank_signatures() {

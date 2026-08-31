@@ -1521,13 +1521,16 @@ func TestAgentPoolWorkspaceCommandIsBoundedAndCrashResumable(t *testing.T) {
 				InstallName: "opo1", Device: "/dev/disk/by-id/scsi-workspace", Filesystem: filesystem,
 			}, "reconcile")
 			for _, expected := range []string{
-				"probe_identity_topology", "probe_active_raw_consumers", "/proc/[0-9]*", "65536-descriptor limit", "for fd_attempt in 1 2 3", "stat -Lc '%t:%T'", "after 3 attempts", "wipefs -n --noheadings --output TYPE", "blkid -p", "write_receipt planned",
+				"probe_identity_topology", "list_process_ids", "list_process_fds", "probe_active_raw_consumers", "process_ids=$(list_process_ids)", "LC_ALL=C ls -1U", "set -o pipefail", "head -n 65537", "65536-/proc-entry limit", "65536-descriptor limit", "could not enumerate /proc", "current_process_ids=$(list_process_ids)", "remaining_fds=$(list_process_fds", "for fd_attempt in 1 2 3", "stat -Lc '%t:%T'", "after 3 attempts", "wipefs -n --noheadings --output TYPE", "blkid -p", "write_receipt planned",
 				"mkfs.ext4 -F", "mkfs.xfs -f", "filesystem_selection", "transport_b64", "UUID=$planned_uuid",
 				"nodev,nosuid", workspaceFilesystemLabel, workspaceMarkerName,
 			} {
 				assert.Contains(t, script, expected)
 			}
-			for _, forbidden := range []string{"if=/dev/", "FORGE_AGENTPOOL_WORKSPACE_FORCE", "wipefs -a", ">/tmp/forge-workspace"} {
+			for _, forbidden := range []string{
+				"if=/dev/", "FORGE_AGENTPOOL_WORKSPACE_FORCE", "wipefs -a", ">/tmp/forge-workspace",
+				`/proc/[0-9]*`, `test -d "$process/fd" || continue`, `for fd in "$process"/fd/[0-9]*`, `test -L "$fd" || continue`,
+			} {
 				assert.NotContains(t, script, forbidden)
 			}
 			assert.LessOrEqual(t, strings.Count(script, "probe_blank_signatures"), 4, "bounded probes are repeated only at the authorization boundary")
