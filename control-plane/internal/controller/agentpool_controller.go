@@ -67,8 +67,8 @@ const (
 	// defaultProbePort mirrors the harness probe default (harness/src/config.ts).
 	defaultAgentPoolProbePort int32 = 8081
 	// supervisorUID is the supervisor's runAsUser. Root (0) is required so the
-	// supervisor can read the cert-manager CSI driver's root-owned 0600 tls.key
-	// and launch the per-turn child as the session UID via setpriv. The child
+	// supervisor can read the cert-manager CSI driver's root-owned 0440 resolved
+	// tls.key target and launch the per-turn child as the session UID via setpriv. The child
 	// (session UID, supplementary groups cleared, no_new_privs) cannot read the
 	// root-owned key. PSS baseline permits runAsUser=0; the rendered container
 	// retains runtime-default capabilities and explicitly adds SETUID/SETGID.

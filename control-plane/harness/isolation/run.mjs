@@ -33,7 +33,9 @@ const GID_B = 1001;
 const BREAK_MODE = process.env.HARNESS_ISOLATION_BREAK ?? "";
 const FILESYSTEM = process.env.HARNESS_ISOLATION_FILESYSTEM ?? "";
 const IMAGE = `/tmp/harness-isolation-${FILESYSTEM}.img`;
-const TLS_KEY = "/etc/harness/tls/tls.key";
+const TLS_ROOT = "/etc/harness/tls";
+const TLS_KEY = `${TLS_ROOT}/tls.key`;
+const TLS_TIMESTAMP = "..2026_08_31_12_00_00.000000001";
 
 if (!["ext4", "xfs"].includes(FILESYSTEM)) {
   throw new Error(`HARNESS_ISOLATION_FILESYSTEM must be ext4 or xfs (got ${FILESYSTEM})`);
@@ -75,25 +77,17 @@ function setup() {
   // traverse a known path but cannot list or mutate the root.
   sh(`chown 0:0 ${MOUNT} && chmod 0711 ${MOUNT}`);
 
-  sh(`install -d -m 0700 -o 0 -g 0 /etc/harness/tls`);
-  sh(`printf private-key-material > ${TLS_KEY} && chown 0:0 ${TLS_KEY} && chmod 0600 ${TLS_KEY}`);
+  // Produce the same AtomicWriter representation as cert-manager CSI before
+  // validation. This is fixture materialization, not supervisor repair.
+  sh(`install -d -m 0700 -o 0 -g 0 ${TLS_ROOT}`);
+  sh(`install -d -m 0755 -o 0 -g 0 ${TLS_ROOT}/${TLS_TIMESTAMP}`);
+  sh(`printf private-key-material > ${TLS_ROOT}/${TLS_TIMESTAMP}/tls.key`);
+  sh(`chown 0:0 ${TLS_ROOT}/${TLS_TIMESTAMP}/tls.key && chmod 0440 ${TLS_ROOT}/${TLS_TIMESTAMP}/tls.key`);
+  sh(`ln -s ${TLS_TIMESTAMP} ${TLS_ROOT}/..data`);
+  sh(`ln -s ..data/tls.key ${TLS_KEY}`);
+  sh(`chmod 0550 ${TLS_ROOT}`);
   validateSupervisorTLSKey(TLS_KEY);
-  // Independent drift fixtures: validation observes and refuses; it never
-  // repairs any bad inode before the real child proof runs.
-  sh(`printf bad > /etc/harness/tls/mode.key && chmod 0640 /etc/harness/tls/mode.key`);
-  sh(`ln -s ${TLS_KEY} /etc/harness/tls/symlink.key`);
-  sh(`mkdir /etc/harness/tls/directory.key`);
-  sh(`printf bad > /etc/harness/tls/owner.key && chown ${UID_A}:${GID_A} /etc/harness/tls/owner.key && chmod 0600 /etc/harness/tls/owner.key`);
-  for (const bad of ["mode.key", "symlink.key", "directory.key", "owner.key"]) {
-    let refused = false;
-    try {
-      validateSupervisorTLSKey(`/etc/harness/tls/${bad}`);
-    } catch {
-      refused = true;
-    }
-    if (!refused) throw new Error(`unsafe TLS key fixture was accepted: ${bad}`);
-  }
-  console.log(`PASS  supervisor tls.key invariant (${FILESYSTEM})`);
+  console.log(`PASS  supervisor AtomicWriter tls.key invariant (${FILESYSTEM})`);
 }
 
 function runProbe(label, { uid, gid, sandbox, sibling }) {

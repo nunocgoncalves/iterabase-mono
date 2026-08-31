@@ -106,9 +106,11 @@ endpoints (ARCH-010 — separate domain gateways, one worker SPIFFE cert), WAL
 spool dir (emptyDir), probe port, + HTTP/2 ping / reconnect / child-liveness /
 abort-grace / outbox-bound / model-retry / token-delta-buffer tunables. Certs
 are re-read each reconnect (rotation). Before startup and on the bounded health
-cadence, the supervisor observes (never repairs) that `tls.key` is a non-symlink
-regular root-owned exact-`0600` file and proves it readable; drift withdraws
-readiness/health and drains fail-closed. The supervisor holds the only usable
+cadence, the supervisor observes (never repairs) only the exact cert-manager CSI
+AtomicWriter chain beneath non-child-writable mount/ancestors, safely resolves the
+current root-owned regular exact-`0440` target, and proves it readable; `0440` is
+the narrow fixed-mode upstream exception. Drift withdraws readiness/health and
+drains fail-closed. The supervisor holds the only usable
 mTLS credential; the disposable child receives `EACCES` opening the mounted key
 and has no direct network route (ARCH-003) — model/tool traffic crosses
 dedicated IPC channels (fd 4/fd 5) to the supervisor, which opens the authenticated upstream
@@ -148,7 +150,7 @@ streams (ARCH-011).
 - `ipc.ts` — framed discriminated-union IPC for fd 0/3/4/5 + runtime validation.
 - `launcher.ts` — the `setpriv` privilege-dropping launcher (equal UID/GID, cleared groups, full cap-drop, `no_new_privs`, umask `0077`).
 - `sandbox.ts` — canonical paths + ownership/mode/cwd validation.
-- `tls-key.ts` — observe-only root-owned non-symlink regular exact-`0600` private-key startup/readiness invariant.
+- `tls-key.ts` — observe-only contained AtomicWriter-chain, protected-ancestor, and root-owned regular exact-`0440` resolved-key startup/readiness invariant.
 - `storage-health.ts` — fail-closed runtime workspace fsync/rename/unlink health transaction.
 - `config.ts` — infra-only boot config loader/validator.
 - `probes.ts` — `/healthz` + `/readyz`.
@@ -158,7 +160,7 @@ streams (ARCH-011).
 `node:24-bookworm-slim`, multi-stage (`tsc` → `dist/`). The image defaults to
 non-root (`65532`), but the AgentPool pod security context (HOR-245) runs the
 **supervisor as root (UID/GID 0)** — required to read the cert-manager CSI
-driver's root-owned exact-`0600` tls.key, `chown` per-session sandbox entries
+driver's root-owned exact-`0440` resolved tls.key target, `chown` per-session sandbox entries
 under the root-owned `0711` mount root, and `setpriv`-drop to the session UID/GID.
 The rendered container retains runtime-default capabilities and explicitly adds
 `SETUID`/`SETGID`; it does not set `fsGroup` and does not have only those two
