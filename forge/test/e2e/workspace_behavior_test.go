@@ -344,6 +344,8 @@ func exerciseHumanGateWorkspaceReplacementStage(t *testing.T, state *digitalOcea
 	respondWorkspaceBlocker(t, baseURL, state.workspaceWorkKey, item.ID)
 	waitWorkspaceDatabaseValue(t, cluster, state, fmt.Sprintf(`SELECT count(*) FROM runtime.turn_assignments WHERE attempt_id='%s'`, item.CurrentAttemptID), "2", 4*time.Minute)
 	item = waitWorkspaceWorkState(t, baseURL, state.workspaceWorkKey, item.ID, "blocked", 2*time.Minute)
+	recoveryEvents := workspaceDatabaseQuery(t, cluster, state, fmt.Sprintf(`SELECT string_agg(seq::text || ':' || kind || ':' || payload::text, E'\n' ORDER BY seq) FROM runtime.events WHERE run_id='%s'`, item.CurrentAttemptID))
+	t.Logf("human-gate recovery events before external resumed proof:\n%s", recoveryEvents)
 	assertRecoveryWorkspaceState(t, cluster, sessionBefore, "resumed", true)
 	sessionAfter := workspaceDatabaseQuery(t, cluster, state, fmt.Sprintf(`SELECT session_id FROM runtime.workflow_runs WHERE id='%s'`, item.CurrentAttemptID))
 	if sessionAfter != sessionBefore {
