@@ -11,6 +11,11 @@ RENDER_OBS := /tmp/$(UMBRELLA).observability.rendered.yaml
 RENDER_OBS_TLS := /tmp/$(UMBRELLA).observability-tls.rendered.yaml
 RENDER_INTERNAL_OBS := /tmp/$(UMBRELLA).internal-observability.rendered.yaml
 RENDER_PRIVATE_CP := /tmp/$(UMBRELLA).private-control-plane.rendered.yaml
+# Pin Kubernetes schemas to one immutable upstream commit. kubeconform's
+# floating `master` default can fail or change independently of this source SHA.
+KUBECONFORM_SCHEMA_COMMIT := 14355cdd490a43d21e05985668815a36a6f97da6
+KUBECONFORM_SCHEMA_LOCATION := https://raw.githubusercontent.com/yannh/kubernetes-json-schema/$(KUBECONFORM_SCHEMA_COMMIT)/{{.NormalizedKubernetesVersion}}-standalone-strict/{{.ResourceKind}}.json
+KUBECONFORM := kubeconform -strict -kubernetes-version 1.31.0 -ignore-missing-schemas -schema-location '$(KUBECONFORM_SCHEMA_LOCATION)'
 # Use OPO1's short release name so static TLS checks exercise the upstream
 # kube-prometheus-stack fullname path that differs from the historical
 # `iterabase` E2E release name.
@@ -98,7 +103,7 @@ template: build-deps
 kubeconform: template
 	# The umbrella now renders the control-plane's CRDs (enabled by default);
 	# kubeconform's bundled schema set doesn't resolve apiextensions CRDs.
-	kubeconform -strict -kubernetes-version 1.31.0 -ignore-missing-schemas $(RENDER)
+	$(KUBECONFORM) $(RENDER)
 
 # The umbrella keeps control-plane disabled by default, so validate the
 # control-plane chart standalone (renders with its own enabled=true default).
@@ -110,7 +115,7 @@ kubeconform-controlplane: template-controlplane
 	# The chart renders a CRD (kubebuilder-generated, sourced verbatim from the
 	# control-plane component); kubeconform's bundled schema set does not resolve the
 	# apiextensions CRD schema, so ignore missing schemas rather than failing.
-	kubeconform -strict -kubernetes-version 1.31.0 -ignore-missing-schemas $(RENDER_CP)
+	$(KUBECONFORM) $(RENDER_CP)
 
 # Static check with internal TLS on (values-tls.yaml flips global.internalTLS).
 # Catches conditional/render errors in the TLS-on path that the default
@@ -121,7 +126,7 @@ template-tls: build-deps
 	@echo "rendered $(RENDER_TLS)"
 
 kubeconform-tls: template-tls
-	kubeconform -strict -kubernetes-version 1.31.0 -ignore-missing-schemas $(RENDER_TLS)
+	$(KUBECONFORM) $(RENDER_TLS)
 
 check-certificate-substrate: build-deps
 	./scripts/check-certificate-substrate.sh
@@ -174,7 +179,7 @@ template-observability: build-deps
 	@echo "rendered $(RENDER_OBS)"
 
 kubeconform-observability: template-observability
-	kubeconform -strict -kubernetes-version 1.31.0 -ignore-missing-schemas $(RENDER_OBS)
+	$(KUBECONFORM) $(RENDER_OBS)
 
 check-observability: kubeconform-observability
 
@@ -185,7 +190,7 @@ template-observability-tls: build-deps
 	@echo "rendered $(RENDER_OBS_TLS)"
 
 kubeconform-observability-tls: template-observability-tls
-	kubeconform -strict -kubernetes-version 1.31.0 -ignore-missing-schemas $(RENDER_OBS_TLS)
+	$(KUBECONFORM) $(RENDER_OBS_TLS)
 
 check-observability-tls: template-observability-tls
 	./scripts/check-observability-tls.sh $(RENDER_OBS_TLS) $(TLS_TEST_RELEASE) $(TLS_TEST_NAMESPACE)
@@ -199,7 +204,7 @@ template-internal-observability: build-deps
 	@echo "rendered $(RENDER_INTERNAL_OBS)"
 
 kubeconform-internal-observability: template-internal-observability
-	kubeconform -strict -kubernetes-version 1.31.0 -ignore-missing-schemas $(RENDER_INTERNAL_OBS)
+	$(KUBECONFORM) $(RENDER_INTERNAL_OBS)
 
 check-internal-observability: kubeconform-internal-observability
 	./scripts/check-internal-observability-ingress.sh $(RENDER_INTERNAL_OBS) $(TLS_TEST_RELEASE) $(TLS_TEST_NAMESPACE)
@@ -212,7 +217,7 @@ template-private-control-plane: build-deps
 	@echo "rendered $(RENDER_PRIVATE_CP)"
 
 kubeconform-private-control-plane: template-private-control-plane
-	kubeconform -strict -kubernetes-version 1.31.0 -ignore-missing-schemas $(RENDER_PRIVATE_CP)
+	$(KUBECONFORM) $(RENDER_PRIVATE_CP)
 
 check-private-control-plane: kubeconform-private-control-plane
 	./scripts/check-private-control-plane-ingress.sh $(RENDER_PRIVATE_CP) $(TLS_TEST_RELEASE) $(TLS_TEST_NAMESPACE)

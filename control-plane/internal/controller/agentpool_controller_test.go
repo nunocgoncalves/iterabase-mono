@@ -135,6 +135,51 @@ func gwSelector(app string) v1alpha1.GatewayPodSelector {
 	return v1alpha1.GatewayPodSelector{PodSelector: metav1.LabelSelector{MatchLabels: map[string]string{"app.kubernetes.io/name": app}}}
 }
 
+func TestAgentPoolWorkerPodTrustBoundary(t *testing.T) {
+	poolA := validAgentPool("pool-a", "iterabase-system")
+	poolA.UID = types.UID("pool-a-uid")
+	poolB := validAgentPool("pool-b", "iterabase-system")
+	poolB.UID = types.UID("pool-b-uid")
+
+	podA0 := buildWorkerPodSpec(poolA, "pool-a-worker-0")
+	podA1 := buildWorkerPodSpec(poolA, "pool-a-worker-1")
+	podB0 := buildWorkerPodSpec(poolB, "pool-b-worker-0")
+
+	// No fsGroup grants pool or key access. The trusted supervisor is explicitly
+	// root and retains runtime-default capabilities (no drop list) plus the
+	// explicit SETUID/SETGID additions needed by the production setpriv launcher.
+	require.NotNil(t, podA0.SecurityContext)
+	assert.Nil(t, podA0.SecurityContext.FSGroup)
+	require.Len(t, podA0.Containers, 1)
+	security := podA0.Containers[0].SecurityContext
+	require.NotNil(t, security)
+	require.NotNil(t, security.RunAsUser)
+	require.NotNil(t, security.RunAsGroup)
+	assert.Zero(t, *security.RunAsUser)
+	assert.Zero(t, *security.RunAsGroup)
+	require.NotNil(t, security.Capabilities)
+	assert.Empty(t, security.Capabilities.Drop, "runtime-default capabilities must not be described or rendered as dropped")
+	assert.ElementsMatch(t, []corev1.Capability{"SETUID", "SETGID"}, security.Capabilities.Add)
+
+	claimFor := func(spec corev1.PodSpec) string {
+		t.Helper()
+		claims := []string{}
+		for _, volume := range spec.Volumes {
+			if volume.PersistentVolumeClaim != nil {
+				claims = append(claims, volume.PersistentVolumeClaim.ClaimName)
+			}
+		}
+		require.Len(t, claims, 1, "one AgentPool worker mounts exactly its pool PVC")
+		return claims[0]
+	}
+	claimA := claimFor(podA0)
+	assert.Equal(t, claimA, claimFor(podA1), "all trusted supervisors in one pool mount the same whole-pool claim")
+	claimB := claimFor(podB0)
+	assert.NotEqual(t, claimA, claimB, "separate AgentPools must receive separate PVC mounts")
+	assert.Equal(t, sandboxPVCName(poolA), claimA)
+	assert.Equal(t, sandboxPVCName(poolB), claimB)
+}
+
 func seedLocalPathClass(t *testing.T, c client.Client, ctx context.Context) {
 	t.Helper()
 	reclaim := corev1.PersistentVolumeReclaimDelete

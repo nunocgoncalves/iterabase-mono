@@ -293,11 +293,14 @@ bindings for work dispatched to the pool. No separate Tool/EgressRoute/
 IntegrationBinding CRD exists in v1.
 
 The operator reconciles, per pool: one fixed-class **ReadWriteOnce sandbox
-PVC** on `iterabase-agentpool-local-path`, with per-session `0700` subdirs under
-stable UID/GID isolation. RWO limits a volume to one node, not one pod, so two
-or more workers may mount the claim on the supported single K3s node. Requested
-size is planning metadata rather than a hard local-path quota. It also
-reconciles a **deny-by-default NetworkPolicy** (`denied` = kube-dns + the three gateways;
+PVC** on `iterabase-agentpool-local-path`. All trusted root supervisors in that
+pool may access the whole claim; separate pools receive separate claims/mounts.
+Model-directed children use stable distinct session UID=GID, cleared groups, no
+capabilities, `no_new_privs`, umask `0077`, and session-owned `0700`
+root/home/tmp/session/workspace beneath a root-owned `0711` PVC root. RWO limits
+a volume to one node, not one pod, so two or more workers may mount the claim on
+the supported single K3s node. Requested size is planning metadata, not a quota.
+It also reconciles a **deny-by-default NetworkPolicy** (`denied` = kube-dns + the three gateways;
 `internet` = per-pool opt-in for non-cluster egress — customer-system
 credentialed access still routes through the gateway), a **per-pod config
 ConfigMap** (rendered harness boot config), and the **warm-worker pods**.
@@ -308,10 +311,12 @@ ConfigMap** (rendered harness boot config), and the **warm-worker pods**.
 the CA key (cert-manager owns the CA in `platform-ca`, backed by a
 `ClusterIssuer`). Forge prerequisites: cert-manager + cert-manager-csi-driver +
 the CA `Certificate`/`ClusterIssuer`. The supervisor runs as root (UID 0, PSS
-`baseline`) to read the CSI driver's root-owned `0600` key and launch the
-per-turn child as the session UID via `setpriv` (CAP_SETUID/SETGID, which PSS
-`restricted` forbids — hence `baseline`); the child (dropped groups,
-`no_new_privs`) cannot read the key.
+`baseline`) to validate/read the CSI driver's non-symlink regular root-owned
+exact-`0600` key and launch the per-turn child as the session UID via `setpriv`.
+The rendered supervisor retains runtime-default capabilities and explicitly adds
+`SETUID`/`SETGID` (which PSS `restricted` forbids); no `fsGroup` grants access.
+The child uses equal stable UID/GID, cleared groups, no capabilities,
+`no_new_privs`, and umask `0077`, so opening the key returns `EACCES`.
 
 Readiness requires Forge's exact non-default class (`rancher.io/local-path`,
 `WaitForFirstConsumer`, `Delete`, non-expandable), one RWO Filesystem claim,

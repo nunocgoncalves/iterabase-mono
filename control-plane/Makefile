@@ -287,11 +287,12 @@ harness-image: ## Build the harness container image.
 harness-isolation-image: ## Build the Linux sandbox isolation fixture image.
 	$(CONTAINER_TOOL) build -t $(HARNESS_ISOLATION_IMG) -f harness/isolation/Dockerfile harness/
 
-harness-isolation-test: harness-isolation-image ## Require the Linux setpriv/UID/filesystem and fresh-process isolation gate; missing container/kernel prerequisites fail.
-	$(CONTAINER_TOOL) run --rm $(HARNESS_ISOLATION_IMG)
+harness-isolation-test: harness-isolation-image ## Freshly format real ext4+XFS filesystems and require the production setpriv/UID/TLS-key/fresh-process isolation gate; missing privileged Linux prerequisites fail.
+	$(CONTAINER_TOOL) run --rm --privileged -e HARNESS_ISOLATION_FILESYSTEM=ext4 $(HARNESS_ISOLATION_IMG)
+	$(CONTAINER_TOOL) run --rm --privileged -e HARNESS_ISOLATION_FILESYSTEM=xfs $(HARNESS_ISOLATION_IMG)
 
-harness-isolation-negative-test: harness-isolation-image ## Prove an intentional cross-session access break fails the real isolation gate.
-	@if $(CONTAINER_TOOL) run --rm -e HARNESS_ISOLATION_BREAK=cross-session-read $(HARNESS_ISOLATION_IMG); then \
+harness-isolation-negative-test: harness-isolation-image ## Prove an intentional cross-session access break fails the real ext4 isolation gate.
+	@if $(CONTAINER_TOOL) run --rm --privileged -e HARNESS_ISOLATION_FILESYSTEM=ext4 -e HARNESS_ISOLATION_BREAK=cross-session-read $(HARNESS_ISOLATION_IMG); then \
 		echo "intentional cross-session access break unexpectedly passed"; \
 		exit 1; \
 	else \
