@@ -343,6 +343,7 @@ func exerciseHumanGateWorkspaceReplacementStage(t *testing.T, state *digitalOcea
 	respondWorkspaceBlocker(t, baseURL, state.workspaceWorkKey, item.ID)
 	waitWorkspaceDatabaseValue(t, cluster, state, fmt.Sprintf(`SELECT count(*) FROM runtime.turn_assignments WHERE attempt_id='%s'`, item.CurrentAttemptID), "2", 4*time.Minute)
 	item = waitWorkspaceWorkState(t, baseURL, state.workspaceWorkKey, item.ID, "blocked", 2*time.Minute)
+	waitWorkspaceDatabaseValue(t, cluster, state, fmt.Sprintf(`SELECT count(*) FROM runtime.events WHERE run_id='%s' AND kind='tool_result' AND payload::text LIKE '%%recovery-resume=%s%%'`, item.CurrentAttemptID, workspaceMarkerDigest("recovery-marker")), "1", 2*time.Minute)
 	assertRecoveryWorkspaceState(t, cluster, sessionBefore, true)
 	sessionAfter := workspaceDatabaseQuery(t, cluster, state, fmt.Sprintf(`SELECT session_id FROM runtime.workflow_runs WHERE id='%s'`, item.CurrentAttemptID))
 	if sessionAfter != sessionBefore {
@@ -852,8 +853,7 @@ spec:
 }
 
 func workspaceHumanGateWorkflow() string {
-	initial := recoveryInitialCommand()
-	resume := recoveryResumeCommand()
+	recovery := recoveryCommand()
 	return fmt.Sprintf(`apiVersion: platform.iterabase.com/v1alpha1
 kind: Workflow
 metadata: {name: forge-workspace-recovery, namespace: iterabase-system}
@@ -908,7 +908,7 @@ spec:
       - {from: resume, outcome: completed, to: verified}
     terminalOutcomes: [{node: verified, outcome: continued}]
   presentation: {workflowTitle: Workspace replacement recovery, personaName: E2E Operator, locale: en}
-`, "E2E_MODE:isolation E2E_BASH:"+base64.StdEncoding.EncodeToString([]byte(initial)), "E2E_MODE:isolation E2E_BASH:"+base64.StdEncoding.EncodeToString([]byte(resume)))
+`, "E2E_MODE:isolation E2E_BASH:"+base64.StdEncoding.EncodeToString([]byte(recovery)), "E2E_MODE:isolation E2E_BASH:"+base64.StdEncoding.EncodeToString([]byte(recovery)))
 }
 
 func workspaceBarrierPrompt(marker string) string {
@@ -959,22 +959,21 @@ printf 'capacity-marker=%s'`, workspaceMarkerDigest("capacity-active"), workspac
 	return "E2E_MODE:capacity-active E2E_BASH:" + base64.StdEncoding.EncodeToString([]byte(command))
 }
 
-func recoveryInitialCommand() string {
+func recoveryCommand() string {
 	return fmt.Sprintf(`set -eu
-test ! -e consequence.count
-printf once > consequence.count
-printf recovery-marker > recovery-marker.txt
-test "$(sha256sum recovery-marker.txt | cut -d" " -f1)" = %s
-printf 'recovery-initial=%s'`, workspaceMarkerDigest("recovery-marker"), workspaceMarkerDigest("recovery-marker"))
-}
-
-func recoveryResumeCommand() string {
-	return fmt.Sprintf(`set -eu
-test "$(cat consequence.count)" = once
-test "$(cat recovery-marker.txt)" = recovery-marker
-test "$(sha256sum recovery-marker.txt | cut -d" " -f1)" = %s
-printf resumed > resume-proof.txt
-printf 'recovery-resume=%s'`, workspaceMarkerDigest("recovery-marker"), workspaceMarkerDigest("recovery-marker"))
+if test ! -e consequence.count; then
+  printf once > consequence.count
+  printf recovery-marker > recovery-marker.txt
+  test "$(sha256sum recovery-marker.txt | cut -d" " -f1)" = %[1]s
+  printf 'recovery-initial=%[1]s'
+else
+  test "$(cat consequence.count)" = once
+  test "$(cat recovery-marker.txt)" = recovery-marker
+  test "$(sha256sum recovery-marker.txt | cut -d" " -f1)" = %[1]s
+  test ! -e resume-proof.txt
+  printf resumed > resume-proof.txt
+  printf 'recovery-resume=%[1]s'
+fi`, workspaceMarkerDigest("recovery-marker"))
 }
 
 func workspaceMarkerDigest(value string) string {

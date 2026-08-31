@@ -49,7 +49,11 @@ func (p *SSHProvisioner) Clone(ctx context.Context, repo, ref, dest string, toke
 		return "", fmt.Errorf("overlay mkdir: %w", err)
 	}
 
-	cloneArgs := []string{"git", "clone", "--branch", ref, "--depth", "1", repo, dest}
+	// Force HTTP/1.1 for GitHub smart-HTTP clones. Dual-stack cloud hosts have
+	// repeatedly hit HTTP/2 "expected flush after ref listing" failures even
+	// while the public repository is reachable; HTTP/1.1 plus bounded retries
+	// preserves exact-source behavior without retrying authentication failures.
+	cloneArgs := []string{"git", "-c", "http.version=HTTP/1.1", "clone", "--branch", ref, "--depth", "1", repo, dest}
 	if len(token) > 0 && strings.HasPrefix(repo, "https://") {
 		credFile := dest + ".creds"
 		credLine := fmt.Sprintf("https://x-access-token:%s@%s\n", string(token), httpsHost(repo))

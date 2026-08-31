@@ -1830,6 +1830,7 @@ func TestOverlayer_Clone(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "deadbeef", commit)
 	assert.Contains(t, gotClone, "https://github.com/example/overlay.git")
+	assert.Contains(t, gotClone, "http.version=HTTP/1.1")
 	assert.Contains(t, gotClone, "/var/lib/forge/overlay/opo1")
 	assert.Contains(t, gotCheck, "values.yaml")
 	assert.Contains(t, gotCheck, "values.client.yaml")
