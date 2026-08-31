@@ -228,9 +228,9 @@ func exerciseConcurrentWorkspaceWorkStage(t *testing.T, state *digitalOceanCPUSt
 	if sessionA == "" || sessionB == "" || sessionA == sessionB {
 		t.Fatalf("concurrent work did not retain two isolated sessions: %q/%q", sessionA, sessionB)
 	}
-	toolResults := workspaceDatabaseQuery(t, cluster, state, fmt.Sprintf(`SELECT count(*) FROM runtime.events WHERE run_id IN ('%s','%s') AND kind='tool_result'`, first.CurrentAttemptID, second.CurrentAttemptID))
-	if toolResults != "2" {
-		t.Fatalf("concurrent workspace commands did not each produce one durable result: %s", toolResults)
+	bashCalls := workspaceDatabaseQuery(t, cluster, state, fmt.Sprintf(`SELECT count(*) FROM runtime.events WHERE run_id IN ('%s','%s') AND kind='tool_call_started' AND payload->>'tool_name'='bash'`, first.CurrentAttemptID, second.CurrentAttemptID))
+	if bashCalls != "2" {
+		t.Fatalf("concurrent workspace work did not execute exactly one isolated bash command per session: %s", bashCalls)
 	}
 	assertConcurrentWorkspaceMarkers(t, cluster, sessionA, sessionB)
 }

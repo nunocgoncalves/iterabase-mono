@@ -13,6 +13,7 @@ import (
 const (
 	candidateOverlayRepository = "https://github.com/nunocgoncalves/iterabase-overlay.git"
 	candidateOverlayRef        = "e2e"
+	workspaceBehaviorEnv       = "FORGE_E2E_WORKSPACE_BEHAVIOR"
 )
 
 type candidateOverlayPlan struct {
@@ -137,15 +138,21 @@ func candidateOverlayValues(t *testing.T) string {
 		values.WriteString("  toolRunner:\n    image:\n")
 		values.WriteString(toolRunner)
 	}
-	values.WriteString("inference-gateway:\n  workload:\n    enabled: true\n")
-	if inference != "" {
-		values.WriteString("  image:\n")
+	if os.Getenv(workspaceBehaviorEnv) == "true" {
+		values.WriteString("inference-gateway:\n  workload:\n    enabled: true\n")
+		if inference != "" {
+			values.WriteString("  image:\n")
+			values.WriteString(inference)
+		}
+	} else if inference != "" {
+		values.WriteString("inference-gateway:\n  image:\n")
 		values.WriteString(inference)
 	}
 	return values.String()
 }
 
 func TestCandidateOverlayValues(t *testing.T) {
+	t.Setenv(workspaceBehaviorEnv, "true")
 	digest := "sha256:" + strings.Repeat("a", 64)
 	t.Setenv("FORGE_E2E_RELEASE_CANDIDATE", "true")
 	t.Setenv("FORGE_E2E_CHART_REPOSITORY", "oci://ghcr.io/example/candidates/platform")
@@ -178,6 +185,20 @@ func TestCandidateOverlayValues(t *testing.T) {
 	}
 }
 
+func TestCandidateOverlayValuesKeepWorkloadListenerScopedToWorkspaceScenario(t *testing.T) {
+	t.Setenv(workspaceBehaviorEnv, "")
+	t.Setenv("INFERENCE_GATEWAY_IMAGE_REPO", "iterabase-e2e/inference-gateway")
+	t.Setenv("INFERENCE_GATEWAY_IMAGE_TAG", "exact")
+	t.Setenv(inferenceGatewayDigestEnv, "")
+	values := candidateOverlayValues(t)
+	if strings.Contains(values, "workload:\n    enabled: true") {
+		t.Fatalf("non-workspace Forge scenarios must not widen the published migration fixture:\n%s", values)
+	}
+	if !strings.Contains(values, "inference-gateway:\n  image:") {
+		t.Fatalf("non-workspace fixture lost the exact inference image override:\n%s", values)
+	}
+}
+
 func TestCandidateOverlayValuesContainNoStorageBackendSelection(t *testing.T) {
 	values := candidateOverlayValues(t)
 	for _, forbidden := range []string{"storage.rwx", "managed-longhorn", "external-rwx", "iterabase-rwx", "longhorn"} {
@@ -198,6 +219,7 @@ func TestCandidateOverlayValuesEnableDispatchForRealWorkspaceBehavior(t *testing
 		{name: "release-candidate", mode: "source", releaseCandidate: "true"},
 	} {
 		t.Run(fixture.name, func(t *testing.T) {
+			t.Setenv(workspaceBehaviorEnv, "true")
 			t.Setenv("ITERABASE_E2E_FIXTURE_MODE", fixture.mode)
 			t.Setenv("FORGE_E2E_RELEASE_CANDIDATE", fixture.releaseCandidate)
 			t.Setenv(controlPlaneDigestEnv, "")

@@ -143,6 +143,7 @@ func newDigitalOceanCPUState(t *testing.T) *digitalOceanCPUState {
 }
 
 func newDigitalOceanWorkspaceState(t *testing.T) *digitalOceanCPUState {
+	t.Setenv(workspaceBehaviorEnv, "true")
 	state := newDigitalOceanCPUStateForScenario(t, "digitalocean-workspace")
 	state.freshInstall = true
 	return state
