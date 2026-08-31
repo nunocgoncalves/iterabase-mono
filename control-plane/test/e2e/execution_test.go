@@ -268,12 +268,21 @@ func waitForAgentPoolReady(t *testing.T, state *deployedState, name string, time
 	var last string
 	err := poll.Until(state.ctx, timeout, time.Second, func(_ context.Context) (bool, string, error) {
 		out, err := state.client.Kubectl(state.ctx, 30*time.Second, "get", "agentpool/"+name, "-n", controlPlaneNamespace,
-			"-o", `jsonpath={.status.ready}|{.status.readyReplicas}|{.status.observedGeneration}|{.status.message}`)
+			"-o", `jsonpath={.spec.replicas}|{.status.ready}|{.status.readyReplicas}|{.status.observedGeneration}|{.status.message}`)
 		last = strings.TrimSpace(out)
 		if err != nil {
 			return false, last, err
 		}
-		return strings.HasPrefix(last, "true|"), last, nil
+		parts := strings.SplitN(last, "|", 5)
+		if len(parts) != 5 {
+			return false, last, nil
+		}
+		desired, desiredErr := strconv.Atoi(parts[0])
+		readyReplicas, readyErr := strconv.Atoi(parts[2])
+		if desiredErr != nil || readyErr != nil || desired < 1 {
+			return false, last, nil
+		}
+		return parts[1] == "true" && readyReplicas == desired, last, nil
 	})
 	if err == nil {
 		return
