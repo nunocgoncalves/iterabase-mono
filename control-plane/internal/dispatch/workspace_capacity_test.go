@@ -1,9 +1,11 @@
 package dispatch
 
 import (
+	"context"
 	"testing"
 
 	v1 "github.com/nunocgoncalves/iterabase-mono/control-plane/internal/harnessrpc/iterabase/harness/v1"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/runtime"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -70,6 +72,39 @@ func TestWorkspaceCapacityObservationAfterCreditConsumptionDoesNotRegrant(t *tes
 	assert.False(t, w.idle)
 	assert.False(t, w.creditAdvertised)
 	assert.Equal(t, "turn-in-flight", w.activeTurn)
+	assert.False(t, w.releaseAssignmentFailure("turn-in-flight", true), "an attempted delivery remains consumed")
+	assert.Empty(t, w.activeTurn)
+	assert.False(t, w.idle)
+	assert.False(t, w.creditAdvertised)
+}
+
+func TestPreDeliveryAssignmentFailureRestoresReadyIntent(t *testing.T) {
+	w := &workerConn{poolID: "pool-a", workerID: "worker-a"}
+	w.updateWorkspaceStatus(30, 100, 0.30, false, false)
+	granted, valid := w.grantCreditIfIdle()
+	require.True(t, valid)
+	require.True(t, granted)
+	require.True(t, w.tryConsumeCredit("turn-undelivered"))
+
+	// Reproduce the reported interleaving: a periodic open-capacity observation
+	// arrives after server-side reservation but before AssignTurn delivery. It
+	// must not mint a duplicate credit while the assignment is in flight.
+	assert.False(t, w.updateWorkspaceStatus(30, 100, 0.30, false, false))
+
+	// A missing model is a deterministic pre-send assignment failure. Both the
+	// graph and legacy paths use this deliveryAttempted boundary before deciding
+	// whether the same armed-worker Ready intent is safe to restore.
+	svc := &Service{cfg: Config{}}
+	deliveryAttempted, err := svc.assign(context.Background(), runtime.Turn{ID: "turn-undelivered"}, runtime.Run{ID: "run-a"}, "pool-a", w)
+	require.Error(t, err)
+	require.False(t, deliveryAttempted)
+
+	restored := w.releaseAssignmentFailure("turn-undelivered", deliveryAttempted)
+	assert.True(t, restored)
+	assert.Empty(t, w.activeTurn)
+	assert.True(t, w.idle)
+	assert.True(t, w.creditAdvertised)
+	assert.True(t, w.tryConsumeCredit("turn-retry"), "the same worker remains schedulable without another Ready")
 }
 
 func TestWorkspaceCapacityCrossingDoesNotAbortActiveTurn(t *testing.T) {
