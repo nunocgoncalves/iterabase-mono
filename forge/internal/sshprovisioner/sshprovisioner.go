@@ -539,6 +539,7 @@ const (
 	helmInstallScript      = "https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-4"
 	helmInstallerTempCmd   = "mktemp /tmp/forge-helm-installer.XXXXXX"
 	helmVerifyCommand      = "sudo helm version --short"
+	helmInstallerAttempts  = 3
 	k3sKubeconfigPath      = "/etc/rancher/k3s/k3s.yaml"
 	helmRegistryConfigPath = "/etc/forge/helm-registry.json"
 )
@@ -551,10 +552,14 @@ func helmCmd(args ...string) string {
 	return joinArgs(append(base, args...))
 }
 
+var helmInstallerRetryInterval = 2 * time.Second
+
 // ensureHelm installs Helm on the host when it is not usable through the same
 // privileged PATH used by all subsequent chart operations. The installer is
 // downloaded and validated before execution so curl, empty-input, and installer
 // failures cannot be hidden by a successful shell at the end of a pipeline.
+// Its own release download is retried only for bounded, recognized transport
+// failures; deterministic installer rejection still fails on the first attempt.
 func (p *SSHProvisioner) ensureHelm(ctx context.Context) error {
 	if _, err := p.run(ctx, helmVerifyCommand); err == nil {
 		return nil
@@ -572,22 +577,50 @@ func (p *SSHProvisioner) ensureHelm(ctx context.Context) error {
 		_, _ = p.run(ctx, "rm -f "+shellQuote(installerPath))
 	}()
 
-	if _, err := p.run(ctx, fmt.Sprintf("curl -fsSL -o %s %s", shellQuote(installerPath), shellQuote(helmInstallScript))); err != nil {
+	if _, err := p.run(ctx, fmt.Sprintf("curl -fsSL --retry 4 --retry-delay 2 --retry-all-errors --connect-timeout 10 -o %s %s", shellQuote(installerPath), shellQuote(helmInstallScript))); err != nil {
 		return fmt.Errorf("download helm installer: %w", err)
 	}
 	if _, err := p.run(ctx, "test -s "+shellQuote(installerPath)); err != nil {
 		return fmt.Errorf("download helm installer: downloaded installer is empty: %w", err)
 	}
-	if out, err := p.run(ctx, "sudo bash "+shellQuote(installerPath)); err != nil {
-		if out = strings.TrimSpace(out); out != "" {
-			return fmt.Errorf("execute helm installer: %w; stdout: %s", err, out)
+	installCommand := "sudo bash " + shellQuote(installerPath)
+	for attempt := 1; ; attempt++ {
+		out, installErr := p.run(ctx, installCommand)
+		if installErr == nil {
+			break
 		}
-		return fmt.Errorf("execute helm installer: %w", err)
+		// A lost response may hide a completed idempotent install. Verify before
+		// deciding whether the recognized transport failure needs another run.
+		if _, verifyErr := p.run(ctx, helmVerifyCommand); verifyErr == nil {
+			return nil
+		}
+		if attempt >= helmInstallerAttempts || !transientHelmInstallerFailure(out, installErr) {
+			out = strings.TrimSpace(out)
+			if out != "" {
+				return fmt.Errorf("execute helm installer: %w; stdout: %s", installErr, out)
+			}
+			return fmt.Errorf("execute helm installer: %w", installErr)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(helmInstallerRetryInterval):
+		}
 	}
 	if _, err := p.run(ctx, helmVerifyCommand); err != nil {
 		return fmt.Errorf("verify helm installation through privileged PATH: %w", err)
 	}
 	return nil
+}
+
+func transientHelmInstallerFailure(out string, err error) bool {
+	text := strings.ToLower(out + " " + err.Error())
+	for _, marker := range []string{"failed to install helm", "connection reset", "connection timed out", "temporary failure", "unexpected eof", "curl: ("} {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 const prometheusOperatorVersionAnnotation = "operator.prometheus.io/version"
