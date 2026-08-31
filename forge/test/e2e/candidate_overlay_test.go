@@ -137,8 +137,9 @@ func candidateOverlayValues(t *testing.T) string {
 		values.WriteString("  toolRunner:\n    image:\n")
 		values.WriteString(toolRunner)
 	}
+	values.WriteString("inference-gateway:\n  workload:\n    enabled: true\n")
 	if inference != "" {
-		values.WriteString("inference-gateway:\n  image:\n")
+		values.WriteString("  image:\n")
 		values.WriteString(inference)
 	}
 	return values.String()
@@ -167,6 +168,7 @@ func TestCandidateOverlayValues(t *testing.T) {
 		"dispatch:":             {},
 		"enabled: true":         {},
 		"forge-workspace-model": {},
+		"workload:":             {},
 		"repository: \"ghcr.io/example/control-plane\"": {},
 		"tag: \"candidate-run@" + digest + "\"":         {},
 	} {
