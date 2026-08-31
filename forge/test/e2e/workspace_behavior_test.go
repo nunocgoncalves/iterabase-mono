@@ -155,8 +155,8 @@ spec:
 ---
 %s
 `, repository, tag,
-		workspaceAgentWorkflow("forge-workspace-a", "e2e/forge-workspace-a", workspaceBarrierPrompt("session-a")),
-		workspaceAgentWorkflow("forge-workspace-b", "e2e/forge-workspace-b", workspaceBarrierPrompt("session-b")),
+		workspaceBarrierWorkflow("forge-workspace-a", "e2e/forge-workspace-a", workspaceBarrierPrompt("session-a")),
+		workspaceBarrierWorkflow("forge-workspace-b", "e2e/forge-workspace-b", workspaceBarrierPrompt("session-b")),
 		workspaceAgentWorkflow("forge-workspace-capacity", "e2e/forge-workspace-capacity", workspaceCapacityPrompt()),
 		workspaceHumanGateWorkflow())
 	applyWorkspaceManifest(t, cluster, "workspace-real-behavior.yaml", manifest)
@@ -216,8 +216,8 @@ func exerciseConcurrentWorkspaceWorkStage(t *testing.T, state *digitalOceanCPUSt
 	first := startWorkspaceWork(t, baseURL, state.workspaceWorkKey, "e2e/forge-workspace-a", "Concurrent workspace session A", "hor-538-workspace-a")
 	second := startWorkspaceWork(t, baseURL, state.workspaceWorkKey, "e2e/forge-workspace-b", "Concurrent workspace session B", "hor-538-workspace-b")
 	waitWorkspaceModelStats(t, modelURL, 2, -1, 2*time.Minute)
-	first = waitWorkspaceWorkState(t, baseURL, state.workspaceWorkKey, first.ID, "done", 4*time.Minute)
-	second = waitWorkspaceWorkState(t, baseURL, state.workspaceWorkKey, second.ID, "done", 4*time.Minute)
+	first = waitWorkspaceWorkState(t, baseURL, state.workspaceWorkKey, first.ID, "blocked", 4*time.Minute)
+	second = waitWorkspaceWorkState(t, baseURL, state.workspaceWorkKey, second.ID, "blocked", 4*time.Minute)
 
 	assignments := workspaceDatabaseQuery(t, cluster, state, fmt.Sprintf(`SELECT count(DISTINCT worker_id)::text || '|' || count(*)::text FROM runtime.turn_assignments WHERE attempt_id IN ('%s','%s')`, first.CurrentAttemptID, second.CurrentAttemptID))
 	if assignments != "2|2" {
@@ -233,6 +233,10 @@ func exerciseConcurrentWorkspaceWorkStage(t *testing.T, state *digitalOceanCPUSt
 		t.Fatalf("concurrent workspace work did not execute exactly one isolated bash command per session: %s", bashCalls)
 	}
 	assertConcurrentWorkspaceMarkers(t, cluster, sessionA, sessionB)
+	respondWorkspaceBlocker(t, baseURL, state.workspaceWorkKey, first.ID)
+	respondWorkspaceBlocker(t, baseURL, state.workspaceWorkKey, second.ID)
+	_ = waitWorkspaceWorkState(t, baseURL, state.workspaceWorkKey, first.ID, "done", 2*time.Minute)
+	_ = waitWorkspaceWorkState(t, baseURL, state.workspaceWorkKey, second.ID, "done", 2*time.Minute)
 }
 
 func exerciseActiveWorkspaceCapacityStage(t *testing.T, state *digitalOceanCPUState) {
@@ -309,6 +313,7 @@ func exerciseHumanGateWorkspaceReplacementStage(t *testing.T, state *digitalOcea
 	}
 	oldUID := strings.TrimSpace(cluster.Kubectl(t, "get", "pod/"+assignedWorker, "-n", workspaceNamespace, "-o", "jsonpath={.metadata.uid}"))
 	pvcBefore := strings.TrimSpace(cluster.Kubectl(t, "get", "pvc/forge-storage-pool-sandbox", "-n", workspaceNamespace, "-o", "jsonpath={.metadata.uid}"))
+	assertRecoveryWorkspaceState(t, cluster, sessionBefore, false)
 	cluster.Kubectl(t, "delete", "pod/"+assignedWorker, "-n", workspaceNamespace, "--wait=true", "--timeout=3m")
 	waitWorkspaceReplacementPod(t, cluster, assignedWorker, oldUID, 4*time.Minute)
 	pvcAfter := strings.TrimSpace(cluster.Kubectl(t, "get", "pvc/forge-storage-pool-sandbox", "-n", workspaceNamespace, "-o", "jsonpath={.metadata.uid}"))
@@ -316,17 +321,10 @@ func exerciseHumanGateWorkspaceReplacementStage(t *testing.T, state *digitalOcea
 		t.Fatalf("human-gate worker replacement changed the RWO claim: before=%s after=%s", pvcBefore, pvcAfter)
 	}
 
-	status, body := workspaceAPIRequest(t, baseURL, state.workspaceWorkKey, http.MethodGet, "/v1/work-items/"+item.ID+"/blocker", nil, nil)
-	requireWorkspaceStatus(t, status, http.StatusOK)
-	var blocker workspaceBlocker
-	if err := json.Unmarshal(body, &blocker); err != nil || blocker.ID == "" {
-		t.Fatalf("decode human-gate blocker: %v", err)
-	}
-	status, _ = workspaceAPIRequest(t, baseURL, state.workspaceWorkKey, http.MethodPost, "/v1/work-blockers/"+blocker.ID+"/responses", map[string]any{
-		"outcome": "continued", "response": map[string]any{},
-	}, nil)
-	requireWorkspaceStatus(t, status, http.StatusOK)
-	item = waitWorkspaceWorkState(t, baseURL, state.workspaceWorkKey, item.ID, "done", 4*time.Minute)
+	respondWorkspaceBlocker(t, baseURL, state.workspaceWorkKey, item.ID)
+	waitWorkspaceDatabaseValue(t, cluster, state, fmt.Sprintf(`SELECT count(*) FROM runtime.turn_assignments WHERE attempt_id='%s'`, item.CurrentAttemptID), "2", 4*time.Minute)
+	item = waitWorkspaceWorkState(t, baseURL, state.workspaceWorkKey, item.ID, "blocked", 2*time.Minute)
+	assertRecoveryWorkspaceState(t, cluster, sessionBefore, true)
 	sessionAfter := workspaceDatabaseQuery(t, cluster, state, fmt.Sprintf(`SELECT session_id FROM runtime.workflow_runs WHERE id='%s'`, item.CurrentAttemptID))
 	if sessionAfter != sessionBefore {
 		t.Fatalf("human-gate resume changed durable session identity: before=%s after=%s", sessionBefore, sessionAfter)
@@ -339,12 +337,8 @@ func exerciseHumanGateWorkspaceReplacementStage(t *testing.T, state *digitalOcea
 	if bashCalls != "2" {
 		t.Fatalf("worker replacement duplicated or omitted the intended workspace consequence: bash calls=%s", bashCalls)
 	}
-	for _, evidence := range []string{"recovery-initial=" + workspaceMarkerDigest("recovery-marker"), "recovery-resume=" + workspaceMarkerDigest("recovery-marker")} {
-		count := workspaceDatabaseQuery(t, cluster, state, fmt.Sprintf(`SELECT count(*) FROM runtime.events WHERE run_id='%s' AND kind='tool_result' AND payload::text LIKE '%%%s%%'`, item.CurrentAttemptID, evidence))
-		if count != "1" {
-			t.Fatalf("human-gate durable marker evidence %q count=%s, want 1", evidence, count)
-		}
-	}
+	respondWorkspaceBlocker(t, baseURL, state.workspaceWorkKey, item.ID)
+	_ = waitWorkspaceWorkState(t, baseURL, state.workspaceWorkKey, item.ID, "done", 2*time.Minute)
 }
 
 const (
@@ -451,6 +445,20 @@ func startWorkspaceWork(t *testing.T, baseURL, key, workflowKey, title, idempote
 		t.Fatalf("idempotent manual_api replay diverged: first=%s/%s replay=%s/%s err=%v", item.ID, item.CurrentAttemptID, replay.ID, replay.CurrentAttemptID, err)
 	}
 	return item
+}
+
+func respondWorkspaceBlocker(t *testing.T, baseURL, key, itemID string) {
+	t.Helper()
+	status, body := workspaceAPIRequest(t, baseURL, key, http.MethodGet, "/v1/work-items/"+itemID+"/blocker", nil, nil)
+	requireWorkspaceStatus(t, status, http.StatusOK)
+	var blocker workspaceBlocker
+	if err := json.Unmarshal(body, &blocker); err != nil || blocker.ID == "" {
+		t.Fatalf("decode human-gate blocker: %v", err)
+	}
+	status, _ = workspaceAPIRequest(t, baseURL, key, http.MethodPost, "/v1/work-blockers/"+blocker.ID+"/responses", map[string]any{
+		"outcome": "continued", "response": map[string]any{},
+	}, nil)
+	requireWorkspaceStatus(t, status, http.StatusOK)
 }
 
 func readWorkspaceWork(t *testing.T, baseURL, key, id string) workspaceWorkItem {
@@ -615,11 +623,76 @@ spec:
 		sessionA, sessionA, workspaceMarkerDigest("session-a"), sessionA,
 		sessionB, sessionB, workspaceMarkerDigest("session-b"), sessionB)
 	applyWorkspaceManifest(t, cluster, "workspace-marker-proof.yaml", manifest)
-	cluster.Kubectl(t, "wait", "--for=condition=complete", "job/forge-workspace-marker-proof", "-n", workspaceNamespace, "--timeout=3m")
+	waitWorkspaceProofJob(t, cluster, "forge-workspace-marker-proof", 3*time.Minute)
 	logs := cluster.Kubectl(t, "logs", "job/forge-workspace-marker-proof", "-n", workspaceNamespace)
 	if !strings.Contains(logs, "marker-proof=pass") {
 		t.Fatalf("root observer did not verify isolated checksummed workspace markers: %s", logs)
 	}
+}
+
+func assertRecoveryWorkspaceState(t *testing.T, cluster *remotecluster.Cluster, session string, resumed bool) {
+	t.Helper()
+	repository, tag := os.Getenv("HARNESS_IMAGE_REPO"), os.Getenv("HARNESS_IMAGE_TAG")
+	if repository == "" || tag == "" {
+		t.Fatal("workspace recovery observer requires the exact harness image")
+	}
+	phase := "initial"
+	resumeCheck := "test ! -e /sessions/" + session + "/workspace/resume-proof.txt"
+	if resumed {
+		phase = "resumed"
+		resumeCheck = "test \"$(cat /sessions/" + session + "/workspace/resume-proof.txt)\" = resumed"
+	}
+	name := "forge-workspace-recovery-proof-" + phase
+	manifest := fmt.Sprintf(`apiVersion: batch/v1
+kind: Job
+metadata: {name: %s, namespace: iterabase-system}
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: proof
+          image: %s:%s
+          imagePullPolicy: Never
+          command: [/bin/sh, -ceu]
+          args:
+            - |
+              test "$(cat /sessions/%s/workspace/consequence.count)" = once
+              test "$(cat /sessions/%s/workspace/recovery-marker.txt)" = recovery-marker
+              test "$(sha256sum /sessions/%s/workspace/recovery-marker.txt | cut -d" " -f1)" = %s
+              %s
+              printf recovery-proof=%s
+          volumeMounts: [{name: sessions, mountPath: /sessions}]
+      volumes:
+        - name: sessions
+          persistentVolumeClaim: {claimName: forge-storage-pool-sandbox}
+`, name, repository, tag, session, session, session, workspaceMarkerDigest("recovery-marker"), resumeCheck, phase)
+	applyWorkspaceManifest(t, cluster, name+".yaml", manifest)
+	waitWorkspaceProofJob(t, cluster, name, 3*time.Minute)
+	logs := cluster.Kubectl(t, "logs", "job/"+name, "-n", workspaceNamespace)
+	if !strings.Contains(logs, "recovery-proof="+phase) {
+		t.Fatalf("workspace recovery observer %s returned no durable proof: %s", phase, logs)
+	}
+}
+
+func waitWorkspaceProofJob(t *testing.T, cluster *remotecluster.Cluster, name string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	last := ""
+	for time.Now().Before(deadline) {
+		last = strings.TrimSpace(cluster.Kubectl(t, "get", "job/"+name, "-n", workspaceNamespace, "-o", `jsonpath={.status.succeeded}|{.status.failed}`))
+		parts := strings.Split(last, "|")
+		if len(parts) == 2 && parts[0] == "1" {
+			return
+		}
+		if len(parts) == 2 && parts[1] != "" && parts[1] != "0" {
+			logs := cluster.Kubectl(t, "logs", "job/"+name, "-n", workspaceNamespace)
+			t.Fatalf("workspace proof Job %s failed (status=%q): %s", name, last, logs)
+		}
+		time.Sleep(time.Second)
+	}
+	t.Fatalf("workspace proof Job %s did not complete in %s (last=%q)", name, timeout, last)
 }
 
 func replaceIdleWorkspaceWorkerAtGate(t *testing.T, cluster *remotecluster.Cluster, state *digitalOceanCPUState) {
@@ -696,6 +769,45 @@ spec:
 `, name, key, prompt)
 }
 
+func workspaceBarrierWorkflow(name, key, prompt string) string {
+	return fmt.Sprintf(`apiVersion: platform.iterabase.com/v1alpha1
+kind: Workflow
+metadata: {name: %s, namespace: iterabase-system}
+spec:
+  key: %s
+  version: "1"
+  poolRef: forge-storage-pool
+  defaultModelRef: forge-workspace-model
+  source: {type: manual_api}
+  graph:
+    entryNode: execute
+    maxTransitions: 4
+    nodes:
+      - key: execute
+        label: {en: Execute workspace proof, pt: Executar prova do workspace}
+        kind: agent_task
+        prompt: %q
+        workspaceTools: true
+        outcomes: [completed]
+      - key: hold
+        label: {en: Preserve marker for observation, pt: Preservar marcador para observação}
+        kind: human_gate
+        outcomes: [continued]
+        humanGate:
+          type: approval
+          title: {en: Finish workspace proof, pt: Terminar prova do workspace}
+          description: {en: Release the observed isolated session., pt: Libertar a sessão isolada observada.}
+          responseSchema: {type: object, additionalProperties: false, properties: {}}
+          presentation: {outcomes: [{en: Continued, pt: Continuado}], fields: []}
+        resultPresentation:
+          outcomes: [{outcome: continued, summary: {en: Workspace proof completed, pt: Prova do workspace concluída}}]
+          fields: []
+    edges: [{from: execute, outcome: completed, to: hold}]
+    terminalOutcomes: [{node: hold, outcome: continued}]
+  presentation: {workflowTitle: Workspace behavior proof, personaName: E2E Operator, locale: en}
+`, name, key, prompt)
+}
+
 func workspaceHumanGateWorkflow() string {
 	initial := recoveryInitialCommand()
 	resume := recoveryResumeCommand()
@@ -734,14 +846,24 @@ spec:
         prompt: %q
         workspaceTools: true
         outcomes: [completed]
-        outputSchema: {type: object, additionalProperties: false, required: [result], properties: {result: {type: string}}}
+      - key: verified
+        label: {en: Preserve resumed proof, pt: Preservar prova retomada}
+        kind: human_gate
+        outcomes: [continued]
+        humanGate:
+          type: approval
+          title: {en: Finish recovery proof, pt: Terminar prova de recuperação}
+          description: {en: Release the externally verified resumed session., pt: Libertar a sessão retomada verificada externamente.}
+          responseSchema: {type: object, additionalProperties: false, properties: {}}
+          presentation: {outcomes: [{en: Continued, pt: Continuado}], fields: []}
         resultPresentation:
-          outcomes: [{outcome: completed, summary: {en: Recovery completed, pt: Recuperação concluída}}]
-          fields: [{path: [result], label: {en: Result, pt: Resultado}}]
+          outcomes: [{outcome: continued, summary: {en: Recovery completed, pt: Recuperação concluída}}]
+          fields: []
     edges:
       - {from: execute, outcome: completed, to: hold}
       - {from: hold, outcome: continued, to: resume}
-    terminalOutcomes: [{node: resume, outcome: completed}]
+      - {from: resume, outcome: completed, to: verified}
+    terminalOutcomes: [{node: verified, outcome: continued}]
   presentation: {workflowTitle: Workspace replacement recovery, personaName: E2E Operator, locale: en}
 `, "E2E_MODE:isolation E2E_BASH:"+base64.StdEncoding.EncodeToString([]byte(initial)), "E2E_MODE:isolation E2E_BASH:"+base64.StdEncoding.EncodeToString([]byte(resume)))
 }
@@ -779,6 +901,7 @@ func recoveryResumeCommand() string {
 test "$(cat consequence.count)" = once
 test "$(cat recovery-marker.txt)" = recovery-marker
 test "$(sha256sum recovery-marker.txt | cut -d" " -f1)" = %s
+printf resumed > resume-proof.txt
 printf 'recovery-resume=%s'`, workspaceMarkerDigest("recovery-marker"), workspaceMarkerDigest("recovery-marker"))
 }
 
