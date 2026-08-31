@@ -18,11 +18,13 @@ import (
 // on a cloud VM). The prod recipe's deployability is HOR-299's job; this test is
 // forge's mechanics. See iterabase-overlay `e2e` branch.
 //
-// FORGE_OVERLAY_TOKEN is intentionally unset (public repo, CI non-interactive);
-// the token-prompt path is covered by unit + fake-SSH tests.
+// No explicit FORGE_OVERLAY_TOKEN is accepted. The E2E process maps the
+// workflow's ephemeral GITHUB_TOKEN only into each Forge subprocess so repeated
+// exact public-overlay clones avoid anonymous cloud-edge failures; tokenless and
+// prompt behavior remains covered by unit + fake-SSH tests.
 func runOverlayStage(t *testing.T, state *digitalOceanCPUState) {
 	if _, ok := os.LookupEnv("FORGE_OVERLAY_TOKEN"); ok {
-		t.Fatal("FORGE_OVERLAY_TOKEN must be unset for this test (public repo, tokenless)")
+		t.Fatal("FORGE_OVERLAY_TOKEN must be unset; E2E supplies only the ephemeral workflow token")
 	}
 	prepareCandidateChart(t, state.ip, state.privKeyPath)
 	loginCandidateRegistry(t, state.ip, state.privKeyPath)

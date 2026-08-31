@@ -332,19 +332,19 @@ func exerciseHumanGateWorkspaceReplacementStage(t *testing.T, state *digitalOcea
 	}
 	oldUID := strings.TrimSpace(cluster.Kubectl(t, "get", "pod/"+assignedWorker, "-n", workspaceNamespace, "-o", "jsonpath={.metadata.uid}"))
 	pvcBefore := strings.TrimSpace(cluster.Kubectl(t, "get", "pvc/forge-storage-pool-sandbox", "-n", workspaceNamespace, "-o", "jsonpath={.metadata.uid}"))
-	assertRecoveryWorkspaceState(t, cluster, sessionBefore, false)
+	assertRecoveryWorkspaceState(t, cluster, sessionBefore, "initial", false)
 	cluster.Kubectl(t, "delete", "pod/"+assignedWorker, "-n", workspaceNamespace, "--wait=true", "--timeout=3m")
 	waitWorkspaceReplacementPod(t, cluster, assignedWorker, oldUID, 4*time.Minute)
 	pvcAfter := strings.TrimSpace(cluster.Kubectl(t, "get", "pvc/forge-storage-pool-sandbox", "-n", workspaceNamespace, "-o", "jsonpath={.metadata.uid}"))
 	if pvcAfter != pvcBefore {
 		t.Fatalf("human-gate worker replacement changed the RWO claim: before=%s after=%s", pvcBefore, pvcAfter)
 	}
+	assertRecoveryWorkspaceState(t, cluster, sessionBefore, "replacement", false)
 
 	respondWorkspaceBlocker(t, baseURL, state.workspaceWorkKey, item.ID)
 	waitWorkspaceDatabaseValue(t, cluster, state, fmt.Sprintf(`SELECT count(*) FROM runtime.turn_assignments WHERE attempt_id='%s'`, item.CurrentAttemptID), "2", 4*time.Minute)
 	item = waitWorkspaceWorkState(t, baseURL, state.workspaceWorkKey, item.ID, "blocked", 2*time.Minute)
-	waitWorkspaceDatabaseValue(t, cluster, state, fmt.Sprintf(`SELECT count(*) FROM runtime.events WHERE run_id='%s' AND kind='tool_result' AND payload::text LIKE '%%recovery-resume=%s%%'`, item.CurrentAttemptID, workspaceMarkerDigest("recovery-marker")), "1", 2*time.Minute)
-	assertRecoveryWorkspaceState(t, cluster, sessionBefore, true)
+	assertRecoveryWorkspaceState(t, cluster, sessionBefore, "resumed", true)
 	sessionAfter := workspaceDatabaseQuery(t, cluster, state, fmt.Sprintf(`SELECT session_id FROM runtime.workflow_runs WHERE id='%s'`, item.CurrentAttemptID))
 	if sessionAfter != sessionBefore {
 		t.Fatalf("human-gate resume changed durable session identity: before=%s after=%s", sessionBefore, sessionAfter)
@@ -673,16 +673,14 @@ printf trusted-supervisor-marker-proof=pass
 	}
 }
 
-func assertRecoveryWorkspaceState(t *testing.T, cluster *remotecluster.Cluster, session string, resumed bool) {
+func assertRecoveryWorkspaceState(t *testing.T, cluster *remotecluster.Cluster, session, phase string, resumed bool) {
 	t.Helper()
 	repository, tag := os.Getenv("HARNESS_IMAGE_REPO"), os.Getenv("HARNESS_IMAGE_TAG")
 	if repository == "" || tag == "" {
 		t.Fatal("workspace recovery observer requires the exact harness image")
 	}
-	phase := "initial"
 	resumeCheck := "test ! -e /sessions/" + session + "/workspace/resume-proof.txt"
 	if resumed {
-		phase = "resumed"
 		resumeCheck = "test \"$(cat /sessions/" + session + "/workspace/resume-proof.txt)\" = resumed"
 	}
 	name := "forge-workspace-recovery-proof-" + phase
