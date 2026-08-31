@@ -594,7 +594,9 @@ spec:
                   URI SAN spiffe://<trustDomain>/pools/<pool-uid>/workers/<pod-name>; the
                   operator never holds the CA key (cert-manager owns the CA). Servers
                   (gateway/inference/future Work server) trust caSecretRef's cert as
-                  ClientCAs. The child UID cannot read the key (fsGroup + dropped groups).
+                  ClientCAs. No fsGroup grants access: the trusted root supervisor validates
+                  and reads the exact root-owned 0600 key, while the disposable child has
+                  cleared groups/capabilities and receives EACCES.
                 properties:
                   caSecretRef:
                     description: |-
@@ -612,8 +614,10 @@ spec:
                   certMountPath:
                     description: |-
                       certMountPath is where the CSI driver materialises tls.crt/tls.key/ca.crt
-                      in the supervisor. Defaults to "/etc/harness/tls". Mounted readOnly; the
-                      key is child-inaccessible via fsGroup + dropped supplementary groups.
+                      in the supervisor. Defaults to "/etc/harness/tls". Mounted readOnly; no
+                      fsGroup is set. Supervisor startup/readiness requires tls.key to remain a
+                      root-owned non-symlink regular exact-0600 file; the child has cleared
+                      supplementary groups/capabilities and receives EACCES opening it.
                     type: string
                   trustDomain:
                     description: trustDomain is the SPIFFE trust domain. Defaults
@@ -852,10 +856,11 @@ spec:
                 type: object
               sandbox:
                 description: |-
-                  sandbox configures the pool's shared node-local RWO PVC. Multiple workers
-                  mount it concurrently on the one supported K3s node. Each session gets a
-                  0700 subdir owned by its stable UID/GID; the requested size is planning
-                  metadata because local-path provides no hard per-PVC quota.
+                  sandbox configures the pool's shared node-local RWO PVC. Every trusted root
+                  supervisor in this pool may access the whole claim; separate AgentPools
+                  receive separate claims/mounts. Each disposable child gets a stable distinct
+                  UID=GID and session-owned 0700 tree beneath the root-owned 0711 PVC root.
+                  The requested size is planning metadata because local-path has no hard quota.
                 properties:
                   accessMode:
                     description: |-

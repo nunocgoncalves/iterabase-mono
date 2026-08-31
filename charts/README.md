@@ -183,9 +183,15 @@ K3s's bundled `rancher.io/local-path` provisioner with two isolated class maps:
 
 Every AgentPool declares one `ReadWriteOnce` claim on the fixed class. RWO limits
 the volume to the one supported node, not one pod, so multiple same-pool workers
-may mount it concurrently while per-session UID/GID and directory isolation
-remain enforced. The controller rejects another class, provisioner, reclaim
-policy, expansion mode, access mode, or bound PV path outside the dedicated
+may mount it concurrently. Every trusted root supervisor in a pool may access
+that whole claim; separate pools receive separate claims/mounts. Disposable
+children use stable distinct UID=GID, cleared groups/capabilities,
+`no_new_privs`, umask `0077`, and session-owned `0700` trees under the root-owned
+`0711` PVC root. No `fsGroup` grants this access. Supervisor startup/readiness
+also requires its pod-scoped CSI `tls.key` to be a root-owned non-symlink regular
+exact-`0600` file; the supervisor uses it for mTLS while children get `EACCES`.
+The controller rejects another class, provisioner, reclaim policy, expansion
+mode, access mode, or bound PV path outside the dedicated
 mount. PostgreSQL, MinIO, and ordinary default-class claims cannot land there.
 
 The class is `WaitForFirstConsumer`, `Delete`, and non-expandable. Requested PVC

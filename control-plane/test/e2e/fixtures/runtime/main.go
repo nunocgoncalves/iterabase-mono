@@ -37,6 +37,10 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 	mux.HandleFunc("/stats", stats)
+	mux.HandleFunc("/release/workspace", func(w http.ResponseWriter, _ *http.Request) {
+		barrierOnce.Do(func() { close(workspaceBarrier) })
+		w.WriteHeader(http.StatusNoContent)
+	})
 	mux.HandleFunc("/release/capacity", func(w http.ResponseWriter, _ *http.Request) {
 		capacityOnce.Do(func() { close(capacityRelease) })
 		w.WriteHeader(http.StatusNoContent)
@@ -109,16 +113,14 @@ func waitForFixtureBoundary(w http.ResponseWriter, r *http.Request, transcript s
 		return true
 	}
 	if strings.Contains(currentTurn, "E2E_MODE:workspace-barrier") {
-		if barrierArrivals.Add(1) >= 2 {
-			barrierOnce.Do(func() { close(workspaceBarrier) })
-		}
+		barrierArrivals.Add(1)
 		select {
 		case <-workspaceBarrier:
 		case <-r.Context().Done():
 			cancelled.Add(1)
 			return false
-		case <-time.After(30 * time.Second):
-			http.Error(w, "workspace concurrency barrier timeout", http.StatusGatewayTimeout)
+		case <-time.After(2 * time.Minute):
+			http.Error(w, "workspace concurrency barrier release timeout", http.StatusGatewayTimeout)
 			return false
 		}
 	}

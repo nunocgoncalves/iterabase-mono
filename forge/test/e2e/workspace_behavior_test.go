@@ -216,9 +216,13 @@ func exerciseConcurrentWorkspaceWorkStage(t *testing.T, state *digitalOceanCPUSt
 	first := startWorkspaceWork(t, baseURL, state.workspaceWorkKey, "e2e/forge-workspace-a", "Concurrent workspace session A", "hor-538-workspace-a")
 	second := startWorkspaceWork(t, baseURL, state.workspaceWorkKey, "e2e/forge-workspace-b", "Concurrent workspace session B", "hor-538-workspace-b")
 	waitWorkspaceModelStats(t, modelURL, 2, -1, 2*time.Minute)
-	first = waitWorkspaceWorkState(t, baseURL, state.workspaceWorkKey, first.ID, "blocked", 4*time.Minute)
-	second = waitWorkspaceWorkState(t, baseURL, state.workspaceWorkKey, second.ID, "blocked", 4*time.Minute)
 
+	// Both real model requests are now simultaneously held. Resolve their actual
+	// durable sessions/workers, then let one trusted root supervisor create a
+	// known sibling target for each child on the pool-wide PVC. This is fixture
+	// setup, not permission repair: the production child itself must attempt the
+	// other real session path and discriminate EACCES before the model is released.
+	waitWorkspaceDatabaseValue(t, cluster, state, fmt.Sprintf(`SELECT count(*) FROM runtime.turn_assignments WHERE attempt_id IN ('%s','%s') AND state='active'`, first.CurrentAttemptID, second.CurrentAttemptID), "2", time.Minute)
 	assignments := workspaceDatabaseQuery(t, cluster, state, fmt.Sprintf(`SELECT count(DISTINCT worker_id)::text || '|' || count(*)::text FROM runtime.turn_assignments WHERE attempt_id IN ('%s','%s')`, first.CurrentAttemptID, second.CurrentAttemptID))
 	if assignments != "2|2" {
 		t.Fatalf("real-machine synchronization barrier did not consume two simultaneous worker credits: %q", assignments)
@@ -228,11 +232,26 @@ func exerciseConcurrentWorkspaceWorkStage(t *testing.T, state *digitalOceanCPUSt
 	if sessionA == "" || sessionB == "" || sessionA == sessionB {
 		t.Fatalf("concurrent work did not retain two isolated sessions: %q/%q", sessionA, sessionB)
 	}
+	allocated := workspaceDatabaseQuery(t, cluster, state, fmt.Sprintf(`SELECT count(*)::text || '|' || count(DISTINCT uid)::text FROM runtime.session_uid_allocations WHERE session_id IN ('%s','%s') AND state='in_use'`, sessionA, sessionB))
+	if allocated != "2|2" {
+		t.Fatalf("concurrent sessions did not retain two stable distinct UID=GID allocations: %q", allocated)
+	}
+	workerA := workspaceDatabaseQuery(t, cluster, state, fmt.Sprintf(`SELECT worker_id FROM runtime.turn_assignments WHERE attempt_id='%s' AND state='active'`, first.CurrentAttemptID))
+	configureConcurrentSiblingTargets(t, cluster, workerA, sessionA, sessionB)
+	status, _ := workspaceAPIRequest(t, modelURL, "", http.MethodPost, "/release/workspace", nil, nil)
+	requireWorkspaceStatus(t, status, http.StatusNoContent)
+	first = waitWorkspaceWorkState(t, baseURL, state.workspaceWorkKey, first.ID, "blocked", 4*time.Minute)
+	second = waitWorkspaceWorkState(t, baseURL, state.workspaceWorkKey, second.ID, "blocked", 4*time.Minute)
+
 	bashCalls := workspaceDatabaseQuery(t, cluster, state, fmt.Sprintf(`SELECT count(*) FROM runtime.events WHERE run_id IN ('%s','%s') AND kind='tool_call_started' AND payload->>'tool_name'='bash'`, first.CurrentAttemptID, second.CurrentAttemptID))
 	if bashCalls != "2" {
 		t.Fatalf("concurrent workspace work did not execute exactly one isolated bash command per session: %s", bashCalls)
 	}
-	assertConcurrentWorkspaceMarkers(t, cluster, sessionA, sessionB)
+	childProofs := workspaceDatabaseQuery(t, cluster, state, fmt.Sprintf(`SELECT count(*) FROM runtime.events WHERE run_id IN ('%s','%s') AND kind='tool_result' AND payload::text LIKE '%%child-isolation=pass%%' AND payload::text LIKE '%%sibling-eacces=pass%%' AND payload::text LIKE '%%tls-key-eacces=pass%%'`, first.CurrentAttemptID, second.CurrentAttemptID))
+	if childProofs != "2" {
+		t.Fatalf("real children did not return two direct sibling/tls.key EACCES proofs: %s", childProofs)
+	}
+	assertConcurrentWorkspaceMarkers(t, cluster, workerA, sessionA, sessionB)
 	respondWorkspaceBlocker(t, baseURL, state.workspaceWorkKey, first.ID)
 	respondWorkspaceBlocker(t, baseURL, state.workspaceWorkKey, second.ID)
 	_ = waitWorkspaceWorkState(t, baseURL, state.workspaceWorkKey, first.ID, "done", 2*time.Minute)
@@ -587,46 +606,62 @@ printf '%%s|%%s|%%s\n' "$total" "$ok" "$condition"`, want)
 	t.Fatalf("workspace gate did not reach gated=%t condition=%s (last=%q)", gated, reason, last)
 }
 
-func assertConcurrentWorkspaceMarkers(t *testing.T, cluster *remotecluster.Cluster, sessionA, sessionB string) {
+func configureConcurrentSiblingTargets(t *testing.T, cluster *remotecluster.Cluster, trustedSupervisor, sessionA, sessionB string) {
 	t.Helper()
-	repository, tag := os.Getenv("HARNESS_IMAGE_REPO"), os.Getenv("HARNESS_IMAGE_TAG")
-	if repository == "" || tag == "" {
-		t.Fatal("checksummed workspace marker proof requires the exact harness image")
+	if trustedSupervisor == "" {
+		t.Fatal("concurrent workspace proof has no trusted supervisor")
 	}
-	manifest := fmt.Sprintf(`apiVersion: batch/v1
-kind: Job
-metadata: {name: forge-workspace-marker-proof, namespace: iterabase-system}
-spec:
-  backoffLimit: 0
-  template:
-    spec:
-      restartPolicy: Never
-      containers:
-        - name: proof
-          image: %s:%s
-          imagePullPolicy: Never
-          command: [/bin/sh, -ceu]
-          args:
-            - |
-              test "$(cat /sessions/%s/workspace/marker.txt)" = session-a
-              test "$(sha256sum /sessions/%s/workspace/marker.txt | cut -d" " -f1)" = %s
-              test "$(cat /sessions/%s/workspace/isolation-proof.txt)" = sibling-denied
-              test "$(cat /sessions/%s/workspace/marker.txt)" = session-b
-              test "$(sha256sum /sessions/%s/workspace/marker.txt | cut -d" " -f1)" = %s
-              test "$(cat /sessions/%s/workspace/isolation-proof.txt)" = sibling-denied
-              printf marker-proof=pass
-          volumeMounts: [{name: sessions, mountPath: /sessions}]
-      volumes:
-        - name: sessions
-          persistentVolumeClaim: {claimName: forge-storage-pool-sandbox}
-`, repository, tag,
-		sessionA, sessionA, workspaceMarkerDigest("session-a"), sessionA,
-		sessionB, sessionB, workspaceMarkerDigest("session-b"), sessionB)
-	applyWorkspaceManifest(t, cluster, "workspace-marker-proof.yaml", manifest)
-	waitWorkspaceProofJob(t, cluster, "forge-workspace-marker-proof", 3*time.Minute)
-	logs := cluster.Kubectl(t, "logs", "job/forge-workspace-marker-proof", "-n", workspaceNamespace)
-	if !strings.Contains(logs, "marker-proof=pass") {
-		t.Fatalf("root observer did not verify isolated checksummed workspace markers: %s", logs)
+	// Exec enters the already-running production supervisor container as its
+	// rendered UID 0. It demonstrates the explicit pool-wide trusted boundary by
+	// accessing both sessions and the pod-scoped key. It creates only adversarial
+	// fixture inputs; it does not chmod/chown/repair any production path.
+	script := `
+set -eu
+session_a=$1
+session_b=$2
+root=/data/sandboxes
+key=/etc/harness/tls/tls.key
+test ! -L "$key"
+test -f "$key"
+test "$(stat -c '%u:%g:%a' "$key")" = 0:0:600
+dd if="$key" of=/dev/null bs=1 count=1 status=none
+/usr/local/bin/node -e '
+const status = require("node:fs").readFileSync("/proc/1/status", "utf8");
+const value = (name) => status.match(new RegExp("^" + name + ":[ \\t]+(\\S+)", "m"))?.[1] ?? "";
+if (value("Uid") !== "0") throw new Error("supervisor is not root");
+const caps = BigInt("0x" + value("CapEff"));
+const required = (1n << 6n) | (1n << 7n);
+if ((caps & required) !== required || (caps & ~required) === 0n) throw new Error("supervisor does not retain runtime-default capabilities plus SETGID/SETUID");
+'
+printf session-a-private > "$root/$session_a/workspace/sibling-secret.txt"
+printf session-b-private > "$root/$session_b/workspace/sibling-secret.txt"
+printf '%s\n' "$root/$session_b/workspace/sibling-secret.txt" > "$root/$session_a/workspace/.sibling-target"
+printf '%s\n' "$root/$session_a/workspace/sibling-secret.txt" > "$root/$session_b/workspace/.sibling-target"
+printf trusted-supervisor-setup=pass
+`
+	output := cluster.Kubectl(t, "exec", "pod/"+trustedSupervisor, "-n", workspaceNamespace, "-c", "supervisor", "--",
+		"/bin/sh", "-ceu", script, "harness-proof", sessionA, sessionB)
+	if !strings.Contains(output, "trusted-supervisor-setup=pass") {
+		t.Fatalf("trusted supervisor did not establish known sibling targets: %s", output)
+	}
+}
+
+func assertConcurrentWorkspaceMarkers(t *testing.T, cluster *remotecluster.Cluster, trustedSupervisor, sessionA, sessionB string) {
+	t.Helper()
+	script := fmt.Sprintf(`
+set -eu
+root=/data/sandboxes
+test "$(cat "$root/%s/workspace/marker.txt")" = session-a
+test "$(sha256sum "$root/%s/workspace/marker.txt" | cut -d" " -f1)" = %s
+test "$(cat "$root/%s/workspace/marker.txt")" = session-b
+test "$(sha256sum "$root/%s/workspace/marker.txt" | cut -d" " -f1)" = %s
+test "$(cat "$root/%s/workspace/sibling-secret.txt")" = session-a-private
+test "$(cat "$root/%s/workspace/sibling-secret.txt")" = session-b-private
+printf trusted-supervisor-marker-proof=pass
+`, sessionA, sessionA, workspaceMarkerDigest("session-a"), sessionB, sessionB, workspaceMarkerDigest("session-b"), sessionA, sessionB)
+	output := cluster.Kubectl(t, "exec", "pod/"+trustedSupervisor, "-n", workspaceNamespace, "-c", "supervisor", "--", "/bin/sh", "-ceu", script)
+	if !strings.Contains(output, "trusted-supervisor-marker-proof=pass") {
+		t.Fatalf("trusted pool supervisor did not verify both checksummed workspace markers: %s", output)
 	}
 }
 
@@ -656,6 +691,7 @@ spec:
           image: %s:%s
           imagePullPolicy: Never
           command: [/bin/sh, -ceu]
+          securityContext: {runAsUser: 0, runAsGroup: 0}
           args:
             - |
               test "$(cat /sessions/%s/workspace/consequence.count)" = once
@@ -870,12 +906,41 @@ spec:
 
 func workspaceBarrierPrompt(marker string) string {
 	command := fmt.Sprintf(`set -eu
+/usr/local/bin/node <<'NODE'
+const fs = require("node:fs");
+const path = require("node:path");
+const status = fs.readFileSync("/proc/self/status", "utf8");
+const field = (name) => status.match(new RegExp("^" + name + ":[ \\t]*(.*)$", "m"))?.[1].trim() ?? "";
+const zero = (name) => /^0+$/.test(field(name));
+if (process.getuid() <= 0 || process.getuid() !== process.getgid()) throw new Error("child UID=GID invariant failed");
+if (field("Groups") !== "") throw new Error("child supplementary groups were not cleared");
+if (field("NoNewPrivs") !== "1") throw new Error("child no_new_privs invariant failed");
+for (const capability of ["CapEff", "CapPrm", "CapBnd", "CapAmb"]) if (!zero(capability)) throw new Error(capability + " was not cleared");
+if (process.umask() !== 0o077) throw new Error("child umask is not 0077");
+const workspace = process.cwd();
+const root = path.dirname(workspace);
+const poolRoot = path.dirname(root);
+const pool = fs.lstatSync(poolRoot);
+if (!pool.isDirectory() || pool.isSymbolicLink() || pool.uid !== 0 || pool.gid !== 0 || (pool.mode & 0o777) !== 0o711) throw new Error("pool root is not root-owned 0711");
+for (const entry of [root, path.join(root, "home"), path.join(root, "tmp"), path.join(root, "session"), workspace]) {
+  const stat = fs.lstatSync(entry);
+  if (!stat.isDirectory() || stat.isSymbolicLink() || stat.uid !== process.getuid() || stat.gid !== process.getgid() || (stat.mode & 0o777) !== 0o700) throw new Error("session path is not owned 0700: " + entry);
+}
+const expectEACCES = (target, label) => {
+  try { fs.openSync(target, "r"); } catch (error) {
+    if (error.code === "EACCES") return;
+    throw new Error(label + " returned " + error.code + ", want EACCES");
+  }
+  throw new Error(label + " unexpectedly opened");
+};
+const sibling = fs.readFileSync(".sibling-target", "utf8").trim();
+expectEACCES(sibling, "known sibling path");
+expectEACCES("/etc/harness/tls/tls.key", "supervisor tls.key");
+console.log("child-isolation=pass sibling-eacces=pass tls-key-eacces=pass");
+NODE
 printf %s > marker.txt
 test "$(sha256sum marker.txt | cut -d" " -f1)" = %s
-if ls /data/sandboxes >/dev/null 2>&1; then exit 90; fi
-if touch /data/sandboxes/forbidden-%s >/dev/null 2>&1; then exit 91; fi
-printf sibling-denied > isolation-proof.txt
-printf 'workspace-marker=%s'`, marker, workspaceMarkerDigest(marker), marker, workspaceMarkerDigest(marker))
+printf ' workspace-marker=%s'`, marker, workspaceMarkerDigest(marker), workspaceMarkerDigest(marker))
 	return "E2E_MODE:workspace-barrier E2E_BASH:" + base64.StdEncoding.EncodeToString([]byte(command))
 }
 

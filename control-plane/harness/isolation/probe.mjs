@@ -17,9 +17,10 @@ import { execSync, spawnSync } from "node:child_process";
 const SANDBOX = process.env.SANDBOX_ROOT;
 const SIBLING = process.env.SIBLING_ROOT;
 const MOUNT = process.env.MOUNT_ROOT;
+const TLS_KEY = process.env.TLS_KEY;
 
-if (!SANDBOX || !SIBLING || !MOUNT) {
-  console.error("probe: SANDBOX_ROOT, SIBLING_ROOT, MOUNT_ROOT env vars are required");
+if (!SANDBOX || !SIBLING || !MOUNT || !TLS_KEY) {
+  console.error("probe: SANDBOX_ROOT, SIBLING_ROOT, MOUNT_ROOT, TLS_KEY env vars are required");
   process.exit(2);
 }
 
@@ -37,11 +38,21 @@ ok("CapEff=0 (no effective capabilities)", field("CapEff") === "0000000000000000
 ok("CapPrm=0 (no permitted capabilities)", field("CapPrm") === "0000000000000000");
 ok("CapBnd=0 (bounding set cleared)", field("CapBnd") === "0000000000000000");
 ok("CapAmb=0 (no ambient capabilities)", field("CapAmb") === "0000000000000000");
-ok(`uid=${process.getuid()} gid=${process.getgid()} (non-root)`, process.getuid() > 0 && process.getgid() > 0);
+ok(`uid=${process.getuid()} gid=${process.getgid()} (stable UID=GID, non-root)`, process.getuid() > 0 && process.getuid() === process.getgid());
 // /proc/self/status `Groups:` lists supplementary groups only (not the primary
 // GID). --clear-groups empties it; node's process.getgroups() also reports the
 // effective GID, so we read /proc rather than getgroups().
 ok("no supplementary groups (--clear-groups)", (field("Groups") ?? "").trim() === "");
+ok("umask=0077", process.umask() === 0o077);
+
+// --- exact pool/session ownership and modes ---
+const mountStat = fs.lstatSync(MOUNT);
+ok("pool PVC root is root-owned 0711", mountStat.uid === 0 && !mountStat.isSymbolicLink() && mountStat.isDirectory() && (mountStat.mode & 0o777) === 0o711);
+for (const name of ["root", "home", "tmp", "session", "workspace"]) {
+  const path = name === "root" ? SANDBOX : `${SANDBOX}/${name}`;
+  const stat = fs.lstatSync(path);
+  ok(`${name} is session-owned 0700`, !stat.isSymbolicLink() && stat.isDirectory() && stat.uid === process.getuid() && stat.gid === process.getgid() && (stat.mode & 0o777) === 0o700);
+}
 
 // --- own-sandbox read/write ---
 let w = true;
@@ -82,6 +93,16 @@ try {
   readSib = e.code === "EACCES";
 }
 ok("cannot read sibling session file (EACCES)", readSib);
+
+// The cert-manager CSI key is mounted in the supervisor container namespace,
+// but exact root:0600 permissions must make the real child open fail EACCES.
+let keyDenied = false;
+try {
+  fs.openSync(TLS_KEY, "r");
+} catch (e) {
+  keyDenied = e.code === "EACCES";
+}
+ok("cannot open supervisor tls.key (EACCES)", keyDenied);
 
 // --- sibling-session EACCES via shell ---
 let shellLs = true;

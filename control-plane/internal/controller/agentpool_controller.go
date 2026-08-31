@@ -70,7 +70,8 @@ const (
 	// supervisor can read the cert-manager CSI driver's root-owned 0600 tls.key
 	// and launch the per-turn child as the session UID via setpriv. The child
 	// (session UID, supplementary groups cleared, no_new_privs) cannot read the
-	// root-owned key. PSS baseline permits runAsUser=0 + CAP_SETUID/SETGID.
+	// root-owned key. PSS baseline permits runAsUser=0; the rendered container
+	// retains runtime-default capabilities and explicitly adds SETUID/SETGID.
 	supervisorUID int64 = 0
 
 	// workerTemplateHashAnnotation records a hash of the desired worker pod
@@ -783,7 +784,8 @@ func (r *AgentPoolReconciler) countReadyWorkers(ctx context.Context, pool *v1alp
 // emptyDir, the per-pod config ConfigMap, and read-only piDirs (placeholder
 // mounts; overlay content is HOR-393). The supervisor runs as root (UID 0) to
 // read the CSI driver's root-owned 0600 key and launch the per-turn child as
-// the session UID via setpriv (PSS baseline: CAP_SETUID/SETGID allowed).
+// the session UID via setpriv. It retains runtime-default capabilities and
+// explicitly adds SETUID/SETGID; no pod fsGroup grants key or PVC access.
 func buildWorkerPodSpec(pool *v1alpha1.AgentPool, name string) corev1.PodSpec {
 	probePort := pool.Spec.Probe.Port
 	if probePort == 0 {

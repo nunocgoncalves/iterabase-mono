@@ -16,6 +16,7 @@ import { Supervisor } from "./supervisor.js";
 import { createChildFactory } from "./child-process.js";
 import { HarnessMetrics } from "./metrics.js";
 import { checkSandboxStorageHealth, WorkspaceCapacityGate, type WorkspaceCapacity } from "./storage-health.js";
+import { TLSKeyError, validateSupervisorTLSKey } from "./tls-key.js";
 
 /** The compiled pi child entry, sibling to this module's output. */
 const CHILD_SCRIPT = join(dirname(fileURLToPath(import.meta.url)), "child.js");
@@ -23,6 +24,10 @@ const CHILD_SCRIPT = join(dirname(fileURLToPath(import.meta.url)), "child.js");
 export async function runWorker(): Promise<void> {
   const cfg = loadConfig();
   const metrics = new HarnessMetrics();
+  // Observe only: never chmod/chown/replace projected credential material.
+  // Invalid type, symlink, owner, mode, or readability fails before probes or
+  // network startup, and the periodic check below withdraws readiness on drift.
+  validateSupervisorTLSKey(cfg.tls.key);
   // The gate file lives on the AgentPool's shared PVC so replacement workers
   // retain 20/25 hysteresis instead of reopening credit inside the band.
   const capacityGate = new WorkspaceCapacityGate(cfg.sandboxRoot);
@@ -80,34 +85,35 @@ export async function runWorker(): Promise<void> {
   process.on("SIGTERM", () => void drain("SIGTERM"));
   process.on("SIGINT", () => void drain("SIGINT"));
 
-  let storageFailure: Error | undefined;
-  const storageMonitor = setInterval(() => {
-    if (storageFailure || draining) return;
+  let readinessFailure: Error | undefined;
+  const readinessMonitor = setInterval(() => {
+    if (readinessFailure || draining) return;
     try {
+      validateSupervisorTLSKey(cfg.tls.key);
       const capacity = observeWorkspace();
       sup.updateWorkspaceStatus(toWorkspaceStatus(capacity));
     } catch (error) {
-      storageFailure = error as Error;
-      console.error(`sandbox storage became unavailable: ${storageFailure.message}`);
-      metrics.storageChecks.labels("fail").inc();
+      readinessFailure = error as Error;
+      console.error(`supervisor readiness invariant failed: ${readinessFailure.message}`);
+      if (!(readinessFailure instanceof TLSKeyError)) metrics.storageChecks.labels("fail").inc();
       metrics.storageReady.set(0);
       probes.setReady(false);
       probes.setHealthy(false);
-      clearInterval(storageMonitor);
+      clearInterval(readinessMonitor);
       // Drain closes dispatch credit and aborts/fences an active turn. The
       // process then exits non-zero below so Kubernetes replaces this client
-      // only after the operator observes healthy backend storage.
+      // only after the operator observes healthy storage and identity material.
       void sup.drain().catch((drainError) => {
-        console.error(`storage-failure drain failed: ${(drainError as Error).message}`);
+        console.error(`readiness-failure drain failed: ${(drainError as Error).message}`);
       });
     }
   }, 10_000);
 
   try {
     await sup.run();
-    if (storageFailure) throw storageFailure;
+    if (readinessFailure) throw readinessFailure;
   } finally {
-    clearInterval(storageMonitor);
+    clearInterval(readinessMonitor);
     await probes.stop();
   }
 }

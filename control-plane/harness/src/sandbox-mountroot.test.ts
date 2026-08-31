@@ -69,13 +69,14 @@ describe("ensureSandboxMountRoot — establish+verify failure modes", () => {
     expect(chmodMock).toHaveBeenCalledWith(PATH, 0o711);
   });
 
-  it("fails startup when the root is owned by a foreign (session) UID", () => {
-    // A non-root supervisor cannot reclaim a foreign-owned root.
+  it("fails a defensively injected non-root invocation when the root has a foreign owner", () => {
+    // Production renders the trusted supervisor as root. This mock exercises
+    // the helper's fail-closed fallback if it is ever invoked otherwise.
     lstatMock.mockReturnValue(dirStat(4242, 4242, 0o040711));
     chmodMock.mockReturnValue(undefined);
 
     expect(() => ensureSandboxMountRoot(PATH)).toThrow(SandboxError);
-    // chmod must never run for a foreign-owned root under a non-root supervisor.
+    // The defensive non-root path must never chmod a foreign-owned root.
     expect(chmodMock).not.toHaveBeenCalled();
   });
 

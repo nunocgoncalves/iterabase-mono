@@ -6,7 +6,7 @@ Status: current repository implementation contract for HOR-538, implementing app
 
 Platform V2 supports exactly one schedulable K3s `v1.34.10+k3s1` server node and one customer-selected stable non-removable whole disk for AgentPool workspaces. Multi-node, Longhorn, RWX, BYO/alternate classes, managed storage selection, HA, existing-filesystem adoption, disk replacement/migration, and root-disk fallback are unsupported.
 
-Every AgentPool owns one `ReadWriteOnce` claim on fixed non-default `iterabase-agentpool-local-path`. RWO limits the claim to one node, not one pod: multiple workers in the pool may mount it concurrently on the single node. Per-session UID/GID allocation, root-owned `0711` parent traversal, `0700` sibling directories, path containment, cleanup, and worker/turn/effect fencing remain mandatory.
+Every AgentPool owns one `ReadWriteOnce` claim on fixed non-default `iterabase-agentpool-local-path`. RWO limits the claim to one node, not one pod: multiple workers in the pool may mount it concurrently on the single node. Every trusted root supervisor in a pool may access that whole pool PVC; separate AgentPools receive separate claims/mounts. Model-directed children use stable distinct session UID=GID, cleared supplementary groups, all capabilities dropped, `no_new_privs`, umask `0077`, and session-owned `0700` root/home/tmp/session/workspace beneath the root-owned `0711` PVC root.
 
 ## Forge device authorization and refusal boundary
 
@@ -51,6 +51,14 @@ After K3s readiness, Forge reconciles `kube-system/local-path-config` with exact
 
 The AgentPool class uses `rancher.io/local-path`, `WaitForFirstConsumer`, `Delete`, `allowVolumeExpansion: false`, and an explicit non-default annotation. The control-plane accepts initial unbound `WaitForFirstConsumer` state so workers can trigger binding, then requires the bound PV to be RWO Filesystem `hostPath`, `Delete`, node-affine, and strictly beneath the dedicated mount. PostgreSQL, MinIO, and unrelated default claims remain on the normal K3s path.
 
+## AgentPool permission and workload-TLS boundary
+
+The supervisor is a trusted root process. Its rendered container retains the container runtime's default capability set and explicitly adds `SETUID` and `SETGID`; it is not non-root and does not have only those two capabilities. No pod `fsGroup` grants PVC or credential access.
+
+At startup and every bounded readiness-health observation, the supervisor opens its pod-scoped cert-manager CSI `tls.key` without following symlinks and requires the opened inode to remain a non-symlink regular file owned by root with exact mode `0600`. It proves readability but never chmods, chowns, replaces, or repairs projected key material. Drift withdraws readiness/health, drains/fences the worker, and exits fail-closed. The valid key establishes the supervisor's workload mTLS connections.
+
+For each assignment, the production `setpriv` launcher requires equal stable session UID/GID, clears supplementary groups, sets `no_new_privs`, clears bounding/inheritable/ambient capabilities before the UID transition clears permitted/effective capabilities, pins umask `0077`, and executes the disposable child. A real child must receive `EACCES` opening a known sibling path and `/etc/harness/tls/tls.key`. Freshly formatted ext4 and XFS Linux CI runs the same production launcher/probe; the DigitalOcean exact-candidate scenario runs the deployed real-child sibling/key negative proof and trusted-supervisor whole-pool/mTLS proof.
+
 ## Capacity and failure semantics
 
 Each harness performs a real write/fsync/rename/unlink transaction and `statfs` measurement on the mounted workspace filesystem. The pool-shared PVC stores the gate transition so a replacement supervisor cannot reopen inside the hysteresis band; dispatch serializes the installation-wide gate through Postgres because all AgentPool paths share the one dedicated filesystem. Dispatch metrics and each AgentPool's actionable `WorkspaceCapacityHealthy` condition expose available bytes, capacity bytes, free ratio, warning/gate state, freshness, and customer action; per-worker metrics retain supporting health evidence.
@@ -66,4 +74,4 @@ Requested PVC size is planning metadata, not a quota. There is no online expansi
 
 ## Validation
 
-Required validation includes Forge config/CLI/fake-SSH command-shape and refusal tests; receipt/mount/class reapply tests; AgentPool fixed-class/RWO/PV-path and multi-replica tests; harness threshold/credit/fencing tests; alert/dashboard/runbook checks; release-target/catalogue checks; exact-candidate real-machine install/reapply/worker-replacement behavior; and proof that no Longhorn namespace, CRD, release, image, companion target, iSCSI/NFS bootstrap, RWX/BYO value, or root fallback remains.
+Required validation includes Forge config/CLI/fake-SSH command-shape and refusal tests; receipt/mount/class reapply tests; AgentPool fixed-class/RWO/PV-path, one-PVC-per-pool, separate-pool mount, and multi-replica tests; freshly formatted real ext4/XFS production-`setpriv` probes; fail-closed CSI-key type/owner/mode tests; deployed real-child sibling/key `EACCES`, trusted-supervisor whole-pool access, and mTLS behavior; harness threshold/credit/fencing tests; alert/dashboard/runbook checks; release-target/catalogue checks; exact-candidate real-machine install/reapply/worker-replacement behavior; and proof that no Longhorn namespace, CRD, release, image, companion target, iSCSI/NFS bootstrap, RWX/BYO value, or root fallback remains. Tests observe production behavior and do not perform permission repair that production does not perform.

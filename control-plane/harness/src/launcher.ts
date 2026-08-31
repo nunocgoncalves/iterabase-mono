@@ -3,8 +3,9 @@
 // Spawns the per-turn pi child under a stable per-session UID/GID with
 // no_new_privs and ALL Linux capabilities dropped (bounding + inheritable +
 // ambient cleared by setpriv; permitted + effective cleared by setuid). The
-// supervisor — which HOR-245's security context grants only CAP_SETUID /
-// CAP_SETGID — uses this to run model-directed code (pi + extensions) with
+// trusted root supervisor — whose rendered container retains the runtime-default
+// capability set and explicitly adds SETUID/SETGID — uses this to run
+// model-directed code (pi + extensions) with
 // kernel-enforced isolation: the child can read/write its own 0700 sandbox but
 // receives EACCES for any sibling session root on the same-node shared RWO PVC.
 //
@@ -53,8 +54,9 @@ export class LauncherError extends Error {
  * Build the setpriv argv that drops to `uid`/`gid` with no_new_privs and a
  * fully-cleared capability set, then execs `node <script>`.
  *
- *   setpriv --reuid <uid> --regid <gid> --clear-groups --no-new-privs \
+ *   setpriv --reuid <uid> --regid <uid> --clear-groups --no-new-privs \
  *           --bounding-set -all --inh-caps -all --ambient-caps -all \
+ *           /bin/sh -c 'umask 0077; exec "$@"' harness-child \
  *           <node-execPath> <script>
  *
  * Env isolation comes from spawn({env: childEnv}) — Node replaces (not
@@ -78,6 +80,10 @@ export function buildSetprivArgv(opts: LaunchOptions): string[] {
     "-all",
     "--ambient-caps",
     "-all",
+    "/bin/sh",
+    "-c",
+    'umask 0077; exec "$@"',
+    "harness-child",
     process.execPath,
     opts.script,
   ];
@@ -115,6 +121,8 @@ export function validateLaunchOptions(opts: LaunchOptions): void {
     throw new LauncherError(`uid must be a positive integer (got ${opts.uid})`);
   if (!Number.isInteger(opts.gid) || opts.gid <= 0)
     throw new LauncherError(`gid must be a positive integer (got ${opts.gid})`);
+  if (opts.uid !== opts.gid)
+    throw new LauncherError(`session uid and gid must be equal (got ${opts.uid}:${opts.gid})`);
   requireNonEmpty(opts.sandboxRoot, "sandboxRoot");
   if (!isAbsolute(opts.sandboxRoot)) throw new LauncherError("sandboxRoot must be an absolute path");
   requireNonEmpty(opts.workingDir, "workingDir");
