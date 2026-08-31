@@ -24,9 +24,10 @@ const CHILD_SCRIPT = join(dirname(fileURLToPath(import.meta.url)), "child.js");
 export async function runWorker(): Promise<void> {
   const cfg = loadConfig();
   const metrics = new HarnessMetrics();
-  // Observe only: never chmod/chown/replace projected credential material.
-  // Invalid type, symlink, owner, mode, or readability fails before probes or
-  // network startup, and the periodic check below withdraws readiness on drift.
+  // Observe only: never chmod/chown/mirror/replace projected credentials. Only
+  // DES-HOR-538-03's contained cert-manager AtomicWriter chain and exact
+  // root:root 0440 resolved target pass before network startup; periodic checks
+  // safely re-resolve rotation and withdraw readiness on any drift.
   validateSupervisorTLSKey(cfg.tls.key);
   // The gate file lives on the AgentPool's shared PVC so replacement workers
   // retain 20/25 hysteresis instead of reopening credit inside the band.

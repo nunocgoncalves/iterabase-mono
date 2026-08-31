@@ -151,9 +151,10 @@ type PoolIdentitySpec struct {
 
 	// certMountPath is where the CSI driver materialises tls.crt/tls.key/ca.crt
 	// in the supervisor. Defaults to "/etc/harness/tls". Mounted readOnly; no
-	// fsGroup is set. Supervisor startup/readiness requires tls.key to remain a
-	// root-owned non-symlink regular exact-0600 file; the child has cleared
-	// supplementary groups/capabilities and receives EACCES opening it.
+	// fsGroup is set. Supervisor startup/readiness accepts only the exact contained
+	// cert-manager AtomicWriter chain beneath non-child-writable ancestors and a
+	// root-owned regular exact-0440 resolved key (the narrow upstream exception).
+	// The nonzero-UID/GID child has cleared groups/capabilities and gets EACCES.
 	// +optional
 	CertMountPath string `json:"certMountPath,omitempty"`
 }

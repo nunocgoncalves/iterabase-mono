@@ -311,8 +311,9 @@ ConfigMap** (rendered harness boot config), and the **warm-worker pods**.
 the CA key (cert-manager owns the CA in `platform-ca`, backed by a
 `ClusterIssuer`). Forge prerequisites: cert-manager + cert-manager-csi-driver +
 the CA `Certificate`/`ClusterIssuer`. The supervisor runs as root (UID 0, PSS
-`baseline`) to validate/read the CSI driver's non-symlink regular root-owned
-exact-`0600` key and launch the per-turn child as the session UID via `setpriv`.
+`baseline`) to validate/read only the CSI driver's exact contained AtomicWriter
+chain and root-owned regular exact-`0440` resolved target, the narrow fixed-mode
+upstream exception, and launch the per-turn child as the session UID via `setpriv`.
 The rendered supervisor retains runtime-default capabilities and explicitly adds
 `SETUID`/`SETGID` (which PSS `restricted` forbids); no `fsGroup` grants access.
 The child uses equal stable UID/GID, cleared groups, no capabilities,
