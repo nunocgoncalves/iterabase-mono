@@ -992,20 +992,25 @@ func (s *Service) dispatchGraphRun(ctx context.Context, run runtime.Run) {
 		}
 		return
 	}
-	assignErr := s.assignGraph(ctx, turn, run, node, poolID, w)
+	deliveryAttempted, assignErr := s.assignGraph(ctx, turn, run, node, poolID, w)
 	s.observeAssignment(assignErr)
 	if assignErr != nil {
 		s.log.Warn("assign graph turn", "turn", turn.ID, "error", assignErr)
-		w.releaseTurn()
+		w.releaseAssignmentFailure(turn.ID, deliveryAttempted)
 		s.kickReconciler()
 	}
 }
 
+// assignGraph reports whether AssignTurn entered the stream send. Before that
+// boundary an error is proven undelivered, so the caller restores the same
+// Ready intent; once send starts, delivery is ambiguous and the credit remains
+// consumed while the existing fence/loss path settles the assignment.
+//
 //nolint:gocyclo // Assignment validates and stamps the complete immutable graph execution envelope.
-func (s *Service) assignGraph(ctx context.Context, turn runtime.Turn, run runtime.Run, node workstore.NodeExecution, poolID string, w *workerConn) error {
+func (s *Service) assignGraph(ctx context.Context, turn runtime.Turn, run runtime.Run, node workstore.NodeExecution, poolID string, w *workerConn) (bool, error) {
 	assignment, err := s.work.GetAssignmentContext(ctx, node.ID)
 	if err != nil {
-		return err
+		return false, err
 	}
 	var model struct {
 		ID              string `json:"id"`
@@ -1015,11 +1020,11 @@ func (s *Service) assignGraph(ctx context.Context, turn runtime.Turn, run runtim
 		ThinkingLevel   string `json:"thinkingLevel"`
 	}
 	if err := json.Unmarshal(node.ModelSnapshot, &model); err != nil || model.ID == "" {
-		return fmt.Errorf("invalid graph model snapshot: %w", err)
+		return false, fmt.Errorf("invalid graph model snapshot: %w", err)
 	}
 	uid, err := s.store.AllocateSessionUID(ctx, run.SessionID, s.cfg.SessionUIDBase, s.cfg.SessionUIDRange, s.cfg.SessionUIDGrace)
 	if err != nil {
-		return fmt.Errorf("allocate session uid: %w", err)
+		return false, fmt.Errorf("allocate session uid: %w", err)
 	}
 	prompt := ""
 	if node.Prompt != nil {
@@ -1055,7 +1060,7 @@ func (s *Service) assignGraph(ctx context.Context, turn runtime.Turn, run runtim
 		WorkItemID: assignment.WorkItemID, NodeExecutionID: node.ID,
 	}
 	if _, err := s.store.CreateAssignment(ctx, in); err != nil {
-		return err
+		return false, err
 	}
 	if err := w.send(msg); err != nil {
 		if a, ferr := s.store.FenceWorkerGenerationIf(ctx, poolID, w.workerID, w.gen); ferr == nil {
@@ -1063,7 +1068,7 @@ func (s *Service) assignGraph(ctx context.Context, turn runtime.Turn, run runtim
 				s.log.Warn("graph assign send failed: terminalize turn", "turn", a.TurnID, "error", tErr)
 			}
 		}
-		return err
+		return true, err
 	}
 	s.log.Info("assigned graph turn", "turn", turn.ID, "run", run.ID, "node", node.NodeKey, "visit", node.Visit, "worker", w.workerID)
 	if node.TimeoutMS != nil {
@@ -1083,7 +1088,7 @@ func (s *Service) assignGraph(ctx context.Context, turn runtime.Turn, run runtim
 			}
 		}(ctx)
 	}
-	return nil
+	return true, nil
 }
 
 // dispatchRun ensures a running run has an active, assigned turn. If the run has
@@ -1156,11 +1161,11 @@ func (s *Service) dispatchRun(ctx context.Context, run runtime.Run) {
 		}
 		return // no idle worker; retry on next tick / Ready.
 	}
-	assignErr := s.assign(ctx, turn, run, poolID, w)
+	deliveryAttempted, assignErr := s.assign(ctx, turn, run, poolID, w)
 	s.observeAssignment(assignErr)
 	if assignErr != nil {
 		s.log.Warn("assign turn", "turn", turn.ID, "error", assignErr)
-		w.releaseTurn()
+		w.releaseAssignmentFailure(turn.ID, deliveryAttempted)
 		s.kickReconciler()
 	}
 }
@@ -1190,19 +1195,19 @@ func (s *Service) runningStepID(ctx context.Context, runID string) (string, erro
 	return "", runtime.ErrNotFound
 }
 
-// assign records the active assignment and sends AssignTurn to the worker. The
-// worker's credit is already consumed by pickIdle; on failure the caller must
-// release it.
-func (s *Service) assign(ctx context.Context, turn runtime.Turn, run runtime.Run, poolID string, w *workerConn) error {
+// assign records the active assignment and sends AssignTurn to the worker. It
+// reports whether AssignTurn entered the stream send, matching assignGraph's
+// proven-undelivered credit-restoration boundary.
+func (s *Service) assign(ctx context.Context, turn runtime.Turn, run runtime.Run, poolID string, w *workerConn) (bool, error) {
 	model := s.cfg.DefaultModel
 	if model == nil || model.Id == "" {
 		// Dispatch must not emit an empty model permission (HOR-249). The
 		// reconciler gates on this before starting a turn; guard again here.
-		return errors.New("no default model configured; cannot assign turn")
+		return false, errors.New("no default model configured; cannot assign turn")
 	}
 	uid, err := s.store.AllocateSessionUID(ctx, run.SessionID, s.cfg.SessionUIDBase, s.cfg.SessionUIDRange, s.cfg.SessionUIDGrace)
 	if err != nil {
-		return fmt.Errorf("allocate session uid: %w", err)
+		return false, fmt.Errorf("allocate session uid: %w", err)
 	}
 	gid := uid
 	msg := &v1.ControlMessage{Kind: &v1.ControlMessage_AssignTurn{AssignTurn: &v1.AssignTurn{
@@ -1229,11 +1234,11 @@ func (s *Service) assign(ctx context.Context, turn runtime.Turn, run runtime.Run
 		ToolVersionSnapshot: []byte("[]"),
 	}
 	if _, err := s.store.CreateAssignment(ctx, in); err != nil {
-		return err
+		return false, err
 	}
 	if err := w.send(msg); err != nil {
-		// Send failed: the assignment is recorded active but the worker never
-		// received it. Fence (generation-qualified CAS) + terminalize as worker
+		// Send failed after crossing the delivery-attempt boundary, so receipt is
+		// ambiguous. Fence (generation-qualified CAS) + terminalize as worker
 		// loss using the assignment returned by the fence (the row is no longer
 		// active after fencing, so ResolveActiveAssignment would miss it).
 		if a, ferr := s.store.FenceWorkerGenerationIf(ctx, poolID, w.workerID, w.gen); ferr == nil {
@@ -1241,10 +1246,10 @@ func (s *Service) assign(ctx context.Context, turn runtime.Turn, run runtime.Run
 				s.log.Warn("assign send failed: terminalize turn", "turn", a.TurnID, "error", tErr)
 			}
 		}
-		return err
+		return true, err
 	}
 	s.log.Info("assigned turn", "turn", turn.ID, "run", run.ID, "pool", poolID, "worker", w.workerID, "gen", w.gen)
-	return nil
+	return true, nil
 }
 
 func mustJSON(v any) []byte {

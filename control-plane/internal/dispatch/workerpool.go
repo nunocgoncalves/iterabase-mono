@@ -135,6 +135,34 @@ func (w *workerConn) tryConsumeCredit(turnID string) bool {
 	return true
 }
 
+// restoreCreditAfterPreDeliveryFailure returns a reserved Ready intent to the
+// same worker only when AssignTurn never entered the stream send. The harness
+// is still armed in this case and deliberately does not advertise another
+// Ready. A concurrent capacity gate retains the restored intent but keeps it
+// unusable until the durable global reopen.
+func (w *workerConn) restoreCreditAfterPreDeliveryFailure(turnID string) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.closed || w.activeTurn != turnID {
+		return false
+	}
+	w.activeTurn = ""
+	w.creditAdvertised = true
+	w.idle = w.workspaceObserved && !w.workspaceGated
+	return w.idle
+}
+
+// releaseAssignmentFailure restores only a proven-undelivered reservation.
+// Once stream delivery was attempted, receipt is ambiguous and the Ready
+// intent stays consumed while the active reservation is released.
+func (w *workerConn) releaseAssignmentFailure(turnID string, deliveryAttempted bool) bool {
+	if !deliveryAttempted {
+		return w.restoreCreditAfterPreDeliveryFailure(turnID)
+	}
+	w.releaseTurn()
+	return false
+}
+
 // releaseTurn clears the active turn after terminalization. The worker is NOT
 // idle again until it sends the next Ready (credit is per-assignment).
 func (w *workerConn) releaseTurn() {
