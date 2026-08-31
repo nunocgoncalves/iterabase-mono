@@ -1521,7 +1521,7 @@ func TestAgentPoolWorkspaceCommandIsBoundedAndCrashResumable(t *testing.T) {
 				InstallName: "opo1", Device: "/dev/disk/by-id/scsi-workspace", Filesystem: filesystem,
 			}, "reconcile")
 			for _, expected := range []string{
-				"probe_identity_topology", "probe_active_raw_consumers", "/proc/[0-9]*", "65536-descriptor limit", "stat -Lc '%t:%T'", "wipefs -n --noheadings --output TYPE", "blkid -p", "write_receipt planned",
+				"probe_identity_topology", "probe_active_raw_consumers", "/proc/[0-9]*", "65536-descriptor limit", "for fd_attempt in 1 2 3", "stat -Lc '%t:%T'", "after 3 attempts", "wipefs -n --noheadings --output TYPE", "blkid -p", "write_receipt planned",
 				"mkfs.ext4 -F", "mkfs.xfs -f", "filesystem_selection", "transport_b64", "UUID=$planned_uuid",
 				"nodev,nosuid", workspaceFilesystemLabel, workspaceMarkerName,
 			} {
