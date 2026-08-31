@@ -167,6 +167,9 @@ func newDigitalOceanCPUStateForScenario(t *testing.T, scenario string) *digitalO
 		forgeHome:   t.TempDir(),
 		diagnostics: newForgeDiagnostics(t, scenario),
 	}
+	if githubToken := os.Getenv("GITHUB_TOKEN"); githubToken != "" {
+		state.diagnostics.redactor.Add(githubToken)
+	}
 	state.pubKey, state.privKeyPath = generateKey(t)
 	state.forgeBin = buildForge(t)
 	state.chartVersion = platformChartVersion(t, "")
@@ -845,6 +848,13 @@ func writeForgeConfig(t *testing.T, name, ip, keyPath, chartVersion string) stri
 func runForgeE(bin, forgeHome string, args ...string) (string, error) {
 	cmd := exec.Command(bin, args...)
 	cmd.Env = append(os.Environ(), "FORGE_HOME="+forgeHome)
+	// Required cloud E2E uses the workflow's ephemeral GitHub token for the
+	// public exact-overlay clone when no explicit Forge token was supplied. This
+	// avoids anonymous smart-HTTP edge failures from short-lived cloud IPs while
+	// exercising Forge's credential-helper path without persisting the token.
+	if os.Getenv("FORGE_OVERLAY_TOKEN") == "" && os.Getenv("GITHUB_TOKEN") != "" {
+		cmd.Env = append(cmd.Env, "FORGE_OVERLAY_TOKEN="+os.Getenv("GITHUB_TOKEN"))
+	}
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }

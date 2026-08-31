@@ -12,17 +12,19 @@ import (
 
 // runFluxStage exercises the Flux GitOps phase on the composed CPU fixture:
 // droplet: forge reconciles Flux, its GitRepository, and Kustomization against
-// the PUBLIC exact-artifact E2E overlay fixture (tokenless),
+// the PUBLIC exact-artifact E2E overlay fixture using only the workflow's
+// ephemeral read credential,
 // and Flux source-controller materializes the fork in-cluster + kustomize-controller
 // reconciles crds/client. Validates the MECHANICS (install → sync resources →
 // Flux reconciles) rather than a writable push-to-git loop (that's Flux upstream
 // behavior, validated end-to-end by HOR-299's real OPO1 client fork).
 //
-// FORGE_OVERLAY_TOKEN is intentionally unset (public repo, CI non-interactive);
-// the token→Secret path is covered by unit + fake-SSH tests.
+// No explicit FORGE_OVERLAY_TOKEN is accepted. The E2E process maps the
+// workflow's ephemeral GITHUB_TOKEN into each Forge subprocess; tokenless and
+// prompt behavior remains covered by unit + fake-SSH tests.
 func runFluxStage(t *testing.T, state *digitalOceanCPUState) {
 	if _, ok := os.LookupEnv("FORGE_OVERLAY_TOKEN"); ok {
-		t.Fatal("FORGE_OVERLAY_TOKEN must be unset for this test (public repo, tokenless)")
+		t.Fatal("FORGE_OVERLAY_TOKEN must be unset; E2E supplies only the ephemeral workflow token")
 	}
 
 	cfgPath := writeFluxForgeConfig(t, state.runID, state.ip, state.privKeyPath, state.chartVersion)
