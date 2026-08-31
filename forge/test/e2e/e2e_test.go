@@ -133,6 +133,8 @@ type digitalOceanCPUState struct {
 	storagePV           string
 	agentPoolPVCUID     string
 	initialWorkerPodUID string
+	workspaceAdminKey   string
+	workspaceWorkKey    string
 	diagnostics         forgeDiagnostics
 }
 
@@ -439,7 +441,7 @@ spec:
       serverName: %s-gateway.iterabase-system.svc
       selector: {podSelector: {matchLabels: {app.kubernetes.io/name: inference-gateway}}}
   networkPolicy: {egress: denied}
-  workspaceTools: false
+  workspaceTools: true
 YAML`, repository, tag, state.runID, state.runID, state.runID, state.runID, state.runID, state.runID, state.runID)
 	mustSSHOutput(t, sc, manifest)
 	waitForLocalPathAgentPoolReady(t, sc, 10*time.Minute)

@@ -28,6 +28,35 @@ func TestWorkspaceCapacityGateRevokesOnlyUnspentCredit(t *testing.T) {
 	assert.True(t, granted)
 }
 
+func TestWorkspaceCapacityGateAppliesAcrossPoolsAndReplacement(t *testing.T) {
+	workers := newWorkerPool()
+	first := &workerConn{poolID: "pool-a", workerID: "worker-a"}
+	second := &workerConn{poolID: "pool-b", workerID: "worker-b"}
+	workers.add(first)
+	workers.add(second)
+	first.updateWorkspaceStatus(30, 100, 0.30, false, false)
+	second.updateWorkspaceStatus(30, 100, 0.30, false, false)
+	_, _ = first.grantCreditIfIdle()
+	_, _ = second.grantCreditIfIdle()
+
+	workers.applyWorkspaceStatus(first, 20, 100, 0.20, true, true)
+	assert.False(t, first.idle)
+	assert.False(t, second.idle, "one filesystem observation gates every pool")
+	assert.True(t, second.workspaceGated)
+
+	replacement := &workerConn{poolID: "pool-b", workerID: "worker-b"}
+	workers.add(replacement)
+	workers.applyWorkspaceStatus(replacement, 24, 100, 0.24, true, true)
+	granted, valid := replacement.grantCreditIfIdle()
+	assert.True(t, valid)
+	assert.False(t, granted, "replacement remains gated inside the 20-25 percent band")
+
+	workers.applyWorkspaceStatus(replacement, 25, 100, 0.25, false, false)
+	granted, valid = replacement.grantCreditIfIdle()
+	assert.True(t, valid)
+	assert.True(t, granted, "a fresh Ready after the durable 25 percent reopen restores one credit")
+}
+
 func TestWorkspaceCapacityCrossingDoesNotAbortActiveTurn(t *testing.T) {
 	w := &workerConn{}
 	w.updateWorkspaceStatus(30, 100, 0.30, false, false)

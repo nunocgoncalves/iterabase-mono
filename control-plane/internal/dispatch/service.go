@@ -101,21 +101,25 @@ func NewService(store *Store, cfg Config, log *slog.Logger) *Service {
 // isolated dispatch tests do not need a Prometheus registry.
 func (s *Service) SetMetrics(metrics *cpmetrics.Metrics) { s.metrics = metrics }
 
-// SeedGeneration initializes the in-memory fencing-generation counter from the
-// durable high-water mark in runtime.turn_assignments so a restarted control
-// plane never reuses a prior generation value. The first connection after a
-// restart advertises max+1, strictly greater than any durable prior
-// assignment's gen; combined with the unconditional reconnect fence this
-// guarantees a fenced/terminal prior assignment can never be confused with
-// the new active one (HOR-249 reconnect fencing). Must be called once before
-// serving traffic; idempotent for tests.
+// SeedGeneration initializes the in-memory fencing-generation counter and the
+// shared workspace gate from durable Postgres state before serving traffic.
+// The turn high-water mark prevents generation reuse; the capacity singleton
+// prevents a restart from reopening credit inside the 20-25% hysteresis band.
+// Must be called once before serving traffic; idempotent for tests.
 func (s *Service) SeedGeneration(ctx context.Context) error {
 	max, err := s.store.MaxFencingGeneration(ctx)
 	if err != nil {
 		return fmt.Errorf("seed fencing generation: %w", err)
 	}
+	capacity, err := s.store.LoadWorkspaceCapacityState(ctx)
+	if err != nil {
+		return fmt.Errorf("seed workspace capacity gate: %w", err)
+	}
 	s.gen.Store(max)
-	s.log.Info("seeded fencing generation counter", "from_durable_max", max)
+	s.pool.seedWorkspaceCapacity(capacity.CreditGated)
+	s.observeWorkspaceMetrics(capacity)
+	s.log.Info("seeded fencing generation and workspace capacity gate", "from_durable_max", max,
+		"workspace_observed", capacity.Observed, "workspace_credit_gated", capacity.CreditGated)
 	return nil
 }
 
@@ -289,9 +293,14 @@ func (s *Service) Work(ctx context.Context, st *connect.BidiStream[v1.WorkerMess
 					return connect.NewError(connect.CodeInvalidArgument, err)
 				}
 				ws := m.WorkspaceStatus
-				w.updateWorkspaceStatus(ws.GetFreeBytes(), ws.GetCapacityBytes(), ws.GetFreeRatio(), ws.GetWarning(), ws.GetCreditGated())
-				if ws.GetCreditGated() {
-					s.log.Warn("workspace capacity gate is withholding fresh credit", "pool", w.poolID, "worker", w.workerID, "free_bytes", ws.GetFreeBytes(), "free_ratio", ws.GetFreeRatio())
+				capacity, err := s.store.ObserveWorkspaceCapacity(ctx, ws.GetFreeBytes(), ws.GetCapacityBytes(), ws.GetFreeRatio())
+				if err != nil {
+					return connect.NewError(connect.CodeUnavailable, fmt.Errorf("persist shared workspace capacity gate: %w", err))
+				}
+				s.pool.applyWorkspaceStatus(w, capacity.FreeBytes, capacity.CapacityBytes, capacity.FreeRatio, capacity.Warning, capacity.CreditGated)
+				s.observeWorkspaceMetrics(capacity)
+				if capacity.CreditGated {
+					s.log.Warn("workspace capacity gate is withholding fresh credit", "pool", w.poolID, "worker", w.workerID, "free_bytes", capacity.FreeBytes, "free_ratio", capacity.FreeRatio)
 				}
 			case *v1.WorkerMessage_Heartbeat:
 				// Any message renews the lease; nothing else to do.
@@ -304,6 +313,25 @@ func (s *Service) Work(ctx context.Context, st *connect.BidiStream[v1.WorkerMess
 				// to a UI later; ignored by the dispatch path.
 			}
 		}
+	}
+}
+
+func (s *Service) observeWorkspaceMetrics(state WorkspaceCapacityState) {
+	if s.metrics == nil {
+		return
+	}
+	s.metrics.DispatchWorkspaceFreeBytes.WithLabelValues().Set(float64(state.FreeBytes))
+	s.metrics.DispatchWorkspaceCapacity.WithLabelValues().Set(float64(state.CapacityBytes))
+	s.metrics.DispatchWorkspaceFreeRatio.WithLabelValues().Set(state.FreeRatio)
+	if state.Warning {
+		s.metrics.DispatchWorkspaceWarning.WithLabelValues().Set(1)
+	} else {
+		s.metrics.DispatchWorkspaceWarning.WithLabelValues().Set(0)
+	}
+	if state.CreditGated {
+		s.metrics.DispatchWorkspaceGated.WithLabelValues().Set(1)
+	} else {
+		s.metrics.DispatchWorkspaceGated.WithLabelValues().Set(0)
 	}
 }
 

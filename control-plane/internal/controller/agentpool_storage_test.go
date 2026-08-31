@@ -2,12 +2,15 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -15,6 +18,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/nunocgoncalves/iterabase-mono/control-plane/api/v1alpha1"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/gateway"
 )
 
 func storagePool() *v1alpha1.AgentPool {
@@ -83,6 +87,61 @@ func storageReconciler(t *testing.T, objects ...client.Object) *AgentPoolReconci
 	require.NoError(t, storagev1.AddToScheme(scheme))
 	require.NoError(t, v1alpha1.AddToScheme(scheme))
 	return &AgentPoolReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build(), Scheme: scheme}
+}
+
+type staticWorkspaceCapacityReader struct {
+	status gateway.WorkspaceCapacityStatus
+	err    error
+}
+
+func (r *staticWorkspaceCapacityReader) WorkspaceCapacityStatus(context.Context) (gateway.WorkspaceCapacityStatus, error) {
+	return r.status, r.err
+}
+
+func TestWorkspaceCapacityConditionTransitionsAndSurvivesReplacementBand(t *testing.T) {
+	now := time.Now()
+	reader := &staticWorkspaceCapacityReader{}
+	r := &AgentPoolReconciler{CapacityReader: reader}
+	pool := storagePool()
+
+	reader.status = gateway.WorkspaceCapacityStatus{Observed: true, FreeBytes: 24, CapacityBytes: 100, FreeRatio: 0.24, Warning: true, ObservedAt: &now}
+	notice := r.setWorkspaceCapacityCondition(context.Background(), pool)
+	condition := meta.FindStatusCondition(pool.Status.Conditions, storageConditionWorkspaceCapacityHealthy)
+	require.NotNil(t, condition)
+	assert.Equal(t, metav1.ConditionFalse, condition.Status)
+	assert.Equal(t, storageReasonWorkspaceCapacityWarning, condition.Reason)
+	assert.Contains(t, notice, "credits remain open")
+
+	reader.status = gateway.WorkspaceCapacityStatus{Observed: true, FreeBytes: 20, CapacityBytes: 100, FreeRatio: 0.20, Warning: true, CreditGated: true, ObservedAt: &now}
+	r.setWorkspaceCapacityCondition(context.Background(), pool)
+	condition = meta.FindStatusCondition(pool.Status.Conditions, storageConditionWorkspaceCapacityHealthy)
+	require.NotNil(t, condition)
+	assert.Equal(t, storageReasonWorkspaceCapacityGated, condition.Reason)
+
+	reader.status = gateway.WorkspaceCapacityStatus{Observed: true, FreeBytes: 24, CapacityBytes: 100, FreeRatio: 0.24, Warning: true, CreditGated: true, ObservedAt: &now}
+	r.setWorkspaceCapacityCondition(context.Background(), pool)
+	condition = meta.FindStatusCondition(pool.Status.Conditions, storageConditionWorkspaceCapacityHealthy)
+	require.NotNil(t, condition)
+	assert.Equal(t, storageReasonWorkspaceCapacityGated, condition.Reason, "replacement remains gated inside the hysteresis band")
+
+	reader.status = gateway.WorkspaceCapacityStatus{Observed: true, FreeBytes: 25, CapacityBytes: 100, FreeRatio: 0.25, ObservedAt: &now}
+	assert.Empty(t, r.setWorkspaceCapacityCondition(context.Background(), pool))
+	condition = meta.FindStatusCondition(pool.Status.Conditions, storageConditionWorkspaceCapacityHealthy)
+	require.NotNil(t, condition)
+	assert.Equal(t, metav1.ConditionTrue, condition.Status)
+	assert.Equal(t, storageReasonWorkspaceCapacityHealthy, condition.Reason)
+}
+
+func TestWorkspaceCapacityConditionFailsClosedOnUnavailableObservation(t *testing.T) {
+	reader := &staticWorkspaceCapacityReader{err: errors.New("database unavailable")}
+	r := &AgentPoolReconciler{CapacityReader: reader}
+	pool := storagePool()
+	notice := r.setWorkspaceCapacityCondition(context.Background(), pool)
+	condition := meta.FindStatusCondition(pool.Status.Conditions, storageConditionWorkspaceCapacityHealthy)
+	require.NotNil(t, condition)
+	assert.Equal(t, metav1.ConditionUnknown, condition.Status)
+	assert.Equal(t, storageReasonWorkspaceCapacityUnknown, condition.Reason)
+	assert.Contains(t, notice, "fails closed")
 }
 
 func TestAssessAgentPoolStorageAllowsInitialWaitForFirstConsumer(t *testing.T) {

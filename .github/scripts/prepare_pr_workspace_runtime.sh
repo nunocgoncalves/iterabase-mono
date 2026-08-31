@@ -45,15 +45,16 @@ declare -A image_contexts=(
   [control-plane]="control-plane|control-plane/Dockerfile"
   [control-plane-harness]="control-plane/harness|control-plane/harness/Dockerfile"
   [control-plane-tool-runner]="control-plane/tool-runner|control-plane/tool-runner/Dockerfile"
+  [control-plane-runtime-fixture]="control-plane/test/e2e/fixtures/runtime|control-plane/test/e2e/fixtures/runtime/Dockerfile"
   [inference-gateway]="inference-gateway|inference-gateway/Dockerfile"
 )
-for image in control-plane control-plane-harness control-plane-tool-runner inference-gateway; do
+for image in control-plane control-plane-harness control-plane-tool-runner control-plane-runtime-fixture inference-gateway; do
   IFS='|' read -r context dockerfile <<<"${image_contexts[$image]}"
   docker build -t "iterabase-e2e/$image:$image_tag" -f "$root/$dockerfile" "$root/$context"
   docker save -o "$candidate_dir/$image.tar" "iterabase-e2e/$image:$image_tag"
 done
 
-python3 - "$candidate_dir/checksums.txt" "$platform_archive" "$certificate_archive" "$candidate_dir/control-plane.tar" "$candidate_dir/control-plane-harness.tar" "$candidate_dir/control-plane-tool-runner.tar" "$candidate_dir/inference-gateway.tar" <<'PY'
+python3 - "$candidate_dir/checksums.txt" "$platform_archive" "$certificate_archive" "$candidate_dir/control-plane.tar" "$candidate_dir/control-plane-harness.tar" "$candidate_dir/control-plane-tool-runner.tar" "$candidate_dir/control-plane-runtime-fixture.tar" "$candidate_dir/inference-gateway.tar" <<'PY'
 import hashlib
 import pathlib
 import sys
@@ -77,11 +78,14 @@ PY
   printf 'HARNESS_IMAGE_TAG=%s\n' "$image_tag"
   printf 'TOOL_RUNNER_IMAGE_REPO=iterabase-e2e/control-plane-tool-runner\n'
   printf 'TOOL_RUNNER_IMAGE_TAG=%s\n' "$image_tag"
+  printf 'FORGE_E2E_RUNTIME_IMAGE_REPO=iterabase-e2e/control-plane-runtime-fixture\n'
+  printf 'FORGE_E2E_RUNTIME_IMAGE_TAG=%s\n' "$image_tag"
   printf 'INFERENCE_GATEWAY_IMAGE_REPO=iterabase-e2e/inference-gateway\n'
   printf 'INFERENCE_GATEWAY_IMAGE_TAG=%s\n' "$image_tag"
   printf 'FORGE_E2E_CONTROL_PLANE_IMAGE_ARCHIVE=%s\n' "$candidate_dir/control-plane.tar"
   printf 'FORGE_E2E_HARNESS_IMAGE_ARCHIVE=%s\n' "$candidate_dir/control-plane-harness.tar"
   printf 'FORGE_E2E_TOOL_RUNNER_IMAGE_ARCHIVE=%s\n' "$candidate_dir/control-plane-tool-runner.tar"
+  printf 'FORGE_E2E_RUNTIME_IMAGE_ARCHIVE=%s\n' "$candidate_dir/control-plane-runtime-fixture.tar"
   printf 'FORGE_E2E_INFERENCE_IMAGE_ARCHIVE=%s\n' "$candidate_dir/inference-gateway.tar"
 } >> "$env_output"
 printf 'exact source dedicated-workspace runtime ready: version=%s source=%s\n' "$platform_version" "$source_sha"

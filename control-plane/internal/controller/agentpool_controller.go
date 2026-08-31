@@ -99,6 +99,11 @@ type AgentPoolReconciler struct {
 	// flaky fake). Optional: when nil, gateway materialization is skipped
 	// (e.g. envtest without Postgres).
 	Store PoolMaterializer
+	// CapacityReader projects dispatch's durable installation-wide workspace
+	// hysteresis state into every AgentPool condition. It is separate from the
+	// authorization materializer contract so isolated controller tests may
+	// supply only the capability under test.
+	CapacityReader WorkspaceCapacityReader
 }
 
 // +kubebuilder:rbac:groups=platform.iterabase.com,resources=agentpools,verbs=get;list;watch;create;update;patch;delete
@@ -123,6 +128,12 @@ type AgentPoolReconciler struct {
 type PoolMaterializer interface {
 	MaterializePool(ctx context.Context, key, name, spiffePrefix string, grants []gateway.PoolGrantInput, bindings []gateway.CredentialBindingInput) error
 	SoftDeletePoolByKey(ctx context.Context, key string) error
+}
+
+// WorkspaceCapacityReader is the existing Postgres-backed bridge from
+// dispatch's durable shared-filesystem observation to operator status.
+type WorkspaceCapacityReader interface {
+	WorkspaceCapacityStatus(ctx context.Context) (gateway.WorkspaceCapacityStatus, error)
 }
 
 // Reconcile handles AgentPool create/update/delete events.
@@ -1124,6 +1135,12 @@ func (r *AgentPoolReconciler) patchStatus(ctx context.Context, pool *v1alpha1.Ag
 	// retry and leave the Git->DB bridge unconverged (ARCH-018/REQ-010).
 	if recordObserved {
 		pool.Status.ObservedGeneration = pool.Generation
+	}
+	if capacityNotice := r.setWorkspaceCapacityCondition(ctx, pool); capacityNotice != "" {
+		if message != "" {
+			message += "; "
+		}
+		message += capacityNotice
 	}
 	pool.Status.Message = message
 	return r.Status().Patch(ctx, pool, client.MergeFrom(base))

@@ -963,6 +963,8 @@ class ReleaseContractTests(unittest.TestCase):
             real_machine,
         )
         self.assertIn("prepare_candidate_runtime.sh", real_machine)
+        self.assertIn("Build exact-source deterministic workspace behavior fixture", real_machine)
+        self.assertIn("FORGE_E2E_RUNTIME_IMAGE_ARCHIVE", real_machine)
         self.assertIn("--release-notes /dev/null", candidate)
         self.assertIn("prepare_candidate_runtime.sh", candidate)
         runtime_helper = (

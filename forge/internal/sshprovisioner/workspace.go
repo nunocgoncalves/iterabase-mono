@@ -208,8 +208,36 @@ probe_identity_topology() {
   done < /proc/swaps
 }
 
+probe_active_raw_consumers() {
+  device_number=$(stat -Lc '%%t:%%T' "$device" 2>/dev/null) || fail "cannot determine selected disk device number for the active-open probe"
+  scanned_fds=0
+  for process in /proc/[0-9]*; do
+    test -d "$process/fd" || continue
+    for fd in "$process"/fd/[0-9]*; do
+      test -L "$fd" || continue
+      scanned_fds=$((scanned_fds + 1))
+      test "$scanned_fds" -le 65536 || fail "active-open probe exceeded its bounded 65536-descriptor limit"
+      set +e
+      fd_number=$(stat -Lc '%%t:%%T' "$fd" 2>&1)
+      fd_rc=$?
+      set -e
+      if test "$fd_rc" != 0; then
+        # A process may close a descriptor while /proc is inspected. Ignore only
+        # that proven disappearance; every persistent unreadable descriptor is
+        # uncertain and therefore refuses first format.
+        test ! -L "$fd" || fail "active-open probe could not inspect $fd: $fd_number"
+        continue
+      fi
+      if test "$fd_number" = "$device_number"; then
+        fail "selected disk is held open as a raw block device by process ${process##*/}"
+      fi
+    done
+  done
+}
+
 probe_blank_signatures() {
   probe_identity_topology
+  probe_active_raw_consumers
   mounts=$(findmnt -rn -S "$device" -o TARGET 2>/dev/null || true)
   test -z "$mounts" || fail "selected disk is mounted at $mounts"
   set +e
@@ -294,6 +322,7 @@ else
 fi
 
 probe_identity_topology
+probe_active_raw_consumers
 set +e
 fs_type=$(blkid -p -s TYPE -o value -- "$device" 2>&1)
 fs_rc=$?

@@ -148,7 +148,7 @@ spec:
     - name: iterabase-storage
       rules:
         - alert: IterabaseWorkspaceCapacityWarning
-          expr: min by (namespace,pod) (control_plane_harness_workspace_free_ratio) < 0.25
+          expr: min by (namespace,pod) (control_plane_dispatch_workspace_free_ratio) < 0.25
           for: 5m
           labels: {severity: warning, component: storage}
           annotations:
@@ -157,7 +157,7 @@ spec:
             first_action: "Pause avoidable growth, inspect workspace free bytes and largest eligible session data, then add customer-owned capacity through an explicit replacement/migration plan."
             runbook_url: {{ printf "%s#iterabaseworkspacecapacitywarning" $runbook | quote }}
         - alert: IterabaseWorkspaceCreditGated
-          expr: max by (namespace,pod) (control_plane_harness_workspace_credit_gated) == 1
+          expr: max by (namespace,pod) (control_plane_dispatch_workspace_credit_gated) == 1
           for: 1m
           labels: {severity: critical, component: storage}
           annotations:

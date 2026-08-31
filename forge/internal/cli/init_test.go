@@ -100,11 +100,21 @@ func TestSelectAgentPoolWorkspaceDeviceShowsConsequenceBeforeSelection(t *testin
 func TestSelectAgentPoolWorkspaceFilesystemShowsRecommendationAndOverride(t *testing.T) {
 	device := provisioner.WorkspaceDevice{Path: "/dev/disk/by-id/nvme-workspace", Transport: "nvme"}
 	var out bytes.Buffer
-	selection, err := selectAgentPoolWorkspaceFilesystem(bufio.NewReader(strings.NewReader("ext4\n")), &out, device, config.WorkspaceFilesystemAuto)
+	selection, err := selectAgentPoolWorkspaceFilesystem(bufio.NewReader(strings.NewReader("ext4\n")), &out, device, config.WorkspaceFilesystemAuto, false)
 	require.NoError(t, err)
 	assert.Equal(t, config.WorkspaceFilesystemExt4, selection)
 	assert.Contains(t, out.String(), `transport is "nvme"`)
 	assert.Contains(t, out.String(), "auto recommends and resolves to xfs")
 	assert.Contains(t, out.String(), "Resolved workspace filesystem: ext4")
 	assert.Contains(t, out.String(), "does not add another destructive confirmation")
+}
+
+func TestSelectAgentPoolWorkspaceFilesystemPreservesExplicitSource(t *testing.T) {
+	device := provisioner.WorkspaceDevice{Path: "/dev/disk/by-id/nvme-workspace", Transport: "nvme"}
+	var out bytes.Buffer
+	selection, err := selectAgentPoolWorkspaceFilesystem(bufio.NewReader(strings.NewReader("xfs\n")), &out, device, config.WorkspaceFilesystemExt4, true)
+	require.NoError(t, err)
+	assert.Equal(t, config.WorkspaceFilesystemExt4, selection)
+	assert.Contains(t, out.String(), "Preserving the explicit flag/environment source without an interactive override")
+	assert.NotContains(t, out.String(), "selection=xfs")
 }

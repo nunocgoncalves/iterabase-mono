@@ -251,6 +251,20 @@ type CallerResolution struct {
 	CallerScopeID         string // validated turn_id / run_step_id
 }
 
+// WorkspaceCapacityStatus is the manager-readable projection of dispatch's
+// durable installation-wide workspace capacity gate (HOR-538). It contains no
+// pool/session/customer labels because every AgentPool path shares one
+// Forge-owned filesystem.
+type WorkspaceCapacityStatus struct {
+	Observed      bool
+	FreeBytes     uint64
+	CapacityBytes uint64
+	FreeRatio     float64
+	Warning       bool
+	CreditGated   bool
+	ObservedAt    *time.Time
+}
+
 // Store reads and writes the toolgateway schema via a pgx connection pool.
 type Store struct {
 	pool *pgxpool.Pool
@@ -259,6 +273,26 @@ type Store struct {
 // NewStore wraps a pool for tool-gateway operations.
 func NewStore(pool *pgxpool.Pool) *Store {
 	return &Store{pool: pool}
+}
+
+// WorkspaceCapacityStatus reads the durable singleton that dispatch updates.
+// The AgentPool reconciler projects this state into actionable CR conditions.
+func (s *Store) WorkspaceCapacityStatus(ctx context.Context) (WorkspaceCapacityStatus, error) {
+	var status WorkspaceCapacityStatus
+	var free, capacity int64
+	err := s.pool.QueryRow(ctx, `
+		SELECT observed, free_bytes, capacity_bytes, free_ratio, warning, credit_gated, observed_at
+		FROM runtime.workspace_capacity_state WHERE singleton = true`).Scan(
+		&status.Observed, &free, &capacity, &status.FreeRatio, &status.Warning, &status.CreditGated, &status.ObservedAt)
+	if err != nil {
+		return WorkspaceCapacityStatus{}, fmt.Errorf("read workspace capacity status: %w", err)
+	}
+	if free < 0 || capacity < 0 {
+		return WorkspaceCapacityStatus{}, fmt.Errorf("workspace capacity status contains negative bytes")
+	}
+	status.FreeBytes = uint64(free)
+	status.CapacityBytes = uint64(capacity)
+	return status, nil
 }
 
 // RegisterToolVersion inserts an immutable descriptor on first sight of a

@@ -138,7 +138,7 @@ tests:
   - name: workspace warning uses actual filesystem ratio below 25 percent
     interval: 1m
     input_series:
-      - series: 'control_plane_harness_workspace_free_ratio{namespace="iterabase-system",pod="pool-worker-0"}'
+      - series: 'control_plane_dispatch_workspace_free_ratio{namespace="iterabase-system",pod="dispatch-0"}'
         values: '0.30 0.24x10'
     alert_rule_test:
       - eval_time: 7m
@@ -146,7 +146,7 @@ tests:
         exp_alerts:
           - exp_labels:
               namespace: iterabase-system
-              pod: pool-worker-0
+              pod: dispatch-0
               severity: warning
               component: storage
             exp_annotations:
@@ -158,7 +158,7 @@ tests:
   - name: workspace credit gate reports the hysteretic closed state
     interval: 1m
     input_series:
-      - series: 'control_plane_harness_workspace_credit_gated{namespace="iterabase-system",pod="pool-worker-0"}'
+      - series: 'control_plane_dispatch_workspace_credit_gated{namespace="iterabase-system",pod="dispatch-0"}'
         values: '0 1x5 0x3'
     alert_rule_test:
       - eval_time: 3m
@@ -166,7 +166,7 @@ tests:
         exp_alerts:
           - exp_labels:
               namespace: iterabase-system
-              pod: pool-worker-0
+              pod: dispatch-0
               severity: critical
               component: storage
             exp_annotations:

@@ -42,8 +42,8 @@ grep -Fq 'controller_runtime_reconcile_total{result="error",component="manager"}
   exit 1
 }
 for contract in \
-  'control_plane_harness_workspace_free_ratio) < 0.25' \
-  'control_plane_harness_workspace_credit_gated) == 1' \
+  'control_plane_dispatch_workspace_free_ratio) < 0.25' \
+  'control_plane_dispatch_workspace_credit_gated) == 1' \
   'control_plane_harness_storage_checks_total{result="fail"}'; do
   grep -Fq "$contract" <<<"$base" || {
     echo "ERROR: missing dedicated workspace alert contract: $contract" >&2

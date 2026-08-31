@@ -46,10 +46,10 @@ for title in \
   }
 done
 for query in \
-  'control_plane_harness_workspace_free_bytes' \
-  'control_plane_harness_workspace_free_ratio' \
-  'control_plane_harness_workspace_capacity_warning' \
-  'control_plane_harness_workspace_credit_gated'; do
+  'control_plane_dispatch_workspace_free_bytes' \
+  'control_plane_dispatch_workspace_free_ratio' \
+  'control_plane_dispatch_workspace_capacity_warning' \
+  'control_plane_dispatch_workspace_credit_gated'; do
   grep -Fq "$query" <<<"$rendered" || {
     echo "ERROR: workspace dashboard contract is missing query fragment: $query" >&2
     exit 1

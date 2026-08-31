@@ -23,7 +23,9 @@ const CHILD_SCRIPT = join(dirname(fileURLToPath(import.meta.url)), "child.js");
 export async function runWorker(): Promise<void> {
   const cfg = loadConfig();
   const metrics = new HarnessMetrics();
-  const capacityGate = new WorkspaceCapacityGate();
+  // The gate file lives on the AgentPool's shared PVC so replacement workers
+  // retain 20/25 hysteresis instead of reopening credit inside the band.
+  const capacityGate = new WorkspaceCapacityGate(cfg.sandboxRoot);
   const observeWorkspace = (): WorkspaceCapacity => {
     const observed = checkSandboxStorageHealth(cfg.sandboxRoot, cfg.worker.workerId);
     const capacity = capacityGate.observe(observed.freeBytes, observed.capacityBytes);

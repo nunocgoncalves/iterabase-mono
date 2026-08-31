@@ -146,6 +146,8 @@ class ChangedPathCollectionFixtures(unittest.TestCase):
         for variable in (
             "FORGE_E2E_PLATFORM_CHART_ARCHIVE",
             "FORGE_E2E_SUBSTRATE_CHART_ARCHIVE",
+            "FORGE_E2E_RUNTIME_IMAGE_ARCHIVE",
+            "control-plane-runtime-fixture",
         ):
             self.assertIn(variable, helper)
 

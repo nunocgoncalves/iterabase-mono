@@ -321,12 +321,7 @@ WaitForFirstConsumer Pending state does not deadlock worker creation. Wrong
 class/provisioner/path/access mode, default-class fallback, immutable claim
 mutation, unsafe mount ownership, and actual I/O failure fail closed.
 
-The harness measures available blocks on the actual shared filesystem, exports
-free bytes/ratio and gate state, warns below 25%, withholds fresh dispatch
-credit at or below 20%, and reopens only at or above 25%. Crossing the threshold
-alone does not abort an active turn; after its terminal event is ACKed, the next
-credit remains withheld. Zero space or a real write/fsync/mount failure fences
-through the existing worker-loss path without automatic turn/effect replay.
+The harness measures available blocks on the actual shared filesystem and persists each pool's hysteresis state on its RWO claim. Dispatch serializes one installation-wide Postgres-backed gate across all pool paths, exports the durable free bytes/ratio/warning/gate metrics, and the manager projects it into each AgentPool's actionable `WorkspaceCapacityHealthy` condition. The system warns below 25%, withholds fresh dispatch credit at or below 20%, retains a triggered gate across worker/pool/dispatch replacement, and reopens only at or above 25%. Crossing the threshold alone does not abort an active turn; after its terminal event is ACKed, the next credit remains withheld. Zero space or a real write/fsync/mount failure fences through the existing worker-loss path without automatic turn/effect replay.
 
 `spec.workspaceTools` is the deny-by-default local-tool switch (ARCH-016):
 `false` exposes none; `true` exposes exactly `read`/`write`/`edit`/`bash`.

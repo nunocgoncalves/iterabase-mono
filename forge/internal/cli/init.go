@@ -80,8 +80,10 @@ func runInit(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	flagFilesystem, _ := cmd.Flags().GetString("agentpool-workspace-filesystem")
+	flagFilesystem = strings.TrimSpace(flagFilesystem)
 	envFilesystem := strings.TrimSpace(os.Getenv(agentPoolWorkspaceFilesystemEnv))
-	workspaceFilesystem, err := resolveWorkspaceFilesystemSources(strings.TrimSpace(flagFilesystem), envFilesystem)
+	filesystemSourceExplicit := flagFilesystem != "" || envFilesystem != ""
+	workspaceFilesystem, err := resolveWorkspaceFilesystemSources(flagFilesystem, envFilesystem)
 	if err != nil {
 		return err
 	}
@@ -103,7 +105,7 @@ func runInit(cmd *cobra.Command, _ []string) error {
 		Address: address, SSHUser: sshUser, SSHKeyPath: sshKey,
 		Role: config.RoleControlPlaneWorker, Labels: map[string]string{}, Taints: []config.Taint{},
 	}
-	workspaceDevice, workspaceFilesystem, err = resolveInitWorkspace(in, cmd.ErrOrStderr(), host, nonInteractive, workspaceDevice, workspaceFilesystem)
+	workspaceDevice, workspaceFilesystem, err = resolveInitWorkspace(in, cmd.ErrOrStderr(), host, nonInteractive, workspaceDevice, workspaceFilesystem, filesystemSourceExplicit)
 	if err != nil {
 		return err
 	}
@@ -147,7 +149,7 @@ func runInit(cmd *cobra.Command, _ []string) error {
 	return nil
 }
 
-func resolveInitWorkspace(in *bufio.Reader, out io.Writer, host config.Host, nonInteractive bool, workspaceDevice, workspaceFilesystem string) (string, string, error) {
+func resolveInitWorkspace(in *bufio.Reader, out io.Writer, host config.Host, nonInteractive bool, workspaceDevice, workspaceFilesystem string, filesystemSourceExplicit bool) (string, string, error) {
 	if workspaceDevice == "" && nonInteractive {
 		return "", "", fmt.Errorf("--agentpool-workspace-device or %s is required in non-interactive mode", agentPoolWorkspaceDeviceEnv)
 	}
@@ -176,7 +178,7 @@ func resolveInitWorkspace(in *bufio.Reader, out io.Writer, host config.Host, non
 			return "", "", fmt.Errorf("selected AgentPool workspace device %q is not a discovered stable non-removable whole disk", workspaceDevice)
 		}
 	}
-	workspaceFilesystem, err = selectAgentPoolWorkspaceFilesystem(in, out, selectedDevice, workspaceFilesystem)
+	workspaceFilesystem, err = selectAgentPoolWorkspaceFilesystem(in, out, selectedDevice, workspaceFilesystem, filesystemSourceExplicit)
 	if err != nil {
 		return "", "", err
 	}
@@ -230,10 +232,18 @@ func selectAgentPoolWorkspaceDevice(in *bufio.Reader, out io.Writer, devices []p
 	return devices[index-1], nil
 }
 
-func selectAgentPoolWorkspaceFilesystem(in *bufio.Reader, out io.Writer, device provisioner.WorkspaceDevice, selection string) (string, error) {
+func selectAgentPoolWorkspaceFilesystem(in *bufio.Reader, out io.Writer, device provisioner.WorkspaceDevice, selection string, explicitSource bool) (string, error) {
 	transport := displayWorkspaceTransport(device.Transport)
 	recommended, _ := config.ResolveWorkspaceFilesystem(config.WorkspaceFilesystemAuto, device.Transport)
-	fmt.Fprintf(out, "Selected disk transport is %q; auto recommends and resolves to %s. Explicit ext4 or xfs overrides are supported.\n", transport, recommended)
+	fmt.Fprintf(out, "Selected disk transport is %q; auto recommends and resolves to %s. Explicit ext4 or xfs overrides are supported only when no flag/environment filesystem source was supplied.\n", transport, recommended)
+	if explicitSource {
+		resolved, err := config.ResolveWorkspaceFilesystem(selection, device.Transport)
+		if err != nil {
+			return "", err
+		}
+		fmt.Fprintf(out, "Resolved workspace filesystem: %s (selection=%s, transport=%s). Preserving the explicit flag/environment source without an interactive override.\n", resolved, selection, transport)
+		return selection, nil
+	}
 	choice := prompt(in, "Workspace filesystem (auto|ext4|xfs)", selection)
 	resolved, err := config.ResolveWorkspaceFilesystem(choice, device.Transport)
 	if err != nil {

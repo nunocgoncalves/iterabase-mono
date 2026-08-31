@@ -380,10 +380,10 @@ func assertGrafanaDataStoragePanels(t *testing.T, client *http.Client, baseURL, 
 		t.Fatal(err)
 	}
 	want := map[string]string{
-		"Workspace free bytes":        "control_plane_harness_workspace_free_bytes",
-		"Workspace free ratio":        "control_plane_harness_workspace_free_ratio",
-		"Workspace capacity warnings": "control_plane_harness_workspace_capacity_warning",
-		"Workspace credit gates":      "control_plane_harness_workspace_credit_gated",
+		"Workspace free bytes":        "control_plane_dispatch_workspace_free_bytes",
+		"Workspace free ratio":        "control_plane_dispatch_workspace_free_ratio",
+		"Workspace capacity warnings": "control_plane_dispatch_workspace_capacity_warning",
+		"Workspace credit gates":      "control_plane_dispatch_workspace_credit_gated",
 	}
 	for _, panel := range payload.Dashboard.Panels {
 		fragment, ok := want[panel.Title]

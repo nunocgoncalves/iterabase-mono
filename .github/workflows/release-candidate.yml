@@ -648,6 +648,21 @@ jobs:
             chmod +x candidate-bin/forge
             printf 'FORGE_E2E_BINARY=%s\n' "$GITHUB_WORKSPACE/candidate-bin/forge" >> "$GITHUB_ENV"
           fi
+      - name: Build exact-source deterministic workspace behavior fixture
+        if: matrix.target == 'test-e2e-workspace'
+        run: |
+          fixture_tag="workspace-${{ inputs.master_sha }}"
+          fixture_archive="${RUNNER_TEMP}/control-plane-runtime-fixture.tar"
+          docker build \
+            -t "iterabase-e2e/control-plane-runtime-fixture:${fixture_tag}" \
+            -f control-plane/test/e2e/fixtures/runtime/Dockerfile \
+            control-plane/test/e2e/fixtures/runtime
+          docker save -o "$fixture_archive" "iterabase-e2e/control-plane-runtime-fixture:${fixture_tag}"
+          {
+            printf 'FORGE_E2E_RUNTIME_IMAGE_REPO=iterabase-e2e/control-plane-runtime-fixture\n'
+            printf 'FORGE_E2E_RUNTIME_IMAGE_TAG=%s\n' "$fixture_tag"
+            printf 'FORGE_E2E_RUNTIME_IMAGE_ARCHIVE=%s\n' "$fixture_archive"
+          } >> "$GITHUB_ENV"
       - name: Require mandatory capacity credentials
         env:
           DIGITALOCEAN_TOKEN: ${{ secrets.DIGITALOCEAN_TOKEN }}
