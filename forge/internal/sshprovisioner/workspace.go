@@ -217,15 +217,22 @@ probe_active_raw_consumers() {
       test -L "$fd" || continue
       scanned_fds=$((scanned_fds + 1))
       test "$scanned_fds" -le 65536 || fail "active-open probe exceeded its bounded 65536-descriptor limit"
-      set +e
-      fd_number=$(stat -Lc '%%t:%%T' "$fd" 2>&1)
-      fd_rc=$?
-      set -e
+      fd_rc=1
+      fd_number=
+      for fd_attempt in 1 2 3; do
+        set +e
+        fd_number=$(stat -Lc '%%t:%%T' "$fd" 2>&1)
+        fd_rc=$?
+        set -e
+        test "$fd_rc" = 0 && break
+        test -L "$fd" || break
+      done
       if test "$fd_rc" != 0; then
-        # A process may close a descriptor while /proc is inspected. Ignore only
-        # that proven disappearance; every persistent unreadable descriptor is
-        # uncertain and therefore refuses first format.
-        test ! -L "$fd" || fail "active-open probe could not inspect $fd: $fd_number"
+        # A process may close and quickly reuse one descriptor number while
+        # /proc is inspected. Retry that exact path three times, then ignore
+        # only a proven disappearance; every persistently unreadable descriptor
+        # remains uncertain and therefore refuses first format.
+        test ! -L "$fd" || fail "active-open probe could not inspect $fd after 3 attempts: $fd_number"
         continue
       fi
       if test "$fd_number" = "$device_number"; then
