@@ -277,19 +277,7 @@ func configureKindWorkspaceStorage(t *testing.T, state *deployedState) {
 	// fixture then gives the dedicated class a real isolated path. Forge E2E owns
 	// production per-class separation against K3s's bundled provisioner.
 	configJSON := `{"nodePathMap":[{"node":"DEFAULT_PATH_FOR_NON_LISTED_NODES","paths":["/var/lib/iterabase/agentpool-workspaces"]}]}`
-	setupScript := `#!/bin/sh
-set -eu
-mkdir -m 0777 -p "$VOL_DIR"
-case "$VOL_DIR" in
-  /var/lib/iterabase/agentpool-workspaces/*)
-    parent=${VOL_DIR%/*}
-    test "$parent" = /var/lib/iterabase/agentpool-workspaces
-    chmod 0711 "$parent"
-    ;;
-  *) chmod 0701 "$VOL_DIR/.." ;;
-esac
-`
-	if output, err := state.client.Kubectl(state.ctx, 30*time.Second, "patch", "configmap/local-path-config", "-n", "local-path-storage", "--type=merge", "-p", fmt.Sprintf(`{"data":{"config.json":%q,"setup":%q}}`, configJSON, setupScript)); err != nil {
+	if output, err := state.client.Kubectl(state.ctx, 30*time.Second, "patch", "configmap/local-path-config", "-n", "local-path-storage", "--type=merge", "-p", fmt.Sprintf(`{"data":{"config.json":%q}}`, configJSON)); err != nil {
 		t.Fatalf("configure Kind local-path class isolation: %v\n%s", err, output)
 	}
 	state.applyYAML(t, "agentpool-storageclass.yaml", `apiVersion: storage.k8s.io/v1
