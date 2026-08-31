@@ -1504,6 +1504,7 @@ func TestAgentPoolLocalPathSetupPreservesDedicatedMountMode(t *testing.T) {
 	assert.Contains(t, script, `parent=${VOL_DIR%/*}`)
 	assert.Contains(t, script, `chmod 0711 "$parent"`)
 	assert.Contains(t, script, `*) chmod 0701 "$VOL_DIR/.."`)
+	assert.NotContains(t, script, "chown", "the pinned helper image intentionally provides only the default minimal toolset")
 }
 
 func TestParseAgentPoolWorkspaceResultIncludesTransportAndFilesystem(t *testing.T) {
