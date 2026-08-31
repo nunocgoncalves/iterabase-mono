@@ -284,7 +284,6 @@ case "$VOL_DIR" in
   /var/lib/iterabase/agentpool-workspaces/*)
     parent=${VOL_DIR%/*}
     test "$parent" = /var/lib/iterabase/agentpool-workspaces
-    chown 0:0 "$parent"
     chmod 0711 "$parent"
     ;;
   *) chmod 0701 "$VOL_DIR/.." ;;

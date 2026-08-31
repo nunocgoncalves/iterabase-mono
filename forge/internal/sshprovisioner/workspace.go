@@ -443,7 +443,6 @@ case "$VOL_DIR" in
     test "${VOL_DIR%%/*}" != "$VOL_DIR"
     parent=${VOL_DIR%%/*}
     test "$parent" = %s
-    chown 0:0 "$parent"
     chmod 0711 "$parent"
     ;;
   *) chmod 0701 "$VOL_DIR/.." ;;
