@@ -1010,6 +1010,43 @@ func TestDeployer_Apply_HelmBootstrapFailuresStopBeforeChart(t *testing.T) {
 	}
 }
 
+func TestEnsureHelmRetriesRecognizedInstallerTransportFailure(t *testing.T) {
+	const installerPath = "/tmp/forge-helm-installer.test"
+	originalInterval := helmInstallerRetryInterval
+	helmInstallerRetryInterval = time.Millisecond
+	defer func() { helmInstallerRetryInterval = originalInterval }()
+
+	installed := false
+	installerCalls := 0
+	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
+		switch {
+		case cmd == helmVerifyCommand:
+			if installed {
+				return "v4.0.0\n", 0
+			}
+			return "", 1
+		case cmd == helmInstallerTempCmd:
+			return installerPath + "\n", 0
+		case strings.HasPrefix(cmd, "curl -fsSL"), cmd == "test -s "+shellQuote(installerPath), cmd == "rm -f "+shellQuote(installerPath):
+			return "", 0
+		case cmd == "sudo bash "+shellQuote(installerPath):
+			installerCalls++
+			if installerCalls == 1 {
+				return "Failed to install helm\n", 1
+			}
+			installed = true
+			return "", 0
+		default:
+			return "", 1
+		}
+	})
+	defer cleanup()
+	p := newProvisioner(t, addr, cfg)
+	defer p.Close()
+	require.NoError(t, p.ensureHelm(context.Background()))
+	assert.Equal(t, 2, installerCalls)
+}
+
 func TestDeployer_Apply_EnsuresHelm(t *testing.T) {
 	const installerPath = "/tmp/forge-helm-installer.test"
 	var commands []string
@@ -1051,7 +1088,7 @@ func TestDeployer_Apply_EnsuresHelm(t *testing.T) {
 	require.Len(t, commands, 10)
 	assert.Equal(t, helmVerifyCommand, commands[0])
 	assert.Equal(t, helmInstallerTempCmd, commands[1])
-	assert.Contains(t, commands[2], "curl -fsSL -o '"+installerPath+"'")
+	assert.Contains(t, commands[2], "curl -fsSL --retry 4 --retry-delay 2 --retry-all-errors --connect-timeout 10 -o '"+installerPath+"'")
 	assert.Contains(t, commands[2], shellQuote(helmInstallScript))
 	assert.NotContains(t, commands[2], "|")
 	assert.Equal(t, "test -s "+shellQuote(installerPath), commands[3])
