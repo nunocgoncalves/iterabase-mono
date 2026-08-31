@@ -946,7 +946,7 @@ expectEACCES("/etc/harness/tls/tls.key", "supervisor tls.key");
 console.log("child-isolation=pass sibling-eacces=pass tls-key-eacces=pass");
 NODE
 printf %s > marker.txt
-test "$(sha256sum marker.txt | cut -d" " -f1)" = %s
+test "$(/usr/bin/sha256sum marker.txt | /usr/bin/cut -d" " -f1)" = %s
 printf ' workspace-marker=%s'`, marker, workspaceMarkerDigest(marker), workspaceMarkerDigest(marker))
 	return "E2E_MODE:workspace-barrier E2E_BASH:" + base64.StdEncoding.EncodeToString([]byte(command))
 }
@@ -954,7 +954,7 @@ printf ' workspace-marker=%s'`, marker, workspaceMarkerDigest(marker), workspace
 func workspaceCapacityPrompt() string {
 	command := fmt.Sprintf(`set -eu
 printf capacity-active > capacity-marker.txt
-test "$(sha256sum capacity-marker.txt | cut -d" " -f1)" = %s
+test "$(/usr/bin/sha256sum capacity-marker.txt | /usr/bin/cut -d" " -f1)" = %s
 printf 'capacity-marker=%s'`, workspaceMarkerDigest("capacity-active"), workspaceMarkerDigest("capacity-active"))
 	return "E2E_MODE:capacity-active E2E_BASH:" + base64.StdEncoding.EncodeToString([]byte(command))
 }
@@ -966,12 +966,12 @@ cd "$workspace"
 if test ! -e consequence.count; then
   printf once > consequence.count
   printf recovery-marker > recovery-marker.txt
-  test "$(sha256sum recovery-marker.txt | cut -d" " -f1)" = %[1]s
+  test "$(/usr/bin/sha256sum recovery-marker.txt | /usr/bin/cut -d" " -f1)" = %[1]s
   printf 'recovery-initial=%[1]s'
 else
-  test "$(cat consequence.count)" = once
-  test "$(cat recovery-marker.txt)" = recovery-marker
-  test "$(sha256sum recovery-marker.txt | cut -d" " -f1)" = %[1]s
+  test "$(/usr/bin/cat consequence.count)" = once
+  test "$(/usr/bin/cat recovery-marker.txt)" = recovery-marker
+  test "$(/usr/bin/sha256sum recovery-marker.txt | /usr/bin/cut -d" " -f1)" = %[1]s
   test ! -e resume-proof.txt
   printf resumed > resume-proof.txt
   printf 'recovery-resume=%[1]s'
