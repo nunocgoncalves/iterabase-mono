@@ -49,14 +49,13 @@ the interactive list, `--agentpool-workspace-device`, or
 `spec.agentPoolWorkspace.filesystem`, `--agentpool-workspace-filesystem`, and
 `FORGE_AGENTPOOL_WORKSPACE_FILESYSTEM` support `auto|ext4|xfs`. Auto resolves
 only reliably detected NVMe to XFS and uses ext4 for SATA, unknown, and virtual
-transports. Interactive init
-shows transport plus recommended/resolved type and supports explicit overrides.
+transports. Interactive init shows transport plus recommended/resolved type and supports an override only when no explicit flag/environment filesystem source was supplied; a supplied source is preserved rather than silently reprompted.
 The disk selection is the sole authorization for Forge's first format;
 filesystem choice is not a second destructive confirmation.
 
 Before any K3s/chart mutation, apply rejects root/system, removable, volatile,
-partitioned, mounted, held, in-use, recognized-signature, missing, ambiguous, or
-identity-drifted devices. It repeats bounded topology/signature probes
+partitioned, mounted, holder-backed, process-held raw/in-use,
+recognized-signature, missing, ambiguous, or identity-drifted devices. It repeats bounded topology/signature/active-open probes
 immediately before format; it does not scan the full device or accept a second
 confirmation, wipe/adopt switch, or root fallback. Forge installs/checks the
 required XFS tooling. A fsynced root-owned receipt makes ext4/XFS

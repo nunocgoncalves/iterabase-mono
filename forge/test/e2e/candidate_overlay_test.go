@@ -128,7 +128,7 @@ func candidateOverlayValues(t *testing.T) string {
 	// Forge reconciles the fixed dedicated local-path substrate before Helm.
 	var values strings.Builder
 	values.WriteString("\n# Forge real-machine fixture values.\n")
-	values.WriteString("control-plane:\n  dispatch:\n    enabled: true\n    defaultModel:\n      id: storage-readiness-fixture\n      api: openai-completions\n")
+	values.WriteString("control-plane:\n  dispatch:\n    enabled: true\n    defaultModel:\n      id: forge-workspace-model\n      api: openai-completions\n")
 	if controlPlane != "" {
 		values.WriteString("  image:\n")
 		values.WriteString(controlPlane)
@@ -163,10 +163,10 @@ func TestCandidateOverlayValues(t *testing.T) {
 		t.Fatalf("candidate plan must retain exact public Flux source: %+v", plan)
 	}
 	for expected := range map[string]struct{}{
-		"control-plane:":            {},
-		"dispatch:":                 {},
-		"enabled: true":             {},
-		"storage-readiness-fixture": {},
+		"control-plane:":        {},
+		"dispatch:":             {},
+		"enabled: true":         {},
+		"forge-workspace-model": {},
 		"repository: \"ghcr.io/example/control-plane\"": {},
 		"tag: \"candidate-run@" + digest + "\"":         {},
 	} {
@@ -185,7 +185,7 @@ func TestCandidateOverlayValuesContainNoStorageBackendSelection(t *testing.T) {
 	}
 }
 
-func TestCandidateOverlayValuesEnableOnlySyntheticStorageReadinessDispatch(t *testing.T) {
+func TestCandidateOverlayValuesEnableDispatchForRealWorkspaceBehavior(t *testing.T) {
 	for _, fixture := range []struct {
 		name             string
 		mode             string
@@ -203,8 +203,8 @@ func TestCandidateOverlayValuesEnableOnlySyntheticStorageReadinessDispatch(t *te
 			t.Setenv(inferenceGatewayDigestEnv, "")
 
 			values := candidateOverlayValues(t)
-			if !strings.Contains(values, "control-plane:\n  dispatch:\n    enabled: true\n    defaultModel:\n      id: storage-readiness-fixture") {
-				t.Fatalf("%s machine fixture must use only the synthetic storage-readiness dispatch permission:\n%s", fixture.name, values)
+			if !strings.Contains(values, "control-plane:\n  dispatch:\n    enabled: true\n    defaultModel:\n      id: forge-workspace-model") {
+				t.Fatalf("%s machine fixture must enable dispatch for the exact-candidate real-workspace scenario:\n%s", fixture.name, values)
 			}
 		})
 	}

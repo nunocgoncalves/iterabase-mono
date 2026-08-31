@@ -66,6 +66,42 @@ func requireLen1[T any](s []T) error {
 	return nil
 }
 
+func TestStore_WorkspaceCapacityHysteresisIsDurable(t *testing.T) {
+	store, _, _ := newTestStore(t)
+	ctx := context.Background()
+
+	initial, err := store.LoadWorkspaceCapacityState(ctx)
+	require.NoError(t, err)
+	assert.False(t, initial.Observed)
+	assert.True(t, initial.CreditGated, "missing history starts fail-closed")
+
+	opened, err := store.ObserveWorkspaceCapacity(ctx, 30, 100, 0.30)
+	require.NoError(t, err)
+	assert.False(t, opened.Warning)
+	assert.False(t, opened.CreditGated)
+
+	warning, err := store.ObserveWorkspaceCapacity(ctx, 24, 100, 0.24)
+	require.NoError(t, err)
+	assert.True(t, warning.Warning)
+	assert.False(t, warning.CreditGated, "warning alone does not close fresh credit")
+
+	gated, err := store.ObserveWorkspaceCapacity(ctx, 20, 100, 0.20)
+	require.NoError(t, err)
+	assert.True(t, gated.CreditGated)
+
+	replacement, err := store.ObserveWorkspaceCapacity(ctx, 24, 100, 0.24)
+	require.NoError(t, err)
+	assert.True(t, replacement.CreditGated, "replacement observations retain the durable gate in-band")
+
+	reloaded, err := store.LoadWorkspaceCapacityState(ctx)
+	require.NoError(t, err)
+	assert.True(t, reloaded.CreditGated, "dispatch restart restores the gate")
+
+	reopened, err := store.ObserveWorkspaceCapacity(ctx, 25, 100, 0.25)
+	require.NoError(t, err)
+	assert.False(t, reopened.CreditGated)
+}
+
 func TestStore_AssignRunToPoolAndResolve(t *testing.T) {
 	store, rt, pool := newTestStore(t)
 	ctx := context.Background()

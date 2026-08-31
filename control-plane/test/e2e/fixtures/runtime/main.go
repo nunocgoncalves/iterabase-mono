@@ -9,15 +9,22 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
 
 var (
-	requests  atomic.Int64
-	cancelled atomic.Int64
-	uuidRE    = regexp.MustCompile(`[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`)
-	bashRE    = regexp.MustCompile(`E2E_BASH:([A-Za-z0-9+/=]+)`)
+	requests         atomic.Int64
+	cancelled        atomic.Int64
+	barrierArrivals  atomic.Int64
+	capacityWaiting  atomic.Int64
+	workspaceBarrier = make(chan struct{})
+	barrierOnce      sync.Once
+	capacityRelease  = make(chan struct{})
+	capacityOnce     sync.Once
+	uuidRE           = regexp.MustCompile(`[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`)
+	bashRE           = regexp.MustCompile(`E2E_BASH:([A-Za-z0-9+/=]+)`)
 )
 
 type completionRequest struct {
@@ -30,6 +37,10 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 	mux.HandleFunc("/stats", stats)
+	mux.HandleFunc("/release/capacity", func(w http.ResponseWriter, _ *http.Request) {
+		capacityOnce.Do(func() { close(capacityRelease) })
+		w.WriteHeader(http.StatusNoContent)
+	})
 	mux.HandleFunc("/v1/chat/completions", completions)
 	server := &http.Server{Addr: ":8080", Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	log.Printf("deterministic E2E model listening on %s", server.Addr)
@@ -40,7 +51,10 @@ func main() {
 
 func stats(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]int64{"requests": requests.Load(), "cancelled": cancelled.Load()})
+	_ = json.NewEncoder(w).Encode(map[string]int64{
+		"requests": requests.Load(), "cancelled": cancelled.Load(),
+		"barrier_arrivals": barrierArrivals.Load(), "capacity_waiting": capacityWaiting.Load(),
+	})
 }
 
 func completions(w http.ResponseWriter, r *http.Request) {
@@ -52,13 +66,8 @@ func completions(w http.ResponseWriter, r *http.Request) {
 	}
 	transcriptBytes, _ := json.Marshal(input.Messages)
 	transcript := string(transcriptBytes)
-	if strings.Contains(transcript, "E2E_SLOW") {
-		select {
-		case <-r.Context().Done():
-			cancelled.Add(1)
-			return
-		case <-time.After(30 * time.Second):
-		}
+	if !waitForFixtureBoundary(w, r, transcript) {
+		return
 	}
 
 	choice := nextChoice(transcript)
@@ -86,11 +95,58 @@ func completions(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func nextChoice(transcript string) map[string]any {
-	currentTurn := transcript
-	if index := strings.LastIndex(transcript, "E2E_MODE:"); index >= 0 {
-		currentTurn = transcript[index:]
+func waitForFixtureBoundary(w http.ResponseWriter, r *http.Request, transcript string) bool {
+	if strings.Contains(transcript, "E2E_SLOW") {
+		select {
+		case <-r.Context().Done():
+			cancelled.Add(1)
+			return false
+		case <-time.After(30 * time.Second):
+		}
 	}
+	currentTurn := currentTurnTranscript(transcript)
+	if strings.Contains(currentTurn, `"role":"tool"`) {
+		return true
+	}
+	if strings.Contains(currentTurn, "E2E_MODE:workspace-barrier") {
+		if barrierArrivals.Add(1) >= 2 {
+			barrierOnce.Do(func() { close(workspaceBarrier) })
+		}
+		select {
+		case <-workspaceBarrier:
+		case <-r.Context().Done():
+			cancelled.Add(1)
+			return false
+		case <-time.After(30 * time.Second):
+			http.Error(w, "workspace concurrency barrier timeout", http.StatusGatewayTimeout)
+			return false
+		}
+	}
+	if strings.Contains(currentTurn, "E2E_MODE:capacity-active") {
+		capacityWaiting.Add(1)
+		defer capacityWaiting.Add(-1)
+		select {
+		case <-capacityRelease:
+		case <-r.Context().Done():
+			cancelled.Add(1)
+			return false
+		case <-time.After(2 * time.Minute):
+			http.Error(w, "capacity release timeout", http.StatusGatewayTimeout)
+			return false
+		}
+	}
+	return true
+}
+
+func currentTurnTranscript(transcript string) string {
+	if index := strings.LastIndex(transcript, "E2E_MODE:"); index >= 0 {
+		return transcript[index:]
+	}
+	return transcript
+}
+
+func nextChoice(transcript string) map[string]any {
+	currentTurn := currentTurnTranscript(transcript)
 	if strings.Contains(currentTurn, "Workflow step completion recorded") {
 		return textChoice("Deterministic workflow step complete.")
 	}
@@ -136,7 +192,9 @@ func initialToolChoice(currentTurn string) map[string]any {
 		return toolChoice("fixture-write-unknown", "platform.fixture_write", `{"target":"ambiguous-record","mode":"crash"}`)
 	case strings.Contains(currentTurn, "E2E_MODE:idempotent-race"):
 		return duplicateToolChoice("fixture-upsert", "platform.fixture_upsert", `{"record":"same-logical-write"}`)
-	case strings.Contains(currentTurn, "E2E_MODE:isolation"):
+	case strings.Contains(currentTurn, "E2E_MODE:isolation"),
+		strings.Contains(currentTurn, "E2E_MODE:workspace-barrier"),
+		strings.Contains(currentTurn, "E2E_MODE:capacity-active"):
 		match := bashRE.FindStringSubmatch(currentTurn)
 		command := "printf isolation-default"
 		if len(match) == 2 {

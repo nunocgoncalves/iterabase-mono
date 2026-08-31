@@ -199,7 +199,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "min by (pod) (control_plane_harness_workspace_free_bytes{namespace=~\"$namespace\"})",
+          "expr": "min by (pod) (control_plane_dispatch_workspace_free_bytes{namespace=~\"$namespace\"})",
           "legendFormat": "{{component}} {{model}} {{route}} {{result}} {{pod}}",
           "range": false,
           "instant": true
@@ -239,7 +239,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "min by (pod) (control_plane_harness_workspace_free_ratio{namespace=~\"$namespace\"})",
+          "expr": "min by (pod) (control_plane_dispatch_workspace_free_ratio{namespace=~\"$namespace\"})",
           "legendFormat": "{{component}} {{model}} {{route}} {{result}} {{pod}}",
           "range": false,
           "instant": true
@@ -279,7 +279,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(control_plane_harness_workspace_capacity_warning{namespace=~\"$namespace\"})",
+          "expr": "sum(control_plane_dispatch_workspace_capacity_warning{namespace=~\"$namespace\"})",
           "legendFormat": "{{component}} {{model}} {{route}} {{result}} {{pod}}",
           "range": false,
           "instant": true
@@ -319,7 +319,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(control_plane_harness_workspace_credit_gated{namespace=~\"$namespace\"})",
+          "expr": "sum(control_plane_dispatch_workspace_credit_gated{namespace=~\"$namespace\"})",
           "legendFormat": "{{component}} {{model}} {{route}} {{result}} {{pod}}",
           "range": false,
           "instant": true

@@ -101,9 +101,9 @@ func runServe(ctx context.Context, cfg *config.Config, logger *slog.Logger) erro
 	}, logger)
 	svc.SetMetrics(m)
 
-	// Seed the in-memory fencing-generation counter from the durable
-	// high-water mark so a restarted control plane never reuses a prior
-	// generation value (HOR-249 reconnect fencing).
+	// Seed the fencing-generation high-water mark and the durable shared
+	// workspace-capacity gate before accepting workers. A restart must reuse
+	// neither a fenced generation nor an open default inside the 20-25% band.
 	if err := svc.SeedGeneration(ctx); err != nil {
 		return fmt.Errorf("seeding fencing generation: %w", err)
 	}

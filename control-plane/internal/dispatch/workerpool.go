@@ -162,15 +162,21 @@ func (w *workerConn) grantCreditIfIdle() (granted, valid bool) {
 // updateWorkspaceStatus stores one bounded actual-filesystem observation and
 // revokes an unspent credit while gated. It never changes an active assignment.
 func (w *workerConn) updateWorkspaceStatus(free, capacity uint64, ratio float64, warning, gated bool) {
+	w.applyWorkspaceStatus(free, capacity, ratio, warning, gated, true)
+}
+
+func (w *workerConn) applyWorkspaceStatus(free, capacity uint64, ratio float64, warning, gated, observedByWorker bool) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	w.workspaceObserved = true
+	w.workspaceObserved = w.workspaceObserved || observedByWorker
 	w.workspaceFree = free
 	w.workspaceCapacity = capacity
 	w.workspaceRatio = ratio
 	w.workspaceWarning = warning
 	w.workspaceGated = gated
-	w.lastSeen = time.Now()
+	if observedByWorker {
+		w.lastSeen = time.Now()
+	}
 	if gated && w.activeTurn == "" {
 		w.idle = false
 	}
@@ -179,13 +185,38 @@ func (w *workerConn) updateWorkspaceStatus(free, capacity uint64, ratio float64,
 // workerPool tracks live worker connections keyed by (pool, worker). At most
 // one conn per key; a reconnect fences the prior conn (returned by add).
 type workerPool struct {
-	mu    sync.Mutex
-	conns map[string]*workerConn // key = poolID + "/" + workerID
+	mu             sync.Mutex
+	conns          map[string]*workerConn // key = poolID + "/" + workerID
+	workspaceGated bool                   // durable installation-wide gate restored by Service.SeedGeneration
 }
 
-func newWorkerPool() *workerPool { return &workerPool{conns: make(map[string]*workerConn)} }
+// Start gated until the durable singleton is loaded. This fail-closed default
+// prevents an unseeded/restarted process from granting credit in the 20-25%
+// hysteresis band.
+func newWorkerPool() *workerPool {
+	return &workerPool{conns: make(map[string]*workerConn), workspaceGated: true}
+}
 
 func workerKey(poolID, workerID string) string { return poolID + "/" + workerID }
+
+func (p *workerPool) seedWorkspaceCapacity(gated bool) {
+	p.mu.Lock()
+	p.workspaceGated = gated
+	p.mu.Unlock()
+}
+
+// applyWorkspaceStatus publishes the durable global decision to every live
+// connection because every AgentPool path is on the same Forge-owned
+// filesystem. A low observation from one pool revokes all unspent credits;
+// active assignments remain untouched.
+func (p *workerPool) applyWorkspaceStatus(source *workerConn, free, capacity uint64, ratio float64, warning, gated bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.workspaceGated = gated
+	for _, w := range p.conns {
+		w.applyWorkspaceStatus(free, capacity, ratio, warning, gated, w == source)
+	}
+}
 
 // add registers a new connection. If a prior connection exists for the same
 // (pool, worker), it is returned for fencing (caller closes it + fences its
@@ -195,6 +226,7 @@ func (p *workerPool) add(w *workerConn) *workerConn {
 	defer p.mu.Unlock()
 	key := workerKey(w.poolID, w.workerID)
 	old := p.conns[key]
+	w.workspaceGated = p.workspaceGated
 	p.conns[key] = w
 	return old
 }

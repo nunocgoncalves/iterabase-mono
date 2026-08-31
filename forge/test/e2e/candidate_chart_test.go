@@ -18,13 +18,30 @@ const (
 // bytes without publishing a persistent candidate package.
 func prepareCandidateImages(t *testing.T, ip, keyPath string) {
 	t.Helper()
-	archives := []string{
+	productArchives := []string{
 		os.Getenv("FORGE_E2E_CONTROL_PLANE_IMAGE_ARCHIVE"),
 		os.Getenv("FORGE_E2E_HARNESS_IMAGE_ARCHIVE"),
 		os.Getenv("FORGE_E2E_TOOL_RUNNER_IMAGE_ARCHIVE"),
 		os.Getenv("FORGE_E2E_INFERENCE_IMAGE_ARCHIVE"),
 	}
-	if archives[0] == "" && archives[1] == "" && archives[2] == "" && archives[3] == "" {
+	fixtureArchive := os.Getenv("FORGE_E2E_RUNTIME_IMAGE_ARCHIVE")
+	archives := make([]string, 0, len(productArchives)+1)
+	productArchiveCount := 0
+	for _, archive := range productArchives {
+		if archive != "" {
+			productArchiveCount++
+		}
+	}
+	if productArchiveCount != 0 && productArchiveCount != len(productArchives) {
+		t.Fatal("exact source workspace candidate requires all four local product image archives")
+	}
+	if productArchiveCount == len(productArchives) {
+		archives = append(archives, productArchives...)
+	}
+	if fixtureArchive != "" {
+		archives = append(archives, fixtureArchive)
+	}
+	if len(archives) == 0 {
 		return
 	}
 	client, err := sshDial(ip, keyPath)
@@ -33,9 +50,6 @@ func prepareCandidateImages(t *testing.T, ip, keyPath string) {
 	}
 	defer client.Close()
 	for _, archive := range archives {
-		if archive == "" {
-			t.Fatal("exact workspace candidate requires all four local image archives")
-		}
 		source, err := os.Open(archive)
 		if err != nil {
 			t.Fatalf("open candidate image archive %s: %v", archive, err)

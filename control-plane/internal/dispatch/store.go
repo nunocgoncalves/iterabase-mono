@@ -26,6 +26,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -634,6 +635,70 @@ func (s *Store) ReleaseSessionUID(ctx context.Context, sessionID string) error {
 		return fmt.Errorf("release session uid: %w", err)
 	}
 	return nil
+}
+
+// WorkspaceCapacityState is the durable installation-wide hysteresis state for
+// the one Forge-owned AgentPool workspace filesystem (HOR-538). Dispatch uses
+// it as the authority across every pool and worker process; a missing prior
+// observation starts gated and may reopen only at/above 25 percent.
+type WorkspaceCapacityState struct {
+	Observed      bool
+	FreeBytes     uint64
+	CapacityBytes uint64
+	FreeRatio     float64
+	Warning       bool
+	CreditGated   bool
+	ObservedAt    *time.Time
+}
+
+// LoadWorkspaceCapacityState restores the durable gate before dispatch accepts
+// worker streams. Failure prevents startup so a process restart cannot reopen
+// credit in the hysteresis band.
+func (s *Store) LoadWorkspaceCapacityState(ctx context.Context) (WorkspaceCapacityState, error) {
+	return scanWorkspaceCapacityState(s.pool.QueryRow(ctx, `
+		SELECT observed, free_bytes, capacity_bytes, free_ratio, warning, credit_gated, observed_at
+		FROM runtime.workspace_capacity_state WHERE singleton = true`))
+}
+
+// ObserveWorkspaceCapacity serializes one validated actual-filesystem
+// observation through Postgres. The prior credit_gated value is retained in
+// the 20-25 percent band, making hysteresis deterministic across pools,
+// replacement workers, and dispatch restarts.
+func (s *Store) ObserveWorkspaceCapacity(ctx context.Context, free, capacity uint64, ratio float64) (WorkspaceCapacityState, error) {
+	if free > math.MaxInt64 || capacity > math.MaxInt64 {
+		return WorkspaceCapacityState{}, fmt.Errorf("workspace capacity exceeds durable bigint range")
+	}
+	row := s.pool.QueryRow(ctx, `
+		UPDATE runtime.workspace_capacity_state
+		SET observed = true,
+		    free_bytes = $1::bigint,
+		    capacity_bytes = $2::bigint,
+		    free_ratio = $3::double precision,
+		    warning = $3::double precision < 0.25::double precision,
+		    credit_gated = CASE
+		      WHEN $3::double precision <= 0.20::double precision THEN true
+		      WHEN $3::double precision >= 0.25::double precision THEN false
+		      ELSE credit_gated
+		    END,
+		    observed_at = now()
+		WHERE singleton = true
+		RETURNING observed, free_bytes, capacity_bytes, free_ratio, warning, credit_gated, observed_at`,
+		int64(free), int64(capacity), ratio)
+	return scanWorkspaceCapacityState(row)
+}
+
+func scanWorkspaceCapacityState(row pgx.Row) (WorkspaceCapacityState, error) {
+	var state WorkspaceCapacityState
+	var free, capacity int64
+	if err := row.Scan(&state.Observed, &free, &capacity, &state.FreeRatio, &state.Warning, &state.CreditGated, &state.ObservedAt); err != nil {
+		return WorkspaceCapacityState{}, fmt.Errorf("read durable workspace capacity state: %w", err)
+	}
+	if free < 0 || capacity < 0 {
+		return WorkspaceCapacityState{}, fmt.Errorf("durable workspace capacity state contains negative bytes")
+	}
+	state.FreeBytes = uint64(free)
+	state.CapacityBytes = uint64(capacity)
+	return state, nil
 }
 
 // --- pool resolution (toolgateway.pools read) ---

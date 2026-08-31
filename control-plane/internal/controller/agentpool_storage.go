@@ -3,12 +3,15 @@ package controller
 import (
 	"context"
 	"fmt"
+	"math"
 	"path/filepath"
 	"strings"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -35,10 +38,17 @@ const (
 	storageReasonFreshWorkersReady              = "FreshWorkersReady"
 	storageReasonReady                          = "StorageReady"
 	storageReasonOperationalReadinessReached    = "ReadyWorkersObserved"
+	storageReasonWorkspaceCapacityHealthy       = "WorkspaceCapacityHealthy"
+	storageReasonWorkspaceCapacityWarning       = "WorkspaceCapacityWarning"
+	storageReasonWorkspaceCapacityGated         = "WorkspaceCapacityGateActive"
+	storageReasonWorkspaceCapacityUnknown       = "WorkspaceCapacityUnknown"
 	storageConditionReady                       = "StorageReady"
 	storageConditionOperationalReadinessReached = "OperationalReadinessReached"
 	storageConditionWorkerReplacementPending    = "StorageWorkerReplacementPending"
+	storageConditionWorkspaceCapacityHealthy    = "WorkspaceCapacityHealthy"
 )
+
+const workspaceCapacityObservationFreshness = time.Minute
 
 type agentPoolStorageAssessment struct {
 	Ready              bool
@@ -194,6 +204,62 @@ func validateAgentPoolPV(pv *corev1.PersistentVolume, className string) string {
 	}
 	if pv.Spec.NodeAffinity == nil || pv.Spec.NodeAffinity.Required == nil {
 		return fmt.Sprintf("PV %s lacks the local-path node affinity required by one-node RWO", pv.Name)
+	}
+	return ""
+}
+
+// setWorkspaceCapacityCondition projects the durable shared-filesystem gate
+// into one actionable condition on every AgentPool. Ready/StorageReady continue
+// to describe pod/PVC mount health; this independent condition explains why
+// fresh dispatch credit is open, warning, gated, or unavailable.
+func (r *AgentPoolReconciler) setWorkspaceCapacityCondition(ctx context.Context, pool *v1alpha1.AgentPool) string {
+	if r.CapacityReader == nil {
+		return ""
+	}
+	condition := metav1.Condition{
+		Type:               storageConditionWorkspaceCapacityHealthy,
+		Status:             metav1.ConditionUnknown,
+		Reason:             storageReasonWorkspaceCapacityUnknown,
+		ObservedGeneration: pool.Generation,
+	}
+	status, err := r.CapacityReader.WorkspaceCapacityStatus(ctx)
+	if err != nil {
+		condition.Message = fmt.Sprintf("workspace capacity observation is unavailable; dispatch fails closed until the shared filesystem is observed: %v", err)
+		meta.SetStatusCondition(&pool.Status.Conditions, condition)
+		return condition.Message
+	}
+	if !status.Observed || status.ObservedAt == nil || time.Since(*status.ObservedAt) > workspaceCapacityObservationFreshness {
+		condition.Message = "workspace capacity observation is missing or stale; inspect harness/dispatch health before expecting fresh credits"
+		meta.SetStatusCondition(&pool.Status.Conditions, condition)
+		return condition.Message
+	}
+	computed := 0.0
+	if status.CapacityBytes > 0 {
+		computed = float64(status.FreeBytes) / float64(status.CapacityBytes)
+	}
+	if status.CapacityBytes == 0 || status.FreeBytes > status.CapacityBytes || math.IsNaN(status.FreeRatio) || math.IsInf(status.FreeRatio, 0) || math.Abs(computed-status.FreeRatio) > 0.000001 {
+		condition.Message = "workspace capacity observation is invalid; dispatch fails closed until a valid actual-filesystem measurement arrives"
+		meta.SetStatusCondition(&pool.Status.Conditions, condition)
+		return condition.Message
+	}
+	observation := fmt.Sprintf("workspace filesystem is %.1f%% free (%d of %d bytes)", status.FreeRatio*100, status.FreeBytes, status.CapacityBytes)
+	switch {
+	case status.CreditGated:
+		condition.Status = metav1.ConditionFalse
+		condition.Reason = storageReasonWorkspaceCapacityGated
+		condition.Message = observation + "; fresh dispatch credits are withheld until free space reaches at least 25%; free capacity on the dedicated workspace disk"
+	case status.Warning:
+		condition.Status = metav1.ConditionFalse
+		condition.Reason = storageReasonWorkspaceCapacityWarning
+		condition.Message = observation + "; below the 25% warning threshold but fresh credits remain open until the 20% floor; free capacity on the dedicated workspace disk"
+	default:
+		condition.Status = metav1.ConditionTrue
+		condition.Reason = storageReasonWorkspaceCapacityHealthy
+		condition.Message = observation + "; fresh dispatch credits are capacity-eligible"
+	}
+	meta.SetStatusCondition(&pool.Status.Conditions, condition)
+	if condition.Status != metav1.ConditionTrue {
+		return condition.Message
 	}
 	return ""
 }

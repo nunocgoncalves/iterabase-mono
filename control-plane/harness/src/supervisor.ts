@@ -145,7 +145,6 @@ export class Supervisor {
   private readonly gatewayClient: GatewayClient;
   private readonly modelStream: typeof streamModel;
   private workspaceStatus: WorkspaceStatus | undefined;
-  private creditRevokedByCapacity = false;
 
   constructor(private readonly d: SupervisorDeps) {
     this.tokens = new TokenDeltaForwarder(() => this.stream, d.cfg.tokenDelta.sendBufferBytes);
@@ -294,15 +293,13 @@ export class Supervisor {
   updateWorkspaceStatus(status: WorkspaceStatus): void {
     this.workspaceStatus = status;
     this.sendWorkspaceStatus();
-    if (status.creditGated) {
-      if ((this.state.phase as string) === "armed") this.creditRevokedByCapacity = true;
-      return;
-    }
-    if (this.creditRevokedByCapacity && (this.state.phase as string) === "armed") {
-      // The server revoked the old unspent credit when it observed the gated
-      // status. Re-advertise after the reopen status on the same ordered stream.
+    if (status.creditGated) return;
+    if ((this.state.phase as string) === "armed") {
+      // Ready is an idempotent one-credit advertisement on the server (a
+      // boolean, never a counter). Re-advertise on every open observation so a
+      // stricter durable installation-wide gate can ignore this pool at 20-25%
+      // and still receive a fresh Ready when the global state later reopens.
       this.stream?.send(create(WorkerMessageSchema, { kind: { case: "ready", value: create(ReadySchema, {}) } }));
-      this.creditRevokedByCapacity = false;
       this.d.onCreditAdvertised?.();
       return;
     }
@@ -321,13 +318,11 @@ export class Supervisor {
     if (this.workspaceStatus?.creditGated) return;
     if (!this.state.canAdvertiseCredit) return;
     this.state.advertiseCredit();
-    this.creditRevokedByCapacity = false;
     this.stream?.send(create(WorkerMessageSchema, { kind: { case: "ready", value: create(ReadySchema, {}) } }));
     this.d.onCreditAdvertised?.();
   }
 
   private async handleAssignTurn(at: AssignTurn): Promise<void> {
-    this.creditRevokedByCapacity = false;
     const observedAt = Date.now();
     let observedResult = "failed";
     this.d.metrics?.activeTurns.inc();

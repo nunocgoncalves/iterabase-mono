@@ -19,7 +19,7 @@ The persisted stable-device selection is the sole authorization for Forge's firs
 Before any K3s/chart mutation, and again immediately before first format, Forge uses bounded required probes to reject:
 
 - missing, volatile, partition, removable, mapper, loop, RAID, or non-whole devices;
-- a partition table, child device, holder, mount, swap use, or other active consumer;
+- a partition table, child device, holder, mount, swap use, or process-held raw-device/other active consumer (through a bounded `/proc` descriptor probe that fails closed on uncertainty);
 - any device backing root, boot/EFI, K3s, kubelet, or system data;
 - a recognized filesystem, partition, RAID, LVM, or crypt signature;
 - probe read errors, ambiguity, or stable-identity/model/serial/WWN/size drift.
@@ -53,11 +53,11 @@ The AgentPool class uses `rancher.io/local-path`, `WaitForFirstConsumer`, `Delet
 
 ## Capacity and failure semantics
 
-Each harness performs a real write/fsync/rename/unlink transaction and `statfs` measurement on the mounted workspace filesystem. Metrics expose available bytes, capacity bytes, free ratio, warning state, gate state, and health-check results.
+Each harness performs a real write/fsync/rename/unlink transaction and `statfs` measurement on the mounted workspace filesystem. The pool-shared PVC stores the gate transition so a replacement supervisor cannot reopen inside the hysteresis band; dispatch serializes the installation-wide gate through Postgres because all AgentPool paths share the one dedicated filesystem. Dispatch metrics and each AgentPool's actionable `WorkspaceCapacityHealthy` condition expose available bytes, capacity bytes, free ratio, warning/gate state, freshness, and customer action; per-worker metrics retain supporting health evidence.
 
 - warn below 25% free;
 - withhold/revoke unspent fresh dispatch credit at or below 20%;
-- once gated, reopen only at or above 25%;
+- once gated, reopen only at or above 25%, including across worker, pool, and dispatch-process replacement;
 - do not abort an active turn solely because capacity crossed the threshold;
 - after the active turn's normal terminal/ACK boundary, withhold its next credit;
 - treat zero blocks and real I/O/fsync/mount/ownership failure as worker loss, using existing fencing and no automatic replay.

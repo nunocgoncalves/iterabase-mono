@@ -74,11 +74,11 @@ Stop new AgentPool scheduling and inspect the pool's `StorageReady` reason, fixe
 
 ## IterabaseWorkspaceCapacityWarning
 
-Actual free space is below 25%. Record `control_plane_harness_workspace_free_bytes`, capacity, ratio, affected pods, largest eligible session data, and current active turns. Pause avoidable growth and notify the customer-owned capacity response. Requested PVC size is not a quota and changing it cannot expand local-path storage. Do not delete session data without explicit lifecycle authority.
+Actual free space is below 25%. Record the durable `control_plane_dispatch_workspace_free_bytes`, capacity, ratio, the AgentPool `WorkspaceCapacityHealthy` condition, supporting per-worker harness observations, largest eligible session data, and current active turns. Pause avoidable growth and notify the customer-owned capacity response. Requested PVC size is not a quota and changing it cannot expand local-path storage. Do not delete session data without explicit lifecycle authority.
 
 ## IterabaseWorkspaceCreditGated
 
-The filesystem is at or below 20% free, or a prior gate has not yet reached the 25% reopen threshold. Confirm every worker reports the gate and that no unspent fresh dispatch credit remains. Do not abort an active turn solely for crossing the threshold; let it reach its normal terminal/ACK boundary, then verify no next credit appears. Reopen only after actual free ratio is at least 25%. Disk expansion/replacement/migration is a separate approved procedure; never switch to the root/default path.
+The filesystem is at or below 20% free, or the durable shared gate has not yet reached the 25% reopen threshold. Confirm `control_plane_dispatch_workspace_credit_gated=1`, every AgentPool reports `WorkspaceCapacityHealthy=False` with reason `WorkspaceCapacityGateActive`, supporting worker observations agree, and no unspent fresh dispatch credit remains. Worker or dispatch replacement in the 20–25% band must retain the gate. Do not abort an active turn solely for crossing the threshold; let it reach its normal terminal/ACK boundary, then verify no next credit appears. Reopen only after actual free ratio is at least 25%. Disk expansion/replacement/migration is a separate approved procedure; never switch to the root/default path.
 
 ## IterabaseWorkspaceStorageIOFailure
 

@@ -383,8 +383,9 @@ type PoolProbeSpec struct {
 // +kubebuilder:object:generate=true
 type AgentPoolStatus struct {
 	// conditions expose stable storage/readiness reason families. StorageReady
-	// identifies the exact fixed class/PVC/PV/path predicate or operator action
-	// without exposing session bytes.
+	// identifies the exact fixed class/PVC/PV/path predicate, while
+	// WorkspaceCapacityHealthy projects the durable actual-filesystem
+	// warning/gate state and operator action without exposing session bytes.
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 

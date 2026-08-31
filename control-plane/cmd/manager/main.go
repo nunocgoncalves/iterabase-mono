@@ -263,11 +263,13 @@ func run() int {
 		return 1
 	}
 
+	agentPoolStore := gateway.NewStore(pool)
 	if err = (&controller.AgentPoolReconciler{
-		Client:    mgr.GetClient(),
-		Scheme:    scheme,
-		APIReader: mgr.GetAPIReader(),
-		Store:     gateway.NewStore(pool),
+		Client:         mgr.GetClient(),
+		Scheme:         scheme,
+		APIReader:      mgr.GetAPIReader(),
+		Store:          agentPoolStore,
+		CapacityReader: agentPoolStore,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to set up AgentPool reconciler")
 		return 1
