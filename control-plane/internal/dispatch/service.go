@@ -297,7 +297,9 @@ func (s *Service) Work(ctx context.Context, st *connect.BidiStream[v1.WorkerMess
 				if err != nil {
 					return connect.NewError(connect.CodeUnavailable, fmt.Errorf("persist shared workspace capacity gate: %w", err))
 				}
-				s.pool.applyWorkspaceStatus(w, capacity.FreeBytes, capacity.CapacityBytes, capacity.FreeRatio, capacity.Warning, capacity.CreditGated)
+				if s.pool.applyWorkspaceStatus(w, capacity.FreeBytes, capacity.CapacityBytes, capacity.FreeRatio, capacity.Warning, capacity.CreditGated) {
+					s.kickReconciler()
+				}
 				s.observeWorkspaceMetrics(capacity)
 				if capacity.CreditGated {
 					s.log.Warn("workspace capacity gate is withholding fresh credit", "pool", w.poolID, "worker", w.workerID, "free_bytes", capacity.FreeBytes, "free_ratio", capacity.FreeRatio)

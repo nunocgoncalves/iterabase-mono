@@ -289,20 +289,13 @@ export class Supervisor {
   }
 
   /** Publish a fresh capacity observation. Gating revokes only an unspent
-   * credit; an active turn continues through its normal terminal/ACK boundary. */
+   * credit; an active turn continues through its normal terminal/ACK boundary.
+   * The server retains an advertised-but-gated credit through global reopen,
+   * so an armed worker must never duplicate Ready while AssignTurn is in flight. */
   updateWorkspaceStatus(status: WorkspaceStatus): void {
     this.workspaceStatus = status;
     this.sendWorkspaceStatus();
     if (status.creditGated) return;
-    if ((this.state.phase as string) === "armed") {
-      // Ready is an idempotent one-credit advertisement on the server (a
-      // boolean, never a counter). Re-advertise on every open observation so a
-      // stricter durable installation-wide gate can ignore this pool at 20-25%
-      // and still receive a fresh Ready when the global state later reopens.
-      this.stream?.send(create(WorkerMessageSchema, { kind: { case: "ready", value: create(ReadySchema, {}) } }));
-      this.d.onCreditAdvertised?.();
-      return;
-    }
     this.maybeAdvertiseCredit();
   }
 

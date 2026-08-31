@@ -19,7 +19,8 @@ type workerConn struct {
 
 	mu                sync.Mutex
 	closed            bool
-	idle              bool   // has an unspent Ready credit
+	idle              bool   // has an unspent, currently usable Ready credit
+	creditAdvertised  bool   // worker's one Ready intent, retained while capacity-gated
 	activeTurn        string // turn_id currently assigned ("" when idle)
 	lastSeen          time.Time
 	workspaceObserved bool
@@ -125,10 +126,11 @@ func (w *workerConn) markClosed() {
 func (w *workerConn) tryConsumeCredit(turnID string) bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if w.closed || !w.idle || w.activeTurn != "" {
+	if w.closed || !w.idle || !w.creditAdvertised || w.activeTurn != "" {
 		return false
 	}
 	w.idle = false
+	w.creditAdvertised = false
 	w.activeTurn = turnID
 	return true
 }
@@ -141,8 +143,9 @@ func (w *workerConn) releaseTurn() {
 	w.mu.Unlock()
 }
 
-// grantCreditIfIdle atomically grants one Ready credit. A credit received while
-// capacity-gated is ignored (valid but not granted); a Ready while a turn is
+// grantCreditIfIdle records the worker's one Ready intent. Capacity gating may
+// make that credit temporarily unusable, but the server retains the unspent
+// intent and restores it on the durable global reopen. A Ready while a turn is
 // active remains a protocol violation.
 func (w *workerConn) grantCreditIfIdle() (granted, valid bool) {
 	w.mu.Lock()
@@ -151,6 +154,7 @@ func (w *workerConn) grantCreditIfIdle() (granted, valid bool) {
 		return false, false
 	}
 	w.lastSeen = time.Now()
+	w.creditAdvertised = true
 	if w.workspaceGated {
 		w.idle = false
 		return false, true
@@ -160,14 +164,17 @@ func (w *workerConn) grantCreditIfIdle() (granted, valid bool) {
 }
 
 // updateWorkspaceStatus stores one bounded actual-filesystem observation and
-// revokes an unspent credit while gated. It never changes an active assignment.
-func (w *workerConn) updateWorkspaceStatus(free, capacity uint64, ratio float64, warning, gated bool) {
-	w.applyWorkspaceStatus(free, capacity, ratio, warning, gated, true)
+// revokes/restores only an unspent credit. It never changes an active assignment.
+func (w *workerConn) updateWorkspaceStatus(free, capacity uint64, ratio float64, warning, gated bool) bool {
+	return w.applyWorkspaceStatus(free, capacity, ratio, warning, gated, true)
 }
 
-func (w *workerConn) applyWorkspaceStatus(free, capacity uint64, ratio float64, warning, gated, observedByWorker bool) {
+// applyWorkspaceStatus returns true only when an already-advertised, unspent
+// credit becomes usable on this update and dispatch should reconcile queued work.
+func (w *workerConn) applyWorkspaceStatus(free, capacity uint64, ratio float64, warning, gated, observedByWorker bool) bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	wasIdle := w.idle
 	w.workspaceObserved = w.workspaceObserved || observedByWorker
 	w.workspaceFree = free
 	w.workspaceCapacity = capacity
@@ -177,9 +184,10 @@ func (w *workerConn) applyWorkspaceStatus(free, capacity uint64, ratio float64, 
 	if observedByWorker {
 		w.lastSeen = time.Now()
 	}
-	if gated && w.activeTurn == "" {
-		w.idle = false
+	if w.activeTurn == "" {
+		w.idle = !gated && w.creditAdvertised
 	}
+	return !wasIdle && w.idle
 }
 
 // workerPool tracks live worker connections keyed by (pool, worker). At most
@@ -209,13 +217,17 @@ func (p *workerPool) seedWorkspaceCapacity(gated bool) {
 // connection because every AgentPool path is on the same Forge-owned
 // filesystem. A low observation from one pool revokes all unspent credits;
 // active assignments remain untouched.
-func (p *workerPool) applyWorkspaceStatus(source *workerConn, free, capacity uint64, ratio float64, warning, gated bool) {
+func (p *workerPool) applyWorkspaceStatus(source *workerConn, free, capacity uint64, ratio float64, warning, gated bool) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.workspaceGated = gated
+	creditRestored := false
 	for _, w := range p.conns {
-		w.applyWorkspaceStatus(free, capacity, ratio, warning, gated, w == source)
+		if w.applyWorkspaceStatus(free, capacity, ratio, warning, gated, w == source) {
+			creditRestored = true
+		}
 	}
+	return creditRestored
 }
 
 // add registers a new connection. If a prior connection exists for the same

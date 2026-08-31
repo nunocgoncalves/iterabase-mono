@@ -10,6 +10,9 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -1536,6 +1539,124 @@ func TestAgentPoolWorkspaceCommandIsBoundedAndCrashResumable(t *testing.T) {
 			assert.LessOrEqual(t, strings.Count(script, "probe_blank_signatures"), 4, "bounded probes are repeated only at the authorization boundary")
 		})
 	}
+}
+
+func TestAgentPoolWorkspaceActiveOpenProbeBehavior(t *testing.T) {
+	t.Run("unreadable fd directory for a live PID fails closed", func(t *testing.T) {
+		output, err := runWorkspaceActiveOpenProbe(t, `#!/bin/bash
+set -eu
+path="${!#}"
+if [[ "$path" == "$TEST_PROC_ROOT" ]]; then printf '100\n'; exit 0; fi
+if [[ "$path" == "$TEST_PROC_ROOT/100/fd" ]]; then printf 'permission denied\n' >&2; exit 13; fi
+printf 'unexpected ls path: %s\n' "$path" >&2
+exit 2
+`, `#!/bin/bash
+set -eu
+printf '8:1\n'
+`)
+		var exitErr *exec.ExitError
+		require.ErrorAs(t, err, &exitErr)
+		assert.Equal(t, 42, exitErr.ExitCode())
+		assert.Contains(t, output, "could not enumerate")
+		assert.Contains(t, output, "/100/fd after 3 attempts: permission denied")
+	})
+
+	t.Run("PID disappearance proven by successful process re-enumeration is ignored", func(t *testing.T) {
+		output, err := runWorkspaceActiveOpenProbe(t, `#!/bin/bash
+set -eu
+path="${!#}"
+if [[ "$path" == "$TEST_PROC_ROOT" ]]; then
+  count=0
+  if [[ -f "$TEST_STATE" ]]; then read -r count < "$TEST_STATE"; fi
+  if [[ "$count" == 0 ]]; then printf '100\nself\n'; else printf 'self\n'; fi
+  printf '%s\n' "$((count + 1))" > "$TEST_STATE"
+  exit 0
+fi
+if [[ "$path" == "$TEST_PROC_ROOT/100/fd" ]]; then printf 'process exited\n' >&2; exit 1; fi
+exit 2
+`, `#!/bin/bash
+set -eu
+printf '8:1\n'
+`)
+		require.NoError(t, err, output)
+	})
+
+	t.Run("persistently unreadable descriptor for a live PID fails closed", func(t *testing.T) {
+		output, err := runWorkspaceActiveOpenProbe(t, `#!/bin/bash
+set -eu
+path="${!#}"
+if [[ "$path" == "$TEST_PROC_ROOT" ]]; then printf '100\n'; exit 0; fi
+if [[ "$path" == "$TEST_PROC_ROOT/100/fd" ]]; then printf '9\n'; exit 0; fi
+exit 2
+`, `#!/bin/bash
+set -eu
+path="${!#}"
+if [[ "$path" == "$TEST_DEVICE" ]]; then printf '8:1\n'; exit 0; fi
+printf 'descriptor unreadable\n' >&2
+exit 13
+`)
+		var exitErr *exec.ExitError
+		require.ErrorAs(t, err, &exitErr)
+		assert.Equal(t, 42, exitErr.ExitCode())
+		assert.Contains(t, output, "/100/fd/9 after 3 attempts: descriptor unreadable")
+	})
+
+	t.Run("descriptor disappearance proven by successful re-enumeration is ignored", func(t *testing.T) {
+		output, err := runWorkspaceActiveOpenProbe(t, `#!/bin/bash
+set -eu
+path="${!#}"
+if [[ "$path" == "$TEST_PROC_ROOT" ]]; then printf '100\n'; exit 0; fi
+if [[ "$path" == "$TEST_PROC_ROOT/100/fd" ]]; then
+  count=0
+  if [[ -f "$TEST_STATE" ]]; then read -r count < "$TEST_STATE"; fi
+  if [[ "$count" == 0 ]]; then printf '9\n'; fi
+  printf '%s\n' "$((count + 1))" > "$TEST_STATE"
+  exit 0
+fi
+exit 2
+`, `#!/bin/bash
+set -eu
+path="${!#}"
+if [[ "$path" == "$TEST_DEVICE" ]]; then printf '8:1\n'; exit 0; fi
+printf 'descriptor disappeared\n' >&2
+exit 1
+`)
+		require.NoError(t, err, output)
+	})
+}
+
+func runWorkspaceActiveOpenProbe(t *testing.T, lsScript, statScript string) (string, error) {
+	t.Helper()
+	root := t.TempDir()
+	procRoot := filepath.Join(root, "proc")
+	require.NoError(t, os.MkdirAll(filepath.Join(procRoot, "100", "fd"), 0o755))
+	device := filepath.Join(root, "device")
+	require.NoError(t, os.WriteFile(device, nil, 0o600))
+	state := filepath.Join(root, "ls-state")
+	bin := filepath.Join(root, "bin")
+	require.NoError(t, os.Mkdir(bin, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(bin, "ls"), []byte(lsScript), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(bin, "stat"), []byte(statScript), 0o755))
+
+	generated := workspaceReconcileScript(provisioner.AgentPoolWorkspaceSpec{
+		InstallName: "probe-test", Device: "/dev/disk/by-id/probe-test", Filesystem: config.WorkspaceFilesystemExt4,
+	}, "reconcile")
+	start := strings.Index(generated, "list_process_ids() {")
+	end := strings.Index(generated, "\nprobe_blank_signatures() {")
+	require.GreaterOrEqual(t, start, 0)
+	require.Greater(t, end, start)
+	probe := strings.ReplaceAll(generated[start:end], "/proc", procRoot)
+	script := fmt.Sprintf("set -eu\nfail() { printf 'workspace refusal: %%s\\n' \"$*\" >&2; exit 42; }\ndevice=%s\n%s\nprobe_active_raw_consumers\n", shellQuote(device), probe)
+
+	cmd := exec.Command("/bin/bash", "-ceu", script)
+	cmd.Env = append(os.Environ(),
+		"PATH="+bin+":"+os.Getenv("PATH"),
+		"TEST_PROC_ROOT="+procRoot,
+		"TEST_DEVICE="+device,
+		"TEST_STATE="+state,
+	)
+	output, err := cmd.CombinedOutput()
+	return string(output), err
 }
 
 func TestAgentPoolLocalPathSetupPreservesDedicatedMountMode(t *testing.T) {
