@@ -959,6 +959,8 @@ printf 'capacity-marker=%s'`, workspaceMarkerDigest("capacity-active"), workspac
 
 func recoveryCommand() string {
 	return fmt.Sprintf(`set -eu
+workspace=${HARNESS_SANDBOX_ROOT:?}/workspace
+cd "$workspace"
 if test ! -e consequence.count; then
   printf once > consequence.count
   printf recovery-marker > recovery-marker.txt
