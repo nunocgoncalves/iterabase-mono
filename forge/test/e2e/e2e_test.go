@@ -459,7 +459,7 @@ YAML`, repository, tag, state.runID, state.runID, state.runID, state.runID, stat
 
 func waitForLocalPathAgentPoolReady(t *testing.T, client *ssh.Client, timeout time.Duration) {
 	t.Helper()
-	command := fmt.Sprintf("sudo k3s kubectl wait -n iterabase-system --for=jsonpath='{.status.ready}'=true agentpool/forge-storage-pool --timeout=%s", timeout)
+	command := fmt.Sprintf("sudo k3s kubectl wait -n iterabase-system --for=jsonpath='{.status.readyReplicas}'=2 agentpool/forge-storage-pool --timeout=%s", timeout)
 	output, err := sshOutput(client, command)
 	if err == nil {
 		return
