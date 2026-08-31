@@ -621,9 +621,16 @@ session_a=$1
 session_b=$2
 root=/data/sandboxes
 key=/etc/harness/tls/tls.key
-test ! -L "$key"
-test -f "$key"
-test "$(stat -c '%u:%g:%a' "$key")" = 0:0:600
+/usr/local/bin/node --input-type=module -e '
+import { validateSupervisorTLSKey } from "/app/dist/tls-key.js";
+validateSupervisorTLSKey(process.argv[1]);
+' "$key"
+test "$(readlink "$key")" = ..data/tls.key
+data_target=$(readlink /etc/harness/tls/..data)
+resolved=/etc/harness/tls/$data_target/tls.key
+test ! -L "$resolved"
+test -f "$resolved"
+test "$(stat -c '%u:%g:%a' "$resolved")" = 0:0:440
 dd if="$key" of=/dev/null bs=1 count=1 status=none
 /usr/local/bin/node -e '
 const status = require("node:fs").readFileSync("/proc/1/status", "utf8");

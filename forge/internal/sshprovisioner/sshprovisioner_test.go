@@ -1836,6 +1836,63 @@ func TestOverlayer_Clone(t *testing.T) {
 	assert.Contains(t, gotCheck, "crds/client/kustomization.yaml")
 }
 
+func TestOverlayer_Clone_RetriesTransientTransportFailure(t *testing.T) {
+	previousInterval := overlayCloneRetryInterval
+	overlayCloneRetryInterval = time.Millisecond
+	defer func() { overlayCloneRetryInterval = previousInterval }()
+
+	cloneCalls := 0
+	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
+		switch {
+		case strings.Contains(cmd, "clone"):
+			cloneCalls++
+			if cloneCalls < overlayCloneMaxAttempts {
+				return "fatal: expected flush after ref listing", 128
+			}
+			return "", 0
+		case strings.HasPrefix(cmd, "test -f "):
+			return "", 0
+		case strings.Contains(cmd, "rev-parse HEAD"):
+			return "deadbeef\n", 0
+		default:
+			return "", 0
+		}
+	})
+	defer cleanup()
+	p := newProvisioner(t, addr, cfg)
+	defer p.Close()
+
+	commit, err := p.Clone(context.Background(), "https://github.com/example/overlay.git", "master", "/var/lib/forge/overlay/opo1", nil)
+	require.NoError(t, err)
+	assert.Equal(t, "deadbeef", commit)
+	assert.Equal(t, overlayCloneMaxAttempts, cloneCalls)
+}
+
+func TestOverlayer_Clone_DoesNotRetryAuthenticationFailure(t *testing.T) {
+	cloneCalls := 0
+	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
+		if strings.Contains(cmd, "clone") {
+			cloneCalls++
+			return "fatal: Authentication failed", 128
+		}
+		return "", 0
+	})
+	defer cleanup()
+	p := newProvisioner(t, addr, cfg)
+	defer p.Close()
+
+	_, err := p.Clone(context.Background(), "https://github.com/example/overlay.git", "master", "/var/lib/forge/overlay/opo1", nil)
+	require.ErrorContains(t, err, "overlay clone")
+	assert.Equal(t, 1, cloneCalls)
+}
+
+func TestIsTransientGitCloneFailure(t *testing.T) {
+	assert.True(t, isTransientGitCloneFailure("fatal: expected flush after ref listing"))
+	assert.True(t, isTransientGitCloneFailure("RPC failed; HTTP 503"))
+	assert.False(t, isTransientGitCloneFailure("fatal: Authentication failed"))
+	assert.False(t, isTransientGitCloneFailure("Repository not found"))
+}
+
 func TestOverlayer_Clone_StructureValidation(t *testing.T) {
 	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
 		switch {

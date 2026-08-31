@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 
@@ -14,6 +15,10 @@ import (
 
 // Compile-time assertion: SSHProvisioner implements overlayer.Overlayer.
 var _ overlayer.Overlayer = (*SSHProvisioner)(nil)
+
+const overlayCloneMaxAttempts = 3
+
+var overlayCloneRetryInterval = 2 * time.Second
 
 // EnsureGit implements overlayer.Overlayer. Installs git on the host if absent
 // (apt; v1: Ubuntu hosts), mirroring ensureHelm. Idempotent.
@@ -58,7 +63,7 @@ func (p *SSHProvisioner) Clone(ctx context.Context, repo, ref, dest string, toke
 			cloneArgs[1:]...) // replace the leading "git"
 	}
 
-	if _, err := p.run(ctx, joinArgs(cloneArgs)); err != nil {
+	if err := p.cloneOverlayWithRetry(ctx, joinArgs(cloneArgs), dest); err != nil {
 		return "", fmt.Errorf("overlay clone: %w", err)
 	}
 
@@ -74,6 +79,57 @@ func (p *SSHProvisioner) Clone(ctx context.Context, repo, ref, dest string, toke
 		return "", fmt.Errorf("overlay commit: %w", err)
 	}
 	return strings.TrimSpace(commit), nil
+}
+
+func (p *SSHProvisioner) cloneOverlayWithRetry(ctx context.Context, command, dest string) error {
+	var cloneErr error
+	for attempt := 1; attempt <= overlayCloneMaxAttempts; attempt++ {
+		output, err := p.run(ctx, command)
+		if err == nil {
+			return nil
+		}
+		cloneErr = err
+		if attempt == overlayCloneMaxAttempts || !isTransientGitCloneFailure(output+"\n"+err.Error()) {
+			break
+		}
+		// A failed git clone may leave a partial destination. Remove only that
+		// fresh clone path before the bounded retry; credential material remains
+		// outside dest and is removed by the existing deferred cleanup.
+		if _, removeErr := p.run(ctx, "rm -rf "+shellQuote(dest)); removeErr != nil {
+			return fmt.Errorf("retry cleanup: %w", removeErr)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(overlayCloneRetryInterval):
+		}
+	}
+	return cloneErr
+}
+
+func isTransientGitCloneFailure(detail string) bool {
+	detail = strings.ToLower(detail)
+	for _, fragment := range []string{
+		"expected flush after ref listing",
+		"rpc failed",
+		"remote end hung up unexpectedly",
+		"connection reset by peer",
+		"could not resolve host",
+		"failed to connect",
+		"operation timed out",
+		"tls connection was non-properly terminated",
+		"gnutls recv error",
+		"early eof",
+		"http 500",
+		"http 502",
+		"http 503",
+		"http 504",
+	} {
+		if strings.Contains(detail, fragment) {
+			return true
+		}
+	}
+	return false
 }
 
 // Remove implements overlayer.Overlayer. Best-effort: a missing dir is not an error.
