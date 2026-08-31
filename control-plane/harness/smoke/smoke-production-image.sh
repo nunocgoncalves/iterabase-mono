@@ -44,6 +44,7 @@ trap cleanup EXIT
 
 # Timestamp name must match the AtomicWriter pattern `\.\.\d{4}_\d{2}_..._[0-9a-z]+`.
 TIMESTAMP="..2026_08_31_12_00_00.000000001"
+FIXTURE_CONTENT='release candidate smoke fixture'
 
 write_config() { # <fixture-dir/>  (writes config.yaml as root)
   local dir="$1"
@@ -89,13 +90,55 @@ build_valid_fixture() {
   local dir="$1"
   as_root install -d -m 0700 -o root -g root "$dir"
   as_root install -d -m 0700 -o root -g root "$dir/$TIMESTAMP"
-  printf '%s\n' 'release candidate smoke fixture' | as_root tee "$dir/$TIMESTAMP/tls.key" >/dev/null
+  printf '%s\n' "$FIXTURE_CONTENT" | as_root tee "$dir/$TIMESTAMP/tls.key" >/dev/null
   as_root chown root:root "$dir/$TIMESTAMP/tls.key"
   as_root chmod 0440 "$dir/$TIMESTAMP/tls.key"
   as_root ln -s "$TIMESTAMP" "$dir/..data"
   as_root ln -s "..data/tls.key" "$dir/tls.key"
   write_peer_material "$dir"
   write_config "$dir"
+}
+
+# Verify the valid projection independently of the image/validator under test,
+# so fixture and validator drift cannot mask one another (HOR-539 acceptance #1):
+# protected root-owned non-child-writable mount, the exact two-link AtomicWriter
+# shape with the current timestamp target, and a root:root exact-0440 regular
+# resolved key carrying the expected content.
+assert_valid_fixture() { # <fixture-dir/>
+  local dir="$1" mode owner type rem
+  type="$(as_root stat -c '%F' "$dir")"
+  test "$type" = directory || { log "valid: mount is not a directory: $type" >&2; return 1; }
+  owner="$(as_root stat -c '%u:%g' "$dir")"
+  test "$owner" = "0:0" || { log "valid: mount not root-owned: $owner" >&2; return 1; }
+  mode="$(as_root stat -c '%a' "$dir")"
+  rem=$(( 8#${mode} & 8#22 ))
+  test "$rem" -eq 0 || { log "valid: mount is child-writable (mode $mode)" >&2; return 1; }
+
+  local key_link data_link ts
+  key_link="$(as_root readlink "$dir/tls.key")"
+  test "$key_link" = "..data/tls.key" || { log "valid: tls.key -> $key_link" >&2; return 1; }
+  data_link="$(as_root readlink "$dir/..data")"
+  if ! printf '%s' "$data_link" | grep -Eq '^\.\.20[0-9]{2}_[0-9]{2}_[0-9]{2}_[0-9]{2}_[0-9]{2}_[0-9]{2}\.[0-9a-z]+$'; then
+    log "valid: ..data -> invalid timestamp target $data_link" >&2
+    return 1
+  fi
+  ts="$data_link"
+  test "$ts" = "$TIMESTAMP" || { log "valid: ..data not the current timestamp (expected $TIMESTAMP, got $ts)" >&2; return 1; }
+
+  type="$(as_root stat -c '%F' "$dir/$ts")"
+  test "$type" = directory || { log "valid: timestamp target not a directory: $type" >&2; return 1; }
+  owner="$(as_root stat -c '%u:%g' "$dir/$ts")"
+  test "$owner" = "0:0" || { log "valid: timestamp dir not root-owned: $owner" >&2; return 1; }
+
+  type="$(as_root stat -c '%F' "$dir/$ts/tls.key")"
+  test "$type" = "regular file" || { log "valid: resolved key not regular: $type" >&2; return 1; }
+  owner="$(as_root stat -c '%u:%g' "$dir/$ts/tls.key")"
+  test "$owner" = "0:0" || { log "valid: resolved key not root:root: $owner" >&2; return 1; }
+  mode="$(as_root stat -c '%a' "$dir/$ts/tls.key")"
+  test "$mode" = 440 || { log "valid: resolved key mode $mode (expected 0440)" >&2; return 1; }
+  test "$(as_root cat "$dir/$ts/tls.key")" = "$FIXTURE_CONTENT" || { log "valid: resolved key content mismatch" >&2; return 1; }
+
+  log "positive: asserted contained AtomicWriter shape before image start"
 }
 
 # Malformed: the flat direct `tls.key` regression HOR-539 must fail closed on
@@ -125,6 +168,7 @@ run_container() { # <fixture-dir/>
 positive_smoke() {
   log "positive: valid AtomicWriter projection -> healthz ok"
   build_valid_fixture "$VALID_DIR"
+  assert_valid_fixture "$VALID_DIR"
   run_container "$VALID_DIR"
   local port
   port="$(docker port "$CONTAINER" 8081/tcp | awk -F: 'NR == 1 {print $NF}')"
@@ -153,7 +197,18 @@ negative_smoke() {
   log "negative: malformed direct tls.key must fail closed with no repair"
   build_malformed_fixture "$MALFORMED_DIR"
   run_container "$MALFORMED_DIR"
+  local port
+  port="$(docker port "$CONTAINER" 8081/tcp 2>/dev/null | awk -F: 'NR == 1 {print $NF}' || true)"
   for _ in $(seq 1 "$NEGATIVE_TIMEOUT"); do
+    # Assert throughout the window that no readiness/startup probe ever succeeds.
+    if [ -n "$port" ]; then
+      if body="$(curl --fail --silent "http://127.0.0.1:$port/healthz" 2>/dev/null)"; then
+        if [ "$body" = ok ]; then
+          log "negative: malformed projection unexpectedly served /healthz ok" >&2
+          return 1
+        fi
+      fi
+    fi
     local running
     running="$(docker inspect --format '{{.State.Running}}' "$CONTAINER")"
     if [ "$running" != true ]; then break; fi

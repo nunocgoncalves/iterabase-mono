@@ -74,7 +74,6 @@
   {
     "name": "release implementation runs focused contract checks only",
     "paths": [
-      ".github/workflows/release-candidate.yml",
       ".github/workflows/release-promote.yml",
       ".github/scripts/release.py",
       "release/targets.json",
@@ -82,6 +81,12 @@
     ],
     "true": [],
     "images": []
+  },
+  {
+    "name": "release-candidate workflow change selects the harness smoke",
+    "paths": [".github/workflows/release-candidate.yml"],
+    "true": ["harness", "images"],
+    "images": ["control-plane-harness"]
   },
   {
     "name": "affected-target selector changes fan out to every owner",
