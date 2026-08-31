@@ -395,7 +395,17 @@ func exerciseWorkerLossCancellationStage(t *testing.T, state *deployedState) {
 	if err != nil {
 		t.Fatalf("slow model request did not start: %v", err)
 	}
-	pod := state.firstPod(t, "platform.iterabase.com/agentpool=execution-pool")
+	// With multiple Ready same-pool workers, kill the worker durably assigned to
+	// this exact turn rather than whichever pod happens to sort first.
+	pod := state.databaseQuery(t, fmt.Sprintf(`SELECT worker_id FROM runtime.turn_assignments WHERE attempt_id='%s' AND state='active'`, item.CurrentAttemptID))
+	if pod == "" {
+		t.Fatal("slow model turn has no active assigned worker")
+	}
+	poolLabel := state.kubectl(t, 30*time.Second, "get", "pod", pod, "-n", controlPlaneNamespace,
+		"-o", "jsonpath={.metadata.labels.platform\\.iterabase\\.com/agentpool}")
+	if poolLabel != "execution-pool" {
+		t.Fatalf("assigned worker %q has AgentPool label %q", pod, poolLabel)
+	}
 	oldUID := state.kubectl(t, 30*time.Second, "get", "pod", pod, "-n", controlPlaneNamespace, "-o", "jsonpath={.metadata.uid}")
 	state.kubectl(t, time.Minute, "delete", "pod", pod, "-n", controlPlaneNamespace, "--wait=true")
 	item = waitForWorkState(t, state, item.ID, "failed", 2*time.Minute)
