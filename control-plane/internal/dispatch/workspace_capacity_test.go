@@ -22,10 +22,10 @@ func TestWorkspaceCapacityGateRevokesOnlyUnspentCredit(t *testing.T) {
 	assert.True(t, valid)
 	assert.False(t, granted)
 
-	w.updateWorkspaceStatus(25, 100, 0.25, false, false)
-	granted, valid = w.grantCreditIfIdle()
-	assert.True(t, valid)
-	assert.True(t, granted)
+	restored := w.updateWorkspaceStatus(25, 100, 0.25, false, false)
+	assert.True(t, restored, "the server restores the already-advertised unspent credit")
+	assert.True(t, w.idle)
+	assert.True(t, w.creditAdvertised)
 }
 
 func TestWorkspaceCapacityGateAppliesAcrossPoolsAndReplacement(t *testing.T) {
@@ -51,10 +51,25 @@ func TestWorkspaceCapacityGateAppliesAcrossPoolsAndReplacement(t *testing.T) {
 	assert.True(t, valid)
 	assert.False(t, granted, "replacement remains gated inside the 20-25 percent band")
 
-	workers.applyWorkspaceStatus(replacement, 25, 100, 0.25, false, false)
-	granted, valid = replacement.grantCreditIfIdle()
-	assert.True(t, valid)
-	assert.True(t, granted, "a fresh Ready after the durable 25 percent reopen restores one credit")
+	restored := workers.applyWorkspaceStatus(replacement, 25, 100, 0.25, false, false)
+	assert.True(t, restored)
+	assert.True(t, replacement.idle, "durable reopen restores the retained Ready without a duplicate advertisement")
+	assert.True(t, replacement.creditAdvertised)
+}
+
+func TestWorkspaceCapacityObservationAfterCreditConsumptionDoesNotRegrant(t *testing.T) {
+	w := &workerConn{}
+	w.updateWorkspaceStatus(30, 100, 0.30, false, false)
+	granted, valid := w.grantCreditIfIdle()
+	require.True(t, valid)
+	require.True(t, granted)
+	require.True(t, w.tryConsumeCredit("turn-in-flight"))
+
+	restored := w.updateWorkspaceStatus(30, 100, 0.30, false, false)
+	assert.False(t, restored, "an observation between server-side consumption and AssignTurn delivery cannot mint another credit")
+	assert.False(t, w.idle)
+	assert.False(t, w.creditAdvertised)
+	assert.Equal(t, "turn-in-flight", w.activeTurn)
 }
 
 func TestWorkspaceCapacityCrossingDoesNotAbortActiveTurn(t *testing.T) {
