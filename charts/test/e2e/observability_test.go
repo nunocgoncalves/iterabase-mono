@@ -22,6 +22,7 @@ import (
 const (
 	observabilityToolSourceName      = "observability-e2e"
 	observabilityToolServerNamespace = "flux-system"
+	observabilityHarnessStorageClass = "iterabase-agentpool-local-path"
 	gpuOperatorFixtureNamespace      = "gpu-operator"
 )
 
@@ -216,7 +217,7 @@ spec:
     caSecretRef: {name: %s-control-plane-gateway-ca}
     certMountPath: /etc/harness/tls
   sandbox:
-    storageClassName: standard
+    storageClassName: %s
     accessMode: ReadWriteOnce
     size: 1Gi
     mountPath: /data/sandboxes
@@ -238,7 +239,7 @@ spec:
   piDirs: [/pi/product, /pi/client]
   walDir: /var/harness/wal
   probe: {port: 8081}
-`, testNamespace, repository, tag, testRelease, testRelease, testRelease, testNamespace,
+`, testNamespace, repository, tag, testRelease, observabilityHarnessStorageClass, testRelease, testRelease, testNamespace,
 		testRelease, testRelease, testNamespace, testRelease, testRelease, testNamespace)
 	state.kubectl(t, 30*time.Second, "apply", "-f", state.writeManifest(t, "observability-agentpool.yaml", manifest))
 	state.waitForPods(t, "app.kubernetes.io/name=control-plane,app.kubernetes.io/component=harness", 7*time.Minute)
@@ -651,6 +652,12 @@ func platformMetricQueries(includeHarness, includeToolRunner bool) []string {
 		)
 	}
 	return queries
+}
+
+func TestUnitObservabilityHarnessUsesDedicatedAgentPoolStorageClass(t *testing.T) {
+	if observabilityHarnessStorageClass != "iterabase-agentpool-local-path" {
+		t.Fatalf("observability harness storage class=%q", observabilityHarnessStorageClass)
+	}
 }
 
 func TestUnitFeatureRuntimeAssertionsMatchDisabledComponents(t *testing.T) {
