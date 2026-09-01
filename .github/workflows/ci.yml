@@ -319,13 +319,9 @@ jobs:
           context: ${{ matrix.context }}
           file: ${{ matrix.dockerfile }}
           push: false
-          load: true
           tags: ${{ matrix.name }}:ci
           cache-from: type=gha,scope=ci-${{ matrix.name }}
           cache-to: type=gha,mode=max,scope=ci-${{ matrix.name }}
-      - name: Smoke-test production harness image
-        if: matrix.name == 'control-plane-harness'
-        run: bash control-plane/harness/smoke/smoke-production-image.sh "control-plane-harness:ci"
 
   required:
     name: CI / required

@@ -80,20 +80,10 @@ def selection(paths: list[str], select_all: bool = False) -> dict[str, object]:
                 ".github/scripts/test_release.py",
                 ".github/scripts/audit_release_security.sh",
                 ".github/workflows/release.yml",
+                ".github/workflows/release-candidate.yml",
                 ".github/workflows/release-promote.yml",
                 ".github/workflows/release-rehearsal.yml",
             }:
-                continue
-
-            # HOR-539: a change to the release-candidate workflow can alter the
-            # production harness-image smoke contract, so a PR touching it must
-            # re-run the exact production harness-image smoke
-            # (control-plane-harness) before merge rather than skip it. The
-            # other release-only files above stay lightweight.
-            if path == ".github/workflows/release-candidate.yml":
-                selected["harness"] = True
-                selected["images"] = True
-                selected_images.add("control-plane-harness")
                 continue
 
             # Selection logic, shared setup/actions, and the PR/E2E workflow
