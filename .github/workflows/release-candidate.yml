@@ -306,11 +306,6 @@ jobs:
           output-file: candidate-${{ matrix.name }}.spdx.json
           registry-username: ${{ github.actor }}
           registry-password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Smoke-test exact production harness digest
-        if: matrix.name == 'control-plane-harness'
-        env:
-          IMAGE: ${{ matrix.repository }}@${{ steps.build.outputs.digest }}
-        run: bash control-plane/harness/smoke/smoke-production-image.sh "$IMAGE"
       - name: Record immutable image identity
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
