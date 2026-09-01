@@ -46,6 +46,27 @@ func TestHelmCmdUsesRootOwnedRegistryConfig(t *testing.T) {
 	assert.Contains(t, command, "'--kubeconfig' '/etc/rancher/k3s/k3s.yaml'")
 }
 
+func TestConfiguredHostKeyCallbackPinsExactKey(t *testing.T) {
+	public, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	key, err := ssh.NewPublicKey(public)
+	require.NoError(t, err)
+	callback, err := configuredHostKeyCallback(strings.TrimSpace(string(ssh.MarshalAuthorizedKey(key))))
+	require.NoError(t, err)
+	require.NoError(t, callback("fixture", &net.TCPAddr{}, key))
+
+	otherPublic, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	other, err := ssh.NewPublicKey(otherPublic)
+	require.NoError(t, err)
+	require.Error(t, callback("fixture", &net.TCPAddr{}, other))
+}
+
+func TestConfiguredHostKeyCallbackRejectsMalformedPin(t *testing.T) {
+	_, err := configuredHostKeyCallback("not-an-openssh-key")
+	require.ErrorContains(t, err, "parse pinned SSH host key")
+}
+
 // startFakeSSH starts an in-process SSH server accepting a single test key.
 // It returns the server address, a client config usable to connect, and a
 // cleanup func. The handler is invoked for each "exec" request.
@@ -460,7 +481,7 @@ func TestUninstall(t *testing.T) {
 	var got string
 	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
 		got = cmd
-		if cmd == "sudo /usr/local/bin/k3s-uninstall.sh" {
+		if cmd == "if test -x /usr/local/bin/k3s-uninstall.sh; then sudo /usr/local/bin/k3s-uninstall.sh; fi" {
 			return "", 0
 		}
 		return "", 1
@@ -469,7 +490,23 @@ func TestUninstall(t *testing.T) {
 	p := newProvisioner(t, addr, cfg)
 	defer p.Close()
 	require.NoError(t, p.Uninstall(context.Background()))
-	assert.Equal(t, "sudo /usr/local/bin/k3s-uninstall.sh", got)
+	assert.Equal(t, "if test -x /usr/local/bin/k3s-uninstall.sh; then sudo /usr/local/bin/k3s-uninstall.sh; fi", got)
+}
+
+func TestRebootUsesAcknowledgedNonBlockingSystemdRequest(t *testing.T) {
+	var got string
+	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
+		got = cmd
+		if cmd == "sudo systemctl reboot --no-block" {
+			return "", 0
+		}
+		return "", 1
+	})
+	defer cleanup()
+	p := newProvisioner(t, addr, cfg)
+	defer p.Close()
+	require.NoError(t, p.Reboot(context.Background()))
+	assert.Equal(t, "sudo systemctl reboot --no-block", got)
 }
 
 func TestSelectMetalLBCRDs(t *testing.T) {
@@ -1515,6 +1552,43 @@ func TestEnsureDriverBuildDeps_CommandShape(t *testing.T) {
 	require.NoError(t, p.EnsureDriverBuildDeps(context.Background()))
 	assert.Contains(t, got, "apt-get update")
 	assert.Contains(t, got, "apt-get install -y linux-headers-$(uname -r)")
+}
+
+func TestWorkspacePurgeScriptIsIdentityBoundedAndIdempotent(t *testing.T) {
+	script := workspacePurgeScript(provisioner.AgentPoolWorkspaceSpec{
+		InstallName: "opo1", Device: "/dev/disk/by-id/scsi-workspace", Filesystem: config.WorkspaceFilesystemAuto,
+	})
+	for _, expected := range []string{
+		"workspace purge refusal",
+		"selected disk backs system path",
+		"workspace receipt install mismatch",
+		"workspace disk serial identity mismatch",
+		"workspace filesystem UUID drift",
+		"workspace filesystem is in use",
+		"workspace block device is in use",
+		"wipefs --all --force",
+		"FORGE_WORKSPACE_PURGE_RESULT",
+		"already-clean",
+	} {
+		assert.Contains(t, script, expected)
+	}
+	assert.NotContains(t, script, "mkfs.", "purge must leave a blank disk for the next apply instead of creating a replacement filesystem")
+}
+
+func TestPurgeAgentPoolWorkspaceRunsOneQuotedRemoteScript(t *testing.T) {
+	var got string
+	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
+		got = cmd
+		return "FORGE_WORKSPACE_PURGE_RESULT\t/dev/disk/by-id/scsi-workspace\tpurged\n", 0
+	})
+	defer cleanup()
+	p := newProvisioner(t, addr, cfg)
+	defer p.Close()
+	require.NoError(t, p.PurgeAgentPoolWorkspace(context.Background(), provisioner.AgentPoolWorkspaceSpec{
+		InstallName: "opo1", Device: "/dev/disk/by-id/scsi-workspace", Filesystem: config.WorkspaceFilesystemAuto,
+	}))
+	assert.True(t, strings.HasPrefix(got, "sudo bash -ceu "))
+	assert.Contains(t, got, "FORGE_WORKSPACE_PURGE_RESULT")
 }
 
 func TestAgentPoolWorkspaceCommandIsBoundedAndCrashResumable(t *testing.T) {

@@ -238,12 +238,17 @@ func runScenario[S any](t *testing.T, scenario Scenario[S], execution scenarioEx
 				status = "failed"
 				t.Errorf("reconcile observed runtime image identities: %v", identityErr)
 			}
+			fixtureEvidence, fixtureErr := fixtureEvidenceForResult()
+			if fixtureErr != nil {
+				status = "failed"
+				t.Errorf("reconcile observed permanent fixture evidence: %v", fixtureErr)
+			}
 			result := ScenarioResult{
 				SchemaVersion: 1, ScenarioID: execution.scenarioID, Status: status,
 				SourceSHA: execution.bundle.SourceSHA, PlanSHA256: execution.bundle.PlanSHA256,
 				CatalogueSHA256: execution.bundle.CatalogueSHA256, RuntimeSHA256: execution.runtimeSHA256,
 				StageGraphSHA256: stageGraphSHA256(cloneStagesFromScenario(scenario.Stages)),
-				FixtureMode:      execution.fixture.Mode, Artifacts: artifacts, Stages: stages,
+				FixtureMode:      execution.fixture.Mode, Artifacts: artifacts, FixtureEvidence: fixtureEvidence, Stages: stages,
 			}
 			if err := writeScenarioResult(os.Getenv(ResultOutputEnv), result); err != nil {
 				t.Errorf("write required scenario result: %v", err)

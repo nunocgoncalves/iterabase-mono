@@ -287,11 +287,13 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             "python3 .github/scripts/e2e.py compose",
             "python3 .github/scripts/e2e.py validate-results",
             "candidate-result-${{ matrix.artifact }}",
-            "group: ${{ matrix.capacity_group }}",
+            "uses: ./.github/actions/setup-permanent-fixture",
+            "group: iterabase-permanent-fixtures",
             "cancel-in-progress: false",
             "export FORGE_E2E_REQUIRE_CAPACITY=true",
         ):
             self.assertIn(value, workflow)
+        self.assertNotIn("DIGITALOCEAN_TOKEN", workflow)
         for stale in (
             "prepare_candidate_runtime.sh",
             "charts-runtime.yml",

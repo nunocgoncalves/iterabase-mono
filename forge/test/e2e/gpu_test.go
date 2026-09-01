@@ -165,6 +165,7 @@ func newGPUDropletRequest(name, pubKeyStr, region, sizeSlug string) *godo.Drople
 
 type digitalOceanGPUState struct {
 	ctx                 context.Context
+	fixture             *permanentFixture
 	provisioner         GPUVMProvisioner
 	runID               string
 	keep                bool
@@ -180,38 +181,48 @@ type digitalOceanGPUState struct {
 }
 
 func newDigitalOceanGPUState(t *testing.T) *digitalOceanGPUState {
-	token := os.Getenv("DIGITALOCEAN_TOKEN")
-	if token == "" {
-		t.Fatal("mandatory GPU capacity incomplete — DIGITALOCEAN_TOKEN not set")
-	}
-
-	ctx := context.Background()
-	client := godo.NewFromToken(token)
-	pubKey, privKeyPath := generateKey(t)
 	state := &digitalOceanGPUState{
-		ctx:                 ctx,
-		provisioner:         &doGPUVMProvisioner{client: client},
-		runID:               fmt.Sprintf("forge-gpu-%d", time.Now().Unix()),
-		keep:                os.Getenv("FORGE_E2E_KEEP") != "",
-		pubKey:              pubKey,
-		privKeyPath:         privKeyPath,
-		forgeBin:            buildForge(t),
+		ctx:                 context.Background(),
 		forgeHome:           t.TempDir(),
 		chartVersion:        platformChartVersion(t, ""),
 		runtimeImageDigests: make(map[string]importedRuntimeIdentity),
 		diagnostics:         newForgeDiagnostics(t, "digitalocean-gpu"),
 	}
+	if permanentFixtureEnabled() {
+		state.fixture = requirePermanentFixture(t, "gpu")
+		state.runID = state.fixture.installName()
+		state.privKeyPath = state.fixture.sshKeyPath
+		state.vm = &GPUVM{IP: state.fixture.address, PrivKeyPath: state.fixture.sshKeyPath, WorkspaceDevice: state.fixture.workspaceDevice}
+	} else {
+		token := os.Getenv("DIGITALOCEAN_TOKEN")
+		if token == "" {
+			t.Fatal("mandatory GPU capacity incomplete — permanent fixture is disabled and DIGITALOCEAN_TOKEN is not set")
+		}
+		pubKey, privKeyPath := generateKey(t)
+		state.provisioner = &doGPUVMProvisioner{client: godo.NewFromToken(token)}
+		state.runID = fmt.Sprintf("forge-gpu-%d", time.Now().Unix())
+		state.keep = os.Getenv("FORGE_E2E_KEEP") != ""
+		state.pubKey = pubKey
+		state.privKeyPath = privKeyPath
+	}
+	state.forgeBin = buildForge(t)
 	return state
 }
 
 func provisionGPUStage(t *testing.T, state *digitalOceanGPUState) {
+	if state.fixture != nil {
+		require.NoError(t, state.fixture.reset(t, state.forgeBin, state.forgeHome))
+		rememberWorkspaceDevice(state.vm.IP, state.vm.WorkspaceDevice)
+		t.Logf("permanent GPU fixture %s workspace=%s", state.vm.IP, state.vm.WorkspaceDevice)
+		return
+	}
 	err := provisionGPUHost(state)
 	if errors.Is(err, ErrNoGPUCapacity) {
 		t.Fatalf("mandatory GPU capacity blocked by an evidenced external-capacity dependency: %v", err)
 	}
 	require.NoError(t, err)
 	rememberWorkspaceDevice(state.vm.IP, state.vm.WorkspaceDevice)
-	t.Logf("gpu vm ip %s workspace=%s (keep=%v)", state.vm.IP, state.vm.WorkspaceDevice, state.keep)
+	t.Logf("qualification GPU VM %s workspace=%s (keep=%v)", state.vm.IP, state.vm.WorkspaceDevice, state.keep)
 }
 
 func provisionGPUHost(state *digitalOceanGPUState) error {
@@ -236,6 +247,14 @@ func assertGPUSmokeStage(t *testing.T, state *digitalOceanGPUState) {
 
 func (state *digitalOceanGPUState) cleanup(t *testing.T) {
 	t.Helper()
+	if state.fixture != nil {
+		state.diagnostics.setDomain(failureDomainCleanup)
+		workspaceDevicesByAddress.Delete(state.vm.IP)
+		if err := state.fixture.reset(t, state.forgeBin, state.forgeHome); err != nil {
+			t.Errorf("reset permanent GPU fixture after diagnostics: %v", err)
+		}
+		return
+	}
 	if state.vm == nil {
 		return
 	}

@@ -31,10 +31,11 @@ forge apply              # provision / reconcile the cluster
 forge kubeconfig         # fetch (or refresh) the kubeconfig
 forge status             # cluster health + drift
 forge upgrade --to v1.32.0   # upgrade k3s
-forge destroy            # uninstall k3s + remove local artifacts
+forge destroy            # customer-safe: uninstall k3s; preserve workspace bytes
+forge destroy --purge-workspace --reboot --yes # explicit destructive fixture/decommission lifecycle
 ```
 
-`forge` SSHes to the host as a sudoer user (key auth) and installs k3s with flags derived from `forge.yaml`. The kubeconfig is fetched, rewritten to the host address, and stored at `~/.forge/<install>/kubeconfig.yaml`.
+`forge` SSHes to the host as a sudoer user (key auth) and installs k3s with flags derived from `forge.yaml`. `spec.hosts[].sshHostKey` optionally pins one OpenSSH host public key; permanent automation must set it and fails on replacement. The kubeconfig is fetched, rewritten to the host address, and stored at `~/.forge/<install>/kubeconfig.yaml`.
 
 `apply` is **idempotent**: it reconciles from the live system — installs if absent, skips if in sync, refuses immutable changes (`cluster-cidr`/`service-cidr`/`dualStack` → `destroy` + `apply`), and routes version changes to `upgrade`.
 
@@ -66,8 +67,18 @@ configured/resolved type, UUID, `iterabase-ws` label, and
 After K3s is Ready, Forge keeps default `local-path` on K3s's normal platform
 path and configures fixed non-default `iterabase-agentpool-local-path` through
 the bundled `rancher.io/local-path` provisioner on only the dedicated mount.
-Destroy uninstalls K3s/platform resources but never wipes the workspace disk or
-filesystem. See [`../docs/architecture/v2-local-path-storage.md`](../docs/architecture/v2-local-path-storage.md).
+
+Ordinary `forge destroy` remains customer-safe: it uninstalls platform/K3s and
+preserves the workspace filesystem, receipt, mount identity, and bytes. Only
+`--purge-workspace` opts into destructive removal. Purge repeats the stable
+by-id, whole-disk, root/system, holder, active-consumer, hardware, receipt,
+filesystem UUID/label, mount, and fstab checks before unmounting and erasing the
+configured Forge filesystem signatures. Missing, ambiguous, wrong, in-use, or
+drifted identity refuses. `--reboot` is independent and runs only after successful
+destroy and any requested purge. Non-interactive destructive operation uses the
+exact explicit command `forge destroy --purge-workspace --reboot --yes`; no CI
+environment or prior state implies either flag. See
+[`../docs/architecture/v2-local-path-storage.md`](../docs/architecture/v2-local-path-storage.md).
 
 See `forge.example.yaml` for the full substrate config schema.
 
@@ -75,8 +86,8 @@ See `forge.example.yaml` for the full substrate config schema.
 
 ```sh
 make test           # unit + fake-SSH integration tests
-make test-e2e       # composed-bundle DigitalOcean CPU E2E (needs DIGITALOCEAN_TOKEN)
-make test-e2e-workspace # composed-bundle dedicated-disk/local-path RWO gate
+make test-e2e       # composed bundle on the configured permanent CPU fixture
+make test-e2e-workspace # permanent-fixture dedicated-disk/local-path RWO gate
 make test-e2e-unit  # compile + unit-test the separate E2E harness module
 make lint           # golangci-lint
 make fmt-check      # gofmt check
@@ -97,7 +108,7 @@ Architecture invariants and v1 boundaries are documented in `AGENTS.md`.
 - `internal/lifecycle/` — phase orchestration + reconcile
 - `internal/artifacts/` — local state dir (`~/.forge/<install>/`)
 - `internal/version/` — build version
-- `test/e2e/` — composable DigitalOcean/Kind E2E runner (separate module; see `DESIGN.md`)
+- `test/e2e/` — permanent CPU/GPU fixture runner (separate module; see `DESIGN.md`)
 
 ## License
 

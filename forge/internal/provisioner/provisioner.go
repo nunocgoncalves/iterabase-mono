@@ -110,6 +110,21 @@ func (r GPUReadiness) String() string {
 	)
 }
 
+// WorkspacePurger is the explicit destructive extension used only by
+// `forge destroy --purge-workspace`. Keeping it separate from Provisioner makes
+// ordinary lifecycle callers incapable of implying a workspace wipe.
+type WorkspacePurger interface {
+	// PurgeAgentPoolWorkspace revalidates the configured device and its Forge
+	// receipt, then removes only that filesystem, mount, fstab, and receipt state.
+	PurgeAgentPoolWorkspace(ctx context.Context, spec AgentPoolWorkspaceSpec) error
+}
+
+// Rebooter is the explicit host-reboot extension used by `forge destroy
+// --reboot`. Reboot is never implied by destroy or workspace purge.
+type Rebooter interface {
+	Reboot(ctx context.Context) error
+}
+
 // Provisioner abstracts host-level k3s operations. One instance is bound to a
 // single host at construction time (the SSH user/key/address).
 type Provisioner interface {

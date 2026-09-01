@@ -57,9 +57,13 @@ func WithSSHConfig(c *ssh.ClientConfig) Option {
 // SSH agent as fallback). Encrypted keys must be agent-loaded (no passphrase
 // prompt).
 func New(host config.Host, opts ...Option) (*SSHProvisioner, error) {
+	hostKeyCallback, err := configuredHostKeyCallback(host.SSHHostKey)
+	if err != nil {
+		return nil, err
+	}
 	cfg := &ssh.ClientConfig{
 		User:            host.SSHUser,
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(), //nolint:gosec // TODO: known_hosts pinning
+		HostKeyCallback: hostKeyCallback,
 		Timeout:         10 * time.Second,
 	}
 	p := &SSHProvisioner{host: host, cfg: cfg, dial: defaultDial}
@@ -74,6 +78,21 @@ func New(host config.Host, opts ...Option) (*SSHProvisioner, error) {
 		}
 	}
 	return p, nil
+}
+
+func configuredHostKeyCallback(value string) (ssh.HostKeyCallback, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ssh.InsecureIgnoreHostKey(), nil //nolint:gosec // backward-compatible interactive config
+	}
+	publicKey, _, _, rest, err := ssh.ParseAuthorizedKey([]byte(value + "\n"))
+	if err != nil {
+		return nil, fmt.Errorf("parse pinned SSH host key: %w", err)
+	}
+	if len(bytes.TrimSpace(rest)) != 0 {
+		return nil, fmt.Errorf("parse pinned SSH host key: unexpected trailing data")
+	}
+	return ssh.FixedHostKey(publicKey), nil
 }
 
 // Close releases the underlying SSH connection.
@@ -225,7 +244,14 @@ func (p *SSHProvisioner) Upgrade(ctx context.Context, version string, serverArgs
 
 // Uninstall implements provisioner.Provisioner.
 func (p *SSHProvisioner) Uninstall(ctx context.Context) error {
-	_, err := p.run(ctx, "sudo /usr/local/bin/k3s-uninstall.sh")
+	_, err := p.run(ctx, "if test -x /usr/local/bin/k3s-uninstall.sh; then sudo /usr/local/bin/k3s-uninstall.sh; fi")
+	return err
+}
+
+// Reboot implements provisioner.Rebooter. --no-block lets systemd acknowledge
+// the request before the pinned SSH connection is intentionally severed.
+func (p *SSHProvisioner) Reboot(ctx context.Context) error {
+	_, err := p.run(ctx, "sudo systemctl reboot --no-block")
 	return err
 }
 

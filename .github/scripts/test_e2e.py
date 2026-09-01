@@ -162,8 +162,8 @@ class E2EPlanTests(unittest.TestCase):
         for plan in (nightly, candidate):
             groups = {item["capacity"]: item for item in plan["real_machine_matrix"]}
             self.assertEqual({"cpu", "gpu"}, set(groups))
-            self.assertEqual("e2e-capacity-cpu", groups["cpu"]["capacity_group"])
-            self.assertEqual("e2e-capacity-gpu", groups["gpu"]["capacity_group"])
+            self.assertEqual("iterabase-permanent-fixtures", groups["cpu"]["capacity_group"])
+            self.assertEqual("iterabase-permanent-fixtures", groups["gpu"]["capacity_group"])
             self.assertEqual(
                 ["forge/digitalocean-cpu", "forge/digitalocean-workspace"],
                 [item["id"] for item in groups["cpu"]["scenarios"]],
@@ -492,6 +492,30 @@ class ResultReconciliationTests(unittest.TestCase):
             "stage_graph_sha256": selected["stage_graph_sha256"],
             "fixture_mode": "source",
             "artifacts": [],
+            "fixture_evidence": [
+                {
+                    "name": "lifecycle",
+                    "capacity": "gpu",
+                    "host_key_sha256": "1" * 64,
+                    "workspace_device": "/dev/disk/by-id/workspace",
+                    "boot_id_before": "boot-before",
+                    "boot_id_after": "boot-after",
+                },
+                {
+                    "name": "model-cache",
+                    "capacity": "gpu",
+                    "host_key_sha256": "1" * 64,
+                    "workspace_device": "/dev/disk/by-id/workspace",
+                    "boot_id_before": "boot-before",
+                    "boot_id_after": "boot-after",
+                    "model_cache_device": "/dev/disk/by-id/model-cache",
+                    "model_cache_mount": "/data/hf-cache",
+                    "model_cache_uuid": "model-cache-uuid",
+                    "model_id": "Qwen/Qwen3.5-0.8B",
+                    "model_revision": "2" * 40,
+                    "model_content_sha256": "3" * 64,
+                },
+            ],
             "stages": [
                 {
                     "name": stage["name"],
@@ -537,6 +561,23 @@ class ResultReconciliationTests(unittest.TestCase):
             (results / "result.json").write_text(json.dumps(result) + "\n")
             with self.assertRaisesRegex(E2EError, "artifact/config/runtime digest identity"):
                 validate_results(plan, results)
+
+    def test_gpu_result_requires_distinct_exact_model_cache_evidence(self) -> None:
+        for mutation in ("missing", "aliased", "floating", "corrupt"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as value:
+                plan, results, result = self.fixture(Path(value))
+                cache = next(item for item in result["fixture_evidence"] if item["name"] == "model-cache")
+                if mutation == "missing":
+                    result["fixture_evidence"].remove(cache)
+                elif mutation == "aliased":
+                    cache["model_cache_device"] = cache["workspace_device"]
+                elif mutation == "floating":
+                    cache["model_revision"] = "main"
+                else:
+                    cache["model_content_sha256"] = "corrupt"
+                (results / "result.json").write_text(json.dumps(result) + "\n")
+                with self.assertRaises(E2EError):
+                    validate_results(plan, results)
 
     def test_missing_extra_skipped_and_blocked_results_fail(self) -> None:
         for mutation in ("missing", "extra", "skipped", "blocked"):

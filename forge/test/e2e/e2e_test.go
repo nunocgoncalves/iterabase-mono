@@ -116,6 +116,7 @@ func deleteWorkspaceVolume(ctx context.Context, client *godo.Client, volumeID st
 
 type digitalOceanCPUState struct {
 	ctx                 context.Context
+	fixture             *permanentFixture
 	provisioner         cpuVMProvisioner
 	ready               func(context.Context, string, string) error
 	runID               string
@@ -151,37 +152,52 @@ func newDigitalOceanWorkspaceState(t *testing.T) *digitalOceanCPUState {
 }
 
 func newDigitalOceanCPUStateForScenario(t *testing.T, scenario string) *digitalOceanCPUState {
-	token := os.Getenv("DIGITALOCEAN_TOKEN")
-	if token == "" {
-		t.Fatal("mandatory CPU capacity incomplete — DIGITALOCEAN_TOKEN not set")
-	}
-
 	state := &digitalOceanCPUState{
 		ctx:                 context.Background(),
-		provisioner:         &doCPUVMProvisioner{client: godo.NewFromToken(token), size: managedSize},
-		ready:               waitForHostReady,
-		runID:               fmt.Sprintf("forge-e2e-%d", time.Now().Unix()),
-		keep:                os.Getenv("FORGE_E2E_KEEP") != "",
 		forgeHome:           t.TempDir(),
 		runtimeImageDigests: make(map[string]importedRuntimeIdentity),
 		diagnostics:         newForgeDiagnostics(t, scenario),
 	}
+	if permanentFixtureEnabled() {
+		state.fixture = requirePermanentFixture(t, "cpu")
+		state.runID = state.fixture.installName()
+		state.ip = state.fixture.address
+		state.privKeyPath = state.fixture.sshKeyPath
+		state.workspaceDevice = state.fixture.workspaceDevice
+	} else {
+		token := os.Getenv("DIGITALOCEAN_TOKEN")
+		if token == "" {
+			t.Fatal("mandatory CPU capacity incomplete — permanent fixture is disabled and DIGITALOCEAN_TOKEN is not set")
+		}
+		state.provisioner = &doCPUVMProvisioner{client: godo.NewFromToken(token), size: managedSize}
+		state.ready = waitForHostReady
+		state.runID = fmt.Sprintf("forge-e2e-%d", time.Now().Unix())
+		state.keep = os.Getenv("FORGE_E2E_KEEP") != ""
+		state.pubKey, state.privKeyPath = generateKey(t)
+	}
 	if githubToken := os.Getenv("GITHUB_TOKEN"); githubToken != "" {
 		state.diagnostics.redactor.Add(githubToken)
 	}
-	state.pubKey, state.privKeyPath = generateKey(t)
 	state.forgeBin = buildForge(t)
 	state.chartVersion = platformChartVersion(t, "")
-	t.Logf("run %s (keep=%v)", state.runID, state.keep)
+	t.Logf("run %s (permanent=%v keep=%v)", state.runID, state.fixture != nil, state.keep)
 	return state
 }
 
 func provisionCPUStage(t *testing.T, state *digitalOceanCPUState) {
 	t.Helper()
+	if state.fixture != nil {
+		if err := state.fixture.reset(t, state.forgeBin, state.forgeHome); err != nil {
+			t.Fatal(err)
+		}
+		rememberWorkspaceDevice(state.ip, state.workspaceDevice)
+		t.Logf("permanent CPU fixture %s workspace=%s", state.ip, state.workspaceDevice)
+		return
+	}
 	if err := provisionCPUHost(state); err != nil {
 		t.Fatal(err)
 	}
-	t.Logf("droplet ip %s workspace=%s", state.ip, state.workspaceDevice)
+	t.Logf("qualification droplet ip %s workspace=%s", state.ip, state.workspaceDevice)
 }
 
 func provisionCPUHost(state *digitalOceanCPUState) error {
@@ -593,6 +609,14 @@ func assertApplyMarkers(t *testing.T, out string, markers ...string) {
 
 func (state *digitalOceanCPUState) cleanup(t *testing.T) {
 	t.Helper()
+	if state.fixture != nil {
+		state.diagnostics.setDomain(failureDomainCleanup)
+		workspaceDevicesByAddress.Delete(state.ip)
+		if err := state.fixture.reset(t, state.forgeBin, state.forgeHome); err != nil {
+			t.Errorf("reset permanent CPU fixture after diagnostics: %v", err)
+		}
+		return
+	}
 	if state.droplet == nil {
 		return
 	}
@@ -762,10 +786,18 @@ func sshDial(ip, keyPath string) (*ssh.Client, error) {
 	if err != nil {
 		return nil, err
 	}
+	hostKeyCallback := ssh.InsecureIgnoreHostKey() //nolint:gosec // branch-qualification droplets only
+	if pin := strings.TrimSpace(os.Getenv(permanentFixtureHostKeyEnv)); pin != "" {
+		publicKey, _, _, rest, parseErr := ssh.ParseAuthorizedKey([]byte(pin + "\n"))
+		if parseErr != nil || len(strings.TrimSpace(string(rest))) != 0 {
+			return nil, fmt.Errorf("parse pinned fixture SSH host key: %w", parseErr)
+		}
+		hostKeyCallback = ssh.FixedHostKey(publicKey)
+	}
 	cfg := &ssh.ClientConfig{
-		User:            "forge",
+		User:            fixtureSSHUser(),
 		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(), //nolint:gosec // ephemeral test droplet
+		HostKeyCallback: hostKeyCallback,
 		Timeout:         10 * time.Second,
 	}
 	return ssh.Dial("tcp", ip+":22", cfg)
