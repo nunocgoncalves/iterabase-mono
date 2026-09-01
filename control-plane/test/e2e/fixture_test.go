@@ -43,6 +43,7 @@ type deployedImage struct {
 	tag        string
 	digest     string
 	sourceSHA  string
+	archive    string
 }
 
 func (image *deployedImage) reference() string { return image.repository + ":" + image.tag }
@@ -71,6 +72,7 @@ type deployedState struct {
 	imageRepo        string
 	imageTag         string
 	imageDigest      string
+	imageArchive     string
 	harnessImage     deployedImage
 	toolRunnerImage  deployedImage
 	inferenceImage   deployedImage
@@ -139,12 +141,11 @@ func (state *deployedState) resolveRuntime(t *testing.T) {
 	if mode != sharede2e.FixtureSource && mode != sharede2e.FixtureCandidate {
 		t.Fatalf("control-plane deployed scenarios support source and candidate fixtures, got %q", mode)
 	}
-	state.imageRepo = os.Getenv("CONTROL_PLANE_IMAGE_REPO")
-	state.imageTag = os.Getenv("CONTROL_PLANE_IMAGE_TAG")
-	state.imageDigest = os.Getenv("CONTROL_PLANE_IMAGE_DIGEST")
-	if state.imageRepo == "" || state.imageTag == "" || !regexp.MustCompile(`^sha256:[0-9a-f]{64}$`).MatchString(state.imageDigest) {
-		t.Fatal("composed runtime requires exact CONTROL_PLANE_IMAGE_REPO/TAG/DIGEST")
-	}
+	controlImage := runtimeImage(t, "control-plane", "CONTROL_PLANE", true)
+	state.imageRepo = controlImage.repository
+	state.imageTag = controlImage.tag
+	state.imageDigest = controlImage.digest
+	state.imageArchive = controlImage.archive
 	state.harnessImage = runtimeImage(t, "harness", "HARNESS", false)
 	state.toolRunnerImage = runtimeImage(t, "tool-runner", "TOOL_RUNNER", false)
 	state.inferenceImage = runtimeImage(t, "inference-gateway", "INFERENCE_GATEWAY", false)
@@ -163,15 +164,23 @@ func (state *deployedState) resolveRuntime(t *testing.T) {
 
 func runtimeImage(t *testing.T, name, prefix string, required bool) deployedImage {
 	t.Helper()
+	archiveEnv := map[string]string{
+		"CONTROL_PLANE":     "FORGE_E2E_CONTROL_PLANE_IMAGE_ARCHIVE",
+		"HARNESS":           "FORGE_E2E_HARNESS_IMAGE_ARCHIVE",
+		"TOOL_RUNNER":       "FORGE_E2E_TOOL_RUNNER_IMAGE_ARCHIVE",
+		"INFERENCE_GATEWAY": "FORGE_E2E_INFERENCE_IMAGE_ARCHIVE",
+		"FORGE_E2E_RUNTIME": "FORGE_E2E_RUNTIME_IMAGE_ARCHIVE",
+	}[prefix]
 	image := deployedImage{
 		name: name, repository: os.Getenv(prefix + "_IMAGE_REPO"), tag: os.Getenv(prefix + "_IMAGE_TAG"),
 		digest: os.Getenv(prefix + "_IMAGE_DIGEST"), sourceSHA: os.Getenv(prefix + "_IMAGE_SOURCE_SHA"),
+		archive: os.Getenv(archiveEnv),
 	}
-	if image.repository == "" && image.tag == "" && image.digest == "" && !required {
+	if image.repository == "" && image.tag == "" && image.digest == "" && image.archive == "" && !required {
 		return deployedImage{}
 	}
-	if image.repository == "" || image.tag == "" || !regexp.MustCompile(`^sha256:[0-9a-f]{64}$`).MatchString(image.digest) {
-		t.Fatalf("composed runtime requires exact %s_IMAGE_REPO/TAG/DIGEST", prefix)
+	if image.repository == "" || image.tag == "" || image.archive == "" || !regexp.MustCompile(`^sha256:[0-9a-f]{64}$`).MatchString(image.digest) {
+		t.Fatalf("composed runtime requires exact %s image repository/tag/digest/archive", prefix)
 	}
 	return image
 }
@@ -216,11 +225,11 @@ allowVolumeExpansion: false
 	}
 }
 
-func loadRuntimeImagesStage(t *testing.T, state *deployedState) {
+func importRuntimeImagesStage(t *testing.T, state *deployedState) {
 	t.Helper()
 	control := deployedImage{
 		name: "control-plane", repository: state.imageRepo, tag: state.imageTag,
-		digest: state.imageDigest, sourceSHA: os.Getenv("CONTROL_PLANE_IMAGE_SOURCE_SHA"),
+		digest: state.imageDigest, sourceSHA: os.Getenv("CONTROL_PLANE_IMAGE_SOURCE_SHA"), archive: state.imageArchive,
 	}
 	images := []*deployedImage{&control, &state.harnessImage, &state.toolRunnerImage, &state.inferenceImage, &state.runtimeImage}
 	for _, image := range images {
@@ -234,8 +243,8 @@ func loadRuntimeImagesStage(t *testing.T, state *deployedState) {
 
 func loadLocalImage(t *testing.T, state *deployedState, image *deployedImage) {
 	t.Helper()
-	if err := state.cluster.LoadImage(state.ctx, image.reference()); err != nil {
-		t.Fatalf("load composed %s image into Kind: %v", image.name, err)
+	if err := state.cluster.ImportImageArchive(state.ctx, image.archive, image.reference()); err != nil {
+		t.Fatalf("import composed %s image archive into Kind: %v", image.name, err)
 	}
 	nodes, err := state.runner.Run(state.ctx, process.Command{
 		Name: "kind", Args: []string{"get", "nodes", "--name", state.cluster.Name}, Timeout: 30 * time.Second,

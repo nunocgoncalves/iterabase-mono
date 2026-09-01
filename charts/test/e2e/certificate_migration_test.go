@@ -23,7 +23,8 @@ func certificateMigrationScenario() sharede2e.Definition {
 		NewState: newChartState,
 		Stages: []sharede2e.Stage[*chartState]{
 			{Name: "create-kind", Run: createKindStage},
-			{Name: "install-released-owner", DependsOn: []string{"create-kind"}, Run: installReleasedCertificateOwnerStage},
+			{Name: "import-runtime-images", DependsOn: []string{"create-kind"}, Run: importRuntimeImagesStage},
+			{Name: "install-released-owner", DependsOn: []string{"import-runtime-images"}, Run: installReleasedCertificateOwnerStage},
 			{Name: "retire-bundled-substrate", DependsOn: []string{"install-released-owner"}, Run: retireBundledSubstrateStage},
 			{Name: "transfer-crds-to-companion", DependsOn: []string{"retire-bundled-substrate"}, Run: transferCRDsToCompanionStage},
 			{Name: "install-companion-owner", DependsOn: []string{"transfer-crds-to-companion"}, Run: installCompanionOwnerStage},

@@ -236,6 +236,34 @@ def validate_catalogue_contract(catalogue: dict[str, Any], contract: dict[str, A
         stages = scenario.get("stages")
         if not isinstance(stages, list) or not stages:
             raise E2EError(f"runnable scenario {scenario['id']} has no declared stage graph")
+        if metadata.get("tier") == "F2" and any(recipes[artifact]["kind"] == "image" for artifact in artifacts):
+            dependencies = {
+                stage["name"]: set(stage.get("depends_on", []))
+                for stage in stages
+            }
+            if dependencies.get("import-runtime-images") != {"create-kind"}:
+                raise E2EError(
+                    f"Kind scenario {scenario['id']} must import resolved runtime images immediately after cluster creation"
+                )
+
+            def imports_before(stage: str, visiting: set[str] | None = None) -> bool:
+                if stage == "import-runtime-images":
+                    return True
+                visiting = set() if visiting is None else visiting
+                if stage in visiting:
+                    return False
+                visiting.add(stage)
+                return any(imports_before(parent, visiting.copy()) for parent in dependencies.get(stage, set()))
+
+            bypasses = sorted(
+                stage
+                for stage in dependencies
+                if stage not in {"create-kind", "import-runtime-images"} and not imports_before(stage)
+            )
+            if bypasses:
+                raise E2EError(
+                    f"Kind scenario {scenario['id']} can execute before runtime image import: {bypasses}"
+                )
         if metadata.get("tier") == "F3":
             if not metadata.get("capacity") or metadata.get("mandatory_capacity") is not True:
                 raise E2EError(f"selected capacity scenario {scenario['id']} is not mandatory")

@@ -205,6 +205,29 @@ class E2EPlanTests(unittest.TestCase):
             with self.subTest(field=field), self.assertRaises(E2EError):
                 validate_catalogue_contract(catalogue, self.contract)
 
+    def test_kind_install_cannot_bypass_post_create_runtime_import(self) -> None:
+        for scenario in (
+            scenario
+            for suite in self.catalogue["suites"]
+            for scenario in suite["scenarios"]
+            if scenario["metadata"]["tier"] == "F2"
+        ):
+            stages = {stage["name"]: stage for stage in scenario["stages"]}
+            self.assertEqual(["create-kind"], stages["import-runtime-images"]["depends_on"])
+
+        catalogue = copy.deepcopy(self.catalogue)
+        scenario = next(
+            scenario
+            for suite in catalogue["suites"]
+            for scenario in suite["scenarios"]
+            if scenario["metadata"]["tier"] == "F2"
+        )
+        scenario["stages"] = [
+            stage for stage in scenario["stages"] if stage["name"] != "import-runtime-images"
+        ]
+        with self.assertRaisesRegex(E2EError, "import resolved runtime images"):
+            validate_catalogue_contract(catalogue, self.contract)
+
     def test_unselected_baseline_is_explicit_not_bumped_repository_version(self) -> None:
         plan = make_plan(
             ROOT, self.catalogue, self.contract,

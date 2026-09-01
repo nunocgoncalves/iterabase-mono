@@ -103,6 +103,32 @@ func (cluster *Cluster) LoadImage(ctx context.Context, image string) error {
 	return err
 }
 
+// ImportImageArchive restores one composer-resolved archive into the runner
+// daemon after cluster creation and then transports that exact reference into
+// every Kind node. Callers cannot rely on images loaded before Kind existed.
+func (cluster *Cluster) ImportImageArchive(ctx context.Context, archive, image string) error {
+	if image == "" {
+		return fmt.Errorf("kind image identity is empty")
+	}
+	info, err := os.Stat(archive)
+	if err != nil {
+		return fmt.Errorf("resolved image archive %q: %w", archive, err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("resolved image archive %q is not a regular file", archive)
+	}
+	if _, err := cluster.executor.Run(ctx, process.Command{
+		Name: "docker", Args: []string{"load", "-i", archive},
+		Timeout: 10 * time.Minute, OutputName: "docker-load-" + safeFileName(image) + ".log",
+	}); err != nil {
+		return fmt.Errorf("restore resolved image %s: %w", image, err)
+	}
+	if err := cluster.LoadImage(ctx, image); err != nil {
+		return fmt.Errorf("import resolved image %s into Kind: %w", image, err)
+	}
+	return nil
+}
+
 // Delete tears down owned infrastructure and removes its temporary kubeconfig.
 func (cluster *Cluster) Delete(ctx context.Context) error {
 	cluster.mu.Lock()
