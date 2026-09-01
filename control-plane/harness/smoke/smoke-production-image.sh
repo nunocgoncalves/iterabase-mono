@@ -129,6 +129,9 @@ assert_valid_fixture() { # <fixture-dir/>
   test "$type" = directory || { log "valid: timestamp target not a directory: $type" >&2; return 1; }
   owner="$(as_root stat -c '%u:%g' "$dir/$ts")"
   test "$owner" = "0:0" || { log "valid: timestamp dir not root-owned: $owner" >&2; return 1; }
+  mode="$(as_root stat -c '%a' "$dir/$ts")"
+  rem=$(( 8#${mode} & 8#22 ))
+  test "$rem" -eq 0 || { log "valid: timestamp dir is child-writable (mode $mode)" >&2; return 1; }
 
   type="$(as_root stat -c '%F' "$dir/$ts/tls.key")"
   test "$type" = "regular file" || { log "valid: resolved key not regular: $type" >&2; return 1; }
