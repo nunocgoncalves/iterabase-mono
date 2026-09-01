@@ -783,24 +783,68 @@ def chart_version(path: Path) -> str:
 def set_chart_dependency_version(platform: Path, dependency: str, version: str) -> None:
     path = platform / "Chart.yaml"
     lines = path.read_text(encoding="utf-8").splitlines()
-    selected = False
-    changed = False
-    for index, line in enumerate(lines):
+    try:
+        header = next(index for index, line in enumerate(lines) if line.strip() == "dependencies:")
+    except StopIteration as error:
+        raise E2EError(f"platform chart has no dependency {dependency!r}") from error
+
+    # `helm package` canonicalizes Chart.yaml: sequence markers move to column
+    # zero and map keys are sorted, so an item commonly starts with
+    # `- condition:` while `name:` appears later. Inspect dependency item
+    # boundaries rather than assuming the source-file `- name:` layout.
+    header_indent = len(lines[header]) - len(lines[header].lstrip())
+    item_indent: int | None = None
+    current: list[int] = []
+    items: list[list[int]] = []
+    for index in range(header + 1, len(lines)):
+        line = lines[index]
         stripped = line.strip()
-        if stripped.startswith("- name:"):
-            selected = stripped.split(":", 1)[1].strip() == dependency
+        marker = re.match(r"^(\s*)-\s+[^#\s]", line)
+        if marker and (item_indent is None or len(marker.group(1)) == item_indent):
+            indent = len(marker.group(1))
+            if item_indent is None:
+                item_indent = indent
+            if current:
+                items.append(current)
+            current = [index]
             continue
-        if selected and stripped.startswith("version:"):
-            indent = line[: len(line) - len(line.lstrip())]
-            lines[index] = f"{indent}version: {version}"
-            changed = True
+        if item_indent is None:
+            if stripped and not stripped.startswith("#") and len(line) - len(line.lstrip()) <= header_indent:
+                break
+            continue
+        if stripped and not stripped.startswith("#") and len(line) - len(line.lstrip()) <= header_indent:
             break
-    if not changed:
-        raise E2EError(f"platform chart has no dependency {dependency!r}")
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    lock = platform / "Chart.lock"
-    if lock.exists():
-        lock.unlink()
+        if current:
+            current.append(index)
+    if current:
+        items.append(current)
+
+    scalar = re.compile(r"^\s*(?:-\s*)?(name|version):\s*(['\"]?)([^'\"#\s]+)\2\s*(?:#.*)?$")
+    for item in items:
+        name = ""
+        version_index: int | None = None
+        for index in item:
+            match = scalar.match(lines[index])
+            if match is None:
+                continue
+            if match.group(1) == "name":
+                name = match.group(3)
+            elif match.group(1) == "version":
+                version_index = index
+        if name != dependency or version_index is None:
+            continue
+        match = scalar.match(lines[version_index])
+        assert match is not None
+        prefix = lines[version_index][: match.start(2)]
+        quote = match.group(2)
+        suffix = lines[version_index][match.end(3) + len(quote) :]
+        lines[version_index] = f"{prefix}{quote}{version}{quote}{suffix}"
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        lock = platform / "Chart.lock"
+        if lock.exists():
+            lock.unlink()
+        return
+    raise E2EError(f"platform chart has no dependency {dependency!r}")
 
 
 def scenario_from_plan(plan: dict[str, Any], scenario_id: str) -> dict[str, Any]:

@@ -5,11 +5,14 @@ from __future__ import annotations
 import copy
 import json
 from pathlib import Path
+import tarfile
 import tempfile
 import unittest
 
 from e2e import (
     E2EError,
+    extract_chart,
+    find_metadata,
     hash_file,
     load_catalogue,
     load_contract,
@@ -232,6 +235,86 @@ class E2EPlanTests(unittest.TestCase):
 
 
 class RuntimeCompositionContractTests(unittest.TestCase):
+    def test_exact_downloaded_artifact_shape_updates_helm_canonical_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as value:
+            root = Path(value)
+            artifacts = root / "artifacts"
+            platform_artifact = artifacts / "e2e-runtime-iterabase-platform-chart"
+            control_artifact = artifacts / "e2e-runtime-control-plane-chart"
+            platform_artifact.mkdir(parents=True)
+            control_artifact.mkdir(parents=True)
+
+            def package(directory: Path, chart: str, version: str, manifest: str) -> Path:
+                source = root / f"source-{chart}" / chart
+                source.mkdir(parents=True)
+                (source / "Chart.yaml").write_text(manifest, encoding="utf-8")
+                (source / "Chart.lock").write_text("digest: stale\n", encoding="utf-8")
+                archive = directory / f"{chart}-{version}.tgz"
+                with tarfile.open(archive, "w:gz") as bundle:
+                    bundle.add(source, arcname=chart)
+                (directory / f"{chart}-chart.json").write_text(
+                    json.dumps(
+                        {
+                            "name": f"{chart}-chart",
+                            "chart": chart,
+                            "file": archive.name,
+                            "version": version,
+                        }
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                return archive
+
+            package(
+                platform_artifact,
+                "iterabase-platform",
+                "0.3.23",
+                "apiVersion: v2\n"
+                "dependencies:\n"
+                "- condition: control-plane.enabled\n"
+                "  name: control-plane\n"
+                "  repository: file://../control-plane\n"
+                "  version: 0.4.12\n"
+                "description: packaged Helm manifest\n"
+                "name: iterabase-platform\n"
+                "version: 0.3.23\n",
+            )
+            package(
+                control_artifact,
+                "control-plane",
+                "0.4.13",
+                "apiVersion: v2\nname: control-plane\nversion: 0.4.13\n",
+            )
+
+            platform_metadata, platform_directory = find_metadata(
+                artifacts,
+                "iterabase-platform-chart",
+                {"chart": "iterabase-platform"},
+            ) or ({}, Path())
+            control_metadata, control_directory = find_metadata(
+                artifacts,
+                "control-plane-chart",
+                {"chart": "control-plane"},
+            ) or ({}, Path())
+            self.assertEqual(platform_artifact, platform_directory)
+            self.assertEqual(control_artifact, control_directory)
+            platform = extract_chart(
+                platform_directory / platform_metadata["file"],
+                root / "runtime/charts/iterabase-platform-chart",
+            )
+            control = extract_chart(
+                control_directory / control_metadata["file"],
+                root / "runtime/charts/control-plane-chart",
+            )
+
+            set_chart_dependency_version(platform, control.name, "0.4.13")
+
+            manifest = (platform / "Chart.yaml").read_text(encoding="utf-8")
+            self.assertIn("  name: control-plane\n", manifest)
+            self.assertIn("  version: 0.4.13\n", manifest)
+            self.assertFalse((platform / "Chart.lock").exists())
+
     def test_selected_nested_chart_updates_outer_dependency_and_invalidates_lock(self) -> None:
         with tempfile.TemporaryDirectory() as value:
             platform = Path(value)
