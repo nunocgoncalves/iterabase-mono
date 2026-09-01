@@ -308,6 +308,12 @@ jobs:
         include: ${{ fromJSON(needs.changes.outputs.image_matrix) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Verify exact builder source
+        env:
+          SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
       - name: Report BuildKit cache source and invalidation boundary
         run: |
           echo "BuildKit cache source: GHA scope ci-${{ matrix.name }}"

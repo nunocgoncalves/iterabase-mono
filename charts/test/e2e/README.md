@@ -19,13 +19,9 @@ Every target provisions a fresh uniquely named Kind cluster and executes once. T
 
 ## Fixture modes
 
-Set `ITERABASE_E2E_FIXTURE_MODE` explicitly:
+Required `source` and `candidate` runs both use the single composer-produced runtime bundle. The composer verifies exact-source temporary or immutable candidate chart archives, the same-recipe companion, selected nested charts, image digests, and checksum-pinned transition inputs before exposing one local platform/substrate composition. Fixture mode changes custody only; scenario IDs, Make targets, stage DAGs, and assertions are identical. `published` remains an explicit local compatibility fixture and is not a required PR/nightly/candidate route.
 
-- `source` uses local charts plus the full checkout SHA and immutable dependencies in `source-fixture.json`;
-- `candidate` uses the exact release candidate plan and composed local candidate chart supplied by release CI;
-- `published` uses `published-fixture.json` and exact OCI versions.
-
-The observability scenarios always publish a deterministic in-cluster `GitRepository` artifact fixture through the same source-controller hostname contract used by the materializer, so source-mode CI exercises the fixture plumbing. When a candidate tool-runner image is selected, Helm readiness additionally proves that the exact candidate can verify, load, and register that valid generation instead of waiting on an intentionally absent source.
+The observability scenarios always publish a deterministic in-cluster `GitRepository` artifact fixture through the same source-controller hostname contract used by the materializer. When a selected tool-runner image is present, Helm readiness proves that exact composed identity can verify, load, and register the valid generation instead of waiting on an intentionally absent source.
 
 `transition-baselines.json` is the chart owner's explicit supported-predecessor authority. It currently pins the published platform/substrate `0.3.12` archives by OCI version and SHA-256, plus a second hook-era `0.3.19` pair for the MetalLB upgrade/rollback transition. Candidate planning copies these inputs into `transition_baselines`, verifies the published bytes, and supplies those exact packages beside the selected current archives; it does not use a compatibility manifest or floating lookup. The N-1, feature-enable, single-node observability-ingress recovery, and reapply/rollback scenarios accept only source or candidate current charts and fail unless both current charts are newer than their predecessors; published mode remains excluded while its pinned current pair is `0.3.1`.
 

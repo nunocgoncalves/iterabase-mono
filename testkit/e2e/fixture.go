@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"regexp"
-	"sort"
 	"strings"
 	"testing"
 )
@@ -15,17 +14,18 @@ const (
 	fixtureSourceSHAEnv        = "ITERABASE_E2E_SOURCE_SHA"
 	fixtureSourceDirtyEnv      = "ITERABASE_E2E_SOURCE_DIRTY"
 	fixtureSourceInputsFileEnv = "ITERABASE_E2E_SOURCE_INPUTS"
-	fixtureCandidatePlanEnv    = "ITERABASE_E2E_CANDIDATE_PLAN"
 	fixturePublishedFileEnv    = "ITERABASE_E2E_PUBLISHED_FIXTURE"
 )
 
 // Fixture records the exact source, candidate, or published inputs used by one
 // suite execution.
 type Fixture struct {
-	Mode      FixtureMode    `json:"mode"`
-	SourceSHA string         `json:"source_sha,omitempty"`
-	Dirty     bool           `json:"dirty,omitempty"`
-	Inputs    []FixtureInput `json:"inputs,omitempty"`
+	Mode            FixtureMode    `json:"mode"`
+	SourceSHA       string         `json:"source_sha,omitempty"`
+	Dirty           bool           `json:"dirty,omitempty"`
+	PlanSHA256      string         `json:"plan_sha256,omitempty"`
+	CatalogueSHA256 string         `json:"catalogue_sha256,omitempty"`
+	Inputs          []FixtureInput `json:"inputs,omitempty"`
 }
 
 // FixtureInput records one immutable runtime input. Reference is a semantic
@@ -34,9 +34,12 @@ type Fixture struct {
 type FixtureInput struct {
 	Name      string `json:"name"`
 	Kind      string `json:"kind"`
+	Custody   string `json:"custody,omitempty"`
+	SourceSHA string `json:"source_sha,omitempty"`
 	Reference string `json:"reference"`
 	Digest    string `json:"digest,omitempty"`
 	Checksum  string `json:"checksum,omitempty"`
+	Path      string `json:"path,omitempty"`
 }
 
 var (
@@ -98,6 +101,20 @@ func (fixture Fixture) Validate() error {
 // default and no coordinated-ref or latest fallback.
 func FixtureFromEnv(t *testing.T) Fixture {
 	t.Helper()
+	if path := os.Getenv(RuntimeBundleEnv); path != "" {
+		bundle, _, err := loadRuntimeBundle(path)
+		if err != nil {
+			t.Fatalf("load composed runtime bundle: %v", err)
+		}
+		fixture := fixtureFromRuntimeBundle(bundle)
+		if err := fixture.Validate(); err != nil {
+			t.Fatalf("invalid composed runtime fixture: %v", err)
+		}
+		return fixture
+	}
+	if os.Getenv(RequiredEnv) == "true" {
+		t.Fatalf("required E2E requires %s", RuntimeBundleEnv)
+	}
 	mode := FixtureMode(os.Getenv(fixtureModeEnv))
 	var fixture Fixture
 	switch mode {
@@ -120,15 +137,7 @@ func FixtureFromEnv(t *testing.T) Fixture {
 			fixture.Inputs = inputsFixture.Inputs
 		}
 	case FixtureCandidate:
-		path := os.Getenv(fixtureCandidatePlanEnv)
-		if path == "" {
-			t.Fatalf("%s=candidate requires %s", fixtureModeEnv, fixtureCandidatePlanEnv)
-		}
-		var err error
-		fixture, err = CandidateFixtureFromPlan(path)
-		if err != nil {
-			t.Fatalf("load candidate fixture: %v", err)
-		}
+		t.Fatalf("%s=candidate requires the shared %s", fixtureModeEnv, RuntimeBundleEnv)
 	case FixturePublished:
 		path := os.Getenv(fixturePublishedFileEnv)
 		if path == "" {
@@ -158,101 +167,6 @@ func fixtureFromFile(path string) (Fixture, error) {
 	}
 	var fixture Fixture
 	if err := json.Unmarshal(data, &fixture); err != nil {
-		return Fixture{}, err
-	}
-	return fixture, nil
-}
-
-// CandidateFixtureFromPlan derives exact candidate and pinned-baseline inputs
-// from the release plan consumed by the gate.
-func CandidateFixtureFromPlan(path string) (Fixture, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return Fixture{}, err
-	}
-	var plan struct {
-		SourceSHA string `json:"source_sha"`
-		Releases  []struct {
-			Target  string `json:"target"`
-			Version string `json:"version"`
-		} `json:"releases"`
-		Baselines struct {
-			Images []struct {
-				Name       string `json:"name"`
-				Repository string `json:"repository"`
-				Version    string `json:"version"`
-				Digest     string `json:"digest"`
-			} `json:"images"`
-			Charts []struct {
-				Chart      string `json:"chart"`
-				Repository string `json:"repository"`
-				Version    string `json:"version"`
-				Checksum   string `json:"sha256"`
-			} `json:"charts"`
-		} `json:"baseline_dependencies"`
-		TransitionBaselines struct {
-			Charts []struct {
-				Name       string `json:"name"`
-				Chart      string `json:"chart"`
-				Repository string `json:"repository"`
-				Version    string `json:"version"`
-				Checksum   string `json:"sha256"`
-			} `json:"charts"`
-		} `json:"transition_baselines"`
-	}
-	if err := json.Unmarshal(data, &plan); err != nil {
-		return Fixture{}, err
-	}
-	fixture := Fixture{Mode: FixtureCandidate, SourceSHA: plan.SourceSHA}
-	for _, release := range plan.Releases {
-		fixture.Inputs = append(fixture.Inputs, FixtureInput{
-			Name: release.Target, Kind: "candidate", Reference: release.Version + "@" + plan.SourceSHA,
-		})
-	}
-	for _, image := range plan.Baselines.Images {
-		fixture.Inputs = append(fixture.Inputs, FixtureInput{
-			Name: image.Name, Kind: "published-image", Reference: image.Repository + ":" + image.Version, Digest: image.Digest,
-		})
-	}
-	for _, chart := range plan.Baselines.Charts {
-		fixture.Inputs = append(fixture.Inputs, FixtureInput{
-			Name: chart.Chart, Kind: "published-chart", Reference: chart.Repository + ":" + chart.Version, Checksum: chart.Checksum,
-		})
-	}
-	for _, chart := range plan.TransitionBaselines.Charts {
-		fixture.Inputs = append(fixture.Inputs, FixtureInput{
-			Name: chart.Name, Kind: "published-chart", Reference: chart.Repository + ":" + chart.Version, Checksum: chart.Checksum,
-		})
-	}
-	for _, image := range []struct {
-		Name   string
-		Prefix string
-	}{
-		{Name: "control-plane", Prefix: "CONTROL_PLANE"},
-		{Name: "inference-gateway", Prefix: "INFERENCE_GATEWAY"},
-		{Name: "control-plane-tool-runner", Prefix: "TOOL_RUNNER"},
-	} {
-		digest := os.Getenv(image.Prefix + "_IMAGE_DIGEST")
-		if digest == "" {
-			continue
-		}
-		repository := os.Getenv(image.Prefix + "_IMAGE_REPO")
-		tag := os.Getenv(image.Prefix + "_IMAGE_TAG")
-		if repository == "" || tag == "" {
-			return Fixture{}, fmt.Errorf("%s candidate digest has no exact repository/tag", image.Prefix)
-		}
-		reference := repository + ":" + tag
-		fixture.Inputs = append(fixture.Inputs, FixtureInput{
-			Name: image.Name, Kind: "candidate-image", Reference: reference, Digest: digest,
-		})
-	}
-	sort.Slice(fixture.Inputs, func(i, j int) bool {
-		if fixture.Inputs[i].Kind == fixture.Inputs[j].Kind {
-			return fixture.Inputs[i].Name < fixture.Inputs[j].Name
-		}
-		return fixture.Inputs[i].Kind < fixture.Inputs[j].Kind
-	})
-	if err := fixture.Validate(); err != nil {
 		return Fixture{}, err
 	}
 	return fixture, nil

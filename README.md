@@ -68,9 +68,10 @@ Docker builds retain their runtime identities and use component-scoped contexts:
 make docker-build  # control-plane, harness, isolation, tool-runner, and inference-gateway
 ```
 
-Forge's source-composed E2E inputs are the local `control-plane/` and `charts/`
-directories. Cross-repository matching-branch checkouts are not part of local
-monorepo development. Published artifact names, binaries, charts, images,
+Required E2E uses one generated exact-source/candidate plan and one verified
+runtime composer across owner suites. Cross-repository matching-branch checkouts
+and owner-local artifact builds are not part of monorepo validation. Published
+artifact names, binaries, charts, images,
 configuration, and runtime behavior remain unchanged.
 
 A merge to `master` does not release. If ticket acceptance requires semantic

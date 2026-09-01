@@ -95,9 +95,10 @@ def selection(paths: list[str], select_all: bool = False) -> dict[str, object]:
                 ".github/scripts/select_ci.py",
                 ".github/scripts/test_select_ci.py",
                 ".github/scripts/test_cache_contract.py",
+                ".github/scripts/e2e.py",
+                ".github/scripts/test_e2e.py",
                 ".github/workflows/ci.yml",
                 ".github/workflows/e2e.yml",
-                ".github/workflows/charts-runtime.yml",
             }
             # Unknown GitHub automation remains conservative, but release-only
             # files above no longer force unrelated images, Kind, CPU, or GPU.

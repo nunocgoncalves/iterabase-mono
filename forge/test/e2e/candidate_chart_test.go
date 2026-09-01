@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -73,13 +74,14 @@ func prepareCandidateImages(t *testing.T, ip, keyPath string) {
 	}
 }
 
+func candidateShellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
+}
+
 func prepareCandidateChart(t *testing.T, ip, keyPath string) {
 	t.Helper()
 	platform := os.Getenv(platformChartArchiveEnv)
 	substrate := os.Getenv(substrateChartArchiveEnv)
-	if platform == "" && substrate == "" {
-		return
-	}
 	if platform == "" || substrate == "" {
 		t.Fatalf("exact platform validation requires %s and %s", platformChartArchiveEnv, substrateChartArchiveEnv)
 	}

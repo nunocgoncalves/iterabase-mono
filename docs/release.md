@@ -1,33 +1,33 @@
 # Build-once affected-target bundles and protected promotion
 
-HOR-473 makes `master` an integration branch, not a publication trigger. The repository has three manual workflows:
+`master` is an integration branch, not a publication trigger. Publication uses
+three manual workflows:
 
-- **Release candidate** (`release-candidate.yml`) builds and validates an explicit affected-target bundle from one exact master SHA.
-- **Promote release** (`release-promote.yml`) verifies a successful candidate bundle and publishes its exact members after one founder approval in the protected `release` environment.
-- **Release system rehearsal** (`release-rehearsal.yml`) exercises and cleans up disposable package, protected-tag, and prerelease operations after release-system or permission changes.
+- **Release candidate** builds and validates an explicit affected-target bundle
+  from one exact SHA contained in `master`.
+- **Promote release** verifies a successful candidate run and publishes its
+  unchanged members after one founder approval in the protected `release`
+  environment.
+- **Release system rehearsal** exercises disposable package, protected-tag, and
+  prerelease operations after release-control or permission changes.
 
-No push to `master` or tag push publishes an artifact or GitHub Release.
+No push to `master`, tag push, merge, acceptance step, or rehearsal implicitly
+publishes a semantic artifact.
 
 ## Ticket acceptance and release intent
 
-Engineering acceptance and semantic publication are separate decisions. Every
-ticket's production-impact evidence must classify publication as one of:
+Every ticket classifies semantic publication as:
 
-- **Required for ticket acceptance:** the acceptance contract names the affected
-  release targets and requires published artifacts. After merge, run a candidate
-  from the exact current master SHA, promote that successful run through the
-  founder-approved environment, and record the run, release, tag, digest, and
-  checksum evidence before marking the ticket Done.
-- **Deferred to the product release gate:** the merged implementation can be
-  accepted as engineering delivery without publishing it. The containing
-  outcome's `product-release-review` decides when the coherent product release
-  is ready.
-- **None:** documentation, tests, source-control operations, or other work does
-  not alter a semantic artifact.
+- **Required for ticket acceptance:** after merge, the founder explicitly
+  selects release targets for the exact current master SHA; successful candidate,
+  promotion, and any named-environment deployment evidence block Done.
+- **Deferred to product release review:** engineering can be accepted without
+  publication; the product release gate later authorizes the target set.
+- **None:** no semantic artifact is required.
 
-Acceptance must never dispatch a release merely because a PR merged. When
-publication is required, target selection is explicit founder-reviewed release
-intent; path selection may inform the proposal but cannot choose it.
+Path selection may inform a proposal but never chooses semantic release intent.
+HOR-540 itself is **none**: its all-target candidate is a non-promoted validation
+rehearsal.
 
 ## Independently versioned targets
 
@@ -35,97 +35,140 @@ intent; path selection may inform the proposal but cannot choose it.
 | --- | --- | --- |
 | `control-plane` | `control-plane/VERSION` | control-plane, harness, and tool-runner images |
 | `inference-gateway` | `inference-gateway/VERSION` | inference-gateway image |
-| `forge` | `forge/VERSION` | Linux/macOS × amd64/arm64 archives in one GitHub Release |
+| `forge` | `forge/VERSION` | Linux/macOS × amd64/arm64 archives |
 | `control-plane-chart` | chart `Chart.yaml` | control-plane OCI chart |
 | `inference-gateway-chart` | chart `Chart.yaml` | inference-gateway OCI chart |
 | `iterabase-platform-chart` | chart `Chart.yaml` | platform chart plus same-version certificate substrate companion |
 
-The protected Git tags remain `control-plane-v<version>`, `inference-gateway-v<version>`, `forge-v<version>`, and `<chart>-<version>`. Targets keep independent versions and namespaced releases, but one product change may release any coherent subset together. Forge's platform matrix is one target, not four releases.
+Tags remain namespaced (`control-plane-v<version>`,
+`inference-gateway-v<version>`, `forge-v<version>`, and `<chart>-<version>`).
+Targets keep independent versions even when validated and promoted together.
+
+## Single artifact and E2E authority
+
+`release/targets.json` owns target/version identity and every reviewed production
+recipe: Docker context/file/arguments/labels, Helm dependency/package steps,
+companion membership, and Forge GoReleaser config/version. The same recipe hashes
+are consumed by temporary PR/nightly builders and candidate builders.
+
+The candidate's execution plan is produced by `.github/scripts/e2e.py`, the same
+planner used by PR and complete nightly/manual E2E. Explicit requested targets
+select a conservative union from compiled owner registrations. Each selected
+scenario retains the same ID, owner Make target, timeout/capacity metadata, and
+stage DAG used in source mode. There is no chart-only matrix, pre-catalogue
+fallback, or duplicate candidate planner.
 
 ## Candidate bundle flow
 
 Dispatch **Release candidate** from `master` with:
 
-- a comma-separated target set such as `control-plane,control-plane-chart,forge`; and
-- one full commit SHA contained in `master`.
+- a non-empty comma-separated target set; and
+- one full SHA contained in `master`.
 
-The workflow trims and validates the explicit target set, rejects empty, unknown, or duplicate members, and canonicalizes it in repository target order. CI may suggest affected targets, but it does not silently choose release intent. Every selected version is inferred from source; callers cannot supply conflicting versions.
+The workflow trims, validates, deduplicates, and canonicalizes targets in
+repository order. Versions are read from source authority; callers cannot supply
+conflicting versions.
 
-1. Preflight validates the repository release contract, exact source membership, target set, version authorities, production-tag uniqueness, and absence of every planned semantic image/chart identity. Existing semantic artifacts or an unavailable registry fail before builds and validation begin.
-2. Every selected target is built exactly once. Image targets push canonical digests plus immutable run-scoped aliases in the existing GHCR packages. The alias format is `<source-sha>-<run-id>-<run-attempt>` and the exact value is recorded in the plan and image metadata separately from the source SHA and digest. Re-dispatches and GitHub run attempts therefore cannot collide. Existing aliases are never deleted or retargeted, and no run-specific package name or candidate package namespace is created. Chart and Forge archives remain Actions artifacts.
-3. Validation consumes all selected candidates together. For example, a selected control-plane chart installs the selected control-plane image digest, and selected Forge validation runs with both. Shared owner, chart, Kind, and real-machine suites are deduplicated into one union.
-4. Any unselected dependency used by validation resolves to an explicit, reviewed, already-published baseline. Candidate evidence distinguishes selected candidate identities from baseline dependencies; it never treats a bumped but unpublished repository version as an available baseline.
-5. A generated bundle bill of materials records source SHA, selected target/version pairs, exact artifact identities, published baselines, native chart dependencies, fixture inputs, and validation result. There is no hand-maintained global compatibility manifest.
-6. The final `release-candidate` Actions artifact contains the canonical plan, evidence, exact chart/Forge files, checksums, SBOMs, and image digest metadata. It is retained for 90 days pending promotion or expiry.
+1. **Preflight** verifies exact checkout/membership, recipes, version authorities,
+   candidate alias uniqueness, semantic destination availability, compiled
+   candidate routing, and immutable published baselines.
+2. **Build once.** Selected product images are pushed by digest and receive one
+   immutable run-scoped alias `<source-sha>-<run-id>-<run-attempt>`. Selected
+   chart/companion and Forge outputs remain retained Actions artifacts. Required
+   validation-only artifacts are exact-source temporary Actions artifacts and
+   can never be promoted.
+3. **Compose once per scenario.** The shared composer verifies every selected or
+   baseline digest/checksum/source/recipe identity, composes selected nested
+   charts into the exact platform archive, and supplies the same runtime-bundle
+   schema used by PR/nightly.
+4. **Execute the compiled union.** F2 and mandatory F3 jobs invoke the same owner
+   scenario and stage graph. CPU/GPU groups are shared across PR, nightly, and
+   candidate workflows and never cancel resource-owning cleanup.
+5. **Reconcile actual evidence.** Candidate validation requires exactly one
+   machine-readable result per planned scenario and one passed terminal result
+   per declared stage. Missing/extra/skipped/blocked/canceled results or identity
+   mismatches fail even when a matrix job itself appears successful.
+6. **Retain promotion trust.** The 90-day `release-candidate` artifact contains
+   the normalized plan, complete per-scenario/stage/runtime identity records,
+   selected candidate files and metadata, checksums, SBOMs, and the generated
+   candidate evidence record.
 
-Real-machine assertions remain bounded rather than relying on fixed timing. Scenarios that deploy product workloads wait up to 10 minutes for every control-plane Deployment to report its current generation Available before inspecting requested digests and CRI image IDs. The dedicated-workspace exact-candidate scenario uses full product workloads and owns fixed mount/class/RWO evidence; the complete CPU scenario also owns migration and exact product-image handoff for coordinated candidates. AgentPool readiness retains its 10-minute bound; a timeout emits the AgentPool condition/message, worker/PVC/PV hostPath, workspace mount/capacity state, and recent platform/storage events. When the mandatory GPU gate exhausts all offered DigitalOcean regions/sizes, the candidate remains failed and is classified as blocked by an evidenced external-capacity dependency. It is retried when capacity returns; it is never converted to a skip under `FORGE_E2E_REQUIRE_CAPACITY=true`.
+Selected targets may never resolve to baselines. Unselected dependencies use
+only explicit published references whose image digests, chart checksums, or
+Forge archive checksum are resolved into the plan before execution. A bumped but
+unpublished repository version is not inferred as an available baseline.
+
+Temporary and candidate artifact custody differs; recipes and assertions do not.
+Temporary artifacts expire and have no semantic names. Candidate identities are
+immutable and retained for no-rebuild promotion.
 
 ## Promotion flow
 
-Dispatch **Promote release** from `master` with the successful candidate workflow run ID.
+Dispatch **Promote release** from `master` with the successful candidate run ID.
+Before approval it verifies:
 
-Before approval, the workflow verifies:
+- repository/workflow identity, manual event, master branch, and successful run;
+- source SHA containment in `master`;
+- normalized plan and all retained asset checksums;
+- exact selected target/version/alias identities; and
+- the complete reconciled scenario/stage/runtime result set.
 
-- the run belongs to this repository's `Release candidate` workflow;
-- it was manually dispatched from `master` and concluded successfully;
-- its source SHA remains contained in `master`;
-- every selected target is known and source-versioned;
-- its plan and every artifact checksum match the candidate evidence.
+The publication job then waits once for founder approval in the protected
+`release` environment. After approval it re-verifies the candidate and preflights
+every semantic image, chart, tag, and GitHub Release destination before the first
+mutation. It then:
 
-The publication job then waits once for founder approval in the protected `release` environment. After approval it re-verifies the bundle and preflights **every** semantic image, chart, protected tag, and GitHub Release destination before the first mutation. It then:
+- adds semantic image tags to the exact tested digests;
+- pushes unchanged chart/companion archives;
+- creates or verifies protected namespaced tags at the exact source SHA; and
+- creates or completes one GitHub Release per selected target using exact
+  retained candidate files and shared evidence.
 
-- verifies each exact tested run-scoped alias again, then adds semantic image tags to those digests;
-- pushes unchanged chart archives;
-- creates or verifies each protected namespaced Git tag at the exact source SHA; and
-- creates one GitHub Release per selected target, attaching that target's exact candidate files plus the shared bundle plan and evidence.
+Nothing is rebuilt. GitHub and GHCR do not provide a cross-package transaction,
+so promotion is resumable rather than falsely atomic: an identical completed
+member is verified and skipped, a missing member continues, and any conflicting
+identity fails closed.
 
-Nothing is rebuilt. GitHub and GHCR do not provide a cross-package transaction, so promotion is resumable rather than falsely atomic: an identical already-published member is verified and skipped, a missing member continues, and any conflicting digest, archive, tag, or Release asset fails closed.
+## Capacity and incomplete candidates
 
-## Generated compatibility evidence
-
-Compatibility evidence answers “what exact combination did this bundle prove?” It is generated from actual inputs:
-
-- selected component `VERSION` files and chart metadata;
-- selected chart dependencies;
-- explicit published baseline identities for unselected dependencies;
-- E2E fixture constants;
-- image digests and archive checksums;
-- source SHA and deduplicated selected scenarios.
-
-The scenario set is compiled from each owner `TestE2E` entrypoint via `make e2e-catalogue`. Scenario metadata—not `release/targets.json` or changed-file narrowing—associates release targets with Kind/real-machine Make targets, bounds, and mandatory CPU/GPU capacity. A coordinated request takes the conservative union. The release target file retains artifact/version authority only.
-
-Targets retain independent versions. A bundle records a tested combination without imposing a synthetic lockstep platform version.
+Every selected F3 scenario is mandatory. Missing credentials or exhausted
+DigitalOcean CPU/GPU capacity produces a failing classification and retained
+redacted diagnostics. It is retried only by dispatching/rerunning when capacity
+returns; it never becomes a skip or pass-on-retry. Tagged reaping remains the
+crash-safety fallback.
 
 ## Release-system rehearsal
 
-The rehearsal is manual and is not part of normal candidate or promotion execution. It runs through the real protected `release` environment and environment-scoped credentials, creates a unique temporary image manifest in the existing control-plane package, creates a protected `dry-run/rehearsal-<run-id>` tag and prerelease, verifies them, and removes all three before completing.
-
-Run it only when commissioning or changing release workflow code, environment permissions, package permissions, deploy keys, or tag rulesets. Workflow logs provide the durable audit; it leaves no release catalogue or candidate-package namespace.
+The rehearsal is manual and separate from product candidates. It runs through
+the protected environment, creates a unique temporary image manifest, protected
+`dry-run/rehearsal-<run-id>` tag, and prerelease, verifies them, and removes all
+three. Run it only after release workflow, environment, package permission,
+deploy-key, or ruleset changes.
 
 ## Protection and operator audit
 
-The `release` environment must require founder review, permit only `master`, and hold `RELEASE_TAG_SSH_KEY`. The active tag ruleset protects production namespaces plus `dry-run/**`. Because GitHub grants deploy-key bypass by actor class, the release key must remain the repository's only write deploy key.
-
-Before release and after repository-key or ruleset changes:
+The `release` environment must require founder review, permit only `master`, and
+hold `RELEASE_TAG_SSH_KEY`. The active ruleset protects production namespaces
+and `dry-run/**`. The release deploy key must remain the repository's only write
+deploy key.
 
 ```bash
+make release-check
 make release-security-audit
 
 test "$(gh api repos/nunocgoncalves/iterabase-mono/keys \
   --jq '[.[] | select(.read_only == false)] | length')" -eq 1
 ```
 
-The sole write key must be `iterabase protected release tags (validated)`. Repository default workflow permissions remain read-only; only candidate image jobs receive package write, and only the approved promotion/rehearsal job receives publication permissions.
-
-## Local validation
-
-```bash
-make release-check
-python3 .github/scripts/test_select_ci.py
-```
-
-Release-only implementation changes are handled by these focused contract checks. Changes to affected-target selection or shared CI/test infrastructure deliberately fan out broadly because they can invalidate every selection decision.
+Repository default workflow permissions remain read-only. Only candidate image
+jobs receive package write, and only approved promotion/rehearsal jobs receive
+publication permissions.
 
 ## Rollback
 
-No overlay deploys automatically. Consumers continue pinning immutable versions. Disable or revert the manual workflows to stop publication. Never overwrite, retarget, or delete an immutable candidate alias or production release to roll back behavior; publish a corrected candidate/version and update consumers deliberately. If publication stops between bundle members, resume the exact verified candidate rather than rebuilding it.
+No overlay deploys automatically. Consumers continue pinning immutable versions.
+Disable or revert manual workflows to stop publication. Never overwrite,
+retarget, or delete immutable candidate aliases or production releases to roll
+back behavior; publish a corrected version and update consumers deliberately.
+If publication stops between members, resume the exact verified candidate rather
+than rebuilding it.

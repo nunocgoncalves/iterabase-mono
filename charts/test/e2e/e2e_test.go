@@ -32,24 +32,24 @@ func TestE2E(t *testing.T) {
 
 func chartFixtureFromEnv(t *testing.T) sharede2e.Fixture {
 	t.Helper()
-	fixture := sharede2e.FixtureFromEnv(t)
-	fixture = mergeChartFixtureInput(t, fixture, sharede2e.FixtureInput{
-		Name: "certificate-migration-source", Kind: "published-chart",
-		Reference: "oci://ghcr.io/nunocgoncalves/iterabase-charts/iterabase-platform:" + certificateMigrationSourceVersion,
-	})
-	for _, input := range loadTransitionBaselineFixture(t).Inputs {
-		fixture = mergeChartFixtureInput(t, fixture, input)
-	}
-	if err := fixture.Validate(); err != nil {
-		t.Fatalf("add chart runtime dependencies to fixture: %v", err)
-	}
-	return fixture
+	return sharede2e.FixtureFromEnv(t)
 }
 
 func chartScenarioMetadata(name, description, makeTarget string, minutes int, references, targets []string) sharede2e.ScenarioMetadata {
+	artifacts := []string{
+		"control-plane-image", "inference-gateway-image", "control-plane-chart", "inference-gateway-chart",
+		"iterabase-platform-chart", "cert-manager-substrate-chart",
+	}
+	if name == "certificate-ownership-migration" {
+		artifacts = append(artifacts, "certificate-migration-chart")
+	}
+	if name == "observability" || name == "observability-tls" {
+		artifacts = append(artifacts, "harness-image", "tool-runner-image")
+	}
 	return sharede2e.ScenarioMetadata{
 		Name: name, Description: description, Tier: sharede2e.TierF2,
-		References: references, ReleaseTargets: targets,
+		References: references, ReleaseTargets: targets, RequiredArtifacts: artifacts,
+		Intents:      []sharede2e.ExecutionIntent{sharede2e.IntentPR, sharede2e.IntentNightly, sharede2e.IntentCandidate},
 		FixtureModes: []sharede2e.FixtureMode{sharede2e.FixtureSource, sharede2e.FixtureCandidate, sharede2e.FixturePublished},
 		MakeTarget:   makeTarget, TimeoutMinutes: minutes,
 	}
@@ -58,6 +58,11 @@ func chartScenarioMetadata(name, description, makeTarget string, minutes int, re
 func transitionScenarioMetadata(name, description, makeTarget string, minutes int, references, targets []string) sharede2e.ScenarioMetadata {
 	metadata := chartScenarioMetadata(name, description, makeTarget, minutes, references, targets)
 	metadata.FixtureModes = []sharede2e.FixtureMode{sharede2e.FixtureSource, sharede2e.FixtureCandidate}
+	if name == "metallb-upgrade-reapply" {
+		metadata.RequiredArtifacts = append(metadata.RequiredArtifacts, "metallb-platform-predecessor", "metallb-substrate-predecessor")
+	} else {
+		metadata.RequiredArtifacts = append(metadata.RequiredArtifacts, "supported-platform-predecessor", "supported-substrate-predecessor")
+	}
 	return metadata
 }
 

@@ -1,0 +1,361 @@
+#!/usr/bin/env python3
+
+from __future__ import annotations
+
+import copy
+import json
+from pathlib import Path
+import tempfile
+import unittest
+
+from e2e import (
+    E2EError,
+    hash_file,
+    load_catalogue,
+    load_contract,
+    make_plan,
+    validate_catalogue_contract,
+    validate_results,
+    set_chart_dependency_version,
+)
+
+ROOT = Path(__file__).resolve().parents[2]
+SOURCE_SHA = "a" * 40
+
+
+class E2EPlanTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.catalogue = load_catalogue(ROOT)
+        cls.contract = load_contract(ROOT)
+
+    def plan(self, paths: list[str]) -> dict:
+        return make_plan(
+            ROOT,
+            self.catalogue,
+            self.contract,
+            intent="pr",
+            source_sha=SOURCE_SHA,
+            paths=paths,
+        )
+
+    def test_compiled_contract_is_complete(self) -> None:
+        validate_catalogue_contract(self.catalogue, self.contract)
+        plan = make_plan(
+            ROOT,
+            self.catalogue,
+            self.contract,
+            intent="nightly",
+            source_sha=SOURCE_SHA,
+        )
+        runnable = [
+            scenario
+            for suite in self.catalogue["suites"]
+            for scenario in suite["scenarios"]
+            if scenario["metadata"]["tier"] in {"F2", "F3"}
+        ]
+        self.assertEqual(len(runnable), plan["scenario_total"])
+        self.assertEqual(
+            {scenario["id"] for scenario in runnable},
+            set(plan["selected_scenario_ids"]),
+        )
+
+    def test_representative_path_unions_are_conservative(self) -> None:
+        cases = {
+            "docs": (["docs/ci.md"], set()),
+            "control-plane": (
+                ["control-plane/internal/api/handler.go"],
+                {"control-plane-image"},
+            ),
+            "inference": (
+                ["inference-gateway/internal/proxy/proxy.go"],
+                {"inference-gateway-image"},
+            ),
+            "chart": (
+                ["charts/charts/control-plane/templates/deployment.yaml"],
+                {"control-plane-chart", "iterabase-platform-chart"},
+            ),
+            "forge": (["forge/internal/lifecycle/lifecycle.go"], {"forge-binary"}),
+            "shared-testkit": (
+                ["testkit/e2e/suite.go"],
+                {
+                    "control-plane-image",
+                    "harness-image",
+                    "tool-runner-image",
+                    "inference-gateway-image",
+                    "runtime-fixture-image",
+                    "iterabase-platform-chart",
+                    "cert-manager-substrate-chart",
+                    "forge-binary",
+                },
+            ),
+            "workflow": (
+                [".github/workflows/e2e.yml"],
+                {
+                    "control-plane-image",
+                    "harness-image",
+                    "tool-runner-image",
+                    "inference-gateway-image",
+                    "runtime-fixture-image",
+                    "iterabase-platform-chart",
+                    "cert-manager-substrate-chart",
+                    "forge-binary",
+                },
+            ),
+        }
+        for name, (paths, expected_subset) in cases.items():
+            with self.subTest(name=name):
+                plan = self.plan(paths)
+                self.assertTrue(expected_subset.issubset(set(plan["affected_artifacts"])))
+                if name == "docs":
+                    self.assertEqual(0, plan["scenario_total"])
+                else:
+                    self.assertGreater(plan["scenario_total"], 0)
+
+    def test_deletion_move_and_all_target_changes_keep_both_owners(self) -> None:
+        moved = self.plan(
+            [
+                "control-plane/internal/api/moved.go",
+                "forge/internal/lifecycle/moved.go",
+            ]
+        )
+        self.assertIn("control-plane-image", moved["affected_artifacts"])
+        self.assertIn("forge-binary", moved["affected_artifacts"])
+        all_targets = make_plan(
+            ROOT,
+            self.catalogue,
+            self.contract,
+            intent="pr",
+            source_sha=SOURCE_SHA,
+            select_all=True,
+        )
+        self.assertEqual(
+            set(all_targets["selected_scenario_ids"]),
+            set(
+                make_plan(
+                    ROOT,
+                    self.catalogue,
+                    self.contract,
+                    intent="nightly",
+                    source_sha=SOURCE_SHA,
+                )["selected_scenario_ids"]
+            ),
+        )
+
+    def test_capacity_groups_are_cross_intent_nonoverlapping_and_serial(self) -> None:
+        nightly = make_plan(
+            ROOT, self.catalogue, self.contract,
+            intent="nightly", source_sha=SOURCE_SHA,
+        )
+        candidate = make_plan(
+            ROOT, self.catalogue, self.contract,
+            intent="candidate", source_sha=SOURCE_SHA,
+            targets=list(self.contract["targets"]),
+        )
+        for plan in (nightly, candidate):
+            groups = {item["capacity"]: item for item in plan["real_machine_matrix"]}
+            self.assertEqual({"cpu", "gpu"}, set(groups))
+            self.assertEqual("e2e-capacity-cpu", groups["cpu"]["capacity_group"])
+            self.assertEqual("e2e-capacity-gpu", groups["gpu"]["capacity_group"])
+            self.assertEqual(
+                ["forge/digitalocean-cpu", "forge/digitalocean-workspace"],
+                [item["id"] for item in groups["cpu"]["scenarios"]],
+            )
+
+    def test_candidate_union_uses_same_scenario_and_stage_graph(self) -> None:
+        candidate = make_plan(
+            ROOT,
+            self.catalogue,
+            self.contract,
+            intent="candidate",
+            source_sha=SOURCE_SHA,
+            targets=["control-plane", "iterabase-platform-chart"],
+        )
+        nightly = make_plan(
+            ROOT,
+            self.catalogue,
+            self.contract,
+            intent="nightly",
+            source_sha=SOURCE_SHA,
+        )
+        nightly_by_id = {item["id"]: item for item in nightly["scenario_matrix"]}
+        for scenario in candidate["scenario_matrix"]:
+            source = nightly_by_id[scenario["id"]]
+            for field in ("id", "owner", "target", "scenario_timeout", "stage_graph_sha256", "stages"):
+                self.assertEqual(source[field], scenario[field])
+            for artifact in scenario["artifacts"]:
+                recipe = self.contract["artifact_recipes"][artifact["name"]]
+                if recipe.get("target") in {"control-plane", "iterabase-platform-chart"} and not recipe.get("temporary_only"):
+                    self.assertEqual("selected-candidate", artifact["custody"])
+
+    def test_runnable_registration_without_artifacts_or_routes_fails(self) -> None:
+        for field in ("required_artifacts", "intents", "make_target", "fixture_modes"):
+            catalogue = copy.deepcopy(self.catalogue)
+            scenario = next(
+                scenario
+                for suite in catalogue["suites"]
+                for scenario in suite["scenarios"]
+                if scenario["metadata"]["tier"] == "F2"
+            )
+            scenario["metadata"][field] = [] if field != "make_target" else ""
+            with self.subTest(field=field), self.assertRaises(E2EError):
+                validate_catalogue_contract(catalogue, self.contract)
+
+    def test_unselected_baseline_is_explicit_not_bumped_repository_version(self) -> None:
+        plan = make_plan(
+            ROOT, self.catalogue, self.contract,
+            intent="candidate", source_sha=SOURCE_SHA,
+            targets=["control-plane-chart"],
+        )
+        control = next(
+            artifact
+            for scenario in plan["scenario_matrix"]
+            for artifact in scenario["artifacts"]
+            if artifact["name"] == "control-plane-image"
+        )
+        self.assertEqual("published-baseline", control["custody"])
+        self.assertEqual(
+            self.contract["published_baselines"]["control-plane-image"],
+            control["reference"],
+        )
+        self.assertNotIn(
+            (ROOT / "control-plane/VERSION").read_text().strip(),
+            control["reference"],
+        )
+
+    def test_selected_artifact_never_substitutes_a_baseline(self) -> None:
+        plan = self.plan(["control-plane/internal/api/handler.go"])
+        for scenario in plan["scenario_matrix"]:
+            for artifact in scenario["artifacts"]:
+                if artifact["name"] == "control-plane-image":
+                    self.assertEqual("selected-temporary", artifact["custody"])
+
+
+class RuntimeCompositionContractTests(unittest.TestCase):
+    def test_selected_nested_chart_updates_outer_dependency_and_invalidates_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as value:
+            platform = Path(value)
+            (platform / "Chart.yaml").write_text(
+                "version: 1.0.0\ndependencies:\n  - name: control-plane\n    version: 0.4.12\n    repository: file://../control-plane\n",
+                encoding="utf-8",
+            )
+            (platform / "Chart.lock").write_text("digest: stale\n")
+            set_chart_dependency_version(platform, "control-plane", "0.4.13")
+            self.assertIn("version: 0.4.13", (platform / "Chart.yaml").read_text())
+            self.assertFalse((platform / "Chart.lock").exists())
+
+    def test_missing_nested_dependency_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as value:
+            platform = Path(value)
+            (platform / "Chart.yaml").write_text("version: 1.0.0\n", encoding="utf-8")
+            with self.assertRaises(E2EError):
+                set_chart_dependency_version(platform, "control-plane", "0.4.13")
+
+
+class ResultReconciliationTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.catalogue = load_catalogue(ROOT)
+        cls.contract = load_contract(ROOT)
+
+    def fixture(self, directory: Path) -> tuple[Path, Path, dict]:
+        plan = make_plan(
+            ROOT,
+            self.catalogue,
+            self.contract,
+            intent="pr",
+            source_sha=SOURCE_SHA,
+            paths=["forge/internal/lifecycle/lifecycle.go"],
+        )
+        # Keep one scenario so result fixtures remain small and exact.
+        selected = next(item for item in plan["scenario_matrix"] if item["id"] == "forge/digitalocean-gpu")
+        plan["scenario_matrix"] = [selected]
+        plan["kind_matrix"] = []
+        plan["real_machine_matrix"] = [selected]
+        plan["selected_scenario_ids"] = [selected["id"]]
+        plan["scenario_total"] = 1
+        plan_path = directory / "plan.json"
+        plan_path.write_text(json.dumps(plan, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+        result = {
+            "schema_version": 1,
+            "scenario_id": selected["id"],
+            "status": "passed",
+            "source_sha": SOURCE_SHA,
+            "plan_sha256": hash_file(plan_path),
+            "catalogue_sha256": plan["catalogue_sha256"],
+            "runtime_bundle_sha256": "b" * 64,
+            "stage_graph_sha256": selected["stage_graph_sha256"],
+            "fixture_mode": "source",
+            "artifacts": [],
+            "stages": [
+                {
+                    "name": stage["name"],
+                    "depends_on": stage.get("depends_on", []),
+                    "status": "passed",
+                }
+                for stage in selected["stages"]
+            ],
+            "completed_at": "2026-09-01T00:00:00Z",
+        }
+        for artifact in selected["artifacts"]:
+            record = {
+                "name": artifact["name"],
+                "kind": artifact["kind"],
+                "custody": artifact["custody"],
+                "reference": artifact.get("reference", artifact["name"]),
+                "recipe_sha256": artifact["recipe_sha256"],
+            }
+            if artifact["custody"] != "published-baseline":
+                record["source_sha"] = SOURCE_SHA
+            if artifact["kind"] == "image":
+                record["digest"] = "sha256:" + "c" * 64
+            else:
+                record["checksum"] = "d" * 64
+            result["artifacts"].append(record)
+        results = directory / "results"
+        results.mkdir()
+        (results / "result.json").write_text(json.dumps(result) + "\n", encoding="utf-8")
+        return plan_path, results, result
+
+    def test_exact_result_set_and_stages_pass(self) -> None:
+        with tempfile.TemporaryDirectory() as value:
+            plan, results, _ = self.fixture(Path(value))
+            validate_results(plan, results)
+
+    def test_missing_extra_skipped_and_blocked_results_fail(self) -> None:
+        for mutation in ("missing", "extra", "skipped", "blocked"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as value:
+                plan, results, result = self.fixture(Path(value))
+                path = results / "result.json"
+                if mutation == "missing":
+                    path.unlink()
+                elif mutation == "extra":
+                    extra = copy.deepcopy(result)
+                    extra["scenario_id"] = "extra/scenario"
+                    (results / "extra.json").write_text(json.dumps(extra) + "\n")
+                else:
+                    result["stages"][0]["status"] = mutation
+                    path.write_text(json.dumps(result) + "\n")
+                with self.assertRaises(E2EError):
+                    validate_results(plan, results)
+
+
+class WorkflowContractTests(unittest.TestCase):
+    def test_workflows_use_one_planner_composer_and_result_validator(self) -> None:
+        for workflow in ("e2e.yml", "release-candidate.yml"):
+            content = (ROOT / ".github" / "workflows" / workflow).read_text(encoding="utf-8")
+            self.assertIn(".github/scripts/e2e.py", content)
+            self.assertIn("e2e.py compose", content)
+            self.assertIn("e2e.py validate-results", content)
+            self.assertNotIn("prepare_candidate_runtime.sh", content)
+            self.assertNotIn("prepare_pr_workspace_runtime.sh", content)
+        e2e = (ROOT / ".github/workflows/e2e.yml").read_text(encoding="utf-8")
+        self.assertIn("github.event.pull_request.head.sha", e2e)
+        self.assertIn("git rev-parse HEAD", e2e)
+        self.assertIn("cancel-in-progress: false", e2e)
+        self.assertNotIn("control-plane-kind:", e2e)
+        self.assertNotIn("charts-runtime:", e2e)
+
+
+if __name__ == "__main__":
+    unittest.main()

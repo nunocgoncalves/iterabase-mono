@@ -62,7 +62,7 @@ func (suite *Suite) Run(t *testing.T) {
 		t.Fatalf("invalid E2E suite: %v", err)
 	}
 	if output := os.Getenv(CatalogueOutputEnv); output != "" {
-		catalogue := Catalogue{SchemaVersion: 1, Suites: []CatalogueSuite{suite.catalogue()}}
+		catalogue := Catalogue{SchemaVersion: 2, Suites: []CatalogueSuite{suite.catalogue()}}
 		data, err := json.MarshalIndent(catalogue, "", "  ")
 		if err != nil {
 			t.Fatalf("marshal E2E catalogue: %v", err)
@@ -88,11 +88,13 @@ func (suite *Suite) Run(t *testing.T) {
 
 	for _, definition := range suite.definitions {
 		definition := definition
+		scenarioID := suite.metadata.Name + "/" + definition.metadata.Name
 		t.Run(definition.metadata.Name, func(t *testing.T) {
 			if !slices.Contains(definition.metadata.FixtureModes, fixture.Mode) {
 				t.Fatalf("scenario does not support recorded fixture mode %q", fixture.Mode)
 			}
-			definition.run(t)
+			execution := prepareScenarioExecution(t, scenarioID, definition, fixture)
+			definition.run(t, execution)
 		})
 	}
 }
@@ -143,31 +145,104 @@ func cloneStages(stages []StageMetadata) []StageMetadata {
 	return cloned
 }
 
-type stageStatus uint8
+type stageStatus string
 
 const (
-	stagePassed stageStatus = iota + 1
-	stageFailed
-	stageSkipped
-	stageBlocked
+	stagePassed  stageStatus = "passed"
+	stageFailed  stageStatus = "failed"
+	stageSkipped stageStatus = "skipped"
+	stageBlocked stageStatus = "blocked"
+	stageNotRun  stageStatus = "not-run"
 )
 
-func runScenario[S any](t *testing.T, scenario Scenario[S]) {
+type scenarioExecution struct {
+	scenarioID    string
+	fixture       Fixture
+	required      bool
+	bundle        RuntimeBundle
+	runtimeSHA256 string
+}
+
+func prepareScenarioExecution(t *testing.T, scenarioID string, definition Definition, fixture Fixture) scenarioExecution {
+	t.Helper()
+	execution := scenarioExecution{scenarioID: scenarioID, fixture: fixture, required: os.Getenv(RequiredEnv) == "true"}
+	if !execution.required {
+		return execution
+	}
+	if selected := os.Getenv(ScenarioIDEnv); selected != scenarioID {
+		t.Fatalf("required scenario ID = %q, want %q", selected, scenarioID)
+	}
+	bundle, runtimeSHA, err := loadRuntimeBundle(os.Getenv(RuntimeBundleEnv))
+	if err != nil {
+		t.Fatalf("load required runtime bundle: %v", err)
+	}
+	planSHA, err := fileSHA256(os.Getenv(ExecutionPlanEnv))
+	if err != nil {
+		t.Fatalf("hash required execution plan: %v", err)
+	}
+	if planSHA != bundle.PlanSHA256 {
+		t.Fatalf("execution plan hash %s does not match runtime bundle %s", planSHA, bundle.PlanSHA256)
+	}
+	required := slices.Clone(definition.metadata.RequiredArtifacts)
+	actual := make([]string, 0, len(bundle.Artifacts))
+	for _, artifact := range bundle.Artifacts {
+		actual = append(actual, artifact.Name)
+	}
+	sort.Strings(required)
+	sort.Strings(actual)
+	if !slices.Equal(required, actual) {
+		t.Fatalf("runtime artifact set = %v, want %v", actual, required)
+	}
+	execution.bundle, execution.runtimeSHA256 = bundle, runtimeSHA
+	return execution
+}
+
+func runScenario[S any](t *testing.T, scenario Scenario[S], execution scenarioExecution) {
 	t.Helper()
 	var state S
 	initialized := false
 	failed := false
+	incomplete := false
+	statuses := make(map[string]stageStatus, len(scenario.Stages))
+	for _, stage := range scenario.Stages {
+		statuses[stage.Name] = stageNotRun
+	}
 	defer func() {
-		if !initialized {
-			return
-		}
 		failedBeforeCleanup := failed || t.Failed()
-		if failedBeforeCleanup {
-			runHooks(t, "diagnostics", state, scenario.Diagnostics)
+		if initialized {
+			if failedBeforeCleanup || incomplete {
+				runHooks(t, "diagnostics", state, scenario.Diagnostics)
+			}
+			cleanupFailed := runHooks(t, "cleanup", state, scenario.Cleanup)
+			if cleanupFailed && !failedBeforeCleanup {
+				runHooks(t, "diagnostics-after-cleanup-failure", state, scenario.Diagnostics)
+			}
+			failed = failed || cleanupFailed
 		}
-		cleanupFailed := runHooks(t, "cleanup", state, scenario.Cleanup)
-		if cleanupFailed && !failedBeforeCleanup {
-			runHooks(t, "diagnostics-after-cleanup-failure", state, scenario.Diagnostics)
+		if execution.required {
+			status := "passed"
+			switch {
+			case failed:
+				status = "failed"
+			case incomplete:
+				status = "incomplete"
+			case t.Failed():
+				status = "failed"
+			}
+			stages := make([]StageResult, 0, len(scenario.Stages))
+			for _, stage := range scenario.Stages {
+				stages = append(stages, StageResult{Name: stage.Name, DependsOn: slices.Clone(stage.DependsOn), Status: string(statuses[stage.Name])})
+			}
+			result := ScenarioResult{
+				SchemaVersion: 1, ScenarioID: execution.scenarioID, Status: status,
+				SourceSHA: execution.bundle.SourceSHA, PlanSHA256: execution.bundle.PlanSHA256,
+				CatalogueSHA256: execution.bundle.CatalogueSHA256, RuntimeSHA256: execution.runtimeSHA256,
+				StageGraphSHA256: stageGraphSHA256(cloneStagesFromScenario(scenario.Stages)),
+				FixtureMode:      execution.fixture.Mode, Artifacts: execution.bundle.Artifacts, Stages: stages,
+			}
+			if err := writeScenarioResult(os.Getenv(ResultOutputEnv), result); err != nil {
+				t.Errorf("write required scenario result: %v", err)
+			}
 		}
 	}()
 
@@ -175,7 +250,6 @@ func runScenario[S any](t *testing.T, scenario Scenario[S]) {
 		state = scenario.NewState(t)
 	}
 	initialized = true
-	statuses := make(map[string]stageStatus, len(scenario.Stages))
 	for _, stage := range scenario.Stages {
 		blockedBy := make([]string, 0, len(stage.DependsOn))
 		for _, dependency := range stage.DependsOn {
@@ -188,6 +262,7 @@ func runScenario[S any](t *testing.T, scenario Scenario[S]) {
 				t.Skipf("blocked by prerequisite stage(s): %v", blockedBy)
 			})
 			statuses[stage.Name] = stageBlocked
+			incomplete = true
 			continue
 		}
 
@@ -199,6 +274,7 @@ func runScenario[S any](t *testing.T, scenario Scenario[S]) {
 		switch {
 		case skipped:
 			statuses[stage.Name] = stageSkipped
+			incomplete = true
 		case !passed:
 			statuses[stage.Name] = stageFailed
 			failed = true
@@ -206,6 +282,17 @@ func runScenario[S any](t *testing.T, scenario Scenario[S]) {
 			statuses[stage.Name] = stagePassed
 		}
 	}
+	if execution.required && incomplete {
+		t.Errorf("required scenario has skipped, blocked, or not-run stages")
+	}
+}
+
+func cloneStagesFromScenario[S any](stages []Stage[S]) []StageMetadata {
+	metadata := make([]StageMetadata, 0, len(stages))
+	for _, stage := range stages {
+		metadata = append(metadata, StageMetadata{Name: stage.Name, DependsOn: slices.Clone(stage.DependsOn)})
+	}
+	return metadata
 }
 
 func runHooks[S any](t *testing.T, group string, state S, hooks []Hook[S]) bool {
@@ -223,11 +310,11 @@ func runHooks[S any](t *testing.T, group string, state S, hooks []Hook[S]) bool 
 // MergeCatalogues validates and deterministically merges independently compiled
 // suite catalogues.
 func MergeCatalogues(catalogues ...Catalogue) (Catalogue, error) {
-	merged := Catalogue{SchemaVersion: 1}
+	merged := Catalogue{SchemaVersion: 2}
 	seenSuites := make(map[string]struct{})
 	seenScenarios := make(map[string]struct{})
 	for _, catalogue := range catalogues {
-		if catalogue.SchemaVersion != 1 {
+		if catalogue.SchemaVersion != 2 {
 			return Catalogue{}, fmt.Errorf("unsupported catalogue schema %d", catalogue.SchemaVersion)
 		}
 		for _, suite := range catalogue.Suites {

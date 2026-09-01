@@ -10,9 +10,11 @@ import json
 import os
 from pathlib import Path
 import re
-import subprocess
 import sys
+import tempfile
 from typing import Any
+
+import e2e as e2e_contract
 
 SEMVER = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 SHA = re.compile(r"^[0-9a-f]{40}$")
@@ -49,47 +51,17 @@ def load_json(path: Path) -> dict[str, Any]:
 
 @lru_cache(maxsize=4)
 def load_scenario_catalogue(root_value: str | Path) -> dict[str, Any]:
-    root = Path(root_value).resolve()
-    command = [
-        "go",
-        "run",
-        "./testkit/e2e/cmd/e2e-catalogue",
-        "--root",
-        str(root),
-        "--format",
-        "json",
-    ]
     try:
-        completed = subprocess.run(
-            command,
-            cwd=root,
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=600,
-        )
-        catalogue = json.loads(completed.stdout)
-    except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
-        stderr = getattr(exc, "stderr", "")
-        raise ReleaseError(f"cannot compile E2E scenario catalogue: {exc}\n{stderr}") from exc
-    if not isinstance(catalogue, dict) or catalogue.get("schema_version") != 1:
-        raise ReleaseError("compiled E2E scenario catalogue must use schema_version 1")
-    return catalogue
+        return e2e_contract.load_catalogue(Path(root_value).resolve())
+    except e2e_contract.E2EError as exc:
+        raise ReleaseError(str(exc)) from exc
 
 
 def catalogue_scenarios(catalogue: dict[str, Any]) -> list[dict[str, Any]]:
-    suites = catalogue.get("suites")
-    if not isinstance(suites, list):
-        raise ReleaseError("compiled E2E catalogue suites must be a list")
-    scenarios: list[dict[str, Any]] = []
-    for suite in suites:
-        if not isinstance(suite, dict) or not isinstance(suite.get("suite"), dict):
-            raise ReleaseError("compiled E2E catalogue has an invalid suite")
-        for scenario in suite.get("scenarios", []):
-            if not isinstance(scenario, dict) or not isinstance(scenario.get("metadata"), dict):
-                raise ReleaseError("compiled E2E catalogue has an invalid scenario")
-            scenarios.append({**scenario, "suite": suite["suite"]})
-    return sorted(scenarios, key=lambda item: item["id"])
+    try:
+        return e2e_contract.catalogue_scenarios(catalogue)
+    except e2e_contract.E2EError as exc:
+        raise ReleaseError(str(exc)) from exc
 
 
 def parse_json_object(value: str | None, label: str) -> dict[str, Any]:
@@ -350,26 +322,25 @@ def chart_transition_baselines(root: Path) -> dict[str, list[dict[str, str]]]:
 def validate_contract(
     targets: dict[str, Any], root: Path, catalogue: dict[str, Any] | None = None
 ) -> None:
-    if targets.get("schema_version") != 3:
-        raise ReleaseError("release targets schema_version must be 3")
-    if "suite_mapping_until" in targets:
-        raise ReleaseError("temporary release suite mapping must be removed")
+    if targets.get("schema_version") != 4:
+        raise ReleaseError("release targets schema_version must be 4")
     definitions = targets.get("targets")
+    recipes = targets.get("artifact_recipes")
     if not isinstance(definitions, dict) or tuple(definitions) != TARGET_NAMES:
         raise ReleaseError("release target names or order do not match the workflow contract")
+    if not isinstance(recipes, dict):
+        raise ReleaseError("release artifact recipes are missing")
 
-    mapping_fields = {"source_suites", "kind_scenarios", "real_machine", "chart_runtime"}
     for target, definition in definitions.items():
-        if not isinstance(definition, dict):
-            raise ReleaseError(f"target {target} must be an object")
-        if mapping_fields.intersection(definition):
-            raise ReleaseError(f"target {target} retains temporary suite mapping fields")
-        if not isinstance(definition.get("tag_prefix"), str):
-            raise ReleaseError(f"target {target} is missing tag_prefix")
-        images = definition.get("images")
-        if not isinstance(images, list):
-            raise ReleaseError(f"target {target} must declare images")
-
+        if not isinstance(definition, dict) or not isinstance(definition.get("tag_prefix"), str):
+            raise ReleaseError(f"target {target} is incomplete")
+        artifacts = definition.get("artifacts")
+        if not isinstance(artifacts, list) or not artifacts:
+            raise ReleaseError(f"target {target} has no artifact recipes")
+        for artifact in artifacts:
+            recipe = recipes.get(artifact)
+            if not isinstance(recipe, dict) or recipe.get("target") != target:
+                raise ReleaseError(f"target {target} has invalid artifact recipe {artifact!r}")
         if "version_file" in definition:
             read_version(root / definition["version_file"])
         elif "chart" in definition:
@@ -377,58 +348,14 @@ def validate_contract(
             metadata = chart_metadata(root / "charts" / "charts" / chart / "Chart.yaml")
             if metadata["name"] != chart:
                 raise ReleaseError(f"chart target {target} points at {metadata['name']}")
-            for companion in definition.get("companions", []):
-                companion_metadata = chart_metadata(
-                    root / "charts" / "charts" / companion / "Chart.yaml"
-                )
-                if companion_metadata["version"] != metadata["version"]:
-                    raise ReleaseError(f"companion {companion} must match {chart} version")
         else:
             raise ReleaseError(f"target {target} has no version authority")
 
     compiled = catalogue or load_scenario_catalogue(root)
-    coverage = {target: [] for target in TARGET_NAMES}
-    for scenario in catalogue_scenarios(compiled):
-        metadata = scenario["metadata"]
-        release_targets = metadata.get("release_targets", [])
-        if not isinstance(release_targets, list):
-            raise ReleaseError(f"scenario {scenario['id']} release_targets must be a list")
-        unknown = sorted(set(release_targets) - set(TARGET_NAMES))
-        if unknown:
-            raise ReleaseError(
-                f"scenario {scenario['id']} has unknown release targets: {', '.join(unknown)}"
-            )
-        for target in release_targets:
-            coverage[target].append(scenario)
-        if not release_targets:
-            continue
-        fixture_modes = metadata.get("fixture_modes")
-        if not isinstance(fixture_modes, list) or "candidate" not in fixture_modes:
-            raise ReleaseError(f"release scenario {scenario['id']} lacks candidate fixture mode")
-        tier = metadata.get("tier")
-        if tier not in RUNNABLE_E2E_TIERS:
-            raise ReleaseError(
-                f"release scenario {scenario['id']} uses unsupported executable tier {tier!r}"
-            )
-        timeout = metadata.get("timeout_minutes")
-        if (
-            not metadata.get("make_target")
-            or not isinstance(timeout, int)
-            or isinstance(timeout, bool)
-            or timeout <= 0
-        ):
-            raise ReleaseError(f"release scenario {scenario['id']} lacks runtime metadata")
-        if tier == "F3" and (
-            metadata.get("capacity") not in {"cpu", "gpu"}
-            or metadata.get("mandatory_capacity") is not True
-        ):
-            raise ReleaseError(f"real-machine scenario {scenario['id']} must require named capacity")
-    missing = [target for target, scenarios in coverage.items() if not scenarios]
-    if missing:
-        raise ReleaseError(
-            "compiled E2E catalogue has no release coverage for: " + ", ".join(missing)
-        )
-
+    try:
+        e2e_contract.validate_catalogue_contract(compiled, targets)
+    except e2e_contract.E2EError as exc:
+        raise ReleaseError(str(exc)) from exc
     fixture_versions(root)
     chart_transition_baselines(root)
 
@@ -468,43 +395,6 @@ def source_suites_for_targets(selected: list[str]) -> list[str]:
     return suites
 
 
-def release_scenarios(
-    catalogue: dict[str, Any], selected: list[str]
-) -> list[dict[str, Any]]:
-    selected_set = set(selected)
-    return [
-        scenario
-        for scenario in catalogue_scenarios(catalogue)
-        if selected_set.intersection(scenario["metadata"].get("release_targets", []))
-    ]
-
-
-def scenario_matrix(scenarios: list[dict[str, Any]], tier: str) -> list[dict[str, Any]]:
-    matrix: list[dict[str, Any]] = []
-    for scenario in scenarios:
-        metadata = scenario["metadata"]
-        if metadata.get("tier") != tier:
-            continue
-        name = metadata["name"]
-        if tier == "F2":
-            name = name.removeprefix("kind-")
-        matrix.append(
-            {
-                "id": scenario["id"],
-                "owner": scenario["suite"]["owner"],
-                "name": metadata.get("capacity") or name,
-                "target": metadata["make_target"],
-                "timeout": metadata["timeout_minutes"],
-                **(
-                    {"capacity": metadata["capacity"], "mandatory": metadata["mandatory_capacity"]}
-                    if tier == "F3"
-                    else {}
-                ),
-            }
-        )
-    return matrix
-
-
 def make_plan(
     targets: dict[str, Any],
     selected_targets: str | list[str],
@@ -536,27 +426,42 @@ def make_plan(
     chart_matrix: list[dict[str, Any]] = []
     selected_chart_dependencies: list[dict[str, Any]] = []
 
+    recipes = targets["artifact_recipes"]
     for target in selected:
         definition = targets["targets"][target]
         version = versions[target]
         artifact_types: list[str] = []
-        if definition["images"]:
+        target_recipes = [recipes[name] for name in definition["artifacts"]]
+        image_recipes = [recipe for recipe in target_recipes if recipe["kind"] == "image"]
+        if image_recipes:
             artifact_types.append("image")
             images.extend(
                 {
-                    **image,
+                    "name": image["name"],
+                    "artifact": next(name for name in definition["artifacts"] if recipes[name] is image),
+                    "repository": image["repository"],
+                    "context": image["context"],
+                    "dockerfile": image["dockerfile"],
+                    "build_args": e2e_contract.render_recipe_values(image["build_args"], version=version, source_sha=master_sha),
+                    "labels": e2e_contract.render_recipe_values(image["labels"], version=version, source_sha=master_sha),
+                    "build_args_text": "\n".join(e2e_contract.render_recipe_values(image["build_args"], version=version, source_sha=master_sha)),
+                    "labels_text": "\n".join(e2e_contract.render_recipe_values(image["labels"], version=version, source_sha=master_sha)),
+                    "recipe_sha256": e2e_contract.recipe_hash(image),
                     "target": target,
                     "version": version,
                     "candidate_tag": candidate_tag,
                 }
-                for image in definition["images"]
+                for image in image_recipes
             )
-        chart = definition.get("chart")
-        if chart:
+        chart_recipes = [recipe for recipe in target_recipes if recipe["kind"] == "chart"]
+        if chart_recipes:
             artifact_types.append("chart")
+            recipe = chart_recipes[0]
+            chart = recipe["chart"]
+            companions = recipe.get("companions", [])
             dependencies = chart_dependencies(root / "charts" / "charts" / chart / "Chart.yaml")
             selected_chart_dependencies.append({"target": target, "chart": chart, "dependencies": dependencies})
-            for companion in definition.get("companions", []):
+            for companion in companions:
                 selected_chart_dependencies.append(
                     {
                         "target": target,
@@ -571,10 +476,21 @@ def make_plan(
                     "target": target,
                     "chart": chart,
                     "version": version,
-                    "companions": definition.get("companions", []),
+                    "companions": companions,
+                    "recipe_sha256": e2e_contract.recipe_hash(recipe),
+                    "companion_recipes": [
+                        {
+                            "chart": companion,
+                            "artifact": name,
+                            "recipe_sha256": e2e_contract.recipe_hash(recipes[name]),
+                        }
+                        for companion in companions
+                        for name in definition["artifacts"]
+                        if recipes[name].get("chart") == companion
+                    ],
                 }
             )
-        if target == "forge":
+        if any(recipe["kind"] == "forge" for recipe in target_recipes):
             artifact_types.append("forge")
         releases.append(
             {
@@ -586,19 +502,26 @@ def make_plan(
         )
 
     source_suites = source_suites_for_targets(selected)
-    scenarios = release_scenarios(compiled_catalogue, selected)
-    chart_runtime = any(target.endswith("-chart") for target in selected)
-    # Chart releases run the chart owner's complete candidate matrix through the
-    # reusable charts-runtime workflow. Image-only releases still select any
-    # chart-owned F2 scenario that names the image target in the generic exact-
-    # candidate matrix, without duplicating chart-release jobs.
-    kind_scenarios = [
+    try:
+        execution_plan = e2e_contract.make_plan(
+            root,
+            compiled_catalogue,
+            targets,
+            intent="candidate",
+            source_sha=master_sha,
+            targets=selected,
+        )
+    except e2e_contract.E2EError as exc:
+        raise ReleaseError(str(exc)) from exc
+    selected_scenario_ids = set(execution_plan["selected_scenario_ids"])
+    scenarios = [
         scenario
-        for scenario in scenarios
-        if not (chart_runtime and scenario["suite"]["owner"] == "charts")
+        for scenario in catalogue_scenarios(compiled_catalogue)
+        if scenario["id"] in selected_scenario_ids
     ]
-    kind_matrix = scenario_matrix(kind_scenarios, "F2")
-    real_machine_matrix = scenario_matrix(scenarios, "F3")
+    chart_runtime = False
+    kind_matrix = execution_plan["kind_matrix"]
+    real_machine_matrix = execution_plan["real_machine_matrix"]
 
     # Derive product baselines from every artifact-backed runtime fixture in the
     # selected suite union. Owner/source checks use the exact checkout; Kind and
@@ -649,9 +572,9 @@ def make_plan(
         add_baseline_chart("cert-manager-substrate", fixtures["platform_chart"])
 
     image_definitions = {
-        image["name"]: image
-        for target in ("control-plane", "inference-gateway")
-        for image in targets["targets"][target]["images"]
+        recipe["name"]: recipe
+        for recipe in targets["artifact_recipes"].values()
+        if recipe.get("kind") == "image" and recipe.get("target") in {"control-plane", "inference-gateway"}
     }
     baseline_images: list[dict[str, Any]] = []
 
@@ -764,7 +687,8 @@ def make_plan(
         "targets": selected,
         "releases": releases,
         "source_suites": source_suites,
-        "selected_scenarios": [scenario["id"] for scenario in scenarios],
+        "selected_scenarios": execution_plan["selected_scenario_ids"],
+        "execution_plan": execution_plan,
         "kind_matrix": kind_matrix,
         "real_machine_matrix": real_machine_matrix,
         "real_machine": real_machine,
@@ -772,6 +696,7 @@ def make_plan(
         "image_matrix": images,
         "chart_matrix": chart_matrix,
         "forge": "forge" in selected,
+        "forge_recipe_sha256": e2e_contract.recipe_hash(targets["artifact_recipes"]["forge-binary"]),
         "baseline_dependencies": {
             "images": baseline_images,
             "charts": baseline_charts,
@@ -808,11 +733,11 @@ def candidate_job_selection(plan: dict[str, Any]) -> dict[str, bool]:
     for field in ("image_matrix", "chart_matrix", "kind_matrix"):
         if not isinstance(plan.get(field), list):
             raise ReleaseError(f"candidate plan {field} must be a list")
-    # Plans produced by a contained pre-HOR-476 master SHA predate the compiled
-    # matrix. The workflow supplies their historical CPU+GPU matrix; current
-    # plans must still carry a list.
-    if "real_machine_matrix" in plan and not isinstance(plan["real_machine_matrix"], list):
+    if not isinstance(plan.get("real_machine_matrix"), list):
         raise ReleaseError("candidate plan real_machine_matrix must be a list")
+    execution = plan.get("execution_plan")
+    if not isinstance(execution, dict) or not isinstance(execution.get("artifact_build_matrix"), list):
+        raise ReleaseError("candidate plan has no compiled execution plan")
     for field in ("forge", "chart_runtime", "real_machine"):
         if not isinstance(plan.get(field), bool):
             raise ReleaseError(f"candidate plan {field} must be a boolean")
@@ -823,8 +748,8 @@ def candidate_job_selection(plan: dict[str, Any]) -> dict[str, bool]:
         "inference-gateway-source": "inference-gateway" in source_suites,
         "forge-source": "forge" in source_suites,
         "charts-source": "charts" in source_suites,
-        "charts-runtime": plan["chart_runtime"],
         "image-candidates": bool(plan["image_matrix"]),
+        "runtime-artifacts": bool(execution["artifact_build_matrix"]),
         "chart-candidate": bool(plan["chart_matrix"]),
         "forge-candidate": plan["forge"],
         "kind-candidates": bool(plan["kind_matrix"]),
@@ -907,6 +832,7 @@ def validate_candidate_assets(plan: dict[str, Any], assets: Path) -> None:
                 "candidate_tag": planned["candidate_tag"],
                 "version": planned["version"],
                 "source_sha": plan["source_sha"],
+                "recipe_sha256": planned["recipe_sha256"],
             }
             for field, value in required_identity.items():
                 if metadata.get(field) != value:
@@ -925,6 +851,18 @@ def validate_candidate_assets(plan: dict[str, Any], assets: Path) -> None:
     for chart_plan in plan["chart_matrix"]:
         chart = chart_plan["chart"]
         version = chart_plan["version"]
+        metadata = load_json(assets / "charts" / f"candidate-chart-{chart}.json")
+        for field, expected in {
+            "schema_version": 2,
+            "artifact_type": "chart",
+            "target": chart_plan["target"],
+            "chart": chart,
+            "version": version,
+            "source_sha": plan["source_sha"],
+            "recipe_sha256": chart_plan["recipe_sha256"],
+        }.items():
+            if metadata.get(field) != expected:
+                raise ReleaseError(f"candidate chart {chart} {field} does not match the plan")
         expected_archives = [chart, *chart_plan["companions"]]
         for expected_chart in expected_archives:
             if not (assets / "charts" / f"{expected_chart}-{version}.tgz").is_file():
@@ -933,6 +871,9 @@ def validate_candidate_assets(plan: dict[str, Any], assets: Path) -> None:
             raise ReleaseError(f"candidate chart checksums for {chart} are missing")
 
     if plan["forge"]:
+        metadata = load_json(assets / "forge" / "candidate-forge.json")
+        if metadata.get("source_sha") != plan["source_sha"] or metadata.get("recipe_sha256") != plan["forge_recipe_sha256"]:
+            raise ReleaseError("Forge candidate source or recipe identity does not match the plan")
         archives = sorted((assets / "forge").glob("forge_*_*.tar.gz"))
         expected_platforms = {"linux_amd64", "linux_arm64", "darwin_amd64", "darwin_arm64"}
         found = {
@@ -947,6 +888,13 @@ def validate_candidate_assets(plan: dict[str, Any], assets: Path) -> None:
 
 def assemble_evidence(plan: dict[str, Any], assets: Path) -> dict[str, Any]:
     validate_candidate_assets(plan, assets)
+    with tempfile.TemporaryDirectory(prefix="iterabase-candidate-plan-") as value:
+        normalized_plan = Path(value) / "candidate-plan.json"
+        normalized_plan.write_text(compact(plan) + "\n", encoding="utf-8")
+        try:
+            scenario_results = e2e_contract.validate_results(normalized_plan, assets / "results")
+        except e2e_contract.E2EError as exc:
+            raise ReleaseError(f"candidate scenario evidence is incomplete: {exc}") from exc
     records = asset_records(assets)
     if not records:
         raise ReleaseError("candidate has no recorded assets")
@@ -964,7 +912,19 @@ def assemble_evidence(plan: dict[str, Any], assets: Path) -> dict[str, Any]:
         "schema_version": 3,
         "candidate": candidate,
         "tested_with": plan["tested_with"],
-        "validation": {"status": "passed"},
+        "validation": {
+            "status": "passed",
+            "scenario_results": [
+                {
+                    "scenario_id": result["scenario_id"],
+                    "stage_graph_sha256": result["stage_graph_sha256"],
+                    "runtime_bundle_sha256": result["runtime_bundle_sha256"],
+                    "stages": result["stages"],
+                    "artifacts": result["artifacts"],
+                }
+                for result in scenario_results
+            ],
+        },
         "plan_sha256": hashlib.sha256((compact(plan) + "\n").encode()).hexdigest(),
         "assets": records,
     }
@@ -984,6 +944,26 @@ def verify_candidate(directory: Path) -> dict[str, Any]:
     actual = asset_records(assets)
     if evidence.get("assets") != actual:
         raise ReleaseError("candidate assets do not match recorded checksums")
+    with tempfile.TemporaryDirectory(prefix="iterabase-candidate-plan-") as value:
+        normalized_plan = Path(value) / "candidate-plan.json"
+        normalized_plan.write_text(compact(plan) + "\n", encoding="utf-8")
+        try:
+            scenario_results = e2e_contract.validate_results(normalized_plan, assets / "results")
+        except e2e_contract.E2EError as exc:
+            raise ReleaseError(f"candidate scenario evidence is incomplete: {exc}") from exc
+    recorded_results = evidence.get("validation", {}).get("scenario_results")
+    actual_results = [
+        {
+            "scenario_id": result["scenario_id"],
+            "stage_graph_sha256": result["stage_graph_sha256"],
+            "runtime_bundle_sha256": result["runtime_bundle_sha256"],
+            "stages": result["stages"],
+            "artifacts": result["artifacts"],
+        }
+        for result in scenario_results
+    ]
+    if recorded_results != actual_results:
+        raise ReleaseError("candidate evidence does not retain the exact scenario/stage/runtime result records")
     candidate = evidence.get("candidate", {})
     fields = ["run_id", "source_sha", "targets", "releases"]
     fields.extend(
@@ -1005,10 +985,13 @@ def write_github_outputs(path: Path, plan: dict[str, Any]) -> None:
         "targets": compact(plan["targets"]),
         "releases": compact(plan["releases"]),
         "forge_version": forge_release["version"] if forge_release else "",
+        "forge_recipe_sha256": plan["forge_recipe_sha256"],
         "image_matrix": compact(plan["image_matrix"]),
         "chart_matrix": compact(plan["chart_matrix"]),
         "kind_matrix": compact(plan["kind_matrix"]),
         "real_machine_matrix": compact(plan["real_machine_matrix"]),
+        "runtime_artifact_matrix": compact(plan["execution_plan"]["artifact_build_matrix"]),
+        "has_runtime_artifacts": str(bool(plan["execution_plan"]["artifact_build_matrix"])).lower(),
         "has_images": str(bool(plan["image_matrix"])).lower(),
         "has_chart": str(bool(plan["chart_matrix"])).lower(),
         "has_forge": str(bool(plan["forge"])).lower(),

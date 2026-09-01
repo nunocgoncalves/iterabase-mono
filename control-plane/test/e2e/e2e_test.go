@@ -30,14 +30,20 @@ func deployedMetadata(name, description, makeTarget string, timeout int, referen
 		Name: name, Description: description, Tier: sharede2e.TierF2,
 		References:     references,
 		ReleaseTargets: []string{"control-plane", "control-plane-chart", "iterabase-platform-chart"},
-		FixtureModes:   []sharede2e.FixtureMode{sharede2e.FixtureSource, sharede2e.FixtureCandidate},
-		MakeTarget:     makeTarget, TimeoutMinutes: timeout,
+		RequiredArtifacts: []string{
+			"control-plane-image", "control-plane-chart", "iterabase-platform-chart", "cert-manager-substrate-chart",
+		},
+		Intents:      []sharede2e.ExecutionIntent{sharede2e.IntentPR, sharede2e.IntentNightly, sharede2e.IntentCandidate},
+		FixtureModes: []sharede2e.FixtureMode{sharede2e.FixtureSource, sharede2e.FixtureCandidate},
+		MakeTarget:   makeTarget, TimeoutMinutes: timeout,
 	}
 }
 
 func deployedExecutionMetadata(name, description, makeTarget string, timeout int, references []string) sharede2e.ScenarioMetadata {
 	metadata := deployedMetadata(name, description, makeTarget, timeout, references)
 	metadata.ReleaseTargets = []string{"control-plane", "inference-gateway", "control-plane-chart", "inference-gateway-chart", "iterabase-platform-chart"}
+	metadata.RequiredArtifacts = append(metadata.RequiredArtifacts,
+		"harness-image", "tool-runner-image", "inference-gateway-image", "inference-gateway-chart", "runtime-fixture-image")
 	return metadata
 }
 
@@ -52,10 +58,9 @@ func deployedBrowserJourneysScenario() sharede2e.Definition {
 		),
 		NewState: newDeployedState,
 		Stages: []sharede2e.Stage[*deployedState]{
-			{Name: "build-source-image", Run: buildSourceImageStage},
-			{Name: "create-kind", DependsOn: []string{"build-source-image"}, Run: createControlPlaneKindStage},
-			{Name: "load-source-image", DependsOn: []string{"create-kind"}, Run: loadSourceImageStage},
-			{Name: "install-certificate-substrate", DependsOn: []string{"load-source-image"}, Run: installCertificateSubstrateStage},
+			{Name: "create-kind", Run: createControlPlaneKindStage},
+			{Name: "load-runtime-images", DependsOn: []string{"create-kind"}, Run: loadRuntimeImagesStage},
+			{Name: "install-certificate-substrate", DependsOn: []string{"load-runtime-images"}, Run: installCertificateSubstrateStage},
 			{Name: "install-control-plane", DependsOn: []string{"install-certificate-substrate"}, Run: installControlPlanePlatformStage},
 			{Name: "configure-workspace-storage", DependsOn: []string{"install-control-plane"}, Run: configureKindWorkspaceStorage},
 			{Name: "assert-deployment-ready", DependsOn: []string{"configure-workspace-storage"}, Run: assertDeploymentReadyStage},
@@ -77,12 +82,9 @@ func deployedExecutionContractsScenario() sharede2e.Definition {
 		),
 		NewState: newDeployedState,
 		Stages: []sharede2e.Stage[*deployedState]{
-			{Name: "build-source-image", Run: buildSourceImageStage},
-			{Name: "build-execution-images", DependsOn: []string{"build-source-image"}, Run: buildExecutionImagesStage},
-			{Name: "create-kind", DependsOn: []string{"build-execution-images"}, Run: createControlPlaneKindStage},
-			{Name: "load-source-image", DependsOn: []string{"create-kind"}, Run: loadSourceImageStage},
-			{Name: "load-execution-images", DependsOn: []string{"load-source-image"}, Run: loadExecutionImagesStage},
-			{Name: "install-certificate-substrate", DependsOn: []string{"load-execution-images"}, Run: installCertificateSubstrateStage},
+			{Name: "create-kind", Run: createControlPlaneKindStage},
+			{Name: "load-runtime-images", DependsOn: []string{"create-kind"}, Run: loadRuntimeImagesStage},
+			{Name: "install-certificate-substrate", DependsOn: []string{"load-runtime-images"}, Run: installCertificateSubstrateStage},
 			{Name: "install-execution-fixtures", DependsOn: []string{"install-certificate-substrate"}, Run: installExecutionFixtureStage},
 			{Name: "install-execution-platform", DependsOn: []string{"install-execution-fixtures"}, Run: installExecutionPlatformStage},
 			{Name: "configure-execution-workspace-storage", DependsOn: []string{"install-execution-platform"}, Run: configureKindWorkspaceStorage},
@@ -113,10 +115,9 @@ func deployedIdentityAPIScenario() sharede2e.Definition {
 		),
 		NewState: newDeployedState,
 		Stages: []sharede2e.Stage[*deployedState]{
-			{Name: "build-source-image", Run: buildSourceImageStage},
-			{Name: "create-kind", DependsOn: []string{"build-source-image"}, Run: createControlPlaneKindStage},
-			{Name: "load-source-image", DependsOn: []string{"create-kind"}, Run: loadSourceImageStage},
-			{Name: "install-certificate-substrate", DependsOn: []string{"load-source-image"}, Run: installCertificateSubstrateStage},
+			{Name: "create-kind", Run: createControlPlaneKindStage},
+			{Name: "load-runtime-images", DependsOn: []string{"create-kind"}, Run: loadRuntimeImagesStage},
+			{Name: "install-certificate-substrate", DependsOn: []string{"load-runtime-images"}, Run: installCertificateSubstrateStage},
 			{Name: "install-control-plane", DependsOn: []string{"install-certificate-substrate"}, Run: installControlPlanePlatformStage},
 			{Name: "configure-workspace-storage", DependsOn: []string{"install-control-plane"}, Run: configureKindWorkspaceStorage},
 			{Name: "assert-deployment-ready", DependsOn: []string{"configure-workspace-storage"}, Run: assertDeploymentReadyStage},
@@ -137,10 +138,9 @@ func deployedWorkRecoveryScenario() sharede2e.Definition {
 		),
 		NewState: newDeployedState,
 		Stages: []sharede2e.Stage[*deployedState]{
-			{Name: "build-source-image", Run: buildSourceImageStage},
-			{Name: "create-kind", DependsOn: []string{"build-source-image"}, Run: createControlPlaneKindStage},
-			{Name: "load-source-image", DependsOn: []string{"create-kind"}, Run: loadSourceImageStage},
-			{Name: "install-certificate-substrate", DependsOn: []string{"load-source-image"}, Run: installCertificateSubstrateStage},
+			{Name: "create-kind", Run: createControlPlaneKindStage},
+			{Name: "load-runtime-images", DependsOn: []string{"create-kind"}, Run: loadRuntimeImagesStage},
+			{Name: "install-certificate-substrate", DependsOn: []string{"load-runtime-images"}, Run: installCertificateSubstrateStage},
 			{Name: "install-control-plane", DependsOn: []string{"install-certificate-substrate"}, Run: installControlPlanePlatformStage},
 			{Name: "configure-workspace-storage", DependsOn: []string{"install-control-plane"}, Run: configureKindWorkspaceStorage},
 			{Name: "assert-deployment-ready", DependsOn: []string{"configure-workspace-storage"}, Run: assertDeploymentReadyStage},
@@ -164,10 +164,9 @@ func deployedArtifactDurabilityScenario() sharede2e.Definition {
 		),
 		NewState: newDeployedState,
 		Stages: []sharede2e.Stage[*deployedState]{
-			{Name: "build-source-image", Run: buildSourceImageStage},
-			{Name: "create-kind", DependsOn: []string{"build-source-image"}, Run: createControlPlaneKindStage},
-			{Name: "load-source-image", DependsOn: []string{"create-kind"}, Run: loadSourceImageStage},
-			{Name: "install-certificate-substrate", DependsOn: []string{"load-source-image"}, Run: installCertificateSubstrateStage},
+			{Name: "create-kind", Run: createControlPlaneKindStage},
+			{Name: "load-runtime-images", DependsOn: []string{"create-kind"}, Run: loadRuntimeImagesStage},
+			{Name: "install-certificate-substrate", DependsOn: []string{"load-runtime-images"}, Run: installCertificateSubstrateStage},
 			{Name: "install-control-plane", DependsOn: []string{"install-certificate-substrate"}, Run: installControlPlanePlatformStage},
 			{Name: "configure-workspace-storage", DependsOn: []string{"install-control-plane"}, Run: configureKindWorkspaceStorage},
 			{Name: "assert-deployment-ready", DependsOn: []string{"configure-workspace-storage"}, Run: assertDeploymentReadyStage},

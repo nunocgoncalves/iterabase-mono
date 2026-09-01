@@ -75,8 +75,8 @@ See `forge.example.yaml` for the full substrate config schema.
 
 ```sh
 make test           # unit + fake-SSH integration tests
-make test-e2e       # composed DigitalOcean single-node CPU e2e (needs DIGITALOCEAN_TOKEN)
-make test-e2e-workspace # exact-candidate dedicated-disk/local-path RWO gate
+make test-e2e       # composed-bundle DigitalOcean CPU E2E (needs DIGITALOCEAN_TOKEN)
+make test-e2e-workspace # composed-bundle dedicated-disk/local-path RWO gate
 make test-e2e-unit  # compile + unit-test the separate E2E harness module
 make lint           # golangci-lint
 make fmt-check      # gofmt check

@@ -111,21 +111,18 @@ func newChartState(t *testing.T) *chartState {
 	return state
 }
 
-func resolveCharts(t *testing.T, chartsRoot string) (kube.Chart, kube.Chart) {
+func resolveCharts(t *testing.T, _ string) (kube.Chart, kube.Chart) {
 	t.Helper()
 	mode := sharede2e.FixtureMode(os.Getenv("ITERABASE_E2E_FIXTURE_MODE"))
 	switch mode {
-	case sharede2e.FixtureSource:
-		return kube.Chart{Mode: mode, LocalPath: filepath.Join(chartsRoot, "charts", "iterabase-platform")},
-			kube.Chart{Mode: mode, LocalPath: filepath.Join(chartsRoot, "charts", "cert-manager-substrate")}
-	case sharede2e.FixtureCandidate:
+	case sharede2e.FixtureSource, sharede2e.FixtureCandidate:
 		platform := os.Getenv("ITERABASE_PLATFORM_LOCAL_CHART")
 		if platform == "" {
-			t.Fatal("candidate charts scenario requires ITERABASE_PLATFORM_LOCAL_CHART")
+			t.Fatal("composed runtime requires ITERABASE_PLATFORM_LOCAL_CHART")
 		}
 		platform, err := filepath.Abs(platform)
 		if err != nil {
-			t.Fatalf("resolve candidate platform chart: %v", err)
+			t.Fatalf("resolve composed platform chart: %v", err)
 		}
 		substrate := filepath.Join(filepath.Dir(platform), "cert-manager-substrate")
 		return kube.Chart{Mode: mode, LocalPath: platform}, kube.Chart{Mode: mode, LocalPath: substrate}
@@ -306,50 +303,16 @@ func runtimePlatformValues(t *testing.T) map[string]any {
 
 func applyRuntimeImages(t *testing.T, values map[string]any) {
 	t.Helper()
-	// Hold runtime artifacts constant while transition scenarios roll chart
-	// revisions backward and forward. Candidate mode does this through resolved
-	// image environment variables; source mode uses the equivalent immutable
-	// fixture inputs instead of accidentally exercising a database downgrade.
-	if sharede2e.FixtureMode(os.Getenv("ITERABASE_E2E_FIXTURE_MODE")) == sharede2e.FixtureSource {
-		path := os.Getenv("ITERABASE_E2E_SOURCE_INPUTS")
-		data, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatalf("read source runtime fixture: %v", err)
-		}
-		var fixture sharede2e.Fixture
-		if err := json.Unmarshal(data, &fixture); err != nil {
-			t.Fatalf("decode source runtime fixture: %v", err)
-		}
-		required := map[string]string{
-			"control-plane-image":     "control-plane",
-			"inference-gateway-image": "inference-gateway",
-		}
-		for _, input := range fixture.Inputs {
-			component, ok := required[input.Name]
-			if !ok {
-				continue
-			}
-			repository, tag, err := splitImageReference(input.Reference)
-			if err != nil {
-				t.Fatalf("source runtime fixture %s: %v", input.Name, err)
-			}
-			setPlatformImage(values, component, repository, tag)
-			delete(required, input.Name)
-		}
-		if len(required) != 0 {
-			t.Fatalf("source runtime fixture is missing image inputs: %v", required)
-		}
-		return
-	}
+	// Every workflow mode consumes the same composer-produced image identities;
+	// chart stages never substitute owner-local or stale published fixture bytes.
 	applyCandidateImages(values)
-}
-
-func splitImageReference(reference string) (string, string, error) {
-	separator := strings.LastIndexByte(reference, ':')
-	if separator <= strings.LastIndexByte(reference, '/') || separator == len(reference)-1 {
-		return "", "", fmt.Errorf("reference has no exact tag: %q", reference)
+	if os.Getenv(sharede2e.RequiredEnv) == "true" {
+		for _, prefix := range []string{"CONTROL_PLANE", "INFERENCE_GATEWAY"} {
+			if os.Getenv(prefix+"_IMAGE_REPO") == "" || os.Getenv(prefix+"_IMAGE_TAG") == "" {
+				t.Fatalf("composed runtime is missing %s image identity", prefix)
+			}
+		}
 	}
-	return reference[:separator], reference[separator+1:], nil
 }
 
 func setPlatformImage(values map[string]any, component, repository, tag string) {
@@ -383,19 +346,12 @@ func applyCandidateImages(values map[string]any) {
 	}
 }
 
-func TestUnitSourceRuntimeImagesRemainConstantAcrossChartTransitions(t *testing.T) {
-	fixture := filepath.Join(t.TempDir(), "source-fixture.json")
-	if err := os.WriteFile(fixture, []byte(`{
-		"mode":"published",
-		"inputs":[
-			{"name":"control-plane-image","kind":"published-image","reference":"registry.example/control-plane:0.0.30"},
-			{"name":"inference-gateway-image","kind":"published-image","reference":"registry.example/inference-gateway:0.2.7"}
-		]
-	}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
+func TestUnitComposedRuntimeImagesRemainConstantAcrossChartTransitions(t *testing.T) {
 	t.Setenv("ITERABASE_E2E_FIXTURE_MODE", string(sharede2e.FixtureSource))
-	t.Setenv("ITERABASE_E2E_SOURCE_INPUTS", fixture)
+	t.Setenv("CONTROL_PLANE_IMAGE_REPO", "registry.example/control-plane")
+	t.Setenv("CONTROL_PLANE_IMAGE_TAG", "0.0.30")
+	t.Setenv("INFERENCE_GATEWAY_IMAGE_REPO", "registry.example/inference-gateway")
+	t.Setenv("INFERENCE_GATEWAY_IMAGE_TAG", "0.2.7")
 
 	values := runtimePlatformValues(t)
 	for component, want := range map[string]string{
