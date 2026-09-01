@@ -781,10 +781,23 @@ func gpuOperatorValues(g config.GPU) []string {
 
 func isUbuntu(os string) bool { return strings.HasPrefix(os, "Ubuntu") }
 
+// DestroyOpts controls the two explicit fixture/decommission operations that
+// ordinary destroy must never imply.
+type DestroyOpts struct {
+	PurgeWorkspace bool
+	Reboot         bool
+}
+
 // Destroy removes platform/K3s resources but deliberately preserves the
 // dedicated AgentPool workspace filesystem, receipt, fstab identity, and bytes.
-// Disk wipe, replacement, migration, and decommission are separate contracts.
 func Destroy(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner, d deployer.Deployer, o overlayer.Overlayer, f fluxer.Fluxer) error {
+	return DestroyWithOptions(ctx, cfg, p, d, o, f, DestroyOpts{})
+}
+
+// DestroyWithOptions preserves ordinary destroy semantics and performs an
+// explicitly requested purge only after the existing product/platform/K3s
+// destroy path succeeds. A requested reboot is last, after any purge.
+func DestroyWithOptions(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner, d deployer.Deployer, o overlayer.Overlayer, f fluxer.Fluxer, opts DestroyOpts) error {
 	// Flux is stopped first (reverse of apply's flux-last). Remaining chart
 	// cleanup is best-effort and never mutates the workspace disk.
 	if f != nil && cfg.Spec.Flux.Enabled {
@@ -804,7 +817,33 @@ func Destroy(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner
 		g := cfg.Spec.GPU.Operator
 		_ = d.UninstallChart(ctx, g.Release, g.Namespace)
 	}
-	return p.Uninstall(ctx)
+	if err := p.Uninstall(ctx); err != nil {
+		return err
+	}
+	if opts.PurgeWorkspace {
+		purger, ok := p.(provisioner.WorkspacePurger)
+		if !ok {
+			return fmt.Errorf("workspace purge is unavailable for this provisioner")
+		}
+		spec := provisioner.AgentPoolWorkspaceSpec{
+			InstallName: cfg.Metadata.Name,
+			Device:      cfg.Spec.AgentPoolWorkspace.Device,
+			Filesystem:  cfg.Spec.AgentPoolWorkspace.Filesystem,
+		}
+		if err := purger.PurgeAgentPoolWorkspace(ctx, spec); err != nil {
+			return fmt.Errorf("purge AgentPool workspace: %w", err)
+		}
+	}
+	if opts.Reboot {
+		rebooter, ok := p.(provisioner.Rebooter)
+		if !ok {
+			return fmt.Errorf("host reboot is unavailable for this provisioner")
+		}
+		if err := rebooter.Reboot(ctx); err != nil {
+			return fmt.Errorf("reboot host: %w", err)
+		}
+	}
+	return nil
 }
 
 // Upgrade re-runs the k3s install script with a new version (in-place upgrade),

@@ -61,6 +61,7 @@ func TestParse_Valid(t *testing.T) {
 	h := c.Spec.Hosts[0]
 	assert.Equal(t, "10.20.0.10", h.Address)
 	assert.Equal(t, "forge", h.SSHUser)
+	assert.Equal(t, "", h.SSHHostKey)
 	assert.Equal(t, "test", h.Labels["forge.horizonshift.io/env"])
 	require.Len(t, h.Taints, 1)
 	assert.Equal(t, "NoSchedule", h.Taints[0].Effect)
@@ -164,6 +165,16 @@ func TestParse_MissingSSHUser(t *testing.T) {
 	_, err := Parse(yamlFor(t, func(c *Cluster) { c.Spec.Hosts[0].SSHUser = "" }))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "sshUser")
+}
+
+func TestParse_PinnedSSHHostKey(t *testing.T) {
+	const key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixturePinnedHostIdentity HOR-540"
+	cluster, err := Parse(yamlFor(t, func(c *Cluster) { c.Spec.Hosts[0].SSHHostKey = key }))
+	require.NoError(t, err)
+	assert.Equal(t, key, cluster.Spec.Hosts[0].SSHHostKey)
+
+	_, err = Parse(yamlFor(t, func(c *Cluster) { c.Spec.Hosts[0].SSHHostKey = key + "\nsecond-key" }))
+	require.ErrorContains(t, err, "one OpenSSH public host key line")
 }
 
 func TestParse_BadRole(t *testing.T) {

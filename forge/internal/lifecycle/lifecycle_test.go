@@ -76,6 +76,9 @@ type fakeProv struct {
 	gpuTerminal           bool
 	gpuReadinessReason    string
 	gpuDriverRequests     []string
+	destroyCalls          []string
+	purgeErr              error
+	rebootErr             error
 }
 
 func (f *fakeProv) Preflight(_ context.Context) (*provisioner.PreflightResult, error) {
@@ -96,8 +99,17 @@ func (f *fakeProv) Upgrade(ctx context.Context, v string, a []string) error {
 	return f.Install(ctx, v, a)
 }
 func (f *fakeProv) Uninstall(_ context.Context) error {
+	f.destroyCalls = append(f.destroyCalls, "uninstall")
 	f.state.Installed = false
 	return nil
+}
+func (f *fakeProv) PurgeAgentPoolWorkspace(_ context.Context, spec provisioner.AgentPoolWorkspaceSpec) error {
+	f.destroyCalls = append(f.destroyCalls, "purge:"+spec.InstallName+":"+spec.Device+":"+spec.Filesystem)
+	return f.purgeErr
+}
+func (f *fakeProv) Reboot(_ context.Context) error {
+	f.destroyCalls = append(f.destroyCalls, "reboot")
+	return f.rebootErr
 }
 func (f *fakeProv) FetchKubeconfig(_ context.Context) ([]byte, error) { return f.kubeconfig, nil }
 func (f *fakeProv) ReadState(_ context.Context) (*provisioner.HostState, error) {
@@ -680,6 +692,33 @@ func TestDestroy_NoChart(t *testing.T) {
 	require.NoError(t, Destroy(context.Background(), testConfig(), p, d, nil, nil))
 	assert.Empty(t, d.uninstallCalls) // no chart configured
 	assert.False(t, p.state.Installed)
+	assert.Equal(t, []string{"uninstall"}, p.destroyCalls, "ordinary destroy must preserve the workspace and must not reboot")
+}
+
+func TestDestroyWithOptions_PurgeThenReboot(t *testing.T) {
+	p := &fakeProv{pf: readyPf(), state: inSyncState()}
+	require.NoError(t, DestroyWithOptions(context.Background(), testConfig(), p, nil, nil, nil, DestroyOpts{
+		PurgeWorkspace: true,
+		Reboot:         true,
+	}))
+	assert.Equal(t, []string{
+		"uninstall",
+		"purge:opo1:/dev/disk/by-id/scsi-workspace:auto",
+		"reboot",
+	}, p.destroyCalls)
+}
+
+func TestDestroyWithOptions_StopsBeforeRebootOnPurgeFailure(t *testing.T) {
+	p := &fakeProv{pf: readyPf(), state: inSyncState(), purgeErr: errors.New("identity drift")}
+	err := DestroyWithOptions(context.Background(), testConfig(), p, nil, nil, nil, DestroyOpts{
+		PurgeWorkspace: true,
+		Reboot:         true,
+	})
+	require.ErrorContains(t, err, "identity drift")
+	assert.Equal(t, []string{
+		"uninstall",
+		"purge:opo1:/dev/disk/by-id/scsi-workspace:auto",
+	}, p.destroyCalls)
 }
 
 func testConfigWithGPU() *config.Cluster {

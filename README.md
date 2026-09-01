@@ -70,9 +70,10 @@ make docker-build  # control-plane, harness, isolation, tool-runner, and inferen
 
 Required E2E uses one generated exact-source/candidate plan and one verified
 runtime composer across owner suites. Cross-repository matching-branch checkouts
-and owner-local artifact builds are not part of monorepo validation. Published
-artifact names, binaries, charts, images,
-configuration, and runtime behavior remain unchanged.
+and owner-local artifact builds are not part of monorepo validation. Published artifact names, semantic versions, charts, and images remain unchanged.
+Forge additionally exposes an explicit, fail-closed workspace purge/reboot
+lifecycle for dedicated fixture/decommission use; ordinary destroy remains
+data-preserving.
 
 A merge to `master` does not release. If ticket acceptance requires semantic
 publication, use the explicit affected-target candidate and founder-approved

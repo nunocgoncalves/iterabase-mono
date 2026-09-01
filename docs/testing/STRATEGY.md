@@ -23,7 +23,7 @@ A dependent layer may retain a composition smoke check, but it does not become d
 | **F0** | Pure/static process, parser, fake, or hermetic mechanics example. |
 | **F1** | Local real process, envtest, testcontainer, or native protocol integration. |
 | **F2** | Fresh isolated Kind cluster with real Kubernetes, Helm, and network boundaries. |
-| **F3** | Fresh ephemeral real CPU/GPU host reconciled through its real substrate path. |
+| **F3** | Founder-owned permanent real CPU/GPU fixture reset through a verified destroy/purge/reboot lifecycle before and after each scenario. |
 | **P** | Mutable production confirmation that satisfies the strict criteria below. |
 
 Tier is compiled scenario metadata, not an estimate of importance. A higher tier supplements rather than replaces faster owner authority.
@@ -122,7 +122,7 @@ Component artifacts are fail-closed:
 
 That declaration is required for Playwright screenshots/traces and is part of the reviewable scenario code. The control-plane fixture is wholly synthetic; its owner sanitizes trace archive entries before declaration, deletes raw evidence, and independently rejects retained work-key literals before shared collection. Customer/production browser artifacts do not qualify.
 
-A normal F2 failure bundle includes cluster resources, events, pod describes, current/previous logs, Helm list/state, revision history, effective values, hooks, status, process output, and declared component evidence. Forge F3 uses the same collector against its fetched kubeconfig, adds SSH/cloud-init and GPU-operator evidence, and records whether the failure belongs to provisioning, Forge substrate/reconciliation/handoff, dependent smoke, or cleanup. Diagnostics are best effort and do not suppress teardown.
+A normal F2 failure bundle includes cluster resources, events, pod describes, current/previous logs, Helm list/state, revision history, effective values, hooks, status, process output, and declared component evidence. Forge F3 uses the same collector against its fetched kubeconfig, adds strictly pinned SSH, boot-ID, workspace/model-cache, and GPU-operator evidence, and records whether failure belongs to fixture readiness, Forge substrate/reconciliation/handoff, dependent smoke, or cleanup. Diagnostics are best effort and run before unconditional teardown.
 
 ## CI and release gates
 
@@ -130,7 +130,7 @@ Pull requests run affected owner checks and deterministic selected E2E. Control-
 
 The nightly schedule and explicit `complete_catalogue` manual rehearsal compile the catalogue from their exact source SHA and select every F2/F3 scenario exactly once under its registered owner. Every required scenario must declare source mode, a Make target, and a positive bound; every F3 entry must also declare mandatory named capacity. The retained complete-catalogue plan records the source SHA, selected IDs, owner totals, fixture mode, and dynamic Kind/browser and real-machine matrices. Source execution records its immutable published dependency fixtures, so this orchestration never resolves a floating coordinated fallback or creates a second scenario list.
 
-Complete-catalogue Kind/browser work has bounded parallelism and isolated owner fixtures. CPU and GPU jobs use capacity-scoped non-canceling concurrency, require credentials and capacity, and fail rather than skip when either is unavailable. The schedule/manual aggregate requires selection, shared-harness validation, the complete Kind/browser matrix, and the complete real-machine matrix to succeed; skipped, failed, or canceled required jobs are incomplete. Owner cleanup and redacted diagnostics remain active on failure/cancellation, and the independent Forge reaper remains the backstop for interrupted cloud cleanup.
+Complete-catalogue Kind/browser work has bounded parallelism and isolated owner fixtures. Every permanent CPU/GPU PR, nightly/manual, candidate, red-proof, and cleanup path uses the identical literal `iterabase-permanent-fixtures` non-canceling group, so CPU and GPU never overlap. A selected job requires its fixture-scoped key and fixed repository configuration and fails rather than skips on host, purge, reboot, cache, or identity failure. The schedule/manual aggregate requires selection, shared-harness validation, the complete Kind/browser matrix, and the complete real-machine matrix to succeed; skipped, failed, or canceled required jobs are incomplete. Owner diagnostics run before unconditional destroy/purge/reboot cleanup. An interrupted run is recovered by the next globally serialized preflight while SSH remains healthy; otherwise founder-operated provider recovery is required.
 
 Release planning takes an explicit non-empty target set and selects the union of every compiled scenario whose `release_targets` intersects it. It does not use changed-file narrowing. The compiled metadata supplies owner, Kind and real-machine Make targets, bounds, and capacity requirements. Chart releases execute the chart owner's complete exact-candidate matrix through the reusable chart workflow; image-only releases can select chart-owned scenarios through the owner-aware generic candidate matrix without duplicating chart-release jobs.
 
@@ -141,14 +141,14 @@ The release gate preserves these invariants:
 - lifecycle predecessors come from owner-local immutable fixture authority, are copied into the generated candidate plan, and are checksum-verified before execution;
 - coordinated target sets execute the deduplicated scenario union;
 - Forge and platform-chart release coverage includes both CPU and GPU F3 scenarios;
-- missing mandatory CPU/GPU credentials or capacity is incomplete/failing, never passing;
-- generated candidate evidence binds the selected compiled catalogue metadata and stages.
+- missing mandatory CPU/GPU fixture credentials, identity, readiness, or cleanup is incomplete/failing, never passing;
+- generated candidate evidence binds the selected compiled catalogue metadata, stages, host boot/SSH/workspace identity, and GPU model-cache revision/hash.
 
 Fixture tests in `.github/scripts/test_release.py` assert equivalent-or-stronger coverage for every target and the complete coordinated union.
 
 ## Production-only criteria
 
-A check may remain tier P only when a representative ephemeral fixture cannot establish the claimed behavior without one of:
+A check may remain tier P only when a representative isolated fixture cannot establish the claimed behavior without one of:
 
 - the actual GPU/hardware or customer resource envelope;
 - public DNS and ACME authorization;

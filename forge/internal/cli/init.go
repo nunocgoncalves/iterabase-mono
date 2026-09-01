@@ -43,7 +43,8 @@ func newInitCmd() *cobra.Command {
 	cmd.Flags().String("name", "opo1", "install name")
 	cmd.Flags().String("address", "", "target host address")
 	cmd.Flags().String("ssh-user", "forge", "SSH user (must have passwordless sudo)")
-	cmd.Flags().String("ssh-key", "~/.ssh/forge_ed25519", "SSH key path")
+	cmd.Flags().String("ssh-key", "~/.ssh/forge_ed25519", "SSH private key path")
+	cmd.Flags().String("ssh-host-key", "", "pinned OpenSSH public host key (recommended for automation)")
 	cmd.Flags().String("k3s-version", "v1.34.10+k3s1", "K3s version (full tag, e.g. v1.34.10+k3s1)")
 	cmd.Flags().Bool("dual-stack", true, "enable dual-stack IPv4+IPv6")
 	cmd.Flags().String("overlay", "", "overlay repo URL (client fork; https:// or file://; empty => no overlay)")
@@ -69,6 +70,7 @@ func runInit(cmd *cobra.Command, _ []string) error {
 	address, _ := cmd.Flags().GetString("address")
 	sshUser, _ := cmd.Flags().GetString("ssh-user")
 	sshKey, _ := cmd.Flags().GetString("ssh-key")
+	sshHostKey, _ := cmd.Flags().GetString("ssh-host-key")
 	k3sVersion, _ := cmd.Flags().GetString("k3s-version")
 	dualStack, _ := cmd.Flags().GetBool("dual-stack")
 	overlay, _ := cmd.Flags().GetString("overlay")
@@ -94,6 +96,7 @@ func runInit(cmd *cobra.Command, _ []string) error {
 		address = prompt(in, "Target host address", address)
 		sshUser = prompt(in, "SSH user", sshUser)
 		sshKey = prompt(in, "SSH key path", sshKey)
+		sshHostKey = prompt(in, "SSH host key (optional OpenSSH public key)", sshHostKey)
 		k3sVersion = prompt(in, "K3s version", k3sVersion)
 		overlay = prompt(in, "Overlay repo URL (optional)", overlay)
 	}
@@ -102,7 +105,7 @@ func runInit(cmd *cobra.Command, _ []string) error {
 	}
 
 	host := config.Host{
-		Address: address, SSHUser: sshUser, SSHKeyPath: sshKey,
+		Address: address, SSHUser: sshUser, SSHKeyPath: sshKey, SSHHostKey: strings.TrimSpace(sshHostKey),
 		Role: config.RoleControlPlaneWorker, Labels: map[string]string{}, Taints: []config.Taint{},
 	}
 	workspaceDevice, workspaceFilesystem, err = resolveInitWorkspace(in, cmd.ErrOrStderr(), host, nonInteractive, workspaceDevice, workspaceFilesystem, filesystemSourceExplicit)

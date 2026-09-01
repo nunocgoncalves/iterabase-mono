@@ -127,7 +127,11 @@ The shared runner writes one result record for every selected scenario. It binds
 
 - scenario ID and terminal status;
 - plan, catalogue, runtime-bundle, source, and stage-graph identities;
-- the complete observed artifact identity set; and
+- the complete observed artifact identity set;
+- for F3, the permanent fixture capacity, pinned host-key hash, workspace by-id
+  device, and changed pre/post-cleanup boot IDs;
+- for GPU F3, the distinct model-cache device/mount/UUID and repository-pinned
+  public model revision/content hash; and
 - exactly one terminal status for every declared stage.
 
 A passed scenario must record one observed post-import runtime manifest digest
@@ -143,18 +147,31 @@ Failure diagnostics are separate, redacted artifacts retained for seven days.
 PR/nightly plans and results are retained for 30 days. Candidate results and
 artifact identities are retained in the 90-day immutable candidate record.
 
-## Mandatory capacity and concurrency
+## Permanent fixture capacity and concurrency
 
-Every compiled F3 registration names mandatory `cpu` or `gpu` capacity. A
-selected job requires credentials and fails with retained diagnostics when
-credentials or external capacity are unavailable; it never calls `t.Skip`.
-Unselected capacity creates no job.
+Every compiled F3 registration names mandatory `cpu` or `gpu` capacity.
+Selected execution binds founder-configured repository variables and one
+fixture-scoped private-key secret to a fixed address, SSH user, pinned host key,
+and exact workspace by-id device. Address, host identity, and devices are not
+workflow-dispatch inputs. Missing credentials, unreachable hosts, reboot/purge
+failure, or identity drift fails with retained diagnostics; it never calls
+`t.Skip`. Unselected capacity creates no job.
 
-The planner derives `e2e-capacity-<capacity>` groups. PR, nightly, manual, and
-candidate jobs sharing capacity cannot overlap. Resource-owning jobs use
-`cancel-in-progress: false`, so superseding a PR cannot bypass owner cleanup.
-Non-resource exact-head work may cancel safely. Tagged reaper cleanup remains
-the crash/cancel fallback.
+All PR, nightly/manual, candidate, intentional-red, and cleanup/recovery fixture
+work uses the one literal `iterabase-permanent-fixtures` concurrency group with
+`cancel-in-progress: false`. CPU and GPU therefore cannot overlap. Build,
+static, unit, fresh F2 Kind/browser, and other non-fixture exact-head work retain
+safe parallelism.
+
+Every selected scenario starts and ends with `forge destroy
+--purge-workspace --reboot --yes`. The harness proves SSH disconnect/reconnect,
+a changed boot ID, blank authorized workspace state, absence of stale K3s/run
+state, and strict host-key verification. GPU execution also validates the
+separate `/data/hf-cache` volume and the model authority in
+`forge/test/e2e/model-cache.json`; workspace purge never targets that device.
+Actions has no provider API credential. An SSH-unrecoverable fixture stops F3
+until founder-operated provider quarantine/recovery restores the documented
+baseline.
 
 ## Cache and setup contract
 
@@ -177,10 +194,10 @@ make testkit-test
 make release-check
 ```
 
-Infrastructure scenarios still require Docker/Kind or DigitalOcean capacity.
-The commands above validate selection, recipes, composition contracts, strict
-result reconciliation, and compiled owner entrypoints without provisioning
-cloud resources.
+Infrastructure scenarios still require Docker/Kind or the founder-configured
+permanent CPU/GPU fixtures. The commands above validate selection, recipes,
+composition contracts, strict result reconciliation, and compiled owner
+entrypoints without contacting a fixture.
 
 ## Branch-protection audit
 

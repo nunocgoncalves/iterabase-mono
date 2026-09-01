@@ -56,9 +56,13 @@ blocked/not-run stage, missing result, or incomplete artifact identity fails the
 scenario and aggregate.
 
 The result record binds scenario status, source/plan/catalogue/runtime/stage-graph
-hashes, fixture mode, artifact identities, and every stage terminal status. Only
-the workflow aggregate reconciles the complete result-artifact set against the
-generated plan.
+hashes, fixture mode, artifact identities, and every stage terminal status. F3
+results additionally bind the permanent fixture capacity, pinned host-key hash,
+configured workspace by-id device, and pre/post-cleanup boot IDs. GPU results
+also bind the separate model-cache by-id device/mount/UUID plus the
+repository-pinned public model revision and content hash; that device may not
+alias the Forge workspace. Only the workflow aggregate reconciles the complete
+result-artifact set against the generated plan.
 
 ## Validation
 

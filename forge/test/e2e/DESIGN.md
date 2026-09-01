@@ -1,114 +1,146 @@
 # Forge E2E runner design
 
-Decision: HOR-406, approved 2026-08-03.
+Original composition decision: HOR-406, approved 2026-08-03. Permanent-fixture
+and exact-artifact cutover: `DES-HOR-540-01` and `DES-HOR-540-02`, approved
+2026-09-01.
 
 ## Goals
 
-- Expose one Go test entrypoint and one GitHub Actions workflow.
-- Compose scenarios from named stages and shared fixtures.
-- Preserve every existing boundary assertion while avoiding redundant cloud setup.
-- Keep isolation where clean installation is part of the contract.
+- One compiled `TestE2E` entrypoint and one stage DAG per scenario in source and
+  candidate modes.
+- Exact composer-verified images, charts/companion, Forge binary, runtime
+  fixture, plan, and metadata; no owner-local build/load fallback.
+- Real CPU/GPU substrate behavior without provider availability or provider API
+  credentials in Actions.
+- A proven clean destroy/apply/test/destroy boundary on dedicated, reimageable
+  fixtures.
+- Fail-closed fixture, artifact, stage, and result identities with no retry or
+  selected-capacity skip.
 
-## Runner
+## Permanent fixture authority
 
-`TestE2E` is the only top-level infrastructure test. It registers typed scenarios/stages through the shared `testkit/e2e`; `go test -run` selects a scenario and each scenario reports named stage subtests. Failed/skipped prerequisites suppress only dependent stages, independent stages continue, and cleanup/diagnostics still run. Required execution then fails closed on every skip, blocked/not-run stage, or incomplete report. Catalogue mode compiles these exact registrations without provisioning infrastructure.
+F3 uses exactly one founder-provisioned CPU host and one founder-provisioned GPU
+host. Repository variables supply each fixed address, SSH user, pinned OpenSSH
+host public key, and Forge workspace `/dev/disk/by-id/...` identity. A separate
+repository secret supplies each fixture-scoped private key. These values are not
+workflow-dispatch inputs.
 
-## Isolation boundary
+Every fixture path uses the literal `iterabase-permanent-fixtures` concurrency
+group with `cancel-in-progress: false`: PR, complete nightly/manual, candidate,
+intentional-red, diagnostics, and cleanup execution are globally serial. CPU and
+GPU never overlap. Build/unit/F2 work remains parallel.
 
-### DigitalOcean CPU — one VM
+Actions has no provider credential. It cannot list, create, delete, resize,
+power-cycle, rescue, reimage, or replace a fixture. If strict SSH cleanup and
+reboot cannot recover a host, F3 stops until founder-operated provider recovery
+restores the runbook baseline.
 
-Stages:
+## Lifecycle boundary
 
-1. Provision a cloud-init-complete CPU host.
-2. Assert `gpu.enabled` is rejected when no NVIDIA GPU exists.
-3. Install the explicit `0.2.2` migration source with the local MetalLB edge overlay.
-4. Assert node readiness, dual-stack pod CIDRs, label propagation, gateway pod readiness, and HTTPS/MetalLB health.
-5. Upgrade to the reviewed current platform release through the public E2E overlay: exact Flux source first, certificate ownership handoff, companion substrate, platform, then CR reconciliation.
-6. Assert both Helm versions, certificate CRD ownership, exact Flux revision/digest, tool-runner readiness, and HTTPS health through the fixture's NodePort edge.
-7. Re-apply the current release and assert the reality-derived action is `skip` while every configured phase reconciles successfully.
-8. Materialize an overlay-declared Secret from an operator environment variable and verify its value/type.
-9. Reconcile Flux again and assert controllers, source artifact, and Kustomization readiness.
+Before every selected scenario, and unconditionally after diagnostics on every
+outcome, the harness runs:
 
-The old release is an intentional migration input, never the desired test target. Only migration setup needs a fresh host. Current-platform, secret-sync, and Flux checks compose on that host so this scenario covers the exact `0.2.2` → `0.3+` ownership and Helm-status path used by OPO1.
+```text
+forge destroy --purge-workspace --reboot --yes
+```
 
-### DigitalOcean GPU — one VM
+Ordinary `forge destroy` is unchanged and preserves AgentPool workspace state.
+The explicit purge runs only after the existing platform/K3s destroy path. It
+revalidates the configured stable whole disk, root/system exclusion, holders and
+active consumers, hardware identity, Forge receipt, filesystem UUID/label,
+mount, and fstab identity. Missing, ambiguous, wrong, in-use, or drifted state
+refuses. A clean second purge is idempotent only when the configured disk is
+blank and every Forge mount/receipt/fstab surface is absent. Reboot is last.
 
-Stages:
+The harness requires strict host-key verification, observes SSH disconnect,
+requires reconnect with a changed `/proc/sys/kernel/random/boot_id`, and proves
+that K3s, workspace signatures/mount/receipt, run-scoped overlay/transferred
+state, and stale test processes cannot satisfy the next scenario. Failure is
+incomplete/failing, never a skip.
 
-1. Record the exact source/candidate Forge identity and the supported `580.126.20` → `595.71.05` driver inputs.
-2. Apply k3s + GPU operator with the exact baseline driver, without the platform chart.
-3. Assert ClusterPolicy readiness and run a real GPU smoke pod.
-4. Start a representative GPU Deployment with memory-backed `/dev/shm` `emptyDir` and a separate PVC-backed cache sentinel.
-5. Run one Forge reconciliation with the exact candidate driver.
-6. Assert the workload pod was deleted/recreated, `emptyDir` state was fresh, PVC state survived, ClusterPolicy selected the candidate with the pinned deletion/drain policy, the node reached Ready + schedulable + `upgrade-done`, and the recreated workload reported the candidate through `nvidia-smi`.
-7. Reconcile the reviewed current platform release on the same host with exact Flux source + companion certificate substrate and the already-proven GPU phase skipped.
-8. Apply the minimal identity/catalog fixture, wait for real vLLM availability, and request one completion as non-authoritative infrastructure-serving smoke.
+## GPU model cache
 
-The inference path depends on GPU readiness, so a second VM/operator installation added cost and capacity noise rather than isolation. The chart is introduced only after the substrate and driver-transition assertions, preserving fault localization. Under HOR-494, candidate readiness is generation-current only when ClusterPolicy `Ready=True`/`Error=False`, the selected and node-reported drivers equal the requested candidate, and the node is Ready, schedulable, and `upgrade-done`. The legacy ClusterPolicy state remains explicit evidence: `ready` is normal, while `notReady` is accepted only for the documented GPU Operator status-write conflict when every stronger current signal agrees. The recreated workload and its `nvidia-smi` result remain an independent post-upgrade proof.
+The GPU fixture has a harness-owned block volume mounted at `/data/hf-cache`.
+Its fixed by-id device and filesystem UUID must differ from the Forge AgentPool
+workspace device. Forge does not configure, authorize, purge, or claim this
+volume.
 
-`make test-e2e-gpu-broken-policy` is the intentional HOR-411 red proof: it builds the same source through a Go overlay that changes only `gpuPodDeletion.deleteEmptyDir` to `false`, requires real capacity, and passes only when the active baseline `emptyDir` workload drives the normal fixture through `pod-deletion-required` into `upgrade-failed`. A manual E2E workflow dispatch with `gpu_policy_red_proof=true` runs that mutation using CI's GPU credential; the ordinary PR, nightly, and release paths always run the unmodified green scenario.
+[`model-cache.json`](model-cache.json) pins the public
+`Qwen/Qwen3.5-0.8B` model at revision
+`2fc06364715b967f1860aea9cf38778875588b17` and pins the selected weight file to
+SHA-256 `f0140d845aced424f17b1c75ebc5a67ef75fe309c68d2f613acda2eb551db7dd`.
+Every GPU use verifies device, mount, UUID, revision path, and content hash
+before product execution. The ModelBackend receives that exact revision. Cache
+bytes can accelerate model loading but cannot satisfy product artifact/runtime
+identity or AgentPool workspace assertions.
 
-### Kind ownership cleanup
+## Compiled scenarios
 
-Forge registers no Kind scenario after HOR-481. The removed scenarios installed charts directly and never exercised Forge:
+### `permanent-cpu`
 
-- `kind-controlplane-identity` maps to control-plane `deployed-identity-api` (HOR-478).
-- `kind-inference-contract` maps to control-plane `deployed-execution-contracts` (HOR-477).
-- `kind-tool-runner-contract` maps to the same execution scenario for immutable tool generation, materialization, registration, pin/drain/retirement, invocation, and artifact attribution (HOR-477).
-- Certificate substrate, issuer, internal-TLS, observability, install, upgrade, reapply, and rollback authority maps to the chart-owned compiled suite (HOR-416/HOR-475).
+Uses the CPU fixture for no-GPU refusal, supported migration-source install,
+exact current Forge/chart/image/Flux handoff, dedicated local-path assertions,
+two-worker RWO behavior, persistence/replacement/reapply, secret sync, and Flux
+reconciliation.
 
-Those replacements passed their owner PRs and required source/candidate-backed gates before deletion. Forge uses Kubernetes helpers only against a kubeconfig fetched from a real Forge-provisioned host. A future Forge Kind scenario is valid only if it invokes Forge-owned behavior or proves a substrate operation that does not require a real machine; direct chart-install-only coverage must remain with charts/control-plane.
+### `permanent-workspace`
 
-## Coverage mapping
+Resets the same CPU fixture, then proves process-open raw-device refusal, exact
+workspace identity, concurrent isolated work, capacity gating, human-gate
+worker replacement, persisted bytes, and idempotent reapply.
 
-| Previous test | New scenario/stage | Coverage |
-|---|---|---|
-| `TestE2E` | `digitalocean-cpu/install-migration-source` through `reapply-current-idempotently` | k3s, real Helm 4 migration, certificate handoff, exact Flux source, runner readiness, overlay, node, dual-stack, and gateway edges |
-| `TestGPUE2E_PreflightFail` | `digitalocean-cpu/reject-gpu-on-cpu-host` | no-GPU preflight refusal; now actually selected by CI |
-| `TestE2EOverlay` | `digitalocean-cpu/apply-public-overlay` | public tokenless clone, commit, values, CRD path |
-| `TestE2ESecrets` | `digitalocean-cpu/sync-secrets` | env → SSH stdin → Kubernetes Secret |
-| `TestE2EFlux` | `digitalocean-cpu/install-and-reconcile-flux` | controllers, GitRepository artifact, Kustomization |
-| `TestGPUE2E` | `digitalocean-gpu/apply-gpu-substrate`, `assert-gpu-smoke` | operator readiness and usable GPU |
-| HOR-411 / HOR-485 / HOR-494 | `digitalocean-gpu/start-emptydir-workload` through `assert-driver-upgrade` | exact supported driver transition, generation-current readiness authority, disposable `emptyDir`, preserved PVC cache, operator/node convergence, and post-upgrade GPU use |
-| `TestInferenceFlowGPU` | `digitalocean-gpu/apply-dependent-platform-smoke`, `run-real-serving-smoke` | minimal real control-plane/vLLM/gateway request proving usable infrastructure; product correctness is non-authoritative here |
-| `TestControlPlaneIdentity` | `control-plane/deployed-identity-api` | migrated to product authority; bootstrap/JWKS/scopes/identity deletion plus broader API/recovery evidence |
-| `TestInferenceFlowContract` | `control-plane/deployed-execution-contracts` | migrated to product authority with workload mTLS and a deterministic OpenAI-compatible backend |
-| `TestCertIssuers` | `charts/fresh-install` | migrated to chart authority; issuer and CSI identity on fresh Kind |
-| `TestInternalTLS` | `charts/internal-tls` | migrated to chart authority; verified HTTPS plus rejected plaintext datastore transport |
-| HOR-397 cross-component acceptance | `control-plane/deployed-execution-contracts` | Flux artifact → materializer → runner → mTLS registration plus generation pin/drain/retirement, invocation, and artifact attribution |
+### `permanent-gpu`
 
-## HOR-406 harness/fixture reconciliation
+Uses the GPU fixture for exact baseline/candidate driver transition, real GPU
+smoke, disposable `emptyDir` versus durable cache behavior, exact platform
+handoff, pinned model-cache validation, and one non-authoritative real-serving
+request. `make test-e2e-gpu-broken-policy` runs the same fixture under the same
+global lock and passes only when the intentional `deleteEmptyDir=false`
+mutation is detected as red.
 
-The composable runner remains one `TestE2E` entrypoint with typed shared-testkit stages, prerequisite blocking, diagnostics, and cleanup hooks. HOR-481 intentionally removes Forge-private F0 code that existed only to support the deleted Kind product/chart scenarios:
+Forge registers no chart-install-only Kind scenario. Product and chart behavior
+remains in control-plane/charts owner suites; Forge's deployed checks are
+bounded dependent smokes after Forge-owned substrate and handoff assertions.
 
-- historical floating GitHub chart-release pagination, semver, and `appVersion` helpers are superseded by explicit source/candidate/published fixture records and release-contract tests; floating latest already failed closed;
-- tool-runner packaged-chart dependency preparation is superseded by the shared runtime composer plus control-plane's compiled execution owner;
-- Forge-private Kind create/chart/JWT mechanics are superseded by shared testkit mechanics in the chart/control-plane owners.
+## Exact artifact and result contract
 
-Forge retains its exact candidate overlay/chart/image-digest tests, GPU transition policy/evidence tests, and hermetic runner example. This is a reviewed ownership migration, not silent loss of HOR-406 coverage.
+The one compiled planner selects PR, complete nightly/manual, and explicit
+candidate intent. `.github/scripts/e2e.py` builds affected temporary or immutable
+candidate artifacts once from the reviewed production recipes, composes one
+verified runtime bundle, and supplies the same scenario ID, Make target,
+timeout, and stage DAG in both modes.
 
-## CI
+The Forge stages transfer only composer-authorized bytes and separately verify
+requested references, archive config/source labels, imported K3s CRI config
+identity, and remote tag-to-manifest identity. A source-only build/load path,
+published substitution for selected targets, stale host byte, or missing/extra
+artifact is a failure.
 
-One `e2e.yml` workflow owns:
+Each result binds plan, catalogue, source, stage graph, runtime bundle, exact
+artifact identities, terminal stage statuses, fixture capacity, pinned host-key
+hash, workspace device, and pre/post-cleanup boot IDs. GPU results additionally
+bind model-cache device/mount/UUID/model revision/hash. The aggregate requires
+exactly one result per planned scenario.
 
-- fast harness compilation, unit tests, and nested-module lint;
-- one serialized CPU cloud job against reviewed published releases;
-- one serialized GPU cloud job against reviewed published releases;
-- owner-local control-plane and chart Kind jobs, selected by those owners rather than Forge;
-- no Forge-published Kind compatibility matrix after its product/chart scenarios moved to their owners.
+## Qualification and legacy removal
 
-Every selected PR, complete nightly/manual, and candidate cloud job consumes one generated runtime bundle. Affected PR/nightly artifacts are exact-source temporary Actions artifacts built with candidate-equivalent recipes; selected candidates are immutable; only explicit unselected published baselines are allowed. The shared composer supplies the exact Forge binary, chart/companion archives, product image archives/references, and deterministic runtime fixture before the owner stage graph begins. CPU/workspace and GPU dependent-platform stages transfer/import every required image archive, verify its config digest/source label through CRI, and separately record the remote tag's single-platform manifest digest. K3s exposes the imported config digest (rather than the manifest digest) in Pod `imageID`, so workload proof requires the exact composed request plus that exact CRI config identity while retained scenario evidence keeps the independently verified runtime manifest identity. Source and candidate custody do not select different behavior. Every CPU/GPU composition appends a Forge-owned `control-plane.dispatch.enabled=false` fixture value: dispatch requires a customer-specific default model, and its portable behavior belongs to control-plane E2E rather than these machine contracts. The CPU chart/tool-runner/gateway checks and GPU completion remain explicitly dependent smoke, not product or chart authority.
+Ephemeral DigitalOcean provisioning and tagged reaping were retained only on the
+HOR-540 branch while the permanent path was qualified. Removal was authorized
+only after the dated lifecycle acceptance record contained three consecutive
+CPU and three consecutive GPU green destroy/apply/test/destroy cycles; any
+failed or incomplete cycle reset that fixture's streak. The final repository has
+no provider SDK, dynamic capacity discovery, `FORGE_E2E_KEEP`, tagged reaper, or
+`DIGITALOCEAN_TOKEN` workflow path.
 
-Owner-unit validation proves the production CPU/GPU create requests carry the `forge-e2e` reaper tag, forces provisioning failures after each cloud resource identity exists, and runs the registered owner cleanup hooks with both deletion paths forced to fail. The retained cleanup evidence binds the exact resource ID to its reaper tags. The reaper's two-hour default exceeds the longest 115-minute Forge workflow bound; its seam proves a host at that active-run boundary is retained, expired tagged orphans are deleted, and one delete failure does not suppress later deletions or report a false-success run.
+## Operational authority
 
-Published baselines never float to `latest`; intentional baseline changes are reviewed in `release/targets.json` and resolved to checksums/digests in the generated plan. All E2E invocations are verbose so exact driver inputs, Forge/runtime identity, failure domain, and stage results are visible. Shared redacted diagnostics run before shared cleanup hooks. Selected CPU/GPU capacity is mandatory in PR, complete nightly/manual, and candidate execution: a missing credential or exhausted capacity fails rather than skipping. Capacity groups are shared across workflow types and never cancel resource-owning jobs, allowing owner cleanup to destroy VMs; the root tagged reaper remains crash/cancel safety.
+Setup, SSH pinning, model-cache preparation, key rotation, quarantine, manual
+provider recovery, and rollback are in
+[`../../../docs/runbooks/permanent-e2e-fixtures.md`](../../../docs/runbooks/permanent-e2e-fixtures.md).
+Qualification run IDs and bound identities are retained in the dated HOR-540
+lifecycle acceptance record.
 
-## Rejected alternatives
-
-- **Merged mega-suite/shared Kind cluster:** weaker artifact-boundary signal and cluster-scoped state leakage.
-- **Fresh VM for every forge phase:** repeated provisioning and k3s/GPU installation without an independent requirement.
-- **Forge-private runner:** replaced by the approved monorepo `testkit/e2e`; owner assertions remain here while mechanics and compiled metadata are shared.
-
-## Production impact
-
-The runner remains test infrastructure: `FORGE_E2E_KEEP` retains either cloud fixture for debugging; normal cleanup and the reaper remain in place. HOR-494 also changes Forge's production GPU readiness authority, documented in `forge/README.md`, and requires a semantic Forge publication before acceptance.
+The production impact is the explicit Forge purge/reboot CLI and permanent
+fixture operations. Semantic publication is not required for HOR-540
+acceptance; its all-target candidate is validation-only and must not be
+promoted.

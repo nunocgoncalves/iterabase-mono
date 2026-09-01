@@ -20,7 +20,9 @@ func newDestroyCmd() *cobra.Command {
 		Short: "Uninstall k3s and remove local artifacts",
 		RunE:  runDestroy,
 	}
-	cmd.Flags().Bool("yes", false, "skip confirmation prompt")
+	cmd.Flags().Bool("purge-workspace", false, "destructively purge the configured AgentPool workspace after destroy")
+	cmd.Flags().Bool("reboot", false, "reboot the host after successful destroy and any requested purge")
+	cmd.Flags().Bool("yes", false, "confirm the requested destroy, purge, and reboot without prompting")
 	return cmd
 }
 
@@ -31,9 +33,18 @@ func runDestroy(cmd *cobra.Command, _ []string) error {
 	}
 	host := cfg.Spec.Hosts[0]
 
+	purgeWorkspace, _ := cmd.Flags().GetBool("purge-workspace")
+	reboot, _ := cmd.Flags().GetBool("reboot")
 	yes, _ := cmd.Flags().GetBool("yes")
 	if !yes {
-		if !confirm(cmd, fmt.Sprintf("Uninstall k3s on %s and remove local artifacts?", host.Address)) {
+		message := fmt.Sprintf("Uninstall k3s on %s and remove local artifacts?", host.Address)
+		if purgeWorkspace {
+			message = fmt.Sprintf("DESTROY k3s and PURGE the configured AgentPool workspace on %s? This permanently removes its filesystem and bytes.", host.Address)
+		}
+		if reboot {
+			message += " The host will reboot after successful cleanup."
+		}
+		if !confirm(cmd, message) {
 			return fmt.Errorf("aborted")
 		}
 	}
@@ -45,7 +56,10 @@ func runDestroy(cmd *cobra.Command, _ []string) error {
 	defer p.Close()
 
 	ctx := context.Background()
-	if err := lifecycle.Destroy(ctx, cfg, p, p, p, p); err != nil {
+	if err := lifecycle.DestroyWithOptions(ctx, cfg, p, p, p, p, lifecycle.DestroyOpts{
+		PurgeWorkspace: purgeWorkspace,
+		Reboot:         reboot,
+	}); err != nil {
 		return err
 	}
 	if dir, err := artifacts.Dir(cfg.Metadata.Name); err == nil {

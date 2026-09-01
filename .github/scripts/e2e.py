@@ -331,7 +331,7 @@ def scenario_entry(scenario: dict[str, Any], fixture_mode: str, expected: list[d
             {
                 "capacity": capacity,
                 "mandatory": True,
-                "capacity_group": f"e2e-capacity-{capacity}",
+                "capacity_group": "iterabase-permanent-fixtures",
             }
         )
     return entry
@@ -539,7 +539,7 @@ def make_plan(
         real_matrix.append(
             {
                 "capacity": capacity,
-                "capacity_group": f"e2e-capacity-{capacity}",
+                "capacity_group": "iterabase-permanent-fixtures",
                 "artifact": capacity,
                 "timeout": sum(entry["timeout"] for entry in capacity_scenarios) + CAPACITY_JOB_GRACE_MINUTES,
                 "scenarios": capacity_scenarios,
@@ -1296,6 +1296,40 @@ def validate_result(result: dict[str, Any], scenario: dict[str, Any], execution:
             raise E2EError(f"result for {scenario_id} has wrong {field}")
     if not SHA256.fullmatch(str(result.get("runtime_bundle_sha256", ""))):
         raise E2EError(f"result for {scenario_id} has no runtime bundle identity")
+    if scenario.get("tier") == "F3":
+        fixture_evidence = result.get("fixture_evidence")
+        if not isinstance(fixture_evidence, list):
+            raise E2EError(f"result for {scenario_id} has no permanent fixture evidence")
+        fixtures = {
+            item.get("name"): item for item in fixture_evidence if isinstance(item, dict)
+        }
+        expected_fixture_names = {"lifecycle"}
+        if scenario.get("capacity") == "gpu":
+            expected_fixture_names.add("model-cache")
+        if set(fixtures) != expected_fixture_names or len(fixtures) != len(fixture_evidence):
+            raise E2EError(f"result for {scenario_id} has missing, extra, or duplicate fixture evidence")
+        for name, evidence in fixtures.items():
+            if (
+                evidence.get("capacity") != scenario.get("capacity")
+                or not SHA256.fullmatch(str(evidence.get("host_key_sha256", "")))
+                or not str(evidence.get("workspace_device", "")).startswith("/dev/disk/by-id/")
+                or not evidence.get("boot_id_before")
+                or not evidence.get("boot_id_after")
+                or evidence.get("boot_id_before") == evidence.get("boot_id_after")
+            ):
+                raise E2EError(f"result for {scenario_id} has incomplete {name} fixture identity")
+        if "model-cache" in fixtures:
+            cache = fixtures["model-cache"]
+            if (
+                not str(cache.get("model_cache_device", "")).startswith("/dev/disk/by-id/")
+                or cache.get("model_cache_device") == cache.get("workspace_device")
+                or cache.get("model_cache_mount") != "/data/hf-cache"
+                or not cache.get("model_cache_uuid")
+                or not cache.get("model_id")
+                or not SHA.fullmatch(str(cache.get("model_revision", "")))
+                or not SHA256.fullmatch(str(cache.get("model_content_sha256", "")))
+            ):
+                raise E2EError(f"result for {scenario_id} has incomplete or aliased GPU model-cache evidence")
     stages = result.get("stages")
     expected_stages = scenario["stages"]
     if not isinstance(stages, list) or len(stages) != len(expected_stages):

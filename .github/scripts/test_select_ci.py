@@ -145,9 +145,11 @@ class WorkflowContractTests(unittest.TestCase):
             "python3 .github/scripts/e2e.py compose",
             "python3 .github/scripts/e2e.py validate-results",
             "export FORGE_E2E_REQUIRE_CAPACITY=true",
-            "group: ${{ matrix.capacity_group }}",
+            "uses: ./.github/actions/setup-permanent-fixture",
+            "group: iterabase-permanent-fixtures",
         ):
             self.assertIn(value, workflow)
+        self.assertNotIn("DIGITALOCEAN_TOKEN", workflow)
         for stale in (
             "control-plane-kind:",
             "control-plane-execution-kind:",

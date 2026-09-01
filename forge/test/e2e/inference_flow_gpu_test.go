@@ -62,9 +62,10 @@ func runInferenceGPUStage(t *testing.T, state *digitalOceanGPUState) {
 		svcPort     = 8080
 	)
 
-	// 4. apply a ModelBackend (vLLM, Qwen/Qwen3.5-0.8B) + a Model (alias). The
-	//    control-plane deploys vLLM on the GPU node (requests nvidia.com/gpu: 1,
-	//    downloads the model, serves on /health).
+	// 4. apply a ModelBackend using the repository-pinned public model revision
+	//    already verified on the dedicated harness-owned cache volume.
+	modelAuthority, err := loadModelCacheAuthority()
+	require.NoError(t, err)
 	catManifest := fmt.Sprintf(`apiVersion: platform.iterabase.com/v1alpha1
 kind: ModelBackend
 metadata:
@@ -72,7 +73,8 @@ metadata:
   namespace: %s
 spec:
   kind: vLLM
-  model: Qwen/Qwen3.5-0.8B
+  model: %s
+  extraArgs: ["--revision", "%s"]
 ---
 apiVersion: platform.iterabase.com/v1alpha1
 kind: Model
@@ -85,7 +87,7 @@ spec:
   backendRef: %s
   transforms:
     rewrite_model_name: true
-`, mbName, namespace, mbName, namespace, alias, mbName)
+`, mbName, namespace, modelAuthority.ModelID, modelAuthority.Revision, mbName, namespace, alias, mbName)
 	catPath := filepath.Join(t.TempDir(), "catalog.yaml")
 	require.NoError(t, os.WriteFile(catPath, []byte(catManifest), 0o600))
 	c.Kubectl(t, "apply", "-f", catPath, "-n", namespace)

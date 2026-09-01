@@ -15,7 +15,7 @@ standalone component repository.
 | --- | --- |
 | Control-plane source | [`control-plane/`](../control-plane/) |
 | Inference-gateway source | [`inference-gateway/`](../inference-gateway/) |
-| Forge source and E2E cleanup | [`forge/`](../forge/) and [root reaper workflow](../.github/workflows/reaper.yml) |
+| Forge source and permanent-fixture lifecycle | [`forge/`](../forge/) and [fixture runbook](runbooks/permanent-e2e-fixtures.md) |
 | Chart source | [`charts/`](../charts/) |
 | Pull-request CI | [root CI and E2E workflows](ci.md) |
 | Candidate and promotion | [root release workflows](release.md) |
@@ -53,10 +53,11 @@ metadata provide the active-source notice. Each legacy repository had zero
 standalone GitHub issues at cutover; the audit records that fact rather than
 inventing an issue sample, while preserving all historical pull requests.
 
-## Protected cutover procedure
+## Historical protected cutover procedure
 
-Archival happens only after the HOR-474 change is merged to `master` and its
-required checks pass.
+This records the completed HOR-474 archival procedure; it is historical
+evidence, not current cleanup authority. Archival happened only after the
+HOR-474 change merged to `master` and its required checks passed.
 
 1. Verify `master` requires `CI / required` and `E2E / required`, the protected
    release-tag ruleset is active, and the `release` environment retains founder
@@ -98,12 +99,15 @@ required checks pass.
      SOURCE_AUTHORITY_STATE=archived
    ```
 
-The root scheduled reaper is the only post-cutover cleanup authority. The final
-audit verifies that Dependabot version updates remain unconfigured, Dependabot
-security updates and repository Actions are disabled, and custom repository
-Actions secrets are absent from every legacy archive, so product-writing
-automation and CI/release credentials stay only in
-the monorepo. Dependency alerts and the read-only dependency graph may remain
+At cutover, the root scheduled reaper was the only post-cutover cleanup
+authority and supplied the historical archive guard above. HOR-540 later
+replaced ephemeral provider resources with permanent serialized fixtures and
+removed that reaper/provider credential path. Current cleanup authority is
+`forge destroy --purge-workspace --reboot --yes` over fixture-scoped, pinned
+SSH; provider-side quarantine/recovery is founder-operated outside Actions.
+The final archive audit continues to prove that Dependabot version updates are
+unconfigured, Dependabot security updates and repository Actions are disabled,
+and custom repository Actions secrets are absent from every legacy archive. Dependency alerts and the read-only dependency graph may remain
 available as historical security evidence.
 Existing GHCR image and chart names remain unchanged, so overlays continue
 consuming the same immutable artifact identities.

@@ -24,8 +24,9 @@ permissions:
   actions: read
   packages: read
 
-# Resource-owning scenarios use non-canceling cross-workflow capacity groups.
-# Exact-head non-resource jobs may supersede independently below.
+# Every permanent CPU/GPU fixture path shares one literal non-canceling lock
+# across PR, nightly/manual, candidate, intentional-red, and cleanup execution.
+# Exact-head non-fixture jobs may supersede independently below.
 
 env:
   GO_CACHE_DEPENDENCIES: |
@@ -272,7 +273,7 @@ jobs:
       matrix:
         include: ${{ fromJSON(needs.plan.outputs.real_machine_matrix) }}
     concurrency:
-      group: ${{ matrix.capacity_group }}
+      group: iterabase-permanent-fixtures
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -299,19 +300,20 @@ jobs:
       - uses: ./.github/actions/setup-kubernetes-tools
       - name: Add reviewed Helm repositories
         run: .github/scripts/add_helm_repositories.sh
-      - name: Require selected external capacity
-        env:
-          DIGITALOCEAN_TOKEN: ${{ secrets.DIGITALOCEAN_TOKEN }}
-        run: |
-          mkdir -p '${{ runner.temp }}/diagnostics'
-          if [ -z "$DIGITALOCEAN_TOKEN" ]; then
-            printf '{"classification":"missing-capacity-credential","capacity":"${{ matrix.capacity }}"}\n' > '${{ runner.temp }}/diagnostics/capacity.json'
-            exit 1
-          fi
-      - name: Compose and run every scenario for this capacity serially
+      - name: Bind the fixed permanent fixture
+        uses: ./.github/actions/setup-permanent-fixture
+        with:
+          capacity: ${{ matrix.capacity }}
+          address: ${{ matrix.capacity == 'cpu' && vars.FORGE_E2E_CPU_ADDRESS || vars.FORGE_E2E_GPU_ADDRESS }}
+          ssh-user: ${{ matrix.capacity == 'cpu' && vars.FORGE_E2E_CPU_SSH_USER || vars.FORGE_E2E_GPU_SSH_USER }}
+          ssh-private-key: ${{ matrix.capacity == 'cpu' && secrets.FORGE_E2E_CPU_SSH_KEY || secrets.FORGE_E2E_GPU_SSH_KEY }}
+          ssh-host-key: ${{ matrix.capacity == 'cpu' && vars.FORGE_E2E_CPU_SSH_HOST_KEY || vars.FORGE_E2E_GPU_SSH_HOST_KEY }}
+          workspace-device: ${{ matrix.capacity == 'cpu' && vars.FORGE_E2E_CPU_WORKSPACE_DEVICE || vars.FORGE_E2E_GPU_WORKSPACE_DEVICE }}
+          model-cache-device: ${{ matrix.capacity == 'gpu' && vars.FORGE_E2E_GPU_MODEL_CACHE_DEVICE || '' }}
+          model-cache-uuid: ${{ matrix.capacity == 'gpu' && vars.FORGE_E2E_GPU_MODEL_CACHE_UUID || '' }}
+      - name: Compose and run every scenario for this fixture serially
         env:
           SCENARIOS: ${{ toJSON(matrix.scenarios) }}
-          DIGITALOCEAN_TOKEN: ${{ secrets.DIGITALOCEAN_TOKEN }}
           GH_RUNTIME_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           mkdir -p '${{ runner.temp }}/results' '${{ runner.temp }}/diagnostics'
@@ -334,7 +336,7 @@ jobs:
               set -a
               source "$envfile"
               set +a
-              export DIGITALOCEAN_TOKEN GITHUB_TOKEN="$GH_RUNTIME_TOKEN"
+              export GITHUB_TOKEN="$GH_RUNTIME_TOKEN"
               export FORGE_E2E_REQUIRE_CAPACITY=true
               export ITERABASE_E2E_RESULT='${{ runner.temp }}/results/'"$artifact.json"
               export ITERABASE_E2E_DIAGNOSTICS='${{ runner.temp }}/diagnostics/'"$artifact"
@@ -368,7 +370,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 115
     concurrency:
-      group: e2e-capacity-gpu
+      group: iterabase-permanent-fixtures
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -379,14 +381,20 @@ jobs:
           go-version: 1.26.5
           cache-dependency-path: forge/test/e2e/go.sum
           cache-scope: e2e-gpu-red-proof
-      - name: Require selected GPU capacity
-        env:
-          DIGITALOCEAN_TOKEN: ${{ secrets.DIGITALOCEAN_TOKEN }}
-        run: test -n "$DIGITALOCEAN_TOKEN"
+      - name: Bind the fixed permanent GPU fixture
+        uses: ./.github/actions/setup-permanent-fixture
+        with:
+          capacity: gpu
+          address: ${{ vars.FORGE_E2E_GPU_ADDRESS }}
+          ssh-user: ${{ vars.FORGE_E2E_GPU_SSH_USER }}
+          ssh-private-key: ${{ secrets.FORGE_E2E_GPU_SSH_KEY }}
+          ssh-host-key: ${{ vars.FORGE_E2E_GPU_SSH_HOST_KEY }}
+          workspace-device: ${{ vars.FORGE_E2E_GPU_WORKSPACE_DEVICE }}
+          model-cache-device: ${{ vars.FORGE_E2E_GPU_MODEL_CACHE_DEVICE }}
+          model-cache-uuid: ${{ vars.FORGE_E2E_GPU_MODEL_CACHE_UUID }}
       - name: Prove the normal scenario rejects the intentional mutation
         working-directory: forge
         env:
-          DIGITALOCEAN_TOKEN: ${{ secrets.DIGITALOCEAN_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ITERABASE_E2E_FIXTURE_MODE: source
           ITERABASE_E2E_SOURCE_SHA: ${{ github.sha }}

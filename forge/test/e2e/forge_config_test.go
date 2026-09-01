@@ -25,7 +25,9 @@ func rememberWorkspaceDevice(address, device string) {
 type forgeConfigSpec struct {
 	Name             string
 	Address          string
+	SSHUser          string
 	SSHKeyPath       string
+	SSHHostKey       string
 	WorkspaceDevice  string
 	RunLabel         bool
 	DualStack        bool
@@ -57,6 +59,12 @@ func workspaceDevice(spec forgeConfigSpec) string {
 
 func writeForgeConfigSpec(t *testing.T, spec forgeConfigSpec) string {
 	t.Helper()
+	if spec.SSHUser == "" {
+		spec.SSHUser = fixtureSSHUser()
+	}
+	if spec.SSHHostKey == "" {
+		spec.SSHHostKey = strings.TrimSpace(os.Getenv(permanentFixtureHostKeyEnv))
+	}
 	var cfg strings.Builder
 	fmt.Fprintf(&cfg, `apiVersion: forge.horizonshift.io/v1alpha1
 kind: Cluster
@@ -69,10 +77,13 @@ spec:
     filesystem: auto
   hosts:
     - address: %s
-      sshUser: forge
+      sshUser: %s
       sshKeyPath: %s
-      role: control-plane+worker
-`, spec.Name, workspaceDevice(spec), spec.Address, spec.SSHKeyPath)
+`, spec.Name, workspaceDevice(spec), spec.Address, spec.SSHUser, spec.SSHKeyPath)
+	if spec.SSHHostKey != "" {
+		fmt.Fprintf(&cfg, "      sshHostKey: %q\n", spec.SSHHostKey)
+	}
+	cfg.WriteString("      role: control-plane+worker\n")
 	if spec.RunLabel {
 		fmt.Fprintf(&cfg, `      labels:
         e2e.horizonshift.io/run: %q

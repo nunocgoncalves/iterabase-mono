@@ -82,8 +82,9 @@ conflicting versions.
    charts into the exact platform archive, and supplies the same runtime-bundle
    schema used by PR/nightly.
 4. **Execute the compiled union.** F2 and mandatory F3 jobs invoke the same owner
-   scenario and stage graph. CPU/GPU groups are shared across PR, nightly, and
-   candidate workflows and never cancel resource-owning cleanup.
+   scenario and stage graph. Every CPU/GPU path shares the literal
+   `iterabase-permanent-fixtures` non-canceling lock across PR, nightly/manual,
+   intentional-red, and candidate workflows.
 5. **Reconcile actual evidence.** Candidate validation requires exactly one
    machine-readable result per planned scenario and one passed terminal result
    per declared stage. Missing/extra/skipped/blocked/canceled results or identity
@@ -129,13 +130,20 @@ so promotion is resumable rather than falsely atomic: an identical completed
 member is verified and skipped, a missing member continues, and any conflicting
 identity fails closed.
 
-## Capacity and incomplete candidates
+## Permanent fixtures and incomplete candidates
 
-Every selected F3 scenario is mandatory. Missing credentials or exhausted
-DigitalOcean CPU/GPU capacity produces a failing classification and retained
-redacted diagnostics. It is retried only by dispatching/rerunning when capacity
-returns; it never becomes a skip or pass-on-retry. Tagged reaping remains the
-crash-safety fallback.
+Every selected F3 scenario is mandatory. Candidate execution uses the same fixed
+CPU/GPU addresses, pinned SSH identities, workspace devices, explicit
+pre/post-test purge/reboot lifecycle, and GPU model-cache authority as source
+execution. Its result retains those fixture identities alongside exact artifact
+and stage evidence.
+
+A missing fixture-scoped key, unreachable host, host-key/device drift, corrupt
+model cache, or failed cleanup/reboot produces a failing classification and
+retained redacted diagnostics. It never becomes a skip, retry, or pass-on-retry.
+Actions has no provider credential and cannot power-cycle, rescue, reimage,
+replace, or delete a fixture. Founder-operated quarantine/recovery must restore
+the runbook baseline before a new candidate dispatch.
 
 ## Release-system rehearsal
 

@@ -43,6 +43,90 @@ type RuntimeArtifact struct {
 }
 
 var observedRuntimeIdentityMu sync.Mutex
+var observedFixtureEvidenceMu sync.Mutex
+
+// FixtureEvidence binds F3 execution to the exact permanent host lifecycle and,
+// for GPU execution, the separately owned public-model cache.
+type FixtureEvidence struct {
+	Name               string `json:"name"`
+	Capacity           string `json:"capacity"`
+	HostKeySHA256      string `json:"host_key_sha256"`
+	WorkspaceDevice    string `json:"workspace_device"`
+	BootIDBefore       string `json:"boot_id_before"`
+	BootIDAfter        string `json:"boot_id_after"`
+	ModelCacheDevice   string `json:"model_cache_device,omitempty"`
+	ModelCacheMount    string `json:"model_cache_mount,omitempty"`
+	ModelCacheUUID     string `json:"model_cache_uuid,omitempty"`
+	ModelID            string `json:"model_id,omitempty"`
+	ModelRevision      string `json:"model_revision,omitempty"`
+	ModelContentSHA256 string `json:"model_content_sha256,omitempty"`
+}
+
+// RecordFixtureEvidence upserts one named fixture record for the current
+// required scenario. Cleanup can therefore replace preflight boot evidence with
+// the final destroy/purge/reboot handoff before the result is assembled.
+func RecordFixtureEvidence(evidence FixtureEvidence) error {
+	if os.Getenv(RequiredEnv) != "true" {
+		return nil
+	}
+	if evidence.Name == "" || evidence.Capacity == "" || !canonicalHash.MatchString(evidence.HostKeySHA256) ||
+		evidence.WorkspaceDevice == "" || evidence.BootIDBefore == "" || evidence.BootIDAfter == "" ||
+		evidence.BootIDBefore == evidence.BootIDAfter {
+		return fmt.Errorf("permanent fixture evidence is incomplete: %+v", evidence)
+	}
+	if evidence.Name == "model-cache" && (evidence.ModelCacheDevice == "" || evidence.ModelCacheDevice == evidence.WorkspaceDevice ||
+		evidence.ModelCacheMount != "/data/hf-cache" || evidence.ModelCacheUUID == "" || evidence.ModelID == "" ||
+		!fullSHA.MatchString(evidence.ModelRevision) || !canonicalHash.MatchString(evidence.ModelContentSHA256)) {
+		return fmt.Errorf("GPU model-cache evidence is incomplete: %+v", evidence)
+	}
+	resultPath := os.Getenv(ResultOutputEnv)
+	if resultPath == "" {
+		return fmt.Errorf("%s is empty while recording fixture evidence", ResultOutputEnv)
+	}
+	path := resultPath + ".fixtures.json"
+	observedFixtureEvidenceMu.Lock()
+	defer observedFixtureEvidenceMu.Unlock()
+	records := make(map[string]FixtureEvidence)
+	if data, err := os.ReadFile(path); err == nil {
+		if err := json.Unmarshal(data, &records); err != nil {
+			return fmt.Errorf("decode observed fixture evidence: %w", err)
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("read observed fixture evidence: %w", err)
+	}
+	records[evidence.Name] = evidence
+	data, err := json.MarshalIndent(records, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	temporary := path + ".tmp"
+	if err := os.WriteFile(temporary, data, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(temporary, path)
+}
+
+func fixtureEvidenceForResult() ([]FixtureEvidence, error) {
+	path := os.Getenv(ResultOutputEnv) + ".fixtures.json"
+	records := make(map[string]FixtureEvidence)
+	if data, err := os.ReadFile(path); err == nil {
+		if err := json.Unmarshal(data, &records); err != nil {
+			return nil, fmt.Errorf("decode observed fixture evidence: %w", err)
+		}
+	} else if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("read observed fixture evidence: %w", err)
+	}
+	result := make([]FixtureEvidence, 0, len(records))
+	for _, evidence := range records {
+		result = append(result, evidence)
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].Name < result[j].Name })
+	return result, nil
+}
 
 // RecordRuntimeImageIdentity retains the immutable single-platform manifest
 // digest observed after an exact archive is imported into the execution host.
@@ -159,6 +243,7 @@ type ScenarioResult struct {
 	StageGraphSHA256 string            `json:"stage_graph_sha256"`
 	FixtureMode      FixtureMode       `json:"fixture_mode"`
 	Artifacts        []RuntimeArtifact `json:"artifacts"`
+	FixtureEvidence  []FixtureEvidence `json:"fixture_evidence,omitempty"`
 	Stages           []StageResult     `json:"stages"`
 	CompletedAt      string            `json:"completed_at"`
 }
