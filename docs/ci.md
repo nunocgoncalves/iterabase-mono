@@ -107,9 +107,13 @@ Owner scenarios no longer build artifacts or choose a different stage DAG in
 source versus candidate mode. Image identity keeps three non-interchangeable
 proofs: the temporary artifact or registry/index digest, the archive's image
 config digest, and the post-import single-platform runtime manifest digest.
-Import verifies the config and source-revision label; workload assertions verify
-the exact composer request reference and the imported runtime digest reported by
-CRI. A config digest is never compared to a Pod manifest digest.
+Import verifies the config and source-revision label and separately records the
+imported tag's runtime manifest digest. Workload assertions always verify the
+exact composer request reference and the immutable identity CRI exposes for that
+substrate: Kind reports the imported manifest digest in Pod `imageID`, while
+K3s reports the already-verified image config digest. The Forge assertion binds
+that config identity to the same tag-to-manifest mapping established during
+import; config and manifest digests are never compared as interchangeable.
 Harness-bearing Kind DAGs additionally establish their AgentPool storage
 substrate after platform-default claims bind and before worker creation. The
 shared helper applies and verifies the Forge-owned non-default,

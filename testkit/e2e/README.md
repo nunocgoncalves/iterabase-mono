@@ -34,9 +34,12 @@ The shared Kind helper restores the downloaded archive and transports the exact
 reference into the created nodes, so pre-cluster runner-daemon state cannot
 silently satisfy an install. It verifies the archive's config digest and returns
 the imported single-platform manifest digest. Owners then prove that workloads
-requested the composer reference and that CRI reports that runtime digest;
-registry/index, config, and runtime-manifest digests are retained as distinct
-identities rather than compared as if they were interchangeable.
+requested the composer reference and bind it to the immutable identity exposed
+by that CRI. Kind Pod status reports the imported manifest digest; K3s Pod status
+reports the already-verified config digest, so Forge also proves the imported
+tag-to-manifest mapping separately. Registry/index, config, and runtime-manifest
+digests remain distinct identities rather than being compared as if they were
+interchangeable.
 
 Kind scenarios that create an `AgentPool` use the shared post-platform storage
 helper before worker creation. It configures Kind's pinned provisioner onto the

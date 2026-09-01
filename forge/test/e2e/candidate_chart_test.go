@@ -16,13 +16,18 @@ const (
 	substrateChartArchiveEnv = "FORGE_E2E_SUBSTRATE_CHART_ARCHIVE"
 )
 
+type importedRuntimeIdentity struct {
+	ConfigDigest   string
+	ManifestDigest string
+}
+
 // prepareCandidateChart transfers the exact Actions-retained platform and
 // companion archives to the ephemeral host. Forge then gives remote Helm those
 // extracted directories, so real-machine validation consumes the candidate
 // bytes without publishing a persistent candidate package.
-func prepareCandidateImages(t *testing.T, ip, keyPath string) map[string]string {
+func prepareCandidateImages(t *testing.T, ip, keyPath string) map[string]importedRuntimeIdentity {
 	t.Helper()
-	runtimeDigests := make(map[string]string)
+	runtimeDigests := make(map[string]importedRuntimeIdentity)
 	type imageInput struct {
 		name       string
 		prefix     string
@@ -99,7 +104,9 @@ func prepareCandidateImages(t *testing.T, ip, keyPath string) map[string]string 
 		if sourceSHA := os.Getenv(input.prefix + "_IMAGE_SOURCE_SHA"); sourceSHA != "" && labels["org.opencontainers.image.revision"] != sourceSHA {
 			t.Fatalf("imported %s image revision label=%q want=%q", input.name, labels["org.opencontainers.image.revision"], sourceSHA)
 		}
-		runtimeDigests[input.prefix] = runtimeDigest
+		runtimeDigests[input.prefix] = importedRuntimeIdentity{
+			ConfigDigest: configDigest, ManifestDigest: runtimeDigest,
+		}
 		artifact := map[string]string{
 			"CONTROL_PLANE": "control-plane-image", "HARNESS": "harness-image", "TOOL_RUNNER": "tool-runner-image",
 			"INFERENCE_GATEWAY": "inference-gateway-image", "FORGE_E2E_RUNTIME": "runtime-fixture-image",
