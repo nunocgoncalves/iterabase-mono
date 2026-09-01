@@ -41,20 +41,20 @@ jobs:
       targets: ${{ steps.resolved.outputs.targets }}
       releases: ${{ steps.resolved.outputs.releases }}
       forge_version: ${{ steps.resolved.outputs.forge_version }}
+      forge_recipe_sha256: ${{ steps.resolved.outputs.forge_recipe_sha256 }}
       image_matrix: ${{ steps.resolved.outputs.image_matrix }}
       chart_matrix: ${{ steps.resolved.outputs.chart_matrix }}
+      runtime_artifact_matrix: ${{ steps.resolved.outputs.runtime_artifact_matrix }}
       kind_matrix: ${{ steps.resolved.outputs.kind_matrix }}
-      # A contained pre-HOR-476 master SHA emits no compiled matrix; preserve
-      # its historical mandatory CPU+GPU gate while current SHAs use catalogue metadata.
-      real_machine_matrix: ${{ steps.resolved.outputs.real_machine_matrix || '[{"name":"cpu","target":"test-e2e","timeout":70},{"name":"gpu","target":"test-e2e-gpu","timeout":70}]' }}
+      real_machine_matrix: ${{ steps.resolved.outputs.real_machine_matrix }}
       has_images: ${{ steps.resolved.outputs.has_images }}
       has_chart: ${{ steps.resolved.outputs.has_chart }}
       has_forge: ${{ steps.resolved.outputs.has_forge }}
+      has_runtime_artifacts: ${{ steps.resolved.outputs.has_runtime_artifacts }}
       run_control_plane: ${{ steps.resolved.outputs.run_control_plane }}
       run_inference_gateway: ${{ steps.resolved.outputs.run_inference_gateway }}
       run_forge: ${{ steps.resolved.outputs.run_forge }}
       run_charts: ${{ steps.resolved.outputs.run_charts }}
-      run_chart_runtime: ${{ steps.resolved.outputs.run_chart_runtime }}
       run_kind: ${{ steps.resolved.outputs.run_kind }}
       run_real_machine: ${{ steps.resolved.outputs.run_real_machine }}
     steps:
@@ -74,36 +74,10 @@ jobs:
       - uses: ./.github/actions/setup-go
         with:
           go-version: 1.26.5
-          # Keep preflight compatible with an older contained master SHA that
-          # predates the shared modules; Forge's E2E sum exists on both sides.
-          cache-dependency-path: forge/test/e2e/go.sum
-          cache-scope: candidate-catalogue
-      - name: Validate and resolve the affected target bundle from source authority
-        id: plan
-        env:
-          REQUESTED_TARGETS: ${{ inputs.targets }}
-          REQUESTED_SHA: ${{ inputs.master_sha }}
-          RUN_ID: ${{ github.run_id }}
-          RUN_ATTEMPT: ${{ github.run_attempt }}
-        run: |
-          python3 .github/scripts/test_release.py
-          python3 .github/scripts/release.py validate
-          python3 .github/scripts/release.py plan \
-            --targets "$REQUESTED_TARGETS" \
-            --master-sha "$REQUESTED_SHA" \
-            --run-id "$RUN_ID" \
-            --run-attempt "$RUN_ATTEMPT" \
-            --output candidate-plan.json \
-            --github-output "$GITHUB_OUTPUT"
-      - name: Reject existing protected production tags
-        env:
-          RELEASES: ${{ steps.plan.outputs.releases }}
-        run: |
-          while IFS= read -r tag; do
-            test -z "$(git ls-remote --tags origin "refs/tags/$tag" "refs/tags/$tag^{}")"
-          done < <(jq -r '.[].production_tag' <<<"$RELEASES")
-      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+          cache-dependency-path: ${{ env.GO_CACHE_DEPENDENCIES }}
+          cache-scope: candidate-plan
       - uses: ./.github/actions/setup-kubernetes-tools
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
@@ -113,11 +87,35 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: echo "$GH_TOKEN" | helm registry login ghcr.io -u '${{ github.actor }}' --password-stdin
+      - name: Validate and compile one candidate execution plan
+        env:
+          REQUESTED_TARGETS: ${{ inputs.targets }}
+          REQUESTED_SHA: ${{ inputs.master_sha }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          python3 .github/scripts/test_e2e.py
+          python3 .github/scripts/test_release.py
+          python3 .github/scripts/release.py validate
+          python3 .github/scripts/release.py plan \
+            --targets "$REQUESTED_TARGETS" \
+            --master-sha "$REQUESTED_SHA" \
+            --run-id "$RUN_ID" \
+            --run-attempt "$RUN_ATTEMPT" \
+            --output candidate-plan.json
+      - name: Reject existing protected production tags
+        run: |
+          while IFS= read -r tag; do
+            test -z "$(git ls-remote --tags origin "refs/tags/$tag" "refs/tags/$tag^{}")"
+          done < <(jq -r '.[].production_tag' candidate-plan.json)
       - name: Reject existing semantic artifacts before candidate validation
         run: .github/scripts/check_release_availability.sh candidate-plan.json '${{ github.repository_owner }}'
-      - name: Resolve immutable published baseline identities
-        run: .github/scripts/resolve_release_baselines.sh candidate-plan.json
-      - name: Refresh plan outputs with resolved baselines
+      - name: Resolve every immutable published baseline identity
+        run: |
+          python3 .github/scripts/e2e.py resolve-baselines --plan candidate-plan.json
+          jq -cS . candidate-plan.json > candidate-plan.normalized.json
+          mv candidate-plan.normalized.json candidate-plan.json
+      - name: Export the fully resolved plan
         id: resolved
         run: >-
           python3 .github/scripts/release.py outputs
@@ -135,8 +133,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ inputs.master_sha }}
+        with: {ref: "${{ inputs.master_sha }}"}
       - uses: ./.github/actions/setup-go
         with:
           go-version: 1.26.5
@@ -150,14 +147,11 @@ jobs:
             control-plane/harness/package-lock.json
             control-plane/tool-runner/package-lock.json
           cache-scope: candidate-control-plane
-      - name: Install locked Node dependencies
-        run: make ui-deps harness-deps tool-runner-deps
+      - run: make ui-deps harness-deps tool-runner-deps
         working-directory: control-plane
-      - name: Run complete control-plane owner validation
-        run: >-
+      - run: >-
           make fmt-check lint build test test-e2e-unit proto-check
-          ui-lint ui-test
-          harness-lint harness-test
+          ui-lint ui-test harness-lint harness-test
           tool-runner-lint tool-runner-test tool-runner-build
         working-directory: control-plane
 
@@ -166,12 +160,10 @@ jobs:
     needs: preflight
     if: needs.preflight.outputs.run_inference_gateway == 'true'
     runs-on: ubuntu-latest
-    env:
-      GOWORK: "off"
+    env: {GOWORK: "off"}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ inputs.master_sha }}
+        with: {ref: "${{ inputs.master_sha }}"}
       - uses: ./.github/actions/setup-go
         with:
           go-version: 1.25.12
@@ -189,8 +181,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ inputs.master_sha }}
+        with: {ref: "${{ inputs.master_sha }}"}
       - uses: ./.github/actions/setup-go
         with:
           go-version: 1.26.5
@@ -209,62 +200,43 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ inputs.master_sha }}
+        with: {ref: "${{ inputs.master_sha }}"}
       - uses: ./.github/actions/setup-kubernetes-tools
       - uses: ./.github/actions/cache-helm
-        with:
-          cache-scope: candidate-charts
+        with: {cache-scope: candidate-charts}
       - run: .github/scripts/add_helm_repositories.sh
       - run: make check check-tls test-e2e-unit
         working-directory: charts
-
-  charts-runtime:
-    needs: [preflight, image-candidates, chart-candidate]
-    if: >-
-      always() && needs.preflight.result == 'success' &&
-      needs.preflight.outputs.run_chart_runtime == 'true' &&
-      (needs.image-candidates.result == 'success' || needs.image-candidates.result == 'skipped') &&
-      needs.chart-candidate.result == 'success'
-    uses: ./.github/workflows/charts-runtime.yml
-    with:
-      source_ref: ${{ inputs.master_sha }}
-      candidate_bundle: true
-      image_candidates: ${{ needs.preflight.outputs.has_images == 'true' }}
 
   image-candidates:
     name: Build image — ${{ matrix.name }}
     needs: preflight
     if: needs.preflight.outputs.has_images == 'true'
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
+    permissions: {contents: read, packages: write}
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.preflight.outputs.image_matrix) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ inputs.master_sha }}
+        with: {ref: "${{ inputs.master_sha }}"}
+      - name: Verify exact image source
+        run: test "$(git rev-parse HEAD)" = '${{ inputs.master_sha }}'
       - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Reject an existing immutable run-scoped alias
+      - name: Reject an existing immutable candidate alias
         env:
           REPOSITORY: ${{ matrix.repository }}
           CANDIDATE_TAG: ${{ matrix.candidate_tag }}
         run: |
           existing="$(docker buildx imagetools inspect "$REPOSITORY:$CANDIDATE_TAG" --format '{{json .Manifest.Digest}}' 2>/dev/null | tr -d '"' || true)"
-          test -z "$existing" || {
-            echo "$REPOSITORY:$CANDIDATE_TAG already exists at $existing; immutable candidate aliases are never reused or retargeted" >&2
-            exit 1
-          }
-      - name: Build and push one canonical untagged digest
+          test -z "$existing"
+      - name: Build and push one canonical digest from the reviewed recipe
         id: build
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
@@ -272,13 +244,8 @@ jobs:
           file: ${{ matrix.dockerfile }}
           tags: ${{ matrix.repository }}
           outputs: type=image,push-by-digest=true,name-canonical=true,push=true
-          labels: |
-            org.opencontainers.image.version=${{ matrix.version }}
-            org.opencontainers.image.revision=${{ inputs.master_sha }}
-            org.opencontainers.image.source=https://github.com/${{ github.repository }}
-          build-args: |
-            VERSION=${{ matrix.version }}
-            COMMIT=${{ inputs.master_sha }}
+          labels: ${{ matrix.labels_text }}
+          build-args: ${{ matrix.build_args_text }}
           provenance: mode=max
           sbom: true
           cache-from: type=gha,scope=release-${{ matrix.name }}
@@ -290,15 +257,10 @@ jobs:
           DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           test -n "$DIGEST"
-          existing="$(docker buildx imagetools inspect "$REPOSITORY:$CANDIDATE_TAG" --format '{{json .Manifest.Digest}}' 2>/dev/null | tr -d '"' || true)"
-          test -z "$existing" || {
-            echo "$REPOSITORY:$CANDIDATE_TAG appeared at $existing during the build; refusing to retarget it" >&2
-            exit 1
-          }
+          test -z "$(docker buildx imagetools inspect "$REPOSITORY:$CANDIDATE_TAG" --format '{{json .Manifest.Digest}}' 2>/dev/null | tr -d '"' || true)"
           docker buildx imagetools create --tag "$REPOSITORY:$CANDIDATE_TAG" "$REPOSITORY@$DIGEST"
           test "$(docker buildx imagetools inspect "$REPOSITORY:$CANDIDATE_TAG" --format '{{json .Manifest.Digest}}' | tr -d '"')" = "$DIGEST"
-      - name: Generate portable SPDX SBOM
-        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.20.6
+      - uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.20.6
         with:
           image: ${{ matrix.repository }}@${{ steps.build.outputs.digest }}
           syft-version: v1.51.0
@@ -306,19 +268,15 @@ jobs:
           output-file: candidate-${{ matrix.name }}.spdx.json
           registry-username: ${{ github.actor }}
           registry-password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Record immutable image identity
-        env:
-          DIGEST: ${{ steps.build.outputs.digest }}
+      - name: Record complete image identity
+        env: {DIGEST: "${{ steps.build.outputs.digest }}"}
         run: |
           jq -n \
-            --arg name '${{ matrix.name }}' \
-            --arg target '${{ matrix.target }}' \
-            --arg repository '${{ matrix.repository }}' \
-            --arg candidate_tag '${{ matrix.candidate_tag }}' \
-            --arg version '${{ matrix.version }}' \
-            --arg digest "$DIGEST" \
-            --arg source_sha '${{ inputs.master_sha }}' \
-            '{schema_version:2,artifact_type:"image",name:$name,target:$target,repository:$repository,candidate_tag:$candidate_tag,version:$version,digest:$digest,source_sha:$source_sha}' \
+            --arg name '${{ matrix.name }}' --arg target '${{ matrix.target }}' \
+            --arg repository '${{ matrix.repository }}' --arg candidate_tag '${{ matrix.candidate_tag }}' \
+            --arg version '${{ matrix.version }}' --arg digest "$DIGEST" \
+            --arg source_sha '${{ inputs.master_sha }}' --arg recipe_sha256 '${{ matrix.recipe_sha256 }}' \
+            '{schema_version:2,artifact_type:"image",name:$name,target:$target,repository:$repository,candidate_tag:$candidate_tag,version:$version,digest:$digest,source_sha:$source_sha,recipe_sha256:$recipe_sha256}' \
             > candidate-${{ matrix.name }}.json
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -333,47 +291,52 @@ jobs:
     needs: preflight
     if: needs.preflight.outputs.has_chart == 'true'
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write
-      attestations: write
+    permissions: {contents: read, id-token: write, attestations: write}
     strategy:
+      fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.preflight.outputs.chart_matrix) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ inputs.master_sha }}
+        with: {ref: "${{ inputs.master_sha }}"}
+      - name: Verify exact chart source
+        run: test "$(git rev-parse HEAD)" = '${{ inputs.master_sha }}'
       - uses: ./.github/actions/setup-kubernetes-tools
       - run: .github/scripts/add_helm_repositories.sh
-      - name: Package exact archives once
+      - name: Package exact chart and companion archives once
         run: |
           mkdir -p candidate-charts
-          helm dependency build charts/charts/control-plane
-          helm dependency build charts/charts/observability
-          helm dependency build charts/charts/cert-manager-substrate
-          helm dependency build charts/charts/iterabase-platform
+          for chart in control-plane observability cert-manager-substrate iterabase-platform; do
+            helm dependency build "charts/charts/$chart"
+          done
           helm package 'charts/charts/${{ matrix.chart }}' --destination candidate-charts
           for companion in $(jq -r '.[]' <<<'${{ toJSON(matrix.companions) }}'); do
             helm package "charts/charts/$companion" --destination candidate-charts
           done
           (cd candidate-charts && sha256sum -- *.tgz > 'checksums-${{ matrix.chart }}.txt')
           jq -n \
-            --arg target '${{ matrix.target }}' \
-            --arg chart '${{ matrix.chart }}' \
-            --arg version '${{ matrix.version }}' \
-            --arg source_sha '${{ inputs.master_sha }}' \
-            '{schema_version:2,artifact_type:"chart",target:$target,chart:$chart,version:$version,source_sha:$source_sha}' \
+            --arg target '${{ matrix.target }}' --arg chart '${{ matrix.chart }}' \
+            --arg version '${{ matrix.version }}' --arg source_sha '${{ inputs.master_sha }}' \
+            --arg recipe_sha256 '${{ matrix.recipe_sha256 }}' \
+            '{schema_version:2,artifact_type:"chart",target:$target,chart:$chart,version:$version,source_sha:$source_sha,recipe_sha256:$recipe_sha256}' \
             > 'candidate-charts/candidate-chart-${{ matrix.chart }}.json'
-      - name: Generate chart SPDX SBOM
-        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.20.6
+          while IFS= read -r companion; do
+            chart=$(jq -r '.chart' <<<"$companion")
+            recipe=$(jq -r '.recipe_sha256' <<<"$companion")
+            jq -n --arg target '${{ matrix.target }}' --arg chart "$chart" \
+              --arg version '${{ matrix.version }}' --arg source_sha '${{ inputs.master_sha }}' \
+              --arg recipe_sha256 "$recipe" \
+              '{schema_version:2,artifact_type:"chart-companion",target:$target,chart:$chart,version:$version,source_sha:$source_sha,recipe_sha256:$recipe_sha256}' \
+              > "candidate-charts/candidate-chart-$chart.json"
+          done < <(jq -c '.[]' <<<'${{ toJSON(matrix.companion_recipes) }}')
+          git diff --exit-code
+      - uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.20.6
         with:
           path: charts/charts/${{ matrix.chart }}
           syft-version: v1.51.0
           format: spdx-json
           output-file: candidate-charts/candidate-chart-${{ matrix.chart }}.spdx.json
-      - name: Attest exact chart candidate files
-        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.3.0
+      - uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.3.0
         with:
           subject-path: |
             candidate-charts/*.tgz
@@ -389,46 +352,38 @@ jobs:
     needs: preflight
     if: needs.preflight.outputs.has_forge == 'true'
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write
-      attestations: write
+    permissions: {contents: read, id-token: write, attestations: write}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ inputs.master_sha }}
-          fetch-depth: 0
+        with: {ref: "${{ inputs.master_sha }}", fetch-depth: 0}
+      - name: Verify exact Forge source
+        run: test "$(git rev-parse HEAD)" = '${{ inputs.master_sha }}'
       - uses: ./.github/actions/setup-go
         with:
           go-version: 1.26.5
           cache-dependency-path: forge/go.sum
           cache-scope: candidate-forge-build
       - uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0.20.6
-        with:
-          syft-version: v1.51.0
+        with: {syft-version: v1.51.0}
       - run: git -c tag.gpgSign=false tag 'v${{ needs.preflight.outputs.forge_version }}' '${{ inputs.master_sha }}'
       - uses: goreleaser/goreleaser-action@ec59f474b9834571250b370d4735c50f8e2d1e29 # v7.0.0
         with:
           version: v2.12.7
-          # Candidate archives do not need release notes. Supplying an empty
-          # notes file prevents GoReleaser from deriving a previous tag from
-          # unrelated namespaced or disposable chart releases.
           args: release --clean --skip=publish --release-notes /dev/null
           workdir: forge
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GORELEASER_CURRENT_TAG: v${{ needs.preflight.outputs.forge_version }}
-      - name: Select publishable Forge files only
+      - name: Verify GoReleaser did not change source authority
+        run: git diff --exit-code -- forge/go.mod forge/go.sum
+      - name: Record exact Forge matrix
         run: |
           mkdir forge-candidate
           cp forge/dist/forge_*.tar.gz forge/dist/forge_*.tar.gz.sbom.json forge/dist/checksums.txt forge-candidate/
-          jq -n \
-            --arg target forge \
-            --arg version '${{ needs.preflight.outputs.forge_version }}' \
-            --arg source_sha '${{ inputs.master_sha }}' \
-            '{schema_version:2,artifact_type:"forge",target:$target,version:$version,source_sha:$source_sha}' \
+          jq -n --arg target forge --arg version '${{ needs.preflight.outputs.forge_version }}' \
+            --arg source_sha '${{ inputs.master_sha }}' --arg recipe_sha256 '${{ needs.preflight.outputs.forge_recipe_sha256 }}' \
+            '{schema_version:2,artifact_type:"forge",target:$target,version:$version,source_sha:$source_sha,recipe_sha256:$recipe_sha256}' \
             > forge-candidate/candidate-forge.json
-          test "$(find forge-candidate -name forge -type f | wc -l | tr -d ' ')" = 0
           test "$(find forge-candidate -name 'forge_*.tar.gz' -type f | wc -l | tr -d ' ')" = 4
       - uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.3.0
         with:
@@ -441,185 +396,205 @@ jobs:
           path: forge-candidate/
           retention-days: 90
 
+  runtime-artifacts:
+    name: Build validation artifact — ${{ matrix.artifact }}
+    needs: preflight
+    if: needs.preflight.outputs.has_runtime_artifacts == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.preflight.outputs.runtime_artifact_matrix) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: {ref: "${{ inputs.master_sha }}"}
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with: {name: candidate-plan, path: "${{ runner.temp }}/plan"}
+      - uses: ./.github/actions/setup-go
+        with:
+          go-version: 1.26.5
+          cache-dependency-path: ${{ env.GO_CACHE_DEPENDENCIES }}
+          cache-scope: candidate-runtime-${{ matrix.artifact }}
+      - uses: ./.github/actions/setup-kubernetes-tools
+      - run: >-
+          python3 .github/scripts/e2e.py build-artifact
+          --plan '${{ runner.temp }}/plan/candidate-plan.json'
+          --artifact '${{ matrix.artifact }}'
+          --output '${{ runner.temp }}/runtime-artifact'
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: candidate-runtime-${{ matrix.artifact }}
+          path: ${{ runner.temp }}/runtime-artifact/
+          retention-days: 90
+
   kind-candidates:
-    name: Exact candidate Kind — ${{ matrix.name }}
-    needs: [preflight, image-candidates, chart-candidate]
+    name: Exact candidate — ${{ matrix.id }}
+    needs: [preflight, image-candidates, chart-candidate, forge-candidate, runtime-artifacts]
     if: >-
-      always() && needs.preflight.result == 'success' &&
-      needs.preflight.outputs.run_kind == 'true' &&
+      always() && needs.preflight.result == 'success' && needs.preflight.outputs.run_kind == 'true' &&
       (needs.image-candidates.result == 'success' || needs.image-candidates.result == 'skipped') &&
-      (needs.chart-candidate.result == 'success' || needs.chart-candidate.result == 'skipped')
+      (needs.chart-candidate.result == 'success' || needs.chart-candidate.result == 'skipped') &&
+      (needs.forge-candidate.result == 'success' || needs.forge-candidate.result == 'skipped') &&
+      (needs.runtime-artifacts.result == 'success' || needs.runtime-artifacts.result == 'skipped')
     runs-on: ubuntu-latest
     timeout-minutes: ${{ matrix.timeout }}
-    permissions:
-      contents: read
-      packages: read
+    permissions: {contents: read, packages: read}
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.preflight.outputs.kind_matrix) }}
+    concurrency:
+      group: candidate-scenario-${{ matrix.artifact }}-${{ inputs.master_sha }}
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ inputs.master_sha }}
+        with: {ref: "${{ inputs.master_sha }}"}
+      - name: Verify exact candidate checkout
+        run: test "$(git rev-parse HEAD)" = '${{ inputs.master_sha }}'
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: candidate-plan
-          path: .
+        with: {name: candidate-plan, path: "${{ runner.temp }}/plan"}
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        if: needs.preflight.outputs.has_images == 'true'
-        with:
-          pattern: candidate-image-*
-          path: candidates/images
-          merge-multiple: true
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        if: needs.preflight.outputs.has_chart == 'true'
-        with:
-          pattern: candidate-chart-*
-          path: candidates/charts
-          merge-multiple: true
+        with: {pattern: "candidate-*", path: "${{ runner.temp }}/artifacts"}
       - uses: ./.github/actions/setup-go
         with:
           go-version: 1.26.5
-          cache-dependency-path: |
-            forge/test/e2e/go.sum
-            control-plane/test/e2e/go.mod
-            charts/test/e2e/go.mod
-            charts/test/e2e/go.sum
-            testkit/e2e/go.mod
-          cache-scope: candidate-kind-${{ matrix.name }}
+          cache-dependency-path: ${{ env.GO_CACHE_DEPENDENCIES }}
+          cache-scope: candidate-${{ matrix.artifact }}
       - uses: ./.github/actions/setup-node
         if: matrix.target == 'test-e2e-browser'
         with:
           node-version: 24.19.0
           cache-dependency-path: control-plane/test/e2e/playwright/package-lock.json
-          cache-scope: candidate-kind-browser
+          cache-scope: candidate-browser
       - uses: ./.github/actions/setup-kubernetes-tools
       - run: .github/scripts/add_helm_repositories.sh
-      - name: Resolve exact selected candidates and published baselines
+      - name: Compose the single verified candidate runtime
         run: >-
-          .github/scripts/prepare_candidate_runtime.sh
-          candidate-plan.json candidates "$GITHUB_ENV"
-      - name: Run candidate-backed scenario
+          python3 .github/scripts/e2e.py compose
+          --plan '${{ runner.temp }}/plan/candidate-plan.json'
+          --scenario '${{ matrix.id }}'
+          --artifacts '${{ runner.temp }}/artifacts'
+          --output '${{ runner.temp }}/runtime'
+          --env-output "$GITHUB_ENV"
+      - run: echo 'ITERABASE_E2E_RESULT=${{ runner.temp }}/result/result.json' >> "$GITHUB_ENV"
+      - name: Run the compiled scenario against that runtime
         working-directory: ${{ matrix.owner }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ITERABASE_E2E_FIXTURE_MODE: candidate
-          ITERABASE_E2E_CANDIDATE_PLAN: ${{ github.workspace }}/candidate-plan.json
-          ITERABASE_E2E_DIAGNOSTICS: ${{ runner.temp }}/candidate-kind-diagnostics/${{ matrix.id }}
-          E2E_SKIP_BUILD_DEPS: ${{ matrix.owner == 'charts' && 'true' || 'false' }}
+          E2E_SKIP_BUILD_DEPS: "true"
           PLAYWRIGHT_INSTALL_ARGS: ${{ matrix.target == 'test-e2e-browser' && '--with-deps chromium' || 'chromium' }}
-        run: make ${{ matrix.target }}
-      - name: Upload redacted candidate failure diagnostics
-        if: failure()
+          ITERABASE_E2E_DIAGNOSTICS: ${{ runner.temp }}/diagnostics/${{ matrix.artifact }}
+        run: make '${{ matrix.target }}'
+      - name: Retain strict candidate result
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: candidate-kind-diagnostics-${{ matrix.owner }}-${{ matrix.name }}
-          path: ${{ runner.temp }}/candidate-kind-diagnostics/${{ matrix.id }}
+          name: candidate-result-${{ matrix.artifact }}
+          path: ${{ runner.temp }}/result/result.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Retain diagnostics
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: candidate-diagnostics-${{ matrix.artifact }}
+          path: ${{ runner.temp }}/diagnostics/${{ matrix.artifact }}
           if-no-files-found: ignore
           retention-days: 7
 
   real-machine-candidates:
-    name: Exact candidate real machine — ${{ matrix.target }}
-    needs: [preflight, image-candidates, forge-candidate, chart-candidate]
+    name: Exact candidate capacity — ${{ matrix.capacity }}
+    needs: [preflight, image-candidates, chart-candidate, forge-candidate, runtime-artifacts]
     if: >-
-      always() && needs.preflight.result == 'success' &&
-      needs.preflight.outputs.run_real_machine == 'true' &&
+      always() && needs.preflight.result == 'success' && needs.preflight.outputs.run_real_machine == 'true' &&
       (needs.image-candidates.result == 'success' || needs.image-candidates.result == 'skipped') &&
+      (needs.chart-candidate.result == 'success' || needs.chart-candidate.result == 'skipped') &&
       (needs.forge-candidate.result == 'success' || needs.forge-candidate.result == 'skipped') &&
-      (needs.chart-candidate.result == 'success' || needs.chart-candidate.result == 'skipped')
+      (needs.runtime-artifacts.result == 'success' || needs.runtime-artifacts.result == 'skipped')
     runs-on: ubuntu-latest
     timeout-minutes: ${{ matrix.timeout }}
-    permissions:
-      contents: read
-      packages: read
-    env:
-      FORGE_E2E_RELEASE_CANDIDATE: "true"
+    permissions: {contents: read, packages: read}
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.preflight.outputs.real_machine_matrix) }}
+    concurrency:
+      group: ${{ matrix.capacity_group }}
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ inputs.master_sha }}
+        with: {ref: "${{ inputs.master_sha }}"}
+      - name: Verify exact candidate checkout
+        run: test "$(git rev-parse HEAD)" = '${{ inputs.master_sha }}'
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: candidate-plan
-          path: .
+        with: {name: candidate-plan, path: "${{ runner.temp }}/plan"}
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        if: needs.preflight.outputs.has_images == 'true'
-        with:
-          pattern: candidate-image-*
-          path: candidates/images
-          merge-multiple: true
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        if: needs.preflight.outputs.has_forge == 'true'
-        with:
-          name: candidate-forge
-          path: candidates/forge
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        if: needs.preflight.outputs.has_chart == 'true'
-        with:
-          pattern: candidate-chart-*
-          path: candidates/charts
-          merge-multiple: true
+        with: {pattern: "candidate-*", path: "${{ runner.temp }}/artifacts"}
       - uses: ./.github/actions/setup-go
         with:
           go-version: 1.26.5
-          cache-dependency-path: forge/test/e2e/go.sum
-          cache-scope: candidate-real-${{ matrix.target }}
+          cache-dependency-path: ${{ env.GO_CACHE_DEPENDENCIES }}
+          cache-scope: candidate-real-${{ matrix.capacity }}
       - uses: ./.github/actions/setup-kubernetes-tools
       - run: .github/scripts/add_helm_repositories.sh
-      - name: Resolve the exact composed runtime bundle
+      - name: Require selected external capacity
+        env: {DIGITALOCEAN_TOKEN: "${{ secrets.DIGITALOCEAN_TOKEN }}"}
         run: |
-          .github/scripts/prepare_candidate_runtime.sh \
-            candidate-plan.json candidates "$GITHUB_ENV"
-          forge_archive="$(find candidates/forge -name 'forge_*_linux_amd64.tar.gz' -print -quit 2>/dev/null || true)"
-          if [ -n "$forge_archive" ]; then
-            (cd candidates/forge && sha256sum --check checksums.txt)
-            test "$(jq -r '.schema_version' candidates/forge/candidate-forge.json)" = 2
-            test "$(jq -r '.source_sha' candidates/forge/candidate-forge.json)" = '${{ inputs.master_sha }}'
-            mkdir candidate-bin
-            tar -xzf "$forge_archive" -C candidate-bin
-            chmod +x candidate-bin/forge
-            printf 'FORGE_E2E_BINARY=%s\n' "$GITHUB_WORKSPACE/candidate-bin/forge" >> "$GITHUB_ENV"
+          mkdir -p '${{ runner.temp }}/diagnostics'
+          if [ -z "$DIGITALOCEAN_TOKEN" ]; then
+            printf '{"classification":"missing-capacity-credential","capacity":"${{ matrix.capacity }}"}\n' > '${{ runner.temp }}/diagnostics/capacity.json'
+            exit 1
           fi
-      - name: Build exact-source deterministic workspace behavior fixture
-        if: matrix.target == 'test-e2e-workspace'
+      - name: Compose and run every candidate scenario for this capacity serially
+        env:
+          SCENARIOS: ${{ toJSON(matrix.scenarios) }}
+          DIGITALOCEAN_TOKEN: ${{ secrets.DIGITALOCEAN_TOKEN }}
+          GH_RUNTIME_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          fixture_tag="workspace-${{ inputs.master_sha }}"
-          fixture_archive="${RUNNER_TEMP}/control-plane-runtime-fixture.tar"
-          docker build \
-            -t "iterabase-e2e/control-plane-runtime-fixture:${fixture_tag}" \
-            -f control-plane/test/e2e/fixtures/runtime/Dockerfile \
-            control-plane/test/e2e/fixtures/runtime
-          docker save -o "$fixture_archive" "iterabase-e2e/control-plane-runtime-fixture:${fixture_tag}"
-          {
-            printf 'FORGE_E2E_RUNTIME_IMAGE_REPO=iterabase-e2e/control-plane-runtime-fixture\n'
-            printf 'FORGE_E2E_RUNTIME_IMAGE_TAG=%s\n' "$fixture_tag"
-            printf 'FORGE_E2E_RUNTIME_IMAGE_ARCHIVE=%s\n' "$fixture_archive"
-          } >> "$GITHUB_ENV"
-      - name: Require mandatory capacity credentials
-        env:
-          DIGITALOCEAN_TOKEN: ${{ secrets.DIGITALOCEAN_TOKEN }}
-        run: test -n "$DIGITALOCEAN_TOKEN"
-      - name: Run exact-candidate real-machine suite
-        working-directory: forge
-        env:
-          DIGITALOCEAN_TOKEN: ${{ secrets.DIGITALOCEAN_TOKEN }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          FORGE_E2E_REQUIRE_CAPACITY: "true"
-          ITERABASE_E2E_FIXTURE_MODE: candidate
-          ITERABASE_E2E_CANDIDATE_PLAN: ${{ github.workspace }}/candidate-plan.json
-          ITERABASE_E2E_DIAGNOSTICS: ${{ runner.temp }}/candidate-forge-diagnostics
-        run: make ${{ matrix.target }}
-      - name: Upload redacted real-machine failure diagnostics
-        if: failure()
+          mkdir -p '${{ runner.temp }}/results' '${{ runner.temp }}/diagnostics'
+          status=0
+          while IFS= read -r scenario; do
+            id=$(jq -r '.id' <<<"$scenario")
+            owner=$(jq -r '.owner' <<<"$scenario")
+            target=$(jq -r '.target' <<<"$scenario")
+            artifact=$(jq -r '.artifact' <<<"$scenario")
+            runtime='${{ runner.temp }}/runtime-'"$artifact"
+            envfile='${{ runner.temp }}/env-'"$artifact"
+            : > "$envfile"
+            python3 .github/scripts/e2e.py compose \
+              --plan '${{ runner.temp }}/plan/candidate-plan.json' \
+              --scenario "$id" \
+              --artifacts '${{ runner.temp }}/artifacts' \
+              --output "$runtime" \
+              --env-output "$envfile"
+            if ! (
+              set -a
+              source "$envfile"
+              set +a
+              export DIGITALOCEAN_TOKEN GITHUB_TOKEN="$GH_RUNTIME_TOKEN"
+              export FORGE_E2E_REQUIRE_CAPACITY=true
+              export ITERABASE_E2E_RESULT='${{ runner.temp }}/results/'"$artifact.json"
+              export ITERABASE_E2E_DIAGNOSTICS='${{ runner.temp }}/diagnostics/'"$artifact"
+              make -C "$owner" "$target"
+            ); then
+              status=1
+            fi
+          done < <(jq -c '.[]' <<<"$SCENARIOS")
+          exit "$status"
+      - name: Retain strict candidate capacity results
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: candidate-forge-diagnostics-${{ matrix.target }}
-          path: ${{ runner.temp }}/candidate-forge-diagnostics
+          name: candidate-result-capacity-${{ matrix.capacity }}
+          path: ${{ runner.temp }}/results/*.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Retain capacity diagnostics
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: candidate-diagnostics-capacity-${{ matrix.capacity }}
+          path: ${{ runner.temp }}/diagnostics
           if-no-files-found: ignore
           retention-days: 7
 
@@ -632,72 +607,67 @@ jobs:
       - inference-gateway-source
       - forge-source
       - charts-source
-      - charts-runtime
       - image-candidates
+      - runtime-artifacts
       - chart-candidate
       - forge-candidate
       - kind-candidates
       - real-machine-candidates
     runs-on: ubuntu-latest
     steps:
-      - name: Check out validation code from the workflow revision
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.workflow_sha }}
-          path: workflow-validator
-      - name: Require every selected candidate job
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: {ref: "${{ inputs.master_sha }}"}
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with: {name: candidate-plan, path: "${{ runner.temp }}/plan"}
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with: {pattern: "candidate-result-*", path: "${{ runner.temp }}/results"}
+      - name: Reconcile every selected scenario, stage, and artifact identity
+        run: >-
+          python3 .github/scripts/e2e.py validate-results
+          --plan '${{ runner.temp }}/plan/candidate-plan.json'
+          --results '${{ runner.temp }}/results'
+      - name: Require every selected build and execution job
         env:
           PLAN: ${{ needs.preflight.outputs.plan }}
           NEEDS: ${{ toJSON(needs) }}
-        run: python3 workflow-validator/.github/scripts/release.py validate-jobs
+        run: python3 .github/scripts/release.py validate-jobs
 
   evidence:
     name: Assemble immutable candidate record
-    if: >-
-      always() &&
-      needs.preflight.result == 'success' &&
-      needs.validation.result == 'success'
+    if: always() && needs.preflight.result == 'success' && needs.validation.result == 'success'
     needs: [preflight, validation]
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write
-      attestations: write
+    permissions: {contents: read, id-token: write, attestations: write}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ inputs.master_sha }}
+        with: {ref: "${{ inputs.master_sha }}"}
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: candidate-plan
-          path: candidate
+        with: {name: candidate-plan, path: candidate}
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         if: needs.preflight.outputs.has_images == 'true'
-        with:
-          pattern: candidate-image-*
-          path: candidate/assets/images
-          merge-multiple: true
+        with: {pattern: "candidate-image-*", path: candidate/assets/images, merge-multiple: true}
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         if: needs.preflight.outputs.has_chart == 'true'
-        with:
-          pattern: candidate-chart-*
-          path: candidate/assets/charts
-          merge-multiple: true
+        with: {pattern: "candidate-chart-*", path: candidate/assets/charts, merge-multiple: true}
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         if: needs.preflight.outputs.has_forge == 'true'
-        with:
-          name: candidate-forge
-          path: candidate/assets/forge
-      - name: Generate candidate bill of materials and verify it
+        with: {name: candidate-forge, path: candidate/assets/forge}
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: needs.preflight.outputs.has_runtime_artifacts == 'true'
+        with: {pattern: "candidate-runtime-*", path: candidate/assets/runtime}
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with: {pattern: "candidate-result-*", path: candidate/assets/results}
+      - name: Generate and verify retained per-scenario candidate evidence
         run: |
+          python3 .github/scripts/e2e.py validate-results \
+            --plan candidate/candidate-plan.json --results candidate/assets/results
           python3 .github/scripts/release.py evidence \
             --plan candidate/candidate-plan.json \
             --assets candidate/assets \
             --output candidate/candidate-evidence.json
           python3 .github/scripts/release.py verify-candidate --directory candidate
       - uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.3.0
-        with:
-          subject-path: candidate/candidate-evidence.json
+        with: {subject-path: candidate/candidate-evidence.json}
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-candidate

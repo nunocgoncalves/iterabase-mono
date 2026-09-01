@@ -9,22 +9,23 @@ on:
   workflow_dispatch:
     inputs:
       complete_catalogue:
-        description: "Rehearse the exact complete scheduled catalogue and fail on any incomplete required job"
+        description: "Run the exact complete compiled catalogue"
         required: false
         type: boolean
         default: false
       gpu_policy_red_proof:
-        description: "Run the intentional HOR-411 deleteEmptyDir=false GPU mutation instead of the green GPU scenario"
+        description: "Run the intentional HOR-411 deleteEmptyDir=false GPU mutation"
         required: false
         type: boolean
         default: false
 
 permissions:
   contents: read
+  actions: read
+  packages: read
 
-concurrency:
-  group: e2e-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name != 'schedule' }}
+# Resource-owning scenarios use non-canceling cross-workflow capacity groups.
+# Exact-head non-resource jobs may supersede independently below.
 
 env:
   GO_CACHE_DEPENDENCIES: |
@@ -38,56 +39,43 @@ env:
     charts/test/e2e/go.sum
 
 jobs:
-  changes:
-    name: select
+  plan:
+    name: Compile exact-head execution plan
     runs-on: ubuntu-latest
+    concurrency:
+      group: e2e-plan-${{ github.event.pull_request.number || github.ref }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     outputs:
-      control_plane: ${{ steps.select.outputs.control_plane }}
-      harness: ${{ steps.select.outputs.harness }}
-      tool_runner: ${{ steps.select.outputs.tool_runner }}
-      inference_gateway: ${{ steps.select.outputs.inference_gateway }}
-      forge_e2e: ${{ steps.select.outputs.forge_e2e }}
-      forge_real_e2e: ${{ steps.select.outputs.forge_real_e2e }}
-      charts: ${{ steps.select.outputs.charts }}
-      nightly_kind_matrix: ${{ steps.nightly.outputs.nightly_kind_matrix }}
-      nightly_real_machine_matrix: ${{ steps.nightly.outputs.nightly_real_machine_matrix }}
-      nightly_owner_totals: ${{ steps.nightly.outputs.nightly_owner_totals }}
-      nightly_scenario_total: ${{ steps.nightly.outputs.nightly_scenario_total }}
+      artifact_build_matrix: ${{ steps.plan.outputs.artifact_build_matrix }}
+      kind_matrix: ${{ steps.plan.outputs.kind_matrix }}
+      real_machine_matrix: ${{ steps.plan.outputs.real_machine_matrix }}
+      has_artifacts: ${{ steps.plan.outputs.has_artifacts }}
+      has_scenarios: ${{ steps.plan.outputs.has_scenarios }}
+      has_kind: ${{ steps.plan.outputs.has_kind }}
+      has_real_machine: ${{ steps.plan.outputs.has_real_machine }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-      - name: Reject conflicting manual E2E intents
+      - name: Reject conflicting manual intents
         if: github.event_name == 'workflow_dispatch'
         env:
-          COMPLETE_CATALOGUE: ${{ inputs.complete_catalogue }}
-          GPU_POLICY_RED_PROOF: ${{ inputs.gpu_policy_red_proof }}
-        run: test "$COMPLETE_CATALOGUE:$GPU_POLICY_RED_PROOF" != "true:true"
+          COMPLETE: ${{ inputs.complete_catalogue }}
+          RED_PROOF: ${{ inputs.gpu_policy_red_proof }}
+        run: test "$COMPLETE:$RED_PROOF" != "true:true"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+      - name: Verify the exact selected source
+        env:
+          SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
       - uses: ./.github/actions/setup-go
         with:
           go-version: 1.26.5
           cache-dependency-path: ${{ env.GO_CACHE_DEPENDENCIES }}
-          cache-scope: e2e-nightly-catalogue
-      - name: Test path and nightly selection fixtures
-        run: |
-          python3 .github/scripts/test_select_ci.py
-          python3 .github/scripts/test_nightly_e2e.py
-      - name: Select the complete compiled nightly catalogue
-        id: nightly
-        env:
-          SOURCE_SHA: ${{ github.sha }}
-        run: >-
-          python3 .github/scripts/nightly_e2e.py plan
-          --source-sha "$SOURCE_SHA"
-          --output nightly-e2e-plan.json
-          --github-output "$GITHUB_OUTPUT"
-      - name: Retain complete catalogue selection evidence
-        if: github.event_name == 'schedule' || inputs.complete_catalogue == true
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: nightly-e2e-plan
-          path: nightly-e2e-plan.json
-          retention-days: 30
+          cache-scope: e2e-plan
+      - uses: ./.github/actions/setup-kubernetes-tools
+      - name: Test the unified plan, recipe, composer, and result contracts
+        run: python3 .github/scripts/test_e2e.py
       - name: Collect changed paths
         id: paths
         env:
@@ -98,50 +86,36 @@ jobs:
           python3 .github/scripts/collect_changed_paths.py
           --all-event schedule
           --all-event workflow_dispatch
-      - name: Select E2E owners
-        id: select
+      - name: Generate one PR/nightly execution plan
+        id: plan
+        env:
+          SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          COMPLETE: ${{ github.event_name == 'schedule' || inputs.complete_catalogue == true }}
+          RED_PROOF: ${{ inputs.gpu_policy_red_proof == true }}
         run: |
-          if [ "${{ steps.paths.outputs.all }}" = true ]; then
-            python3 .github/scripts/select_ci.py --all
+          if [ "$RED_PROOF" = true ]; then
+            : > /tmp/changed-paths
+            intent=pr
+          elif [ "$COMPLETE" = true ]; then
+            intent=nightly
           else
-            python3 .github/scripts/select_ci.py --paths-file /tmp/changed-paths
+            intent=pr
           fi
-
-  harness:
-    name: harness-unit
-    needs: changes
-    if: needs.changes.outputs.forge_e2e == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: ./.github/actions/setup-go
+          args=(plan --intent "$intent" --source-sha "$SOURCE_SHA" --output e2e-plan.json --github-output "$GITHUB_OUTPUT")
+          if [ "$intent" = pr ]; then args+=(--paths-file /tmp/changed-paths); fi
+          python3 .github/scripts/e2e.py "${args[@]}"
+          python3 .github/scripts/e2e.py resolve-baselines --plan e2e-plan.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          go-version: 1.26.5
-          cache-dependency-path: ${{ env.GO_CACHE_DEPENDENCIES }}
-          cache-scope: e2e-harness
-      - name: Test shared mechanics and compile every owner entrypoint
-        run: make testkit-test
-      - name: Compile Forge scenarios and test harness internals
-        run: make test-e2e-unit
-        working-directory: forge
-      - name: Install pinned golangci-lint
-        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
-      - name: Lint nested E2E module
-        run: golangci-lint run ./...
-        working-directory: forge/test/e2e
+          name: e2e-plan
+          path: e2e-plan.json
+          retention-days: 30
 
-  digitalocean-cpu:
-    name: digitalocean-cpu
-    needs: [changes, harness]
-    if: >-
-      needs.changes.outputs.forge_real_e2e == 'true' &&
-      (github.event_name == 'pull_request' ||
-      (github.event_name == 'workflow_dispatch' && inputs.complete_catalogue != true))
+  runtime-contract:
+    name: Compile shared runner and every owner entrypoint
+    needs: plan
+    if: needs.plan.outputs.has_scenarios == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 105
-    concurrency:
-      group: e2e-digitalocean-cpu
-      cancel-in-progress: false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -150,366 +124,304 @@ jobs:
         with:
           go-version: 1.26.5
           cache-dependency-path: ${{ env.GO_CACHE_DEPENDENCIES }}
-          cache-scope: e2e-digitalocean-cpu
-      - name: Composed CPU E2E
-        run: make test-e2e
-        working-directory: forge
-        env:
-          DIGITALOCEAN_TOKEN: ${{ secrets.DIGITALOCEAN_TOKEN }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ITERABASE_E2E_FIXTURE_MODE: source
-          ITERABASE_E2E_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-          ITERABASE_E2E_SOURCE_INPUTS: ${{ github.workspace }}/forge/test/e2e/published-fixture.json
-          ITERABASE_E2E_DIAGNOSTICS: ${{ runner.temp }}/forge-diagnostics
-      - name: Upload redacted CPU failure diagnostics
-        if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: forge-diagnostics-digitalocean-cpu
-          path: ${{ runner.temp }}/forge-diagnostics/digitalocean-cpu
-          if-no-files-found: ignore
-          retention-days: 7
+          cache-scope: e2e-runtime-contract
+      - run: make testkit-test
 
-  digitalocean-workspace:
-    name: digitalocean-workspace
-    needs: [changes, harness]
-    if: >-
-      (needs.changes.outputs.charts == 'true' ||
-      needs.changes.outputs.forge_real_e2e == 'true' ||
-      needs.changes.outputs.control_plane == 'true') &&
-      (github.event_name == 'pull_request' ||
-      (github.event_name == 'workflow_dispatch' && inputs.complete_catalogue != true))
+  artifacts:
+    name: Build exact source — ${{ matrix.artifact }}
+    needs: plan
+    if: needs.plan.outputs.has_artifacts == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 130
+    timeout-minutes: 45
     concurrency:
-      group: e2e-digitalocean-workspace
-      cancel-in-progress: false
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-      - uses: ./.github/actions/setup-go
-        with:
-          go-version: 1.26.5
-          cache-dependency-path: ${{ env.GO_CACHE_DEPENDENCIES }}
-          cache-scope: e2e-digitalocean-workspace
-      - uses: ./.github/actions/setup-kubernetes-tools
-      - name: Package exact-head platform and certificate companion
-        run: >-
-          .github/scripts/prepare_pr_workspace_runtime.sh
-          '${{ runner.temp }}/workspace-runtime'
-          "$GITHUB_ENV"
-      - name: Exact-head dedicated local-path workspace gate
-        run: make test-e2e-workspace
-        working-directory: forge
-        env:
-          DIGITALOCEAN_TOKEN: ${{ secrets.DIGITALOCEAN_TOKEN }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          FORGE_E2E_REQUIRE_CAPACITY: "true"
-          ITERABASE_E2E_FIXTURE_MODE: source
-          ITERABASE_E2E_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-          ITERABASE_E2E_SOURCE_INPUTS: ${{ github.workspace }}/forge/test/e2e/published-fixture.json
-          ITERABASE_E2E_DIAGNOSTICS: ${{ runner.temp }}/forge-diagnostics
-      - name: Upload dedicated workspace failure diagnostics
-        if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: forge-diagnostics-digitalocean-workspace
-          path: ${{ runner.temp }}/forge-diagnostics/digitalocean-workspace
-          if-no-files-found: ignore
-          retention-days: 7
-
-  digitalocean-gpu:
-    name: digitalocean-gpu
-    needs: [changes, harness]
-    if: >-
-      needs.changes.outputs.forge_real_e2e == 'true' &&
-      (github.event_name == 'pull_request' ||
-      (github.event_name == 'workflow_dispatch' && inputs.complete_catalogue != true))
-    runs-on: ubuntu-latest
-    timeout-minutes: 115
-    env:
-      ITERABASE_E2E_FIXTURE_MODE: source
-      ITERABASE_E2E_SOURCE_SHA: ${{ github.sha }}
-      ITERABASE_E2E_SOURCE_INPUTS: ${{ github.workspace }}/forge/test/e2e/published-fixture.json
-    concurrency:
-      group: e2e-digitalocean-gpu
-      cancel-in-progress: false
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: ./.github/actions/setup-go
-        with:
-          go-version: 1.26.5
-          cache-dependency-path: ${{ env.GO_CACHE_DEPENDENCIES }}
-          cache-scope: e2e-digitalocean-gpu
-      - name: Composed GPU E2E with exact published dependencies
-        if: inputs.gpu_policy_red_proof != true
-        run: make test-e2e-gpu
-        working-directory: forge
-        env:
-          DIGITALOCEAN_TOKEN: ${{ secrets.DIGITALOCEAN_TOKEN }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ITERABASE_E2E_DIAGNOSTICS: ${{ runner.temp }}/forge-diagnostics
-      - name: Intentional HOR-411 broken-policy red proof
-        if: inputs.gpu_policy_red_proof == true
-        run: make test-e2e-gpu-broken-policy
-        working-directory: forge
-        env:
-          DIGITALOCEAN_TOKEN: ${{ secrets.DIGITALOCEAN_TOKEN }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ITERABASE_E2E_DIAGNOSTICS: ${{ runner.temp }}/forge-diagnostics
-      - name: Upload redacted GPU failure diagnostics
-        if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: forge-diagnostics-digitalocean-gpu
-          path: ${{ runner.temp }}/forge-diagnostics/digitalocean-gpu
-          if-no-files-found: ignore
-          retention-days: 7
-
-  control-plane-kind:
-    name: control-plane-${{ matrix.name }}
-    needs: changes
-    if: >-
-      (needs.changes.outputs.control_plane == 'true' || needs.changes.outputs.charts == 'true') &&
-      (github.event_name == 'pull_request' ||
-      (github.event_name == 'workflow_dispatch' && inputs.complete_catalogue != true))
-    runs-on: ubuntu-latest
-    timeout-minutes: ${{ matrix.timeout }}
+      group: e2e-artifact-${{ matrix.artifact }}-${{ github.event.pull_request.number || github.ref }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - name: identity-api
-            target: test-e2e-identity
-            timeout: 30
-          - name: work-recovery
-            target: test-e2e-work
-            timeout: 35
-          - name: artifact-durability
-            target: test-e2e-artifact
-            timeout: 35
-          - name: browser-journeys
-            target: test-e2e-browser
-            timeout: 45
-    concurrency:
-      group: e2e-control-plane-${{ matrix.name }}-${{ github.ref }}
-      cancel-in-progress: true
+        include: ${{ fromJSON(needs.plan.outputs.artifact_build_matrix) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+      - name: Verify artifact source checkout
+        env:
+          SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: e2e-plan
+          path: ${{ runner.temp }}/plan
       - uses: ./.github/actions/setup-go
         with:
           go-version: 1.26.5
           cache-dependency-path: ${{ env.GO_CACHE_DEPENDENCIES }}
-          cache-scope: e2e-control-plane-${{ matrix.name }}
+          cache-scope: e2e-artifact-${{ matrix.artifact }}
       - uses: ./.github/actions/setup-kubernetes-tools
-      - uses: ./.github/actions/setup-node
-        if: matrix.target == 'test-e2e-browser'
+      - name: Add reviewed Helm repositories
+        if: matrix.kind == 'chart' || matrix.kind == 'chart-companion'
+        run: .github/scripts/add_helm_repositories.sh
+      - name: Build once from the reviewed production recipe
+        run: >-
+          python3 .github/scripts/e2e.py build-artifact
+          --plan '${{ runner.temp }}/plan/e2e-plan.json'
+          --artifact '${{ matrix.artifact }}'
+          --output '${{ runner.temp }}/artifact'
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          node-version: 24.19.0
-          cache-dependency-path: control-plane/test/e2e/playwright/package-lock.json
-          cache-scope: e2e-control-plane-browser
-      - name: Run source-built control-plane owner scenario
-        working-directory: control-plane
-        env:
-          ITERABASE_E2E_FIXTURE_MODE: source
-          ITERABASE_E2E_DIAGNOSTICS: ${{ runner.temp }}/control-plane-diagnostics/${{ matrix.target }}
-          PLAYWRIGHT_INSTALL_ARGS: ${{ matrix.target == 'test-e2e-browser' && '--with-deps chromium' || 'chromium' }}
-        run: make '${{ matrix.target }}'
-      - name: Upload redacted failure diagnostics
-        if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: control-plane-diagnostics-${{ matrix.target }}
-          path: ${{ runner.temp }}/control-plane-diagnostics/${{ matrix.target }}
-          if-no-files-found: ignore
+          name: e2e-runtime-${{ matrix.artifact }}
+          path: ${{ runner.temp }}/artifact/
           retention-days: 7
 
-  control-plane-execution-kind:
-    name: control-plane-execution-contracts
-    needs: changes
+  kind:
+    name: Exact bundle — ${{ matrix.id }}
+    needs: [plan, runtime-contract, artifacts]
     if: >-
-      (needs.changes.outputs.control_plane == 'true' ||
-      needs.changes.outputs.harness == 'true' ||
-      needs.changes.outputs.tool_runner == 'true' ||
-      needs.changes.outputs.inference_gateway == 'true' ||
-      needs.changes.outputs.charts == 'true') &&
-      (github.event_name == 'pull_request' ||
-      (github.event_name == 'workflow_dispatch' && inputs.complete_catalogue != true))
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    concurrency:
-      group: e2e-control-plane-execution-${{ github.ref }}
-      cancel-in-progress: true
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: ./.github/actions/setup-go
-        with:
-          go-version: 1.26.5
-          cache-dependency-path: ${{ env.GO_CACHE_DEPENDENCIES }}
-          cache-scope: e2e-control-plane-execution
-      - uses: ./.github/actions/setup-kubernetes-tools
-      - name: Run source-built deployed execution contracts
-        working-directory: control-plane
-        env:
-          ITERABASE_E2E_FIXTURE_MODE: source
-          ITERABASE_E2E_DIAGNOSTICS: ${{ runner.temp }}/control-plane-diagnostics/test-e2e-execution
-        run: make test-e2e-execution
-      - name: Upload redacted failure diagnostics
-        if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: control-plane-diagnostics-test-e2e-execution
-          path: ${{ runner.temp }}/control-plane-diagnostics/test-e2e-execution
-          if-no-files-found: ignore
-          retention-days: 7
-
-  nightly-kind:
-    name: nightly-${{ matrix.id }}
-    needs: changes
-    if: github.event_name == 'schedule' || inputs.complete_catalogue == true
+      always() && needs.plan.result == 'success' &&
+      needs.plan.outputs.has_kind == 'true' &&
+      needs.runtime-contract.result == 'success' &&
+      (needs.artifacts.result == 'success' || needs.artifacts.result == 'skipped')
     runs-on: ubuntu-latest
     timeout-minutes: ${{ matrix.timeout }}
     strategy:
       fail-fast: false
       max-parallel: 4
       matrix:
-        include: ${{ fromJSON(needs.changes.outputs.nightly_kind_matrix) }}
+        include: ${{ fromJSON(needs.plan.outputs.kind_matrix) }}
     concurrency:
-      group: e2e-nightly-${{ matrix.artifact }}
-      cancel-in-progress: false
+      group: e2e-scenario-${{ matrix.artifact }}-${{ github.event.pull_request.number || github.ref }}
+      cancel-in-progress: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Verify scenario source checkout
+        env:
+          SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: e2e-plan
+          path: ${{ runner.temp }}/plan
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: needs.plan.outputs.has_artifacts == 'true'
+        with:
+          pattern: e2e-runtime-*
+          path: ${{ runner.temp }}/artifacts
       - uses: ./.github/actions/setup-go
         with:
           go-version: 1.26.5
           cache-dependency-path: ${{ env.GO_CACHE_DEPENDENCIES }}
-          cache-scope: e2e-nightly-${{ matrix.artifact }}
+          cache-scope: e2e-${{ matrix.artifact }}
       - uses: ./.github/actions/setup-kubernetes-tools
       - uses: ./.github/actions/setup-node
         if: matrix.target == 'test-e2e-browser'
         with:
           node-version: 24.19.0
           cache-dependency-path: control-plane/test/e2e/playwright/package-lock.json
-          cache-scope: e2e-nightly-control-plane-browser
-      - uses: ./.github/actions/cache-helm
-        if: matrix.owner == 'charts'
-        with:
-          cache-scope: nightly-${{ matrix.artifact }}
-      - name: Add external chart repositories
-        if: matrix.owner == 'charts'
+          cache-scope: e2e-browser
+      - name: Add reviewed Helm repositories
         run: .github/scripts/add_helm_repositories.sh
-      - name: Build source chart dependencies
-        if: matrix.owner == 'charts'
-        run: make build-deps
-        working-directory: charts
-      - name: Run required source owner scenario
+      - name: Compose and verify the exact runtime bundle
+        run: >-
+          python3 .github/scripts/e2e.py compose
+          --plan '${{ runner.temp }}/plan/e2e-plan.json'
+          --scenario '${{ matrix.id }}'
+          --artifacts '${{ runner.temp }}/artifacts'
+          --output '${{ runner.temp }}/runtime'
+          --env-output "$GITHUB_ENV"
+      - name: Bind the required result artifact
+        run: echo 'ITERABASE_E2E_RESULT=${{ runner.temp }}/result/result.json' >> "$GITHUB_ENV"
+      - name: Run the compiled owner scenario once
         working-directory: ${{ matrix.owner }}
         env:
-          ITERABASE_E2E_FIXTURE_MODE: ${{ matrix.fixture_mode }}
-          ITERABASE_E2E_SOURCE_SHA: ${{ github.sha }}
-          ITERABASE_E2E_SOURCE_DIRTY: "false"
-          ITERABASE_E2E_DIAGNOSTICS: ${{ runner.temp }}/nightly-kind-diagnostics/${{ matrix.artifact }}
-          E2E_SKIP_BUILD_DEPS: ${{ matrix.owner == 'charts' && 'true' || 'false' }}
+          ITERABASE_E2E_DIAGNOSTICS: ${{ runner.temp }}/diagnostics/${{ matrix.artifact }}
+          E2E_SKIP_BUILD_DEPS: "true"
           PLAYWRIGHT_INSTALL_ARGS: ${{ matrix.target == 'test-e2e-browser' && '--with-deps chromium' || 'chromium' }}
         run: make '${{ matrix.target }}'
-      - name: Upload redacted nightly failure diagnostics
+      - name: Retain strict scenario result
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: e2e-result-${{ matrix.artifact }}
+          path: ${{ runner.temp }}/result/result.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Retain redacted diagnostics
         if: failure() || cancelled()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: nightly-kind-diagnostics-${{ matrix.artifact }}
-          path: ${{ runner.temp }}/nightly-kind-diagnostics/${{ matrix.artifact }}
+          name: e2e-diagnostics-${{ matrix.artifact }}
+          path: ${{ runner.temp }}/diagnostics/${{ matrix.artifact }}
           if-no-files-found: ignore
           retention-days: 7
 
-  charts-runtime:
-    name: charts-runtime
-    needs: changes
+  real-machine:
+    name: Exact bundle capacity — ${{ matrix.capacity }}
+    needs: [plan, runtime-contract, artifacts]
     if: >-
-      needs.changes.outputs.charts == 'true' &&
-      github.event_name != 'schedule' &&
-      inputs.complete_catalogue != true
-    permissions:
-      contents: read
-      actions: read
-    uses: ./.github/workflows/charts-runtime.yml
-
-  nightly-real-machine:
-    name: nightly-${{ matrix.id }}
-    needs: [changes, harness]
-    if: github.event_name == 'schedule' || inputs.complete_catalogue == true
+      always() && needs.plan.result == 'success' &&
+      needs.plan.outputs.has_real_machine == 'true' &&
+      needs.runtime-contract.result == 'success' &&
+      (needs.artifacts.result == 'success' || needs.artifacts.result == 'skipped')
     runs-on: ubuntu-latest
     timeout-minutes: ${{ matrix.timeout }}
     strategy:
       fail-fast: false
-      max-parallel: 2
       matrix:
-        include: ${{ fromJSON(needs.changes.outputs.nightly_real_machine_matrix) }}
+        include: ${{ fromJSON(needs.plan.outputs.real_machine_matrix) }}
     concurrency:
-      group: e2e-digitalocean-${{ matrix.capacity }}
+      group: ${{ matrix.capacity_group }}
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Verify capacity source checkout
+        env:
+          SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: e2e-plan
+          path: ${{ runner.temp }}/plan
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: needs.plan.outputs.has_artifacts == 'true'
+        with:
+          pattern: e2e-runtime-*
+          path: ${{ runner.temp }}/artifacts
       - uses: ./.github/actions/setup-go
         with:
           go-version: 1.26.5
           cache-dependency-path: ${{ env.GO_CACHE_DEPENDENCIES }}
-          cache-scope: e2e-nightly-real-${{ matrix.capacity }}
+          cache-scope: e2e-real-${{ matrix.capacity }}
       - uses: ./.github/actions/setup-kubernetes-tools
-      - name: Package exact-source workspace runtime
-        if: matrix.target == 'test-e2e-workspace'
-        run: >-
-          .github/scripts/prepare_pr_workspace_runtime.sh
-          '${{ runner.temp }}/workspace-runtime'
-          "$GITHUB_ENV"
-      - name: Require mandatory capacity credentials
+      - name: Add reviewed Helm repositories
+        run: .github/scripts/add_helm_repositories.sh
+      - name: Require selected external capacity
         env:
           DIGITALOCEAN_TOKEN: ${{ secrets.DIGITALOCEAN_TOKEN }}
-        run: test -n "$DIGITALOCEAN_TOKEN"
-      - name: Run required source real-machine scenario
-        working-directory: ${{ matrix.owner }}
+        run: |
+          mkdir -p '${{ runner.temp }}/diagnostics'
+          if [ -z "$DIGITALOCEAN_TOKEN" ]; then
+            printf '{"classification":"missing-capacity-credential","capacity":"${{ matrix.capacity }}"}\n' > '${{ runner.temp }}/diagnostics/capacity.json'
+            exit 1
+          fi
+      - name: Compose and run every scenario for this capacity serially
         env:
+          SCENARIOS: ${{ toJSON(matrix.scenarios) }}
           DIGITALOCEAN_TOKEN: ${{ secrets.DIGITALOCEAN_TOKEN }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          FORGE_E2E_REQUIRE_CAPACITY: "true"
-          ITERABASE_E2E_FIXTURE_MODE: ${{ matrix.fixture_mode }}
-          ITERABASE_E2E_SOURCE_SHA: ${{ github.sha }}
-          ITERABASE_E2E_SOURCE_DIRTY: "false"
-          ITERABASE_E2E_SOURCE_INPUTS: ${{ github.workspace }}/forge/test/e2e/published-fixture.json
-          ITERABASE_E2E_DIAGNOSTICS: ${{ runner.temp }}/nightly-real-machine-diagnostics/${{ matrix.artifact }}
-        run: make '${{ matrix.target }}'
-      - name: Upload redacted nightly real-machine failure diagnostics
+          GH_RUNTIME_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p '${{ runner.temp }}/results' '${{ runner.temp }}/diagnostics'
+          status=0
+          while IFS= read -r scenario; do
+            id=$(jq -r '.id' <<<"$scenario")
+            owner=$(jq -r '.owner' <<<"$scenario")
+            target=$(jq -r '.target' <<<"$scenario")
+            artifact=$(jq -r '.artifact' <<<"$scenario")
+            runtime='${{ runner.temp }}/runtime-'"$artifact"
+            envfile='${{ runner.temp }}/env-'"$artifact"
+            : > "$envfile"
+            python3 .github/scripts/e2e.py compose \
+              --plan '${{ runner.temp }}/plan/e2e-plan.json' \
+              --scenario "$id" \
+              --artifacts '${{ runner.temp }}/artifacts' \
+              --output "$runtime" \
+              --env-output "$envfile"
+            if ! (
+              set -a
+              source "$envfile"
+              set +a
+              export DIGITALOCEAN_TOKEN GITHUB_TOKEN="$GH_RUNTIME_TOKEN"
+              export FORGE_E2E_REQUIRE_CAPACITY=true
+              export ITERABASE_E2E_RESULT='${{ runner.temp }}/results/'"$artifact.json"
+              export ITERABASE_E2E_DIAGNOSTICS='${{ runner.temp }}/diagnostics/'"$artifact"
+              make -C "$owner" "$target"
+            ); then
+              status=1
+            fi
+          done < <(jq -c '.[]' <<<"$SCENARIOS")
+          exit "$status"
+      - name: Retain strict capacity results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: e2e-result-capacity-${{ matrix.capacity }}
+          path: ${{ runner.temp }}/results/*.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Retain redacted capacity diagnostics
         if: failure() || cancelled()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: nightly-real-machine-diagnostics-${{ matrix.artifact }}
-          path: ${{ runner.temp }}/nightly-real-machine-diagnostics/${{ matrix.artifact }}
+          name: e2e-diagnostics-capacity-${{ matrix.capacity }}
+          path: ${{ runner.temp }}/diagnostics
           if-no-files-found: ignore
           retention-days: 7
+
+  gpu-red-proof:
+    name: Intentional HOR-411 GPU red proof
+    needs: plan
+    if: inputs.gpu_policy_red_proof == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 115
+    concurrency:
+      group: e2e-capacity-gpu
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+      - uses: ./.github/actions/setup-go
+        with:
+          go-version: 1.26.5
+          cache-dependency-path: forge/test/e2e/go.sum
+          cache-scope: e2e-gpu-red-proof
+      - name: Require selected GPU capacity
+        env:
+          DIGITALOCEAN_TOKEN: ${{ secrets.DIGITALOCEAN_TOKEN }}
+        run: test -n "$DIGITALOCEAN_TOKEN"
+      - name: Prove the normal scenario rejects the intentional mutation
+        working-directory: forge
+        env:
+          DIGITALOCEAN_TOKEN: ${{ secrets.DIGITALOCEAN_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ITERABASE_E2E_FIXTURE_MODE: source
+          ITERABASE_E2E_SOURCE_SHA: ${{ github.sha }}
+          ITERABASE_E2E_SOURCE_INPUTS: ${{ github.workspace }}/forge/test/e2e/published-fixture.json
+        run: make test-e2e-gpu-broken-policy
 
   required:
     name: E2E / required
     if: always()
-    needs:
-      - changes
-      - harness
-      - digitalocean-cpu
-      - digitalocean-workspace
-      - digitalocean-gpu
-      - control-plane-kind
-      - control-plane-execution-kind
-      - nightly-kind
-      - charts-runtime
-      - nightly-real-machine
+    needs: [plan, runtime-contract, artifacts, kind, real-machine, gpu-red-proof]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Require every selected E2E owner
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: e2e-plan
+          path: ${{ runner.temp }}/plan
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: needs.plan.outputs.has_scenarios == 'true'
+        with:
+          pattern: e2e-result-*
+          path: ${{ runner.temp }}/results
+      - name: Reconcile the exact plan, result set, stages, and identities
+        if: inputs.gpu_policy_red_proof != true
         env:
-          COMPLETE_CATALOGUE: ${{ inputs.complete_catalogue == true }}
-          EVENT_NAME: ${{ github.event_name }}
           NEEDS: ${{ toJSON(needs) }}
         run: >-
-          python3 .github/scripts/nightly_e2e.py validate-results
-          --event-name "$EVENT_NAME"
-          --complete-catalogue "$COMPLETE_CATALOGUE"
+          python3 .github/scripts/e2e.py validate-results
+          --plan '${{ runner.temp }}/plan/e2e-plan.json'
+          --results '${{ runner.temp }}/results'
+          --needs-env NEEDS
+      - name: Require the intentional red proof only
+        if: inputs.gpu_policy_red_proof == true
+        env:
+          RESULT: ${{ needs.gpu-red-proof.result }}
+        run: test "$RESULT" = success

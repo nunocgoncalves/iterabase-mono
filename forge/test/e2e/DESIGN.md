@@ -11,7 +11,7 @@ Decision: HOR-406, approved 2026-08-03.
 
 ## Runner
 
-`TestE2E` is the only top-level infrastructure test. It registers typed scenarios/stages through the shared `testkit/e2e`; `go test -run` selects a scenario and each scenario reports named stage subtests. Failed/skipped prerequisites suppress only dependent stages, independent stages continue, and cleanup/diagnostics still run. Catalogue mode compiles these exact registrations without provisioning infrastructure.
+`TestE2E` is the only top-level infrastructure test. It registers typed scenarios/stages through the shared `testkit/e2e`; `go test -run` selects a scenario and each scenario reports named stage subtests. Failed/skipped prerequisites suppress only dependent stages, independent stages continue, and cleanup/diagnostics still run. Required execution then fails closed on every skip, blocked/not-run stage, or incomplete report. Catalogue mode compiles these exact registrations without provisioning infrastructure.
 
 ## Isolation boundary
 
@@ -82,7 +82,7 @@ Those replacements passed their owner PRs and required source/candidate-backed g
 The composable runner remains one `TestE2E` entrypoint with typed shared-testkit stages, prerequisite blocking, diagnostics, and cleanup hooks. HOR-481 intentionally removes Forge-private F0 code that existed only to support the deleted Kind product/chart scenarios:
 
 - historical floating GitHub chart-release pagination, semver, and `appVersion` helpers are superseded by explicit source/candidate/published fixture records and release-contract tests; floating latest already failed closed;
-- tool-runner packaged-chart dependency preparation is superseded by control-plane's candidate execution owner plus `prepare_candidate_runtime.sh` checksum/digest verification;
+- tool-runner packaged-chart dependency preparation is superseded by the shared runtime composer plus control-plane's compiled execution owner;
 - Forge-private Kind create/chart/JWT mechanics are superseded by shared testkit mechanics in the chart/control-plane owners.
 
 Forge retains its exact candidate overlay/chart/image-digest tests, GPU transition policy/evidence tests, and hermetic runner example. This is a reviewed ownership migration, not silent loss of HOR-406 coverage.
@@ -97,11 +97,11 @@ One `e2e.yml` workflow owns:
 - owner-local control-plane and chart Kind jobs, selected by those owners rather than Forge;
 - no Forge-published Kind compatibility matrix after its product/chart scenarios moved to their owners.
 
-Cloud jobs intentionally use distributable releases because their boundary is Forge's real remote OCI installation path, not local source mounting. Candidate runs consume the exact Forge binary, chart archives, image digests, and immutable published baselines in the generated plan. Every CPU/GPU real-machine composition appends a Forge-owned `control-plane.dispatch.enabled=false` fixture value: dispatch requires a customer-specific default model, and its portable behavior belongs to control-plane E2E rather than these machine contracts. The CPU chart/tool-runner/gateway checks and GPU completion are explicitly dependent smoke, not product or chart authority.
+Every selected PR, complete nightly/manual, and candidate cloud job consumes one generated runtime bundle. Affected PR/nightly artifacts are exact-source temporary Actions artifacts built with candidate-equivalent recipes; selected candidates are immutable; only explicit unselected published baselines are allowed. The shared composer transfers the exact Forge binary, chart/companion archives, product image archives, and deterministic runtime fixture before the owner stage graph begins. Every CPU/GPU composition appends a Forge-owned `control-plane.dispatch.enabled=false` fixture value: dispatch requires a customer-specific default model, and its portable behavior belongs to control-plane E2E rather than these machine contracts. The CPU chart/tool-runner/gateway checks and GPU completion remain explicitly dependent smoke, not product or chart authority.
 
 Owner-unit validation proves the production CPU/GPU create requests carry the `forge-e2e` reaper tag, forces provisioning failures after each cloud resource identity exists, and runs the registered owner cleanup hooks with both deletion paths forced to fail. The retained cleanup evidence binds the exact resource ID to its reaper tags. The reaper's two-hour default exceeds the longest 115-minute Forge workflow bound; its seam proves a host at that active-run boundary is retained, expired tagged orphans are deleted, and one delete failure does not suppress later deletions or report a false-success run.
 
-The checked-in published fixture never floats to `latest`; intentional compatibility-baseline changes are reviewed in source. Forge's reviewed current platform/certificate-substrate pair is `0.3.11`; the chart owner's checksum-pinned `0.3.10` transition predecessors remain separate inputs and never replace that current runtime pair during candidate planning. All E2E invocations are verbose so capacity skips, exact driver inputs, Forge identity, failure domain, and stage results are visible. Shared redacted cluster diagnostics run before shared cleanup hooks. Candidate validation retains mandatory CPU/GPU capacity semantics; a missing credential or exhausted capacity fails rather than skipping. Cloud jobs never cancel in progress, allowing cleanup to destroy VMs; the root tagged reaper remains the crash/cancel safety net.
+Published baselines never float to `latest`; intentional baseline changes are reviewed in `release/targets.json` and resolved to checksums/digests in the generated plan. All E2E invocations are verbose so exact driver inputs, Forge/runtime identity, failure domain, and stage results are visible. Shared redacted diagnostics run before shared cleanup hooks. Selected CPU/GPU capacity is mandatory in PR, complete nightly/manual, and candidate execution: a missing credential or exhausted capacity fails rather than skipping. Capacity groups are shared across workflow types and never cancel resource-owning jobs, allowing owner cleanup to destroy VMs; the root tagged reaper remains crash/cancel safety.
 
 ## Rejected alternatives
 

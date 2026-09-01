@@ -288,21 +288,6 @@ func parsePublishedChartReference(reference string) (chart, repository, version 
 	return chart, repository, version, nil
 }
 
-func mergeChartFixtureInput(t *testing.T, fixture sharede2e.Fixture, required sharede2e.FixtureInput) sharede2e.Fixture {
-	t.Helper()
-	for _, input := range fixture.Inputs {
-		if input.Name != required.Name || input.Kind != required.Kind {
-			continue
-		}
-		if input != required {
-			t.Fatalf("fixture input %s does not match chart-owned authority: got %+v want %+v", required.Name, input, required)
-		}
-		return fixture
-	}
-	fixture.Inputs = append(fixture.Inputs, required)
-	return fixture
-}
-
 func transitionBaselines(fixture sharede2e.Fixture) (map[string]transitionBaseline, error) {
 	baselines := make(map[string]transitionBaseline, len(fixture.Inputs))
 	for _, input := range fixture.Inputs {

@@ -27,7 +27,6 @@ func runOverlayStage(t *testing.T, state *digitalOceanCPUState) {
 		t.Fatal("FORGE_OVERLAY_TOKEN must be unset; E2E supplies only the ephemeral workflow token")
 	}
 	prepareCandidateChart(t, state.ip, state.privKeyPath)
-	loginCandidateRegistry(t, state.ip, state.privKeyPath)
 	plan := prepareCandidateOverlay(t, state.runID, state.ip, state.privKeyPath)
 	candidateConfig := writeCurrentOverlayForgeConfig(
 		t, state.runID, state.ip, state.privKeyPath, state.chartVersion, plan,

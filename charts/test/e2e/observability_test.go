@@ -195,7 +195,10 @@ func installObservabilityHarnessStage(t *testing.T, state *chartState) {
 	t.Helper()
 	repository, tag := os.Getenv("HARNESS_IMAGE_REPO"), os.Getenv("HARNESS_IMAGE_TAG")
 	if repository == "" || tag == "" {
-		t.Log("HARNESS_IMAGE_REPO/TAG absent; candidate harness target is not part of this local fixture")
+		if os.Getenv(sharede2e.RequiredEnv) == "true" {
+			t.Fatal("required observability runtime is missing the composed harness image")
+		}
+		t.Log("HARNESS_IMAGE_REPO/TAG absent in the optional local fixture")
 		return
 	}
 	manifest := fmt.Sprintf(`apiVersion: platform.iterabase.com/v1alpha1

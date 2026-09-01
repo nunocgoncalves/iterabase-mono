@@ -152,10 +152,7 @@ func newDigitalOceanWorkspaceState(t *testing.T) *digitalOceanCPUState {
 func newDigitalOceanCPUStateForScenario(t *testing.T, scenario string) *digitalOceanCPUState {
 	token := os.Getenv("DIGITALOCEAN_TOKEN")
 	if token == "" {
-		if os.Getenv("FORGE_E2E_REQUIRE_CAPACITY") == "true" {
-			t.Fatal("mandatory CPU release validation incomplete — DIGITALOCEAN_TOKEN not set")
-		}
-		t.Skip("DIGITALOCEAN_TOKEN not set; skipping DigitalOcean CPU scenario")
+		t.Fatal("mandatory CPU capacity incomplete — DIGITALOCEAN_TOKEN not set")
 	}
 
 	state := &digitalOceanCPUState{
@@ -406,8 +403,7 @@ func setupLocalPathAgentPoolStage(t *testing.T, state *digitalOceanCPUState) {
 	t.Helper()
 	repository, tag := os.Getenv("HARNESS_IMAGE_REPO"), os.Getenv("HARNESS_IMAGE_TAG")
 	if repository == "" || tag == "" {
-		t.Log("exact harness image is unavailable in the baseline CPU fixture; dedicated workspace scenario owns AgentPool runtime evidence")
-		return
+		t.Fatal("composed CPU runtime requires the exact harness image")
 	}
 	sc, err := sshDial(state.ip, state.privKeyPath)
 	if err != nil {
@@ -483,7 +479,7 @@ func waitForLocalPathAgentPoolReady(t *testing.T, client *ssh.Client, timeout ti
 func exerciseWorkspaceCapacityGateStage(t *testing.T, state *digitalOceanCPUState) {
 	t.Helper()
 	if os.Getenv("HARNESS_IMAGE_REPO") == "" {
-		return
+		t.Fatal("workspace capacity stage requires the composed harness image")
 	}
 	sc, err := sshDial(state.ip, state.privKeyPath)
 	if err != nil {
@@ -535,7 +531,7 @@ exit 1`, want)
 func replaceWorkspaceWorkerStage(t *testing.T, state *digitalOceanCPUState) {
 	t.Helper()
 	if os.Getenv("HARNESS_IMAGE_REPO") == "" {
-		return
+		t.Fatal("worker replacement stage requires the composed harness image")
 	}
 	sc, err := sshDial(state.ip, state.privKeyPath)
 	if err != nil {
@@ -791,6 +787,9 @@ func buildForge(t *testing.T) string {
 		}
 		t.Logf("using exact candidate Forge binary %s", absolute)
 		return absolute
+	}
+	if os.Getenv("ITERABASE_E2E_REQUIRED") == "true" {
+		t.Fatal("required real-machine execution has no composer-supplied Forge binary")
 	}
 	wd, err := os.Getwd()
 	if err != nil {

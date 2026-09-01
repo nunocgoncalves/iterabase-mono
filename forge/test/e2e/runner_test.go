@@ -98,9 +98,17 @@ func TestE2E(t *testing.T) {
 }
 
 func forgeScenarioMetadata(name, description string, tier sharede2e.Tier, references, targets []string, makeTarget string, timeout int, capacity string) sharede2e.ScenarioMetadata {
+	artifacts := []string{"forge-binary", "iterabase-platform-chart", "cert-manager-substrate-chart", "control-plane-image", "inference-gateway-image"}
+	if name == "digitalocean-cpu" || name == "digitalocean-workspace" {
+		artifacts = append(artifacts, "harness-image", "tool-runner-image", "certificate-migration-chart")
+	}
+	if name == "digitalocean-workspace" {
+		artifacts = append(artifacts, "runtime-fixture-image")
+	}
 	return sharede2e.ScenarioMetadata{
 		Name: name, Description: description, Tier: tier,
-		References: references, ReleaseTargets: targets,
+		References: references, ReleaseTargets: targets, RequiredArtifacts: artifacts,
+		Intents:      []sharede2e.ExecutionIntent{sharede2e.IntentPR, sharede2e.IntentNightly, sharede2e.IntentCandidate},
 		FixtureModes: []sharede2e.FixtureMode{sharede2e.FixtureSource, sharede2e.FixtureCandidate},
 		MakeTarget:   makeTarget, TimeoutMinutes: timeout, Capacity: capacity, Mandatory: capacity != "",
 	}

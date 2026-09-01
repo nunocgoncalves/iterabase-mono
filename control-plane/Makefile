@@ -69,23 +69,19 @@ E2E_ENV := ITERABASE_E2E_FIXTURE_MODE=$(ITERABASE_E2E_FIXTURE_MODE) \
 	ITERABASE_E2E_SOURCE_SHA=$(E2E_SOURCE_SHA) \
 	ITERABASE_E2E_SOURCE_DIRTY=$(E2E_SOURCE_DIRTY) \
 	ITERABASE_REPOSITORY_ROOT=$(abspath ..)
-ifeq ($(ITERABASE_E2E_FIXTURE_MODE),source)
-E2E_BUILD_DEPS := e2e-build-deps
-else
+# Required source and candidate runs receive the same composer-produced bundle.
 E2E_BUILD_DEPS :=
-endif
 
 PLAYWRIGHT_INSTALL_ARGS ?= chromium
 
-.PHONY: test-e2e-unit test-e2e test-e2e-identity test-e2e-work test-e2e-artifact test-e2e-execution test-e2e-browser playwright-browser-deps e2e-build-deps
+.PHONY: test-e2e-unit test-e2e test-e2e-identity test-e2e-work test-e2e-artifact test-e2e-execution test-e2e-browser playwright-browser-deps
 
 test-e2e-unit: ## Compile the owner E2E entrypoint and run hermetic helper tests.
 	cd test/e2e && $(E2E_ENV) go test -race -count=1 -run '^TestE2E$$/^hermetic-example$$' .
 	cd test/e2e && $(E2E_ENV) go test -race -count=1 -skip '^TestE2E$$' .
 
-# Each product contract gets a fresh isolated Kind cluster. Source mode builds
-# the current control-plane image inside the Go scenario; candidate mode uses
-# the exact digest and composed chart fixture prepared by the release gate.
+# Each product contract gets a fresh isolated Kind cluster and consumes the
+# same exact composer-produced runtime bundle in source and candidate modes.
 test-e2e: test-e2e-identity test-e2e-work test-e2e-artifact test-e2e-execution test-e2e-browser
 
 test-e2e-identity: $(E2E_BUILD_DEPS)
@@ -106,10 +102,6 @@ playwright-browser-deps:
 
 test-e2e-browser: $(E2E_BUILD_DEPS) playwright-browser-deps
 	cd test/e2e && $(E2E_ENV) go test -v -race -count=1 -timeout 45m -run '^TestE2E$$/^deployed-browser-journeys$$' .
-
-e2e-build-deps:
-	../.github/scripts/add_helm_repositories.sh
-	$(MAKE) -C ../charts build-deps
 
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter

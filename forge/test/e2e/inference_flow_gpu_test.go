@@ -27,7 +27,6 @@ import (
 // and inference correctness remain authoritative in control-plane E2E.
 func applyInferencePlatformStage(t *testing.T, state *digitalOceanGPUState) {
 	prepareCandidateChart(t, state.vm.IP, state.privKeyPath)
-	loginCandidateRegistry(t, state.vm.IP, state.privKeyPath)
 	plan := prepareCandidateOverlay(t, state.runID, state.vm.IP, state.privKeyPath)
 	// GPU readiness was already proven on this host. Reconcile the same config
 	// with the platform chart while skipping a redundant GPU-operator upgrade.

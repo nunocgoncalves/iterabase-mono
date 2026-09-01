@@ -77,8 +77,8 @@ func (catalogue Catalogue) Markdown() []byte {
 	for _, suite := range catalogue.Suites {
 		fmt.Fprintf(&output, "## %s\n\n", suite.Suite.Name)
 		fmt.Fprintf(&output, "Owner: `%s` · Entrypoint: `%s`\n\n", suite.Suite.Owner, suite.Suite.Entrypoint)
-		output.WriteString("| Scenario | Tier | Stages | References | Release targets | Fixture modes |\n")
-		output.WriteString("| --- | --- | --- | --- | --- | --- |\n")
+		output.WriteString("| Scenario | Tier | Stages | References | Release targets | Required artifacts | Routes | Fixture modes |\n")
+		output.WriteString("| --- | --- | --- | --- | --- | --- | --- | --- |\n")
 		for _, scenario := range suite.Scenarios {
 			stages := make([]string, 0, len(scenario.Stages))
 			for _, stage := range scenario.Stages {
@@ -92,12 +92,18 @@ func (catalogue Catalogue) Markdown() []byte {
 			for _, mode := range scenario.Metadata.FixtureModes {
 				modes = append(modes, string(mode))
 			}
-			fmt.Fprintf(&output, "| `%s` | %s | %s | %s | %s | %s |\n",
+			routes := make([]string, 0, len(scenario.Metadata.Intents))
+			for _, intent := range scenario.Metadata.Intents {
+				routes = append(routes, string(intent))
+			}
+			fmt.Fprintf(&output, "| `%s` | %s | %s | %s | %s | %s | %s | %s |\n",
 				scenario.ID,
 				scenario.Metadata.Tier,
 				strings.Join(stages, "<br>"),
 				strings.Join(scenario.Metadata.References, ", "),
 				strings.Join(scenario.Metadata.ReleaseTargets, ", "),
+				strings.Join(scenario.Metadata.RequiredArtifacts, ", "),
+				strings.Join(routes, ", "),
 				strings.Join(modes, ", "),
 			)
 		}

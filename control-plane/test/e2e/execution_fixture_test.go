@@ -133,10 +133,8 @@ spec:
 
 func installExecutionPlatformStage(t *testing.T, state *deployedState) {
 	t.Helper()
-	pullPolicy := "IfNotPresent"
-	if os.Getenv("ITERABASE_E2E_FIXTURE_MODE") == "source" {
-		pullPolicy = "Never"
-	}
+	// The shared composer materializes every selected or baseline image locally.
+	pullPolicy := "Never"
 	values := map[string]any{
 		"global":         map[string]any{"internalTLS": map[string]any{"enabled": true}},
 		"external-dns":   map[string]any{"enabled": false},

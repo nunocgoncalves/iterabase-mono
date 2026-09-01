@@ -29,6 +29,15 @@ const (
 	FixturePublished FixtureMode = "published"
 )
 
+// ExecutionIntent identifies the workflow route that may select a scenario.
+type ExecutionIntent string
+
+const (
+	IntentPR        ExecutionIntent = "pr"
+	IntentNightly   ExecutionIntent = "nightly"
+	IntentCandidate ExecutionIntent = "candidate"
+)
+
 // SuiteMetadata identifies one repository-owned TestE2E entrypoint.
 type SuiteMetadata struct {
 	Name       string `json:"name"`
@@ -38,17 +47,19 @@ type SuiteMetadata struct {
 
 // ScenarioMetadata is compiled with the scenario that it describes.
 type ScenarioMetadata struct {
-	Name           string        `json:"name"`
-	Description    string        `json:"description"`
-	Tier           Tier          `json:"tier"`
-	References     []string      `json:"references,omitempty"`
-	ReleaseTargets []string      `json:"release_targets,omitempty"`
-	FixtureModes   []FixtureMode `json:"fixture_modes"`
-	MakeTarget     string        `json:"make_target,omitempty"`
-	TimeoutMinutes int           `json:"timeout_minutes,omitempty"`
-	Capacity       string        `json:"capacity,omitempty"`
-	Mandatory      bool          `json:"mandatory_capacity,omitempty"`
-	ProductionOnly bool          `json:"production_only,omitempty"`
+	Name              string            `json:"name"`
+	Description       string            `json:"description"`
+	Tier              Tier              `json:"tier"`
+	References        []string          `json:"references,omitempty"`
+	ReleaseTargets    []string          `json:"release_targets,omitempty"`
+	RequiredArtifacts []string          `json:"required_artifacts,omitempty"`
+	Intents           []ExecutionIntent `json:"intents,omitempty"`
+	FixtureModes      []FixtureMode     `json:"fixture_modes"`
+	MakeTarget        string            `json:"make_target,omitempty"`
+	TimeoutMinutes    int               `json:"timeout_minutes,omitempty"`
+	Capacity          string            `json:"capacity,omitempty"`
+	Mandatory         bool              `json:"mandatory_capacity,omitempty"`
+	ProductionOnly    bool              `json:"production_only,omitempty"`
 }
 
 // StageMetadata describes one stage and its direct prerequisites.
@@ -84,7 +95,7 @@ type Definition struct {
 	metadata      ScenarioMetadata
 	stages        []StageMetadata
 	definitionErr error
-	run           func(*testing.T)
+	run           func(*testing.T, scenarioExecution)
 }
 
 // Define validates and erases a typed scenario so heterogeneous state types can
@@ -102,8 +113,8 @@ func Define[S any](scenario Scenario[S]) Definition {
 	if definition.definitionErr == nil {
 		definition.definitionErr = validateHooks(scenario.Diagnostics, scenario.Cleanup)
 	}
-	definition.run = func(t *testing.T) {
-		runScenario(t, scenario)
+	definition.run = func(t *testing.T, execution scenarioExecution) {
+		runScenario(t, scenario, execution)
 	}
 	return definition
 }
@@ -156,6 +167,44 @@ func validateScenario(definition Definition) error {
 	}
 	if metadata.MakeTarget != "" && metadata.TimeoutMinutes == 0 {
 		return fmt.Errorf("scenario %q has a make target without a timeout", metadata.Name)
+	}
+	if metadata.Tier == TierF2 || metadata.Tier == TierF3 {
+		if metadata.MakeTarget == "" || metadata.TimeoutMinutes == 0 {
+			return fmt.Errorf("runnable scenario %q has no execution target and timeout", metadata.Name)
+		}
+		if len(metadata.RequiredArtifacts) == 0 {
+			return fmt.Errorf("runnable scenario %q has no artifact requirements", metadata.Name)
+		}
+		if len(metadata.Intents) == 0 {
+			return fmt.Errorf("runnable scenario %q has no workflow routing", metadata.Name)
+		}
+		intents := make(map[ExecutionIntent]struct{}, len(metadata.Intents))
+		for _, intent := range metadata.Intents {
+			switch intent {
+			case IntentPR, IntentNightly, IntentCandidate:
+			default:
+				return fmt.Errorf("scenario %q has invalid execution intent %q", metadata.Name, intent)
+			}
+			if _, exists := intents[intent]; exists {
+				return fmt.Errorf("scenario %q repeats execution intent %q", metadata.Name, intent)
+			}
+			intents[intent] = struct{}{}
+		}
+		for _, required := range []ExecutionIntent{IntentPR, IntentNightly, IntentCandidate} {
+			if _, exists := intents[required]; !exists {
+				return fmt.Errorf("runnable scenario %q has no %s routing", metadata.Name, required)
+			}
+		}
+		artifacts := make(map[string]struct{}, len(metadata.RequiredArtifacts))
+		for _, artifact := range metadata.RequiredArtifacts {
+			if err := validateName("artifact", artifact); err != nil {
+				return fmt.Errorf("scenario %q: %w", metadata.Name, err)
+			}
+			if _, exists := artifacts[artifact]; exists {
+				return fmt.Errorf("scenario %q repeats artifact %q", metadata.Name, artifact)
+			}
+			artifacts[artifact] = struct{}{}
+		}
 	}
 	if metadata.Capacity != "" && metadata.Tier != TierF3 {
 		return fmt.Errorf("scenario %q declares capacity outside tier F3", metadata.Name)
@@ -211,6 +260,8 @@ func validateHookList[S any](kind string, hooks []Hook[S]) error {
 func cloneScenarioMetadata(metadata ScenarioMetadata) ScenarioMetadata {
 	metadata.References = slices.Clone(metadata.References)
 	metadata.ReleaseTargets = slices.Clone(metadata.ReleaseTargets)
+	metadata.RequiredArtifacts = slices.Clone(metadata.RequiredArtifacts)
+	metadata.Intents = slices.Clone(metadata.Intents)
 	metadata.FixtureModes = slices.Clone(metadata.FixtureModes)
 	return metadata
 }

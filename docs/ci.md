@@ -1,119 +1,165 @@
 # Monorepo continuous integration
 
-HOR-470 replaces the inactive component-local source workflows with root-owned,
-path-aware workflows. The stable branch-protection contexts are:
+The stable branch-protection contexts are:
 
 - `CI / required`
 - `E2E / required`
 
-Both aggregate jobs run for every pull request. Owner jobs that are not selected
-are skipped; a selected job that fails or is canceled fails its aggregate.
-Branch protection therefore does not depend on a changing matrix job name.
+Both run for every pull request. `CI / required` preserves path-aware static,
+unit, integration, lint, build, image-smoke, protobuf, chart, harness-isolation,
+and Forge checks. `E2E / required` is plan-driven: unselected capacity creates no
+job, while every selected scenario and artifact must produce complete evidence.
+A skipped, canceled, missing, extra, or superseded selected result cannot pass.
 
-## Source-workflow parity
+## Exact source authority
 
-| Former source workflow/job | Monorepo owner | Status |
-| --- | --- | --- |
-| control-plane `ci / ci` (format, lint, build, unit, integration, envtest) | `CI / control-plane` | Ported |
-| control-plane `ci / ui` | `CI / dashboard` | Ported |
-| control-plane `ci / harness` | `CI / harness` | Ported; includes required Linux setpriv/UID/process isolation |
-| control-plane `ci / tool-runner` | `CI / tool-runner` | Ported |
-| control-plane `ci / proto` | `CI / protobuf` | Ported |
-| inference-gateway `ci / ci` (format/imports, vet, lint, build, testcontainers tests) | `CI / inference-gateway` | Ported |
-| Forge `ci / ci` (format, lint, GoReleaser check, build, fake-SSH tests) | `CI / forge` | Ported |
-| Forge `e2e / harness-unit` | `E2E / harness-unit` | Ported |
-| Forge `e2e / digitalocean-cpu` | `E2E / digitalocean-cpu` | Ported; Forge source PRs/manual runs |
-| Forge `e2e / digitalocean-gpu` | `E2E / digitalocean-gpu` | Ported; Forge source PRs/manual/nightly |
-| Forge source-composed product/chart Kind jobs | control-plane and charts owner jobs | Retired under HOR-481 after green owner replacements; Forge registers no direct-chart Kind scenario |
-| Forge nightly product compatibility jobs | complete owner catalogue (HOR-486) | Retired under HOR-481; immutable published inputs remain on Forge real-machine fixtures |
-| charts `ci / lint` | `CI / charts-static` | Ported |
-| charts `ci / certificate-ownership-migration` | `E2E / charts-runtime / certificate-ownership-migration` | Ported |
-| charts `ci / install` | `E2E / charts-runtime / install` | Ported |
-| charts `ci / install-observability` | `E2E / charts-runtime / install-observability` | Ported |
-| charts `ci / install-observability-tls` | `E2E / charts-runtime / install-observability-tls` | Ported |
-| component Docker build smoke | `CI / image-*` | Explicit per-image BuildKit jobs |
+For a pull request, every planning, artifact, and scenario job checks out
+`pull_request.head.sha` explicitly and verifies `git rev-parse HEAD` before doing
+work. The synthetic merge ref is not artifact source authority. Scheduled and
+complete manual runs bind the same checks to the exact scheduled `github.sha`.
+Temporary artifacts are retained only as GitHub Actions artifacts and Docker
+state on the disposable runner; they are not semantically published.
 
-The former nested component release workflows have been removed. Root-owned
-manual candidate, protected promotion, and disposable rehearsal workflows are
-the sole publication path: one explicit affected-target bundle and exact master
-SHA, build each selected target once, validate the coherent bundle, obtain one
-founder approval, and promote without rebuild. See
-[`release.md`](release.md). Forge's scheduled droplet reaper is now root-owned
-by `.github/workflows/reaper.yml`; it uses the monorepo E2E source and secret and
-is operational cleanup rather than a source quality gate. At archival, every
-repository-authored legacy workflow and Dependabot security update is disabled,
-Dependabot version updates must remain unconfigured, and repository Actions are
-disabled. GitHub-managed `dynamic/*` entries may remain visible in
-the workflow-list API; read-only dependency-graph entries can remain, while the
-Dependabot writer is disabled explicitly because its jobs bypass repository
-Actions disablement.
+`.github/scripts/collect_changed_paths.py` retains deletion paths and both sides
+of moves. `.github/scripts/select_ci.py` remains the static/unit owner selector.
+E2E selection is owned only by `.github/scripts/e2e.py` and the compiled owner
+catalogue.
 
-## Path ownership
+## One compiled execution plan
 
-`.github/scripts/collect_changed_paths.py` is the shared diff collector for both
-workflows. It includes deletions and disables rename collapsing so both sides of
-a move retain their owners. `.github/scripts/select_ci.py` is the owner-mapping
-source of truth, and its tests prove deletion-only, cross-owner move, docs-only,
-single-component, shared-contract, and cross-component changes.
+Every runnable owner registration declares, in compiled Go metadata:
 
-- Root Makefile, Go workspace metadata, `testkit/e2e`, affected-target selector code, shared setup actions, and PR/E2E workflow contracts fan out to every owner.
-- Release candidate/promotion/rehearsal implementation, target metadata, and component `VERSION` files run focused release contract checks and do not select unrelated product images, Kind scenarios, or CPU/GPU suites.
-- Control-plane UI, harness, tool-runner, and protobuf contracts select their
-  focused checks. The selected harness job always executes the Linux
-  setpriv/UID/process isolation container; missing Docker/kernel prerequisites
-  fail rather than skip. `control-plane/Makefile` selects both control-plane and
-  harness gates so edits to the required target cannot bypass execution.
-  Protobuf changes fan out to both generated Node consumers.
-- Forge source/E2E changes retain Forge unit, compiled-catalogue, and CPU/GPU
-  real-machine gates. Forge has no direct-chart-only Kind gate; any future Kind
-  scenario must exercise Forge-owned behavior.
-- Chart changes run chart static/runtime checks and the current local-chart Kind
-  scenarios. This is source composition from one checkout; no matching-branch
-  lookup or cross-repository checkout exists.
-- Markdown and repository documentation alone select no expensive owner job.
-- `.github/scripts/select_ci.py` remains the PR affected-target authority. Release E2E selection is separate: the candidate workflow compiles every owner `TestE2E` registration and takes the complete union associated with the founder-requested targets. `release/targets.json` contains artifact/version authority only; it has no parallel suite map and does not choose release intent.
+- scenario ID, owner, and Make target;
+- PR, nightly, and candidate routing;
+- source/candidate fixture support;
+- required runtime artifacts and release targets;
+- timeout, capacity, and mandatory-capacity semantics; and
+- the complete declared stage DAG.
 
-Run the fixture matrix locally with:
+`make e2e-catalogue` compiles this metadata from the real `TestE2E` entrypoints.
+There is no hand-maintained scenario matrix. Contract validation fails when a
+runnable registration lacks artifact requirements, any workflow route, a
+supported fixture path, runtime metadata, candidate coverage, or a valid stage
+graph.
 
-```bash
-python3 .github/scripts/test_select_ci.py
-```
+The same schema represents three intents:
+
+- **PR:** map every changed/deleted/moved path to affected artifacts, then select
+  the conservative union of scenarios requiring those artifacts. Owner-suite,
+  workflow, and shared-testkit changes fan out conservatively.
+- **Nightly/manual complete:** select every runnable F2/F3 registration exactly
+  once and build every non-published runtime artifact once from the scheduled
+  source SHA.
+- **Candidate:** retain explicit founder-requested release targets, then select
+  their conservative scenario union from the same compiled metadata. CI never
+  chooses semantic release intent.
+
+The retained plan includes the exact source SHA, catalogue hash, selected
+scenario IDs, stage-graph hashes, artifact custody, build matrix, scenario
+matrices, and capacity groups.
+
+## Candidate-equivalent artifact recipes
+
+`release/targets.json` is the single reviewed artifact and recipe authority for
+both temporary validation and immutable candidates. It defines:
+
+- Docker context, Dockerfile, build arguments, OCI labels, repository, and
+  target/version authority for every product and validation image;
+- Helm dependency-build and package inputs, including the platform companion;
+- the pinned GoReleaser version/config and Forge platform contract; and
+- explicit immutable published baselines and chart transition inputs.
+
+PR/nightly builders create each affected image, chart, companion, Forge binary,
+and source-only runtime fixture once. Candidate builders use the same recipe
+fields and add immutable candidate custody. Contract tests fail on context,
+Dockerfile, argument, label, dependency/package, companion, GoReleaser,
+version-authority, or recipe-hash drift.
+
+An affected PR artifact or founder-selected candidate target may never resolve
+to a published baseline. Unselected dependencies may use only the explicit
+published baseline in the recipe contract. Baseline resolution records and
+later verifies image digests, chart checksums, and Forge archive checksums;
+bumped-but-unpublished repository versions are not inferred as baselines.
+
+## One runtime composer
+
+Every F2/F3 job invokes `e2e.py compose` before its owner Make target. The
+composer rejects:
+
+- missing, extra, or duplicate artifact identities;
+- wrong source SHA, recipe hash, digest, or checksum;
+- selected-target or affected-artifact baseline substitution;
+- unresolved or changed published baselines;
+- incomplete control-plane, harness, tool-runner, inference, deterministic
+  runtime, chart/companion, transition, or Forge evidence; and
+- a plan or checkout that does not match the exact selected source.
+
+It pulls or loads the verified bytes, composes selected nested charts into the
+verified platform archive, materializes real-machine image/chart archives and
+the exact Forge binary, and emits one runtime-bundle manifest plus environment
+bindings. Fixture mode controls custody and identity only. Owner scenarios no
+longer build artifacts or choose a different stage DAG in source versus
+candidate mode.
+
+## Strict scenario results
+
+The shared runner writes one result record for every selected scenario. It binds:
+
+- scenario ID and terminal status;
+- plan, catalogue, runtime-bundle, source, and stage-graph identities;
+- the complete observed artifact identity set; and
+- exactly one terminal status for every declared stage.
+
+A direct skip, blocked/not-run stage, missing report, missing/extra stage,
+mode-dependent successful no-op, or failed stage makes required execution
+incomplete. Diagnostics and cleanup still run. Scenario jobs upload results even
+on failure; the aggregate downloads the exact result-artifact set and reconciles
+it against the plan rather than trusting matrix-job success alone.
+
+Failure diagnostics are separate, redacted artifacts retained for seven days.
+PR/nightly plans and results are retained for 30 days. Candidate results and
+artifact identities are retained in the 90-day immutable candidate record.
+
+## Mandatory capacity and concurrency
+
+Every compiled F3 registration names mandatory `cpu` or `gpu` capacity. A
+selected job requires credentials and fails with retained diagnostics when
+credentials or external capacity are unavailable; it never calls `t.Skip`.
+Unselected capacity creates no job.
+
+The planner derives `e2e-capacity-<capacity>` groups. PR, nightly, manual, and
+candidate jobs sharing capacity cannot overlap. Resource-owning jobs use
+`cancel-in-progress: false`, so superseding a PR cannot bypass owner cleanup.
+Non-resource exact-head work may cancel safely. Tagged reaper cleanup remains
+the crash/cancel fallback.
 
 ## Cache and setup contract
 
-All third-party actions use immutable commit SHAs. Every repository-pinned
-JavaScript action uses reviewed Node 24 metadata; the offline cache contract test
-records every approved external action runtime so a new pin requires explicit
-review. Go and Node are exact patch versions. Helm, Kind, kubectl, and kubeconform
-archives are pinned in `.github/tools/checksums.txt`; archives are
-checksum-verified after both download and cache restore.
+All third-party actions use immutable commit SHAs. Go/Node/tool versions are
+exact. Tool downloads are checksum verified. Caches contain only dependency or
+build inputs and use content-addressed keys without broad fallback keys.
 
-- Go module/build caches use OS, architecture, exact Go version, and all workspace module manifests/checksum files, including shared testkit and owner E2E modules. There are no fallback restore keys.
-- npm caches contain downloads only and use exact Node version plus the owning
-  `package-lock.json`. `setup-node` automatic package-manager caching is disabled
-  so only the repository's content-addressed cache is active. `node_modules` is
-  always rebuilt by `npm ci`.
-- Helm caches contain only `~/.cache/helm` downloads and use exact Helm version
-  plus every `Chart.lock` and `Chart.yaml`. Vendored chart directories are
-  rebuilt and never cached.
-- BuildKit uses a distinct GHA scope per image. BuildKit's content graph includes
-  each Dockerfile and complete build context, so source or lock changes
-  invalidate affected layers.
-- Cache steps print the exact key/scope and whether the source was an exact hit
-  or a cold population.
+Kind clusters, databases, mutable fixtures, runtime bundles, results,
+credentials, customer data, and release evidence are never cached. There are no
+automatic scenario retries, pass-on-retry semantics, or accepted flakes.
 
-Kind clusters, databases, mutable fixtures, vendored/generated outputs, test
-results, credentials, customer data, and release evidence are never cached.
-Full control-plane Go validation uses `-count=1`, so restored build caches cannot
-substitute cached test results. The root `make test` matrix also runs the Linux
-harness isolation container and therefore requires Docker.
-Failure logs remain in job output. Cluster state and credentials are not retained
-as cache or artifact data.
+## Local contract validation
 
-## Branch-protection dry run
+```bash
+python3 .github/scripts/test_select_ci.py
+python3 .github/scripts/test_e2e.py
+python3 .github/scripts/test_release.py
+python3 .github/scripts/e2e.py validate-contract
+make testkit-test
+make release-check
+```
 
-After the workflows have run on a pull request, verify discoverable contexts
-without changing protection:
+Infrastructure scenarios still require Docker/Kind or DigitalOcean capacity.
+The commands above validate selection, recipes, composition contracts, strict
+result reconciliation, and compiled owner entrypoints without provisioning
+cloud resources.
+
+## Branch-protection audit
 
 ```bash
 gh api repos/nunocgoncalves/iterabase-mono/commits/HEAD/check-runs \
@@ -121,10 +167,6 @@ gh api repos/nunocgoncalves/iterabase-mono/commits/HEAD/check-runs \
 gh api repos/nunocgoncalves/iterabase-mono/branches/master/protection/required_status_checks || true
 ```
 
-The active `master` ruleset requires the two aggregate names at the top of this
-document with strict up-to-date-branch enforcement. After the one-way cutover,
-audit that live archived-state contract without changing it via:
-
-```bash
-make source-authority-audit
-```
+The active `master` ruleset requires the two stable aggregate names with strict
+up-to-date-branch enforcement. `make source-authority-audit` separately verifies
+the archived legacy-source boundary.
