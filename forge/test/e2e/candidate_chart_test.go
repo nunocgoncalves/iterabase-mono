@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"testing"
 
@@ -89,11 +88,11 @@ func prepareCandidateImages(t *testing.T, ip, keyPath string) map[string]string 
 		if err != nil {
 			t.Fatalf("verify imported candidate image %s config: %v", reference, err)
 		}
-		manifest, err := sshOutput(client, "sudo k3s ctr images inspect "+candidateShellQuote(repoTag))
+		manifest, err := sshOutput(client, "sudo k3s ctr images list")
 		if err != nil {
 			t.Fatalf("inspect imported candidate image %s manifest: %v\n%s", reference, err, manifest)
 		}
-		runtimeDigest, err := importedRuntimeManifestDigest([]byte(manifest))
+		runtimeDigest, err := importedRuntimeManifestDigest([]byte(manifest), repoTag)
 		if err != nil {
 			t.Fatalf("verify imported candidate image %s manifest: %v", reference, err)
 		}
@@ -138,14 +137,21 @@ func importedRuntimeImageConfig(data []byte, expectedConfigDigest string) (strin
 	return image.Status.RepoTags[0], image.Info.ImageSpec.Config.Labels, nil
 }
 
-var importedManifestDigestPattern = regexp.MustCompile(`(?m)application/vnd\.(?:oci\.image\.manifest|docker\.distribution\.manifest)[^@\n]*@(sha256:[0-9a-f]{64})`)
-
-func importedRuntimeManifestDigest(data []byte) (string, error) {
-	matches := importedManifestDigestPattern.FindAllSubmatch(data, -1)
-	if len(matches) != 1 {
+func importedRuntimeManifestDigest(data []byte, repoTag string) (string, error) {
+	digests := make(map[string]struct{})
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 3 && fields[0] == repoTag && isCanonicalSHA256Digest(fields[2]) {
+			digests[fields[2]] = struct{}{}
+		}
+	}
+	if len(digests) != 1 {
 		return "", fmt.Errorf("imported runtime manifest identity is ambiguous")
 	}
-	return string(matches[0][1]), nil
+	for digest := range digests {
+		return digest, nil
+	}
+	panic("unreachable")
 }
 
 func TestImportedRuntimeImageIdentityKeepsConfigAndManifestDigestsDistinct(t *testing.T) {
@@ -159,7 +165,10 @@ func TestImportedRuntimeImageIdentityKeepsConfigAndManifestDigestsDistinct(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := importedRuntimeManifestDigest([]byte("└── application/vnd.oci.image.manifest.v1+json @" + runtimeDigest + " (1170 bytes)\n"))
+	got, err := importedRuntimeManifestDigest([]byte(
+		"REF TYPE DIGEST SIZE PLATFORMS LABELS\n"+
+			"docker.io/iterabase-e2e/control-plane:exact-head application/vnd.oci.image.manifest.v1+json "+runtimeDigest+" 1B linux/amd64 -\n",
+	), repoTag)
 	if err != nil {
 		t.Fatal(err)
 	}

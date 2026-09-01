@@ -19,9 +19,8 @@ import (
 )
 
 var (
-	prefixPattern       = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$`)
-	imageDigestPattern  = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
-	manifestTreePattern = regexp.MustCompile(`(?m)application/vnd\.(?:oci\.image\.manifest|docker\.distribution\.manifest)[^@\n]*@(sha256:[0-9a-f]{64})`)
+	prefixPattern      = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$`)
+	imageDigestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 )
 
 // Manager creates unique clusters through a testable process seam.
@@ -187,17 +186,26 @@ func (cluster *Cluster) ImportImageArchive(ctx context.Context, archive, image, 
 			return ImportedImageIdentity{}, fmt.Errorf("imported image %s on %s has ambiguous runtime tags: %v", image, node, runtimeImage.Status.RepoTags)
 		}
 		manifest, manifestErr := cluster.executor.Run(ctx, process.Command{
-			Name: "docker", Args: []string{"exec", node, "ctr", "-n", "k8s.io", "images", "inspect", runtimeImage.Status.RepoTags[0]},
+			Name: "docker", Args: []string{"exec", node, "ctr", "-n", "k8s.io", "images", "list"},
 			Timeout: 30 * time.Second, OutputName: "kind-manifest-" + safeFileName(node+"-"+image) + ".txt",
 		})
 		if manifestErr != nil {
-			return ImportedImageIdentity{}, fmt.Errorf("inspect imported manifest %s on %s: %w", image, node, manifestErr)
+			return ImportedImageIdentity{}, fmt.Errorf("list imported manifests for %s on %s: %w", image, node, manifestErr)
 		}
-		matches := manifestTreePattern.FindAllStringSubmatch(manifest.Output, -1)
-		if len(matches) != 1 {
+		runtimeDigests := make(map[string]struct{})
+		for _, line := range strings.Split(manifest.Output, "\n") {
+			fields := strings.Fields(line)
+			if len(fields) >= 3 && fields[0] == runtimeImage.Status.RepoTags[0] && imageDigestPattern.MatchString(fields[2]) {
+				runtimeDigests[fields[2]] = struct{}{}
+			}
+		}
+		if len(runtimeDigests) != 1 {
 			return ImportedImageIdentity{}, fmt.Errorf("imported image %s on %s has ambiguous manifest identity", image, node)
 		}
-		runtimeDigest := matches[0][1]
+		var runtimeDigest string
+		for digest := range runtimeDigests {
+			runtimeDigest = digest
+		}
 		if identity.RuntimeDigest != "" && identity.RuntimeDigest != runtimeDigest {
 			return ImportedImageIdentity{}, fmt.Errorf("imported image %s runtime digest differs across Kind nodes", image)
 		}
