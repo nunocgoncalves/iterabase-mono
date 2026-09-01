@@ -3,6 +3,7 @@ package kind
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -104,6 +105,89 @@ func TestDownloadedRuntimeArtifactRequiresPostCreateClusterImport(t *testing.T) 
 	}
 	if got := executor.commands[4]; got.Name != "docker" || !slices.Equal(got.Args, []string{"exec", "charts-control-plane", "ctr", "-n", "k8s.io", "images", "list"}) {
 		t.Fatalf("manifest inspection command = %+v, want exact imported runtime identity", got)
+	}
+}
+
+func TestConfigureAgentPoolLocalPathStorageAppliesAndVerifiesExactContract(t *testing.T) {
+	t.Parallel()
+	const configJSON = `{"nodePathMap":[{"node":"DEFAULT_PATH_FOR_NON_LISTED_NODES","paths":["/var/lib/iterabase/agentpool-workspaces"]}]}`
+	var appliedManifest string
+	executor := &fakeExecutor{outputFor: func(command process.Command) string {
+		joined := strings.Join(command.Args, " ")
+		switch {
+		case strings.Contains(joined, " apply -f "):
+			data, err := os.ReadFile(command.Args[len(command.Args)-1])
+			if err != nil {
+				t.Fatalf("read applied StorageClass manifest: %v", err)
+			}
+			appliedManifest = string(data)
+		case strings.Contains(joined, " get storageclass "):
+			return `{"metadata":{"name":"iterabase-agentpool-local-path","annotations":{"storageclass.kubernetes.io/is-default-class":"false"}},"provisioner":"rancher.io/local-path","reclaimPolicy":"Delete","volumeBindingMode":"WaitForFirstConsumer","allowVolumeExpansion":false}`
+		case strings.Contains(joined, " get configmap/local-path-config "):
+			return configJSON
+		}
+		return ""
+	}}
+	cluster, err := Use("charts", filepath.Join(t.TempDir(), "kubeconfig"), executor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cluster.ConfigureAgentPoolLocalPathStorage(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if appliedManifest != AgentPoolWorkspaceStorageClassManifest() {
+		t.Fatalf("applied StorageClass manifest drifted:\n%s", appliedManifest)
+	}
+	if strings.Contains(appliedManifest, "parameters:") || strings.Contains(appliedManifest, "name: local-path\n") {
+		t.Fatalf("applied StorageClass aliases the default path or carries parameters:\n%s", appliedManifest)
+	}
+	if len(executor.commands) != 6 {
+		t.Fatalf("AgentPool storage commands=%d, want patch/apply/restart/wait/class/config verification", len(executor.commands))
+	}
+	if got := strings.Join(executor.commands[0].Args, " "); !strings.Contains(got, agentPoolWorkspacePath) {
+		t.Fatalf("Kind workspace patch does not use dedicated path: %s", got)
+	}
+}
+
+func TestValidateAgentPoolWorkspaceStorageClassFailsClosed(t *testing.T) {
+	t.Parallel()
+	valid := map[string]any{
+		"metadata": map[string]any{
+			"name":        AgentPoolWorkspaceStorageClass,
+			"annotations": map[string]any{defaultClassAnnotation: "false"},
+		},
+		"provisioner": AgentPoolWorkspaceProvisioner, "reclaimPolicy": "Delete",
+		"volumeBindingMode": "WaitForFirstConsumer", "allowVolumeExpansion": false,
+	}
+	mutations := map[string]func(map[string]any){
+		"default": func(value map[string]any) {
+			value["metadata"].(map[string]any)["annotations"].(map[string]any)[defaultClassAnnotation] = "true"
+		},
+		"provisioner": func(value map[string]any) { value["provisioner"] = "kubernetes.io/no-provisioner" },
+		"reclaim":     func(value map[string]any) { value["reclaimPolicy"] = "Retain" },
+		"binding":     func(value map[string]any) { value["volumeBindingMode"] = "Immediate" },
+		"expansion":   func(value map[string]any) { value["allowVolumeExpansion"] = true },
+		"parameters":  func(value map[string]any) { value["parameters"] = map[string]any{"path": "default"} },
+	}
+	for name, mutate := range mutations {
+		t.Run(name, func(t *testing.T) {
+			data, err := json.Marshal(valid)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var value map[string]any
+			if err := json.Unmarshal(data, &value); err != nil {
+				t.Fatal(err)
+			}
+			mutate(value)
+			data, err = json.Marshal(value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := ValidateAgentPoolWorkspaceStorageClass(data); err == nil {
+				t.Fatalf("%s contract drift unexpectedly passed", name)
+			}
+		})
 	}
 }
 

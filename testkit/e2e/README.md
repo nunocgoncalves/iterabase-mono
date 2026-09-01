@@ -38,6 +38,14 @@ requested the composer reference and that CRI reports that runtime digest;
 registry/index, config, and runtime-manifest digests are retained as distinct
 identities rather than compared as if they were interchangeable.
 
+Kind scenarios that create an `AgentPool` use the shared post-platform storage
+helper before worker creation. It configures Kind's pinned provisioner onto the
+synthetic dedicated workspace path, applies the Forge-owned non-default
+`iterabase-agentpool-local-path` class, and verifies its parameter-free
+`rancher.io/local-path` / `WaitForFirstConsumer` / `Delete` / no-expansion
+contract. The helper never aliases the default class; production disk and
+per-class path isolation remain Forge-owned.
+
 The runner records exactly one terminal status for every declared stage. Failed
 or skipped prerequisites block only dependents, so independent work,
 diagnostics, and cleanup continue. In required execution any direct skip,
