@@ -102,7 +102,8 @@ func nMinusOneUpgradeScenario() sharede2e.Definition {
 		NewState: newChartState,
 		Stages: []sharede2e.Stage[*chartState]{
 			{Name: "create-kind", Run: createKindStage},
-			{Name: "resolve-supported-predecessor", DependsOn: []string{"create-kind"}, Run: resolveTransitionBaselinesStage},
+			{Name: "import-runtime-images", DependsOn: []string{"create-kind"}, Run: importRuntimeImagesStage},
+			{Name: "resolve-supported-predecessor", DependsOn: []string{"import-runtime-images"}, Run: resolveTransitionBaselinesStage},
 			{Name: "install-predecessor-substrate", DependsOn: []string{"resolve-supported-predecessor"}, Run: installPredecessorSubstrateStage},
 			{Name: "install-predecessor-platform", DependsOn: []string{"install-predecessor-substrate"}, Run: installPredecessorLifecyclePlatformStage},
 			{Name: "seed-persisted-state", DependsOn: []string{"install-predecessor-platform"}, Run: seedPersistedStateStage},
@@ -128,7 +129,8 @@ func featureEnableUpgradeScenario() sharede2e.Definition {
 		NewState: newChartState,
 		Stages: []sharede2e.Stage[*chartState]{
 			{Name: "create-kind", Run: createKindStage},
-			{Name: "resolve-supported-predecessor", DependsOn: []string{"create-kind"}, Run: resolveTransitionBaselinesStage},
+			{Name: "import-runtime-images", DependsOn: []string{"create-kind"}, Run: importRuntimeImagesStage},
+			{Name: "resolve-supported-predecessor", DependsOn: []string{"import-runtime-images"}, Run: resolveTransitionBaselinesStage},
 			{Name: "install-predecessor-substrate", DependsOn: []string{"resolve-supported-predecessor"}, Run: installPredecessorSubstrateStage},
 			{Name: "install-predecessor-with-feature-disabled", DependsOn: []string{"install-predecessor-substrate"}, Run: installPredecessorFeatureDisabledStage},
 			{Name: "assert-operator-crds-absent", DependsOn: []string{"install-predecessor-with-feature-disabled"}, Run: assertOperatorCRDsAbsentStage},
@@ -158,7 +160,8 @@ func singleNodeObservabilityIngressRecoveryScenario() sharede2e.Definition {
 		NewState: newChartState,
 		Stages: []sharede2e.Stage[*chartState]{
 			{Name: "create-kind", Run: createKindStage},
-			{Name: "resolve-supported-predecessor", DependsOn: []string{"create-kind"}, Run: resolveTransitionBaselinesStage},
+			{Name: "import-runtime-images", DependsOn: []string{"create-kind"}, Run: importRuntimeImagesStage},
+			{Name: "resolve-supported-predecessor", DependsOn: []string{"import-runtime-images"}, Run: resolveTransitionBaselinesStage},
 			{Name: "install-predecessor-substrate", DependsOn: []string{"resolve-supported-predecessor"}, Run: installPredecessorSubstrateStage},
 			{Name: "install-predecessor-observability", DependsOn: []string{"install-predecessor-substrate"}, Run: installPredecessorSingleNodeObservabilityStage},
 			{Name: "assert-rolling-update-override-bypasses-recovery", DependsOn: []string{"install-predecessor-observability"}, Run: assertRollingUpdateOverrideBypassesRecoveryStage},
@@ -191,7 +194,8 @@ func reapplyRollbackRecoveryScenario() sharede2e.Definition {
 		NewState: newChartState,
 		Stages: []sharede2e.Stage[*chartState]{
 			{Name: "create-kind", Run: createKindStage},
-			{Name: "resolve-supported-predecessor", DependsOn: []string{"create-kind"}, Run: resolveTransitionBaselinesStage},
+			{Name: "import-runtime-images", DependsOn: []string{"create-kind"}, Run: importRuntimeImagesStage},
+			{Name: "resolve-supported-predecessor", DependsOn: []string{"import-runtime-images"}, Run: resolveTransitionBaselinesStage},
 			{Name: "install-predecessor-substrate", DependsOn: []string{"resolve-supported-predecessor"}, Run: installPredecessorSubstrateStage},
 			{Name: "install-predecessor-platform", DependsOn: []string{"install-predecessor-substrate"}, Run: installPredecessorLifecyclePlatformStage},
 			{Name: "seed-persisted-state", DependsOn: []string{"install-predecessor-platform"}, Run: seedPersistedStateStage},

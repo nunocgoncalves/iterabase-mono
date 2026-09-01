@@ -95,11 +95,16 @@ composer rejects:
 - a plan or checkout that does not match the exact selected source.
 
 It pulls or loads the verified bytes, composes selected nested charts into the
-verified platform archive, materializes real-machine image/chart archives and
-the exact Forge binary, and emits one runtime-bundle manifest plus environment
-bindings. Fixture mode controls custody and identity only. Owner scenarios no
-longer build artifacts or choose a different stage DAG in source versus
-candidate mode.
+verified platform archive, materializes every resolved image archive/reference
+plus real-machine chart archives and the exact Forge binary, and emits one
+runtime-bundle manifest plus environment bindings. Every image-consuming F2 DAG
+then creates Kind and runs the required `import-runtime-images` stage, which
+restores each resolved archive and transports its exact reference into the new
+cluster before any install stage. Loading the runner daemon before Kind exists
+is not cluster transport. Fixture mode controls custody and identity only;
+source, candidate, and explicit baselines use the same post-create import stage.
+Owner scenarios no longer build artifacts or choose a different stage DAG in
+source versus candidate mode.
 
 ## Strict scenario results
 

@@ -35,7 +35,8 @@ func metalLBTransitionScenario() sharede2e.Definition {
 		NewState: newChartState,
 		Stages: []sharede2e.Stage[*chartState]{
 			{Name: "create-kind", Run: createKindStage},
-			{Name: "resolve-predecessor-baselines", DependsOn: []string{"create-kind"}, Run: resolveTransitionBaselinesStage},
+			{Name: "import-runtime-images", DependsOn: []string{"create-kind"}, Run: importRuntimeImagesStage},
+			{Name: "resolve-predecessor-baselines", DependsOn: []string{"import-runtime-images"}, Run: resolveTransitionBaselinesStage},
 			{Name: "install-metallb-predecessor-substrate", DependsOn: []string{"resolve-predecessor-baselines"}, Run: installMetalLBPredecessorSubstrateStage},
 			{Name: "install-metallb-predecessor", DependsOn: []string{"install-metallb-predecessor-substrate"}, Run: installMetalLBPredecessorStage},
 			{Name: "record-pre-upgrade-signals", DependsOn: []string{"install-metallb-predecessor"}, Run: recordMetalLBPreUpgradeSignalsStage},

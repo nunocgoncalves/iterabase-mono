@@ -27,7 +27,12 @@ The runtime bundle must bind the exact source, plan and catalogue hashes, and th
 scenario's exact artifact set. Selected temporary/candidate artifacts carry the
 planned source SHA and recipe hash. Published baselines carry an immutable
 reference plus verified digest/checksum and cannot claim selected-source
-custody.
+custody. Every image artifact also resolves to an archive/reference pair. F2
+scenarios with image requirements must declare `create-kind` followed by
+`import-runtime-images`; every later stage depends transitively on that import.
+The shared Kind helper restores the downloaded archive and transports the exact
+reference into the created nodes, so pre-cluster runner-daemon state cannot
+silently satisfy an install.
 
 The runner records exactly one terminal status for every declared stage. Failed
 or skipped prerequisites block only dependents, so independent work,

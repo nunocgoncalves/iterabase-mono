@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -40,6 +43,51 @@ func TestCreateFailureStillAttemptsClusterDeletion(t *testing.T) {
 	}
 	if len(executor.commands) != 2 || executor.commands[1].Args[0] != "delete" {
 		t.Fatalf("create failure did not attempt delete: %+v", executor.commands)
+	}
+}
+
+func TestDownloadedRuntimeArtifactRequiresPostCreateClusterImport(t *testing.T) {
+	t.Parallel()
+	executor := &fakeExecutor{}
+	cluster, err := Use("charts", filepath.Join(t.TempDir(), "kubeconfig"), executor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifactDir := filepath.Join(t.TempDir(), "artifacts", "e2e-runtime-control-plane-image")
+	if err := os.MkdirAll(artifactDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	archive := filepath.Join(artifactDir, "control-plane-image.tar")
+	if err := os.WriteFile(archive, []byte("exact downloaded archive bytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := cluster.ImportImageArchive(context.Background(), archive, "iterabase-e2e/control-plane:exact-head"); err != nil {
+		t.Fatal(err)
+	}
+	if len(executor.commands) != 2 {
+		t.Fatalf("import commands = %d, want docker restore + Kind transport", len(executor.commands))
+	}
+	if got := executor.commands[0]; got.Name != "docker" || !slices.Equal(got.Args, []string{"load", "-i", archive}) {
+		t.Fatalf("first import command = %+v, want exact downloaded archive restore", got)
+	}
+	if got := executor.commands[1]; got.Name != "kind" || !slices.Equal(got.Args, []string{"load", "docker-image", "--name", "charts", "iterabase-e2e/control-plane:exact-head"}) {
+		t.Fatalf("second import command = %+v, want post-create Kind transport", got)
+	}
+}
+
+func TestMissingDownloadedRuntimeArtifactCannotReachClusterImport(t *testing.T) {
+	t.Parallel()
+	executor := &fakeExecutor{}
+	cluster, err := Use("charts", filepath.Join(t.TempDir(), "kubeconfig"), executor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cluster.ImportImageArchive(context.Background(), filepath.Join(t.TempDir(), "missing.tar"), "iterabase-e2e/control-plane:exact-head"); err == nil {
+		t.Fatal("missing downloaded runtime artifact unexpectedly reached install transport")
+	}
+	if len(executor.commands) != 0 {
+		t.Fatalf("missing archive executed import commands: %+v", executor.commands)
 	}
 }
 

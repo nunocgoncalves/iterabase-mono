@@ -25,7 +25,8 @@ func freshInstallScenario() sharede2e.Definition {
 		NewState: newChartState,
 		Stages: []sharede2e.Stage[*chartState]{
 			{Name: "create-kind", Run: createKindStage},
-			{Name: "install-certificate-substrate", DependsOn: []string{"create-kind"}, Run: installCertificateSubstrateStage},
+			{Name: "import-runtime-images", DependsOn: []string{"create-kind"}, Run: importRuntimeImagesStage},
+			{Name: "install-certificate-substrate", DependsOn: []string{"import-runtime-images"}, Run: installCertificateSubstrateStage},
 			{Name: "install-minimal-platform-edge", DependsOn: []string{"install-certificate-substrate"}, Run: installMinimalPlatformEdgeStage},
 			{Name: "assert-manager-contract", DependsOn: []string{"install-minimal-platform-edge"}, Run: assertManagerContractStage},
 			{Name: "assert-certificate-issuer", DependsOn: []string{"install-minimal-platform-edge"}, Run: assertCertificateIssuerStage},

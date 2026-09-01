@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -170,6 +171,42 @@ func createKindStage(t *testing.T, state *chartState) {
 	}
 	state.cluster = cluster
 	state.client = kube.Client{Executor: state.runner, Kubeconfig: cluster.Kubeconfig, Redactor: state.redactor}
+}
+
+func importRuntimeImagesStage(t *testing.T, state *chartState) {
+	t.Helper()
+	images := []struct {
+		name       string
+		prefix     string
+		archiveEnv string
+	}{
+		{name: "control-plane", prefix: "CONTROL_PLANE", archiveEnv: "FORGE_E2E_CONTROL_PLANE_IMAGE_ARCHIVE"},
+		{name: "inference-gateway", prefix: "INFERENCE_GATEWAY", archiveEnv: "FORGE_E2E_INFERENCE_IMAGE_ARCHIVE"},
+		{name: "harness", prefix: "HARNESS", archiveEnv: "FORGE_E2E_HARNESS_IMAGE_ARCHIVE"},
+		{name: "tool-runner", prefix: "TOOL_RUNNER", archiveEnv: "FORGE_E2E_TOOL_RUNNER_IMAGE_ARCHIVE"},
+		{name: "runtime-fixture", prefix: "FORGE_E2E_RUNTIME", archiveEnv: "FORGE_E2E_RUNTIME_IMAGE_ARCHIVE"},
+	}
+	imported := 0
+	for _, image := range images {
+		repository := os.Getenv(image.prefix + "_IMAGE_REPO")
+		tag := os.Getenv(image.prefix + "_IMAGE_TAG")
+		digest := os.Getenv(image.prefix + "_IMAGE_DIGEST")
+		archive := os.Getenv(image.archiveEnv)
+		if repository == "" && tag == "" && digest == "" && archive == "" {
+			continue
+		}
+		if repository == "" || tag == "" || archive == "" || !regexp.MustCompile(`^sha256:[0-9a-f]{64}$`).MatchString(digest) {
+			t.Fatalf("composed %s runtime image has incomplete repository/tag/digest/archive identity", image.name)
+		}
+		reference := repository + ":" + tag
+		if err := state.cluster.ImportImageArchive(state.ctx, archive, reference); err != nil {
+			t.Fatalf("import composed %s image before chart install: %v", image.name, err)
+		}
+		imported++
+	}
+	if imported == 0 && os.Getenv(sharede2e.RequiredEnv) == "true" {
+		t.Fatal("required composed chart runtime has no image archives to import")
+	}
 }
 
 func chartDiagnostics(t *testing.T, state *chartState) {
