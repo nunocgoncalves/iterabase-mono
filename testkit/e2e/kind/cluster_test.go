@@ -65,7 +65,8 @@ func TestDownloadedRuntimeArtifactRequiresPostCreateClusterImport(t *testing.T) 
 			return fmt.Sprintf(`{"status":{"id":%q,"repoTags":["docker.io/iterabase-e2e/control-plane:exact-head"]},"info":{"imageSpec":{"config":{"Labels":{"org.opencontainers.image.revision":"exact-head"}}}}}`, configDigest)
 		}
 		if command.Name == "docker" && len(command.Args) > 2 && command.Args[0] == "exec" && command.Args[2] == "ctr" {
-			return "└── application/vnd.oci.image.manifest.v1+json @" + runtimeDigest + " (1170 bytes)\n"
+			return "REF TYPE DIGEST SIZE PLATFORMS LABELS\n" +
+				"docker.io/iterabase-e2e/control-plane:exact-head application/vnd.oci.image.manifest.v1+json " + runtimeDigest + " 1B linux/amd64 -\n"
 		}
 		return ""
 	}}
@@ -101,7 +102,7 @@ func TestDownloadedRuntimeArtifactRequiresPostCreateClusterImport(t *testing.T) 
 	if got := executor.commands[3]; got.Name != "docker" || !slices.Equal(got.Args, []string{"exec", "charts-control-plane", "crictl", "inspecti", "iterabase-e2e/control-plane:exact-head"}) {
 		t.Fatalf("config inspection command = %+v, want exact node config identity", got)
 	}
-	if got := executor.commands[4]; got.Name != "docker" || !slices.Equal(got.Args, []string{"exec", "charts-control-plane", "ctr", "-n", "k8s.io", "images", "inspect", "docker.io/iterabase-e2e/control-plane:exact-head"}) {
+	if got := executor.commands[4]; got.Name != "docker" || !slices.Equal(got.Args, []string{"exec", "charts-control-plane", "ctr", "-n", "k8s.io", "images", "list"}) {
 		t.Fatalf("manifest inspection command = %+v, want exact imported runtime identity", got)
 	}
 }
