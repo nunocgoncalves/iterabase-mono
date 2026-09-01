@@ -632,17 +632,16 @@ def build_artifact(root: Path, plan: dict[str, Any], contract: dict[str, Any], a
             command.extend(["--label", label])
         command.append(str(root / recipe["context"]))
         run(command, cwd=root)
-        digest = run(["docker", "image", "inspect", "--format={{.Id}}", tag], capture=True)
-        if not SHA256.fullmatch(digest):
-            raise E2EError(f"built image {artifact} has no canonical digest")
         archive = output / f"{artifact}.tar"
         run(["docker", "save", "-o", str(archive), tag])
+        digest, _ = archive_image_config(archive, tag)
         metadata.update(
             {
                 "repository": f"iterabase-e2e/{recipe['name']}",
                 "tag": source_sha,
                 "reference": tag,
                 "digest": digest,
+                "config_digest": digest,
                 "file": archive.name,
                 "sha256": hash_file(archive),
             }
@@ -729,15 +728,15 @@ def split_image(reference: str) -> tuple[str, str]:
 
 
 def runtime_image_tag(custody: str, tag: str, digest: str) -> str:
-    # Temporary docker-save archives are addressed by their exact source tag;
-    # their sha256 identity is the image config digest verified after local
-    # import. Registry-backed candidate/baseline images are requested by their
-    # immutable manifest/index digest as well as their human-readable tag.
-    if custody == "selected-temporary":
-        return tag
+    # Every mode executes the archive imported by the common owner stage under
+    # its resolved tag with pulling disabled. Registry-backed custody retains
+    # the immutable registry/index digest separately; appending that digest to
+    # the tag could bypass the imported single-platform manifest and pull again.
+    if custody not in {"selected-temporary", "selected-candidate", "published-baseline"}:
+        raise E2EError(f"runtime image has invalid custody {custody!r}")
     if not SHA256.fullmatch(digest):
-        raise E2EError(f"registry-backed runtime image has invalid digest {digest!r}")
-    return f"{tag}@{digest}"
+        raise E2EError(f"runtime image has invalid artifact digest {digest!r}")
+    return tag
 
 
 def split_chart(reference: str) -> tuple[str, str, str]:
@@ -750,7 +749,46 @@ def split_chart(reference: str) -> tuple[str, str, str]:
     return repository, chart, version
 
 
-def load_image_archive(metadata: dict[str, Any], directory: Path, expected: dict[str, Any]) -> tuple[str, str, str, Path]:
+def archive_image_config(archive: Path, reference: str) -> tuple[str, dict[str, Any]]:
+    tagged_reference = reference.split("@", 1)[0]
+    with tarfile.open(archive, "r") as bundle:
+        try:
+            manifest_member = bundle.getmember("manifest.json")
+        except KeyError as error:
+            raise E2EError(f"image archive {archive} has no manifest") from error
+        manifest_file = bundle.extractfile(manifest_member)
+        if manifest_file is None:
+            raise E2EError(f"image archive {archive} has no manifest")
+        manifest = json.load(manifest_file)
+        matches = [
+            entry
+            for entry in manifest
+            if isinstance(entry, dict) and tagged_reference in entry.get("RepoTags", [])
+        ]
+        if len(matches) != 1:
+            raise E2EError(f"image archive {archive} does not bind {tagged_reference} exactly once")
+        config_path = matches[0].get("Config")
+        if not isinstance(config_path, str):
+            raise E2EError(f"image archive {archive} has no config path")
+        try:
+            config_member = bundle.getmember(config_path)
+        except KeyError as error:
+            raise E2EError(f"image archive {archive} has no config bytes") from error
+        config_file = bundle.extractfile(config_member)
+        if config_file is None:
+            raise E2EError(f"image archive {archive} has no config bytes")
+        config_bytes = config_file.read()
+    config_name = Path(config_path).name.removesuffix(".json")
+    digest = "sha256:" + hashlib.sha256(config_bytes).hexdigest()
+    if config_name != digest.removeprefix("sha256:"):
+        raise E2EError(f"image archive {archive} config path does not match its bytes")
+    config = json.loads(config_bytes)
+    if not isinstance(config, dict):
+        raise E2EError(f"image archive {archive} config is not an object")
+    return digest, config
+
+
+def load_image_archive(metadata: dict[str, Any], directory: Path, expected: dict[str, Any]) -> tuple[str, str, str, str, Path]:
     archive = directory / str(metadata.get("file", ""))
     if not archive.is_file() or hash_file(archive) != metadata.get("sha256"):
         raise E2EError(f"temporary image {expected['name']} archive checksum mismatch")
@@ -759,15 +797,21 @@ def load_image_archive(metadata: dict[str, Any], directory: Path, expected: dict
         raise E2EError(f"temporary image {expected['name']} identity does not match the plan")
     repository, tag = split_image(metadata["reference"])
     digest = metadata.get("digest")
-    if not isinstance(digest, str) or not SHA256.fullmatch(digest):
-        raise E2EError(f"temporary image {expected['name']} has no digest")
-    revision = run(["docker", "image", "inspect", "--format={{index .Config.Labels \"org.opencontainers.image.revision\"}}", metadata["reference"]], capture=True)
+    config_digest = metadata.get("config_digest", digest)
+    if not isinstance(digest, str) or not SHA256.fullmatch(digest) or not isinstance(config_digest, str) or not SHA256.fullmatch(config_digest):
+        raise E2EError(f"temporary image {expected['name']} has no artifact/config digest pair")
+    archive_config_digest, config = archive_image_config(archive, metadata["reference"])
+    if archive_config_digest != config_digest:
+        raise E2EError(f"temporary image {expected['name']} archive changed its config digest")
+    image_config = config.get("config")
+    labels = image_config.get("Labels") if isinstance(image_config, dict) else None
+    revision = labels.get("org.opencontainers.image.revision") if isinstance(labels, dict) else None
     if revision != expected["source_sha"]:
         raise E2EError(f"temporary image {expected['name']} revision label does not match exact source")
-    return repository, tag, digest, archive
+    return repository, tag, digest, config_digest, archive
 
 
-def pull_image(reference: str, expected_digest: str | None = None) -> tuple[str, str, str, Path]:
+def pull_image(reference: str, expected_digest: str | None = None) -> tuple[str, str, str, str, Path]:
     repository, tag = split_image(reference)
     tagged_reference = reference.split("@", 1)[0]
     run(["docker", "pull", reference])
@@ -780,7 +824,8 @@ def pull_image(reference: str, expected_digest: str | None = None) -> tuple[str,
         raise E2EError(f"image {reference} digest {digest} != {expected_digest}")
     temporary = Path(tempfile.mkdtemp(prefix="iterabase-e2e-image-")) / "image.tar"
     run(["docker", "save", "-o", str(temporary), tagged_reference])
-    return repository, tag, digest, temporary
+    config_digest, _ = archive_image_config(temporary, tagged_reference)
+    return repository, tag, digest, config_digest, temporary
 
 
 def pull_chart(reference: str, destination: Path, checksum: str | None = None) -> tuple[Path, str]:
@@ -935,7 +980,7 @@ def compose_runtime(plan_path: Path, scenario_id: str, artifacts: Path, output: 
                 if discovered is None:
                     raise E2EError(f"selected temporary image {name} is missing")
                 metadata, directory = discovered
-                repository, tag, digest, archive = load_image_archive(metadata, directory, expected)
+                repository, tag, digest, config_digest, archive = load_image_archive(metadata, directory, expected)
                 reference = f"{repository}:{tag}"
             elif custody == "selected-candidate":
                 if discovered is None:
@@ -949,18 +994,21 @@ def compose_runtime(plan_path: Path, scenario_id: str, artifacts: Path, output: 
                 if not isinstance(repository, str) or not isinstance(tag, str) or not isinstance(wanted, str):
                     raise E2EError(f"candidate image {name} has incomplete identity")
                 reference = f"{repository}:{tag}"
-                repository, tag, digest, archive = pull_image(reference, wanted)
+                repository, tag, digest, config_digest, archive = pull_image(reference, wanted)
             else:
                 reference = expected["reference"]
-                repository, tag, digest, archive = pull_image(reference, expected.get("digest"))
+                repository, tag, digest, config_digest, archive = pull_image(reference, expected.get("digest"))
             local_archive = runtime / f"{name}.tar"
             shutil.copy2(archive, local_archive)
-            record.update({"reference": reference, "digest": digest, "checksum": hash_file(local_archive), "path": str(local_archive)})
+            record.update({"reference": reference, "digest": digest, "config_digest": config_digest, "checksum": hash_file(local_archive), "path": str(local_archive)})
             prefix = IMAGE_ENV[name]
             env[f"{prefix}_IMAGE_REPO"] = repository
             env[f"{prefix}_IMAGE_TAG"] = runtime_image_tag(custody, tag, digest)
             env[f"{prefix}_IMAGE_DIGEST"] = digest
+            env[f"{prefix}_IMAGE_CONFIG_DIGEST"] = config_digest
             env[f"{prefix}_IMAGE_ARCHIVE"] = str(local_archive)
+            if custody != "selected-temporary":
+                env[f"{prefix}_IMAGE_REGISTRY_DIGEST"] = digest
             if custody != "published-baseline":
                 env[f"{prefix}_IMAGE_SOURCE_SHA"] = source_sha
             forge_archive_env = {
@@ -1161,7 +1209,7 @@ def resolve_baselines(plan_path: Path, contract: dict[str, Any]) -> None:
                     raise E2EError(f"published baseline {name} has no reference")
                 identity: dict[str, str]
                 if kind == "image":
-                    _, _, digest, _ = pull_image(reference, artifact.get("digest"))
+                    _, _, digest, _, _ = pull_image(reference, artifact.get("digest"))
                     identity = {"digest": digest, "reference": reference.split("@", 1)[0] + "@" + digest}
                 elif kind in {"chart", "chart-companion", "published-chart"}:
                     _, checksum = pull_chart(reference, directory / name, artifact.get("checksum"))
@@ -1260,8 +1308,12 @@ def validate_result(result: dict[str, Any], scenario: dict[str, Any], execution:
             raise E2EError(f"result for {scenario_id} substitutes a baseline for selected {name}")
         if expected["custody"] == "published-baseline" and actual.get("source_sha"):
             raise E2EError(f"result for {scenario_id} gives baseline {name} selected-source custody")
-        if expected["kind"] == "image" and not SHA256.fullmatch(str(actual.get("digest", ""))):
-            raise E2EError(f"result for {scenario_id} has incomplete image digest for {name}")
+        if expected["kind"] == "image" and (
+            not SHA256.fullmatch(str(actual.get("digest", "")))
+            or not SHA256.fullmatch(str(actual.get("config_digest", "")))
+            or not SHA256.fullmatch(str(actual.get("runtime_digest", "")))
+        ):
+            raise E2EError(f"result for {scenario_id} has incomplete image artifact/config/runtime digest identity for {name}")
         if expected["kind"] != "image" and not SHA256.fullmatch(str(actual.get("checksum", ""))):
             raise E2EError(f"result for {scenario_id} has incomplete checksum for {name}")
 

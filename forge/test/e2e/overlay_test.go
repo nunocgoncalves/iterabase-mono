@@ -35,8 +35,8 @@ func runOverlayStage(t *testing.T, state *digitalOceanCPUState) {
 		bootstrap := applyOnceArgs(t, state.forgeBin, state.forgeHome, candidateConfig,
 			"--skip-chart", "--skip-gpu", "--skip-overlay", "--skip-secrets", "--skip-flux")
 		assertApplyMarkers(t, bootstrap, "action:     install", "node ready: true", "AgentPool workspace:", "AgentPool local-path ready: true")
-		prepareCandidateImages(t, state.ip, state.privKeyPath)
 	}
+	state.runtimeImageDigests = prepareCandidateImages(t, state.ip, state.privKeyPath)
 	out := applyOnce(t, state.forgeBin, state.forgeHome, candidateConfig)
 	markers := []string{"action:     skip", "node ready: true", "AgentPool workspace:",
 		"AgentPool local-path ready: true", "certificate substrate applied: true",
@@ -44,7 +44,7 @@ func runOverlayStage(t *testing.T, state *digitalOceanCPUState) {
 	assertApplyMarkers(t, out, markers...)
 	t.Logf("apply output:\n%s", out)
 	candidateCluster := remotecluster.Use(t, filepath.Join(state.forgeHome, state.runID, "kubeconfig.yaml"))
-	assertCandidateImageDigests(t, candidateCluster, "iterabase-system",
+	assertCandidateImageDigests(t, candidateCluster, "iterabase-system", state.runtimeImageDigests,
 		controlPlaneDigestEnv, inferenceGatewayDigestEnv, toolRunnerDigestEnv)
 
 	// The cloned overlay dir exists on the host (a real clone happened).

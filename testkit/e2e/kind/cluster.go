@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -17,7 +18,11 @@ import (
 	"github.com/nunocgoncalves/iterabase-mono/testkit/e2e/process"
 )
 
-var prefixPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$`)
+var (
+	prefixPattern       = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$`)
+	imageDigestPattern  = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+	manifestTreePattern = regexp.MustCompile(`(?m)application/vnd\.(?:oci\.image\.manifest|docker\.distribution\.manifest)[^@\n]*@(sha256:[0-9a-f]{64})`)
+)
 
 // Manager creates unique clusters through a testable process seam.
 type Manager struct {
@@ -103,30 +108,105 @@ func (cluster *Cluster) LoadImage(ctx context.Context, image string) error {
 	return err
 }
 
+// ImportedImageIdentity binds the composer archive identity to the immutable
+// manifest digest that CRI reports after Kind import.
+type ImportedImageIdentity struct {
+	ConfigDigest  string
+	RuntimeDigest string
+	Labels        map[string]string
+}
+
 // ImportImageArchive restores one composer-resolved archive into the runner
-// daemon after cluster creation and then transports that exact reference into
-// every Kind node. Callers cannot rely on images loaded before Kind existed.
-func (cluster *Cluster) ImportImageArchive(ctx context.Context, archive, image string) error {
+// daemon after cluster creation, transports that exact reference into every
+// Kind node, and proves that each node retained the expected image config. The
+// returned runtime digest is the immutable manifest identity CRI later reports
+// for Pods; it is distinct from a docker config or multi-platform index digest.
+func (cluster *Cluster) ImportImageArchive(ctx context.Context, archive, image, expectedConfigDigest string) (ImportedImageIdentity, error) {
 	if image == "" {
-		return fmt.Errorf("kind image identity is empty")
+		return ImportedImageIdentity{}, fmt.Errorf("kind image identity is empty")
+	}
+	if !imageDigestPattern.MatchString(expectedConfigDigest) {
+		return ImportedImageIdentity{}, fmt.Errorf("resolved image %s has invalid config digest %q", image, expectedConfigDigest)
 	}
 	info, err := os.Stat(archive)
 	if err != nil {
-		return fmt.Errorf("resolved image archive %q: %w", archive, err)
+		return ImportedImageIdentity{}, fmt.Errorf("resolved image archive %q: %w", archive, err)
 	}
 	if !info.Mode().IsRegular() {
-		return fmt.Errorf("resolved image archive %q is not a regular file", archive)
+		return ImportedImageIdentity{}, fmt.Errorf("resolved image archive %q is not a regular file", archive)
 	}
 	if _, err := cluster.executor.Run(ctx, process.Command{
 		Name: "docker", Args: []string{"load", "-i", archive},
 		Timeout: 10 * time.Minute, OutputName: "docker-load-" + safeFileName(image) + ".log",
 	}); err != nil {
-		return fmt.Errorf("restore resolved image %s: %w", image, err)
+		return ImportedImageIdentity{}, fmt.Errorf("restore resolved image %s: %w", image, err)
 	}
 	if err := cluster.LoadImage(ctx, image); err != nil {
-		return fmt.Errorf("import resolved image %s into Kind: %w", image, err)
+		return ImportedImageIdentity{}, fmt.Errorf("import resolved image %s into Kind: %w", image, err)
 	}
-	return nil
+	nodesResult, err := cluster.executor.Run(ctx, process.Command{
+		Name: "kind", Args: []string{"get", "nodes", "--name", cluster.Name},
+		Timeout: 30 * time.Second, OutputName: "kind-nodes-" + safeFileName(image) + ".log",
+	})
+	if err != nil {
+		return ImportedImageIdentity{}, fmt.Errorf("resolve Kind nodes after importing %s: %w", image, err)
+	}
+	if strings.TrimSpace(nodesResult.Output) == "" {
+		return ImportedImageIdentity{}, fmt.Errorf("resolve Kind nodes after importing %s: no nodes returned", image)
+	}
+
+	identity := ImportedImageIdentity{ConfigDigest: expectedConfigDigest}
+	for _, node := range strings.Fields(nodesResult.Output) {
+		inspection, inspectErr := cluster.executor.Run(ctx, process.Command{
+			Name: "docker", Args: []string{"exec", node, "crictl", "inspecti", image},
+			Timeout: 30 * time.Second, OutputName: "kind-inspect-" + safeFileName(node+"-"+image) + ".json",
+		})
+		if inspectErr != nil {
+			return ImportedImageIdentity{}, fmt.Errorf("inspect imported image %s on %s: %w", image, node, inspectErr)
+		}
+		var runtimeImage struct {
+			Status struct {
+				ID       string   `json:"id"`
+				RepoTags []string `json:"repoTags"`
+			} `json:"status"`
+			Info struct {
+				ImageSpec struct {
+					Config struct {
+						Labels map[string]string `json:"Labels"`
+					} `json:"config"`
+				} `json:"imageSpec"`
+			} `json:"info"`
+		}
+		if err := json.Unmarshal([]byte(inspection.Output), &runtimeImage); err != nil {
+			return ImportedImageIdentity{}, fmt.Errorf("decode imported image %s on %s: %w", image, node, err)
+		}
+		if runtimeImage.Status.ID != expectedConfigDigest {
+			return ImportedImageIdentity{}, fmt.Errorf("imported image %s on %s config digest %q != %q", image, node, runtimeImage.Status.ID, expectedConfigDigest)
+		}
+		if len(runtimeImage.Status.RepoTags) != 1 {
+			return ImportedImageIdentity{}, fmt.Errorf("imported image %s on %s has ambiguous runtime tags: %v", image, node, runtimeImage.Status.RepoTags)
+		}
+		manifest, manifestErr := cluster.executor.Run(ctx, process.Command{
+			Name: "docker", Args: []string{"exec", node, "ctr", "-n", "k8s.io", "images", "inspect", runtimeImage.Status.RepoTags[0]},
+			Timeout: 30 * time.Second, OutputName: "kind-manifest-" + safeFileName(node+"-"+image) + ".txt",
+		})
+		if manifestErr != nil {
+			return ImportedImageIdentity{}, fmt.Errorf("inspect imported manifest %s on %s: %w", image, node, manifestErr)
+		}
+		matches := manifestTreePattern.FindAllStringSubmatch(manifest.Output, -1)
+		if len(matches) != 1 {
+			return ImportedImageIdentity{}, fmt.Errorf("imported image %s on %s has ambiguous manifest identity", image, node)
+		}
+		runtimeDigest := matches[0][1]
+		if identity.RuntimeDigest != "" && identity.RuntimeDigest != runtimeDigest {
+			return ImportedImageIdentity{}, fmt.Errorf("imported image %s runtime digest differs across Kind nodes", image)
+		}
+		identity.RuntimeDigest = runtimeDigest
+		if identity.Labels == nil {
+			identity.Labels = runtimeImage.Info.ImageSpec.Config.Labels
+		}
+	}
+	return identity, nil
 }
 
 // Delete tears down owned infrastructure and removes its temporary kubeconfig.

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import io
 import json
 from pathlib import Path
 import tarfile
@@ -11,6 +13,7 @@ import unittest
 
 from e2e import (
     E2EError,
+    archive_image_config,
     extract_chart,
     find_metadata,
     hash_file,
@@ -259,18 +262,59 @@ class E2EPlanTests(unittest.TestCase):
 
 
 class RuntimeCompositionContractTests(unittest.TestCase):
-    def test_image_runtime_reference_distinguishes_archive_and_registry_digest(self) -> None:
+    def test_downloaded_image_archive_retains_config_identity_distinct_from_runtime_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as value:
+            archive = Path(value) / "control-plane-image.tar"
+            config = json.dumps(
+                {
+                    "config": {
+                        "Labels": {"org.opencontainers.image.revision": SOURCE_SHA}
+                    }
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+            config_digest = hashlib.sha256(config).hexdigest()
+            manifest = json.dumps(
+                [
+                    {
+                        "Config": f"blobs/sha256/{config_digest}",
+                        "RepoTags": [f"iterabase-e2e/control-plane:{SOURCE_SHA}"],
+                        "Layers": [],
+                    }
+                ]
+            ).encode()
+            with tarfile.open(archive, "w") as bundle:
+                for name, data in (
+                    ("manifest.json", manifest),
+                    (f"blobs/sha256/{config_digest}", config),
+                ):
+                    member = tarfile.TarInfo(name)
+                    member.size = len(data)
+                    bundle.addfile(member, io.BytesIO(data))
+
+            digest, decoded = archive_image_config(
+                archive, f"iterabase-e2e/control-plane:{SOURCE_SHA}"
+            )
+            self.assertEqual("sha256:" + config_digest, digest)
+            self.assertEqual(
+                SOURCE_SHA,
+                decoded["config"]["Labels"]["org.opencontainers.image.revision"],
+            )
+            self.assertNotEqual("sha256:" + "f" * 64, digest)
+
+    def test_image_runtime_tag_always_selects_the_imported_archive(self) -> None:
         digest = "sha256:" + "b" * 64
         self.assertEqual(
             "exact-source-sha",
             runtime_image_tag("selected-temporary", "exact-source-sha", digest),
         )
         self.assertEqual(
-            "candidate-run@" + digest,
+            "candidate-run",
             runtime_image_tag("selected-candidate", "candidate-run", digest),
         )
         self.assertEqual(
-            "0.0.30@" + digest,
+            "0.0.30",
             runtime_image_tag("published-baseline", "0.0.30", digest),
         )
 
@@ -431,6 +475,8 @@ class ResultReconciliationTests(unittest.TestCase):
                 record["source_sha"] = SOURCE_SHA
             if artifact["kind"] == "image":
                 record["digest"] = "sha256:" + "c" * 64
+                record["config_digest"] = "sha256:" + "e" * 64
+                record["runtime_digest"] = "sha256:" + "f" * 64
             else:
                 record["checksum"] = "d" * 64
             result["artifacts"].append(record)
@@ -443,6 +489,15 @@ class ResultReconciliationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as value:
             plan, results, _ = self.fixture(Path(value))
             validate_results(plan, results)
+
+    def test_image_result_requires_artifact_and_config_digests(self) -> None:
+        with tempfile.TemporaryDirectory() as value:
+            plan, results, result = self.fixture(Path(value))
+            image = next(artifact for artifact in result["artifacts"] if artifact["kind"] == "image")
+            image.pop("config_digest")
+            (results / "result.json").write_text(json.dumps(result) + "\n")
+            with self.assertRaisesRegex(E2EError, "artifact/config/runtime digest identity"):
+                validate_results(plan, results)
 
     def test_missing_extra_skipped_and_blocked_results_fail(self) -> None:
         for mutation in ("missing", "extra", "skipped", "blocked"):

@@ -104,7 +104,12 @@ cluster before any install stage. Loading the runner daemon before Kind exists
 is not cluster transport. Fixture mode controls custody and identity only;
 source, candidate, and explicit baselines use the same post-create import stage.
 Owner scenarios no longer build artifacts or choose a different stage DAG in
-source versus candidate mode.
+source versus candidate mode. Image identity keeps three non-interchangeable
+proofs: the temporary artifact or registry/index digest, the archive's image
+config digest, and the post-import single-platform runtime manifest digest.
+Import verifies the config and source-revision label; workload assertions verify
+the exact composer request reference and the imported runtime digest reported by
+CRI. A config digest is never compared to a Pod manifest digest.
 
 ## Strict scenario results
 
@@ -115,11 +120,14 @@ The shared runner writes one result record for every selected scenario. It binds
 - the complete observed artifact identity set; and
 - exactly one terminal status for every declared stage.
 
-A direct skip, blocked/not-run stage, missing report, missing/extra stage,
-mode-dependent successful no-op, or failed stage makes required execution
-incomplete. Diagnostics and cleanup still run. Scenario jobs upload results even
-on failure; the aggregate downloads the exact result-artifact set and reconciles
-it against the plan rather than trusting matrix-job success alone.
+A passed scenario must record one observed post-import runtime manifest digest
+for every image in its bundle; result assembly rejects a missing/extra identity
+and retains artifact, config, and runtime digests separately. A direct skip,
+blocked/not-run stage, missing report, missing/extra stage, mode-dependent
+successful no-op, or failed stage makes required execution incomplete.
+Diagnostics and cleanup still run. Scenario jobs upload results even on failure;
+the aggregate downloads the exact result-artifact set and reconciles it against
+the plan rather than trusting matrix-job success alone.
 
 Failure diagnostics are separate, redacted artifacts retained for seven days.
 PR/nightly plans and results are retained for 30 days. Candidate results and

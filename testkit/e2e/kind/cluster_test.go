@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -15,9 +17,10 @@ import (
 )
 
 type fakeExecutor struct {
-	mu       sync.Mutex
-	commands []process.Command
-	failNext bool
+	mu        sync.Mutex
+	commands  []process.Command
+	failNext  bool
+	outputFor func(process.Command) string
 }
 
 func (executor *fakeExecutor) Run(_ context.Context, command process.Command) (process.Result, error) {
@@ -28,7 +31,11 @@ func (executor *fakeExecutor) Run(_ context.Context, command process.Command) (p
 		executor.failNext = false
 		return process.Result{}, errors.New("forced create failure")
 	}
-	return process.Result{}, nil
+	result := process.Result{}
+	if executor.outputFor != nil {
+		result.Output = executor.outputFor(command)
+	}
+	return result, nil
 }
 
 func TestCreateFailureStillAttemptsClusterDeletion(t *testing.T) {
@@ -48,7 +55,20 @@ func TestCreateFailureStillAttemptsClusterDeletion(t *testing.T) {
 
 func TestDownloadedRuntimeArtifactRequiresPostCreateClusterImport(t *testing.T) {
 	t.Parallel()
-	executor := &fakeExecutor{}
+	configDigest := "sha256:" + strings.Repeat("a", 64)
+	runtimeDigest := "sha256:" + strings.Repeat("b", 64)
+	executor := &fakeExecutor{outputFor: func(command process.Command) string {
+		if command.Name == "kind" && slices.Equal(command.Args, []string{"get", "nodes", "--name", "charts"}) {
+			return "charts-control-plane\n"
+		}
+		if command.Name == "docker" && len(command.Args) > 2 && command.Args[0] == "exec" && command.Args[2] == "crictl" {
+			return fmt.Sprintf(`{"status":{"id":%q,"repoTags":["docker.io/iterabase-e2e/control-plane:exact-head"]},"info":{"imageSpec":{"config":{"Labels":{"org.opencontainers.image.revision":"exact-head"}}}}}`, configDigest)
+		}
+		if command.Name == "docker" && len(command.Args) > 2 && command.Args[0] == "exec" && command.Args[2] == "ctr" {
+			return "└── application/vnd.oci.image.manifest.v1+json @" + runtimeDigest + " (1170 bytes)\n"
+		}
+		return ""
+	}}
 	cluster, err := Use("charts", filepath.Join(t.TempDir(), "kubeconfig"), executor)
 	if err != nil {
 		t.Fatal(err)
@@ -62,17 +82,27 @@ func TestDownloadedRuntimeArtifactRequiresPostCreateClusterImport(t *testing.T) 
 		t.Fatal(err)
 	}
 
-	if err := cluster.ImportImageArchive(context.Background(), archive, "iterabase-e2e/control-plane:exact-head"); err != nil {
+	identity, err := cluster.ImportImageArchive(context.Background(), archive, "iterabase-e2e/control-plane:exact-head", configDigest)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if len(executor.commands) != 2 {
-		t.Fatalf("import commands = %d, want docker restore + Kind transport", len(executor.commands))
+	if identity.ConfigDigest != configDigest || identity.RuntimeDigest != runtimeDigest || identity.Labels["org.opencontainers.image.revision"] != "exact-head" {
+		t.Fatalf("imported identity = %+v", identity)
+	}
+	if len(executor.commands) != 5 {
+		t.Fatalf("import commands = %d, want docker restore + Kind transport + config/manifest identity inspection", len(executor.commands))
 	}
 	if got := executor.commands[0]; got.Name != "docker" || !slices.Equal(got.Args, []string{"load", "-i", archive}) {
 		t.Fatalf("first import command = %+v, want exact downloaded archive restore", got)
 	}
 	if got := executor.commands[1]; got.Name != "kind" || !slices.Equal(got.Args, []string{"load", "docker-image", "--name", "charts", "iterabase-e2e/control-plane:exact-head"}) {
 		t.Fatalf("second import command = %+v, want post-create Kind transport", got)
+	}
+	if got := executor.commands[3]; got.Name != "docker" || !slices.Equal(got.Args, []string{"exec", "charts-control-plane", "crictl", "inspecti", "iterabase-e2e/control-plane:exact-head"}) {
+		t.Fatalf("config inspection command = %+v, want exact node config identity", got)
+	}
+	if got := executor.commands[4]; got.Name != "docker" || !slices.Equal(got.Args, []string{"exec", "charts-control-plane", "ctr", "-n", "k8s.io", "images", "inspect", "docker.io/iterabase-e2e/control-plane:exact-head"}) {
+		t.Fatalf("manifest inspection command = %+v, want exact imported runtime identity", got)
 	}
 }
 
@@ -83,7 +113,7 @@ func TestMissingDownloadedRuntimeArtifactCannotReachClusterImport(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := cluster.ImportImageArchive(context.Background(), filepath.Join(t.TempDir(), "missing.tar"), "iterabase-e2e/control-plane:exact-head"); err == nil {
+	if _, err := cluster.ImportImageArchive(context.Background(), filepath.Join(t.TempDir(), "missing.tar"), "iterabase-e2e/control-plane:exact-head", "sha256:"+strings.Repeat("a", 64)); err == nil {
 		t.Fatal("missing downloaded runtime artifact unexpectedly reached install transport")
 	}
 	if len(executor.commands) != 0 {

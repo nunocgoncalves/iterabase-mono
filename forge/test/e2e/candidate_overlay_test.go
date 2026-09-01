@@ -110,16 +110,16 @@ func prepareCandidateOverlay(t *testing.T, runID, ip, keyPath string) candidateO
 }
 
 func candidateOverlayValues(t *testing.T) string {
-	sourceFixture := os.Getenv("ITERABASE_E2E_FIXTURE_MODE") == "source"
 	imageValues := func(repositoryEnv, tagEnv, digestEnv, prefix string) string {
-		repository, tag, digest := os.Getenv(repositoryEnv), os.Getenv(tagEnv), os.Getenv(digestEnv)
+		repository, tag := os.Getenv(repositoryEnv), os.Getenv(tagEnv)
 		if repository == "" || tag == "" {
 			return ""
 		}
-		if digest != "" && !sourceFixture && !strings.Contains(tag, "@"+digest) {
-			t.Fatalf("candidate image %s/%s tag %q does not carry selected digest %s", repositoryEnv, tagEnv, tag, digest)
+		registryDigestEnv := strings.TrimSuffix(digestEnv, "_DIGEST") + "_REGISTRY_DIGEST"
+		if registryDigest := os.Getenv(registryDigestEnv); registryDigest != "" && !isCanonicalSHA256Digest(registryDigest) {
+			t.Fatalf("registry image %s/%s has invalid selected registry digest %s", repositoryEnv, tagEnv, registryDigest)
 		}
-		return fmt.Sprintf("%srepository: %q\n%stag: %q\n", prefix, repository, prefix, tag)
+		return fmt.Sprintf("%srepository: %q\n%stag: %q\n%spullPolicy: Never\n", prefix, repository, prefix, tag, prefix)
 	}
 
 	controlPlane := imageValues("CONTROL_PLANE_IMAGE_REPO", "CONTROL_PLANE_IMAGE_TAG", controlPlaneDigestEnv, "    ")
@@ -158,8 +158,9 @@ func TestCandidateOverlayValues(t *testing.T) {
 	t.Setenv("FORGE_E2E_RELEASE_CANDIDATE", "true")
 	t.Setenv("FORGE_E2E_CHART_REPOSITORY", "oci://ghcr.io/example/candidates/platform")
 	t.Setenv("CONTROL_PLANE_IMAGE_REPO", "ghcr.io/example/control-plane")
-	t.Setenv("CONTROL_PLANE_IMAGE_TAG", "candidate-run@"+digest)
+	t.Setenv("CONTROL_PLANE_IMAGE_TAG", "candidate-run")
 	t.Setenv(controlPlaneDigestEnv, digest)
+	t.Setenv("CONTROL_PLANE_IMAGE_REGISTRY_DIGEST", digest)
 	t.Setenv("TOOL_RUNNER_IMAGE_REPO", "")
 	t.Setenv("TOOL_RUNNER_IMAGE_TAG", "")
 	t.Setenv(toolRunnerDigestEnv, "")
@@ -178,7 +179,8 @@ func TestCandidateOverlayValues(t *testing.T) {
 		"forge-workspace-model": {},
 		"workload:":             {},
 		"repository: \"ghcr.io/example/control-plane\"": {},
-		"tag: \"candidate-run@" + digest + "\"":         {},
+		"tag: \"candidate-run\"":                        {},
+		"pullPolicy: Never":                             {},
 	} {
 		if !strings.Contains(plan.values, expected) {
 			t.Fatalf("candidate values missing %q:\n%s", expected, plan.values)
@@ -186,8 +188,7 @@ func TestCandidateOverlayValues(t *testing.T) {
 	}
 }
 
-func TestSourceOverlayValuesRetainImportedTagAndConfigDigest(t *testing.T) {
-	t.Setenv("ITERABASE_E2E_FIXTURE_MODE", "source")
+func TestArchiveOnlyOverlayValuesRetainImportedTagAndConfigDigest(t *testing.T) {
 	t.Setenv("CONTROL_PLANE_IMAGE_REPO", "iterabase-e2e/control-plane")
 	t.Setenv("CONTROL_PLANE_IMAGE_TAG", "exact-source-sha")
 	t.Setenv(controlPlaneDigestEnv, "sha256:"+strings.Repeat("c", 64))
@@ -197,8 +198,8 @@ func TestSourceOverlayValuesRetainImportedTagAndConfigDigest(t *testing.T) {
 		!strings.Contains(values, "tag: \"exact-source-sha\"") {
 		t.Fatalf("source overlay lost the exact imported image tag:\n%s", values)
 	}
-	if strings.Contains(values, "tag: \"exact-source-sha@") {
-		t.Fatalf("source overlay treated a docker config digest as a registry manifest digest:\n%s", values)
+	if strings.Contains(values, "tag: \"exact-source-sha@") || !strings.Contains(values, "pullPolicy: Never") {
+		t.Fatalf("archive-only overlay did not pin the imported reference without pulling:\n%s", values)
 	}
 }
 
@@ -254,8 +255,9 @@ func TestCandidateOverlayValuesEnableDispatchForRealWorkspaceBehavior(t *testing
 func TestCandidateOverlayCheckoutKeepsExactSourceCommit(t *testing.T) {
 	digest := "sha256:" + strings.Repeat("b", 64)
 	t.Setenv("CONTROL_PLANE_IMAGE_REPO", "ghcr.io/example/control-plane")
-	t.Setenv("CONTROL_PLANE_IMAGE_TAG", "candidate-run@"+digest)
+	t.Setenv("CONTROL_PLANE_IMAGE_TAG", "candidate-run")
 	t.Setenv(controlPlaneDigestEnv, digest)
+	t.Setenv("CONTROL_PLANE_IMAGE_REGISTRY_DIGEST", digest)
 	t.Setenv(toolRunnerDigestEnv, "")
 	t.Setenv(inferenceGatewayDigestEnv, "")
 	plan := candidateOverlayPlanForEnvironment(t)
