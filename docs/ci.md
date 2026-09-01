@@ -110,6 +110,12 @@ config digest, and the post-import single-platform runtime manifest digest.
 Import verifies the config and source-revision label; workload assertions verify
 the exact composer request reference and the imported runtime digest reported by
 CRI. A config digest is never compared to a Pod manifest digest.
+Harness-bearing Kind DAGs additionally establish their AgentPool storage
+substrate after platform-default claims bind and before worker creation. The
+shared helper applies and verifies the Forge-owned non-default,
+parameter-free `iterabase-agentpool-local-path` contract and dedicated
+synthetic path; using Kind's default local-path class is not an accepted
+fallback in any fixture mode.
 
 ## Strict scenario results
 

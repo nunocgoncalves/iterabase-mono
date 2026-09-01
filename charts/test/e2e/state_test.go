@@ -176,6 +176,13 @@ func createKindStage(t *testing.T, state *chartState) {
 	state.client = kube.Client{Executor: state.runner, Kubeconfig: cluster.Kubeconfig, Redactor: state.redactor}
 }
 
+func configureAgentPoolLocalPathStage(t *testing.T, state *chartState) {
+	t.Helper()
+	if err := state.cluster.ConfigureAgentPoolLocalPathStorage(state.ctx); err != nil {
+		t.Fatalf("configure exact Kind AgentPool workspace substrate: %v", err)
+	}
+}
+
 func importRuntimeImagesStage(t *testing.T, state *chartState) {
 	t.Helper()
 	images := []struct {

@@ -264,6 +264,16 @@ def validate_catalogue_contract(catalogue: dict[str, Any], contract: dict[str, A
                 raise E2EError(
                     f"Kind scenario {scenario['id']} can execute before runtime image import: {bypasses}"
                 )
+            if "harness-image" in artifacts and "configure-agentpool-local-path" not in dependencies:
+                raise E2EError(
+                    f"Kind harness scenario {scenario['id']} must establish the dedicated AgentPool local-path substrate before worker creation"
+                )
+            if scenario["id"].startswith("charts/") and "harness-image" in artifacts and dependencies.get(
+                "install-harness-worker"
+            ) != {"configure-agentpool-local-path"}:
+                raise E2EError(
+                    f"Kind harness scenario {scenario['id']} must establish the dedicated AgentPool local-path substrate before worker creation"
+                )
         if metadata.get("tier") == "F3":
             if not metadata.get("capacity") or metadata.get("mandatory_capacity") is not True:
                 raise E2EError(f"selected capacity scenario {scenario['id']} is not mandatory")

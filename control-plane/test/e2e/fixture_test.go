@@ -203,30 +203,8 @@ func createControlPlaneKindStage(t *testing.T, state *deployedState) {
 
 func configureKindWorkspaceStorage(t *testing.T, state *deployedState) {
 	t.Helper()
-	// Kind's pinned provisioner predates per-class maps. Configure its single map
-	// only after platform-default claims are bound; this synthetic execution
-	// fixture then gives the dedicated class a real isolated path. Forge E2E owns
-	// production per-class separation against K3s's bundled provisioner.
-	configJSON := `{"nodePathMap":[{"node":"DEFAULT_PATH_FOR_NON_LISTED_NODES","paths":["/var/lib/iterabase/agentpool-workspaces"]}]}`
-	if output, err := state.client.Kubectl(state.ctx, 30*time.Second, "patch", "configmap/local-path-config", "-n", "local-path-storage", "--type=merge", "-p", fmt.Sprintf(`{"data":{"config.json":%q}}`, configJSON)); err != nil {
-		t.Fatalf("configure Kind local-path class isolation: %v\n%s", err, output)
-	}
-	state.applyYAML(t, "agentpool-storageclass.yaml", `apiVersion: storage.k8s.io/v1
-kind: StorageClass
-metadata:
-  name: iterabase-agentpool-local-path
-  annotations:
-    storageclass.kubernetes.io/is-default-class: "false"
-provisioner: rancher.io/local-path
-reclaimPolicy: Delete
-volumeBindingMode: WaitForFirstConsumer
-allowVolumeExpansion: false
-`)
-	if output, err := state.client.Kubectl(state.ctx, 2*time.Minute, "rollout", "restart", "deployment/local-path-provisioner", "-n", "local-path-storage"); err != nil {
-		t.Fatalf("restart Kind local-path provisioner: %v\n%s", err, output)
-	}
-	if output, err := state.client.Kubectl(state.ctx, 2*time.Minute, "rollout", "status", "deployment/local-path-provisioner", "-n", "local-path-storage", "--timeout=90s"); err != nil {
-		t.Fatalf("wait for Kind local-path provisioner: %v\n%s", err, output)
+	if err := state.cluster.ConfigureAgentPoolLocalPathStorage(state.ctx); err != nil {
+		t.Fatalf("configure exact Kind AgentPool workspace substrate: %v", err)
 	}
 }
 
