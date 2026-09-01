@@ -35,13 +35,12 @@ type candidateContainerStatus struct {
 
 const candidateControlPlaneReadyTimeout = 10 * time.Minute
 
-// assertCandidateImageDigests verifies both sides of the runtime contract.
-// Registry-backed candidate/baseline Pods request the selected index digest;
-// exact-source Pods request the imported source tag and CRI must report the
-// docker config digest retained in the verified archive. For multi-platform
-// registry images the runtime ID may be the selected child-manifest digest
-// rather than the parent index digest.
-func assertCandidateImageDigests(t *testing.T, cluster *remotecluster.Cluster, namespace string, digestEnvs ...string) {
+// assertCandidateImageDigests verifies both sides of the unified runtime
+// contract: Pods request the exact composer reference, while CRI reports the
+// immutable manifest digest established when that archive was imported. The
+// request may carry a registry index digest; the imported runtime digest may be
+// its selected child manifest and is therefore recorded separately.
+func assertCandidateImageDigests(t *testing.T, cluster *remotecluster.Cluster, namespace string, runtimeDigests map[string]string, digestEnvs ...string) {
 	t.Helper()
 	waitForCandidateControlPlaneReady(t, cluster, namespace, candidateControlPlaneReadyTimeout)
 	var pods struct {
@@ -60,52 +59,37 @@ func assertCandidateImageDigests(t *testing.T, cluster *remotecluster.Cluster, n
 	if err := json.Unmarshal([]byte(raw), &pods); err != nil {
 		t.Fatalf("decode candidate pod image identities: %v", err)
 	}
-	sourceFixture := os.Getenv("ITERABASE_E2E_FIXTURE_MODE") == "source"
 	for _, envName := range digestEnvs {
-		digest := os.Getenv(envName)
-		if digest == "" {
+		var prefix string
+		switch envName {
+		case controlPlaneDigestEnv:
+			prefix = "CONTROL_PLANE"
+		case inferenceGatewayDigestEnv:
+			prefix = "INFERENCE_GATEWAY"
+		case toolRunnerDigestEnv:
+			prefix = "TOOL_RUNNER"
+		default:
+			t.Fatalf("image digest environment %s has no repository/tag authority", envName)
+		}
+		repository, tag := os.Getenv(prefix+"_IMAGE_REPO"), os.Getenv(prefix+"_IMAGE_TAG")
+		runtimeDigest := runtimeDigests[prefix]
+		if repository == "" && tag == "" && runtimeDigest == "" {
 			continue
 		}
-		if !strings.HasPrefix(digest, "sha256:") {
-			t.Fatalf("%s=%q is not a canonical sha256 digest", envName, digest)
+		if repository == "" || tag == "" || !isCanonicalSHA256Digest(runtimeDigest) {
+			t.Fatalf("%s composed request/runtime digest identity is incomplete", prefix)
 		}
-		expectedSourceReference := ""
-		if sourceFixture {
-			var prefix string
-			switch envName {
-			case controlPlaneDigestEnv:
-				prefix = "CONTROL_PLANE"
-			case inferenceGatewayDigestEnv:
-				prefix = "INFERENCE_GATEWAY"
-			case toolRunnerDigestEnv:
-				prefix = "TOOL_RUNNER"
-			default:
-				t.Fatalf("source image digest environment %s has no repository/tag authority", envName)
-			}
-			repository, tag := os.Getenv(prefix+"_IMAGE_REPO"), os.Getenv(prefix+"_IMAGE_TAG")
-			if repository == "" || tag == "" || strings.Contains(tag, "@") {
-				t.Fatalf("source image %s has invalid imported repository/tag %q:%q", envName, repository, tag)
-			}
-			expectedSourceReference = repository + ":" + tag
-		}
+		expectedReference := repository + ":" + tag
 		found := false
 		for _, pod := range pods.Items {
 			specs := append(pod.Spec.Containers, pod.Spec.InitContainers...)
 			statuses := append(pod.Status.ContainerStatuses, pod.Status.InitContainerStatuses...)
 			for _, spec := range specs {
-				if sourceFixture {
-					if spec.Image != expectedSourceReference {
-						continue
-					}
-				} else if !strings.HasSuffix(spec.Image, "@"+digest) {
+				if spec.Image != expectedReference {
 					continue
 				}
 				for _, status := range statuses {
-					identityMatches := strings.Contains(status.ImageID, "@sha256:")
-					if sourceFixture {
-						identityMatches = strings.Contains(status.ImageID, digest)
-					}
-					if status.Name == spec.Name && identityMatches {
+					if status.Name == spec.Name && strings.Contains(status.ImageID, runtimeDigest) {
 						found = true
 						break
 					}
@@ -113,9 +97,9 @@ func assertCandidateImageDigests(t *testing.T, cluster *remotecluster.Cluster, n
 			}
 		}
 		if !found {
-			t.Fatalf("no running container in %s requested the composed %s identity and reported its immutable image ID", namespace, envName)
+			t.Fatalf("no running container in %s requested %s and reported imported runtime digest %s", namespace, expectedReference, runtimeDigest)
 		}
-		t.Logf("verified composed request %s and its runtime image ID", digest)
+		t.Logf("verified composed request %s and imported runtime digest %s", expectedReference, runtimeDigest)
 	}
 }
 

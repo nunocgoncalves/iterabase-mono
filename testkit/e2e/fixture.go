@@ -32,14 +32,15 @@ type Fixture struct {
 // version, full source identity, or immutable path; Digest/Checksum strengthen
 // identities when the artifact format supports them.
 type FixtureInput struct {
-	Name      string `json:"name"`
-	Kind      string `json:"kind"`
-	Custody   string `json:"custody,omitempty"`
-	SourceSHA string `json:"source_sha,omitempty"`
-	Reference string `json:"reference"`
-	Digest    string `json:"digest,omitempty"`
-	Checksum  string `json:"checksum,omitempty"`
-	Path      string `json:"path,omitempty"`
+	Name         string `json:"name"`
+	Kind         string `json:"kind"`
+	Custody      string `json:"custody,omitempty"`
+	SourceSHA    string `json:"source_sha,omitempty"`
+	Reference    string `json:"reference"`
+	Digest       string `json:"digest,omitempty"`
+	ConfigDigest string `json:"config_digest,omitempty"`
+	Checksum     string `json:"checksum,omitempty"`
+	Path         string `json:"path,omitempty"`
 }
 
 var (
@@ -89,6 +90,9 @@ func (fixture Fixture) Validate() error {
 		seen[key] = struct{}{}
 		if input.Digest != "" && !canonicalHash.MatchString(input.Digest) {
 			return fmt.Errorf("fixture input %q has invalid digest %q", input.Name, input.Digest)
+		}
+		if input.ConfigDigest != "" && !canonicalHash.MatchString(input.ConfigDigest) {
+			return fmt.Errorf("fixture input %q has invalid config digest %q", input.Name, input.ConfigDigest)
 		}
 		if input.Checksum != "" && !canonicalHash.MatchString(input.Checksum) {
 			return fmt.Errorf("fixture input %q has invalid checksum %q", input.Name, input.Checksum)

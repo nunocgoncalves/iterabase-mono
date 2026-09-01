@@ -38,12 +38,13 @@ type requestEvidence struct {
 }
 
 type deployedImage struct {
-	name       string
-	repository string
-	tag        string
-	digest     string
-	sourceSHA  string
-	archive    string
+	name         string
+	repository   string
+	tag          string
+	digest       string
+	configDigest string
+	sourceSHA    string
+	archive      string
 }
 
 func (image *deployedImage) reference() string { return image.repository + ":" + image.tag }
@@ -52,47 +53,48 @@ func (image *deployedImage) reference() string { return image.repository + ":" +
 // state and fresh Kind cluster; later execution/browser scenarios may compose
 // these mechanics without sharing mutable clusters between contracts.
 type deployedState struct {
-	ctx              context.Context
-	repoRoot         string
-	controlRoot      string
-	chartsRoot       string
-	outputDir        string
-	diagnosticsDir   string
-	requestLog       string
-	redactor         *redact.Redactor
-	runner           process.Runner
-	cluster          *kindcluster.Cluster
-	client           kube.Client
-	platform         kube.Chart
-	substrate        kube.Chart
-	forwards         []*kube.Forward
-	apiForward       *kube.Forward
-	apiClient        *http.Client
-	browserProxy     *deployedBrowserProxy
-	imageRepo        string
-	imageTag         string
-	imageDigest      string
-	imageArchive     string
-	harnessImage     deployedImage
-	toolRunnerImage  deployedImage
-	inferenceImage   deployedImage
-	runtimeImage     deployedImage
-	toolDigests      map[string]string
-	toolV2           []toolFixture
-	fluxRevision     string
-	fluxDigest       string
-	adminKey         string
-	tokenKey         string
-	workKey          string
-	workIdentityID   string
-	workItemID       string
-	initialCursor    int64
-	firstAttemptJSON []byte
-	firstAttemptID   string
-	feedbackID       string
-	revisedAttemptID string
-	artifactID       string
-	mu               sync.Mutex
+	ctx               context.Context
+	repoRoot          string
+	controlRoot       string
+	chartsRoot        string
+	outputDir         string
+	diagnosticsDir    string
+	requestLog        string
+	redactor          *redact.Redactor
+	runner            process.Runner
+	cluster           *kindcluster.Cluster
+	client            kube.Client
+	platform          kube.Chart
+	substrate         kube.Chart
+	forwards          []*kube.Forward
+	apiForward        *kube.Forward
+	apiClient         *http.Client
+	browserProxy      *deployedBrowserProxy
+	imageRepo         string
+	imageTag          string
+	imageDigest       string
+	imageConfigDigest string
+	imageArchive      string
+	harnessImage      deployedImage
+	toolRunnerImage   deployedImage
+	inferenceImage    deployedImage
+	runtimeImage      deployedImage
+	toolDigests       map[string]string
+	toolV2            []toolFixture
+	fluxRevision      string
+	fluxDigest        string
+	adminKey          string
+	tokenKey          string
+	workKey           string
+	workIdentityID    string
+	workItemID        string
+	initialCursor     int64
+	firstAttemptJSON  []byte
+	firstAttemptID    string
+	feedbackID        string
+	revisedAttemptID  string
+	artifactID        string
+	mu                sync.Mutex
 }
 
 func newDeployedState(t *testing.T) *deployedState {
@@ -145,6 +147,7 @@ func (state *deployedState) resolveRuntime(t *testing.T) {
 	state.imageRepo = controlImage.repository
 	state.imageTag = controlImage.tag
 	state.imageDigest = controlImage.digest
+	state.imageConfigDigest = controlImage.configDigest
 	state.imageArchive = controlImage.archive
 	state.harnessImage = runtimeImage(t, "harness", "HARNESS", false)
 	state.toolRunnerImage = runtimeImage(t, "tool-runner", "TOOL_RUNNER", false)
@@ -173,14 +176,16 @@ func runtimeImage(t *testing.T, name, prefix string, required bool) deployedImag
 	}[prefix]
 	image := deployedImage{
 		name: name, repository: os.Getenv(prefix + "_IMAGE_REPO"), tag: os.Getenv(prefix + "_IMAGE_TAG"),
-		digest: os.Getenv(prefix + "_IMAGE_DIGEST"), sourceSHA: os.Getenv(prefix + "_IMAGE_SOURCE_SHA"),
-		archive: os.Getenv(archiveEnv),
+		digest: os.Getenv(prefix + "_IMAGE_DIGEST"), configDigest: os.Getenv(prefix + "_IMAGE_CONFIG_DIGEST"),
+		sourceSHA: os.Getenv(prefix + "_IMAGE_SOURCE_SHA"), archive: os.Getenv(archiveEnv),
 	}
-	if image.repository == "" && image.tag == "" && image.digest == "" && image.archive == "" && !required {
+	if image.repository == "" && image.tag == "" && image.digest == "" && image.configDigest == "" && image.archive == "" && !required {
 		return deployedImage{}
 	}
-	if image.repository == "" || image.tag == "" || image.archive == "" || !regexp.MustCompile(`^sha256:[0-9a-f]{64}$`).MatchString(image.digest) {
-		t.Fatalf("composed runtime requires exact %s image repository/tag/digest/archive", prefix)
+	if image.repository == "" || image.tag == "" || image.archive == "" ||
+		!regexp.MustCompile(`^sha256:[0-9a-f]{64}$`).MatchString(image.digest) ||
+		!regexp.MustCompile(`^sha256:[0-9a-f]{64}$`).MatchString(image.configDigest) {
+		t.Fatalf("composed runtime requires exact %s image repository/tag/artifact-digest/config-digest/archive", prefix)
 	}
 	return image
 }
@@ -229,7 +234,8 @@ func importRuntimeImagesStage(t *testing.T, state *deployedState) {
 	t.Helper()
 	control := deployedImage{
 		name: "control-plane", repository: state.imageRepo, tag: state.imageTag,
-		digest: state.imageDigest, sourceSHA: os.Getenv("CONTROL_PLANE_IMAGE_SOURCE_SHA"), archive: state.imageArchive,
+		digest: state.imageDigest, configDigest: state.imageConfigDigest,
+		sourceSHA: os.Getenv("CONTROL_PLANE_IMAGE_SOURCE_SHA"), archive: state.imageArchive,
 	}
 	images := []*deployedImage{&control, &state.harnessImage, &state.toolRunnerImage, &state.inferenceImage, &state.runtimeImage}
 	for _, image := range images {
@@ -243,50 +249,21 @@ func importRuntimeImagesStage(t *testing.T, state *deployedState) {
 
 func loadLocalImage(t *testing.T, state *deployedState, image *deployedImage) {
 	t.Helper()
-	if err := state.cluster.ImportImageArchive(state.ctx, image.archive, image.reference()); err != nil {
+	identity, err := state.cluster.ImportImageArchive(state.ctx, image.archive, image.reference(), image.configDigest)
+	if err != nil {
 		t.Fatalf("import composed %s image archive into Kind: %v", image.name, err)
 	}
-	nodes, err := state.runner.Run(state.ctx, process.Command{
-		Name: "kind", Args: []string{"get", "nodes", "--name", state.cluster.Name}, Timeout: 30 * time.Second,
-	})
-	if err != nil || strings.TrimSpace(nodes.Output) == "" {
-		t.Fatalf("resolve Kind node for %s image inspection: %v", image.name, err)
+	if image.sourceSHA != "" && identity.Labels["org.opencontainers.image.revision"] != image.sourceSHA {
+		t.Fatalf("Kind %s image revision label=%q want=%q", image.name, identity.Labels["org.opencontainers.image.revision"], image.sourceSHA)
 	}
-	node := strings.Fields(nodes.Output)[0]
-	inspection, err := state.runner.Run(state.ctx, process.Command{
-		Name: "docker", Args: []string{"exec", node, "crictl", "inspecti", image.reference()},
-		Timeout: 30 * time.Second, OutputName: "kind-composed-image-" + image.name + ".json",
-	})
-	if err != nil {
-		t.Fatalf("inspect composed %s image inside Kind: %v\n%s", image.name, err, inspection.Output)
+	artifact := map[string]string{
+		"control-plane": "control-plane-image", "harness": "harness-image", "tool-runner": "tool-runner-image",
+		"inference-gateway": "inference-gateway-image", "runtime-fixture": "runtime-fixture-image",
+	}[image.name]
+	if err := sharede2e.RecordRuntimeImageIdentity(artifact, identity.RuntimeDigest); err != nil {
+		t.Fatalf("record Kind %s runtime image identity: %v", image.name, err)
 	}
-	var runtimeImage struct {
-		Status struct {
-			RepoDigests []string `json:"repoDigests"`
-			RepoTags    []string `json:"repoTags"`
-		} `json:"status"`
-		Info struct {
-			ImageSpec struct {
-				Config struct {
-					Labels map[string]string `json:"Labels"`
-				} `json:"config"`
-			} `json:"imageSpec"`
-		} `json:"info"`
-	}
-	if err := json.Unmarshal([]byte(inspection.Output), &runtimeImage); err != nil {
-		t.Fatalf("decode Kind %s image inspection: %v", image.name, err)
-	}
-	if image.sourceSHA != "" && runtimeImage.Info.ImageSpec.Config.Labels["org.opencontainers.image.revision"] != image.sourceSHA {
-		t.Fatalf("Kind %s image revision label=%q want=%q", image.name, runtimeImage.Info.ImageSpec.Config.Labels["org.opencontainers.image.revision"], image.sourceSHA)
-	}
-	if len(runtimeImage.Status.RepoDigests) != 1 || len(runtimeImage.Status.RepoTags) != 1 {
-		t.Fatalf("Kind %s image identity is ambiguous: tags=%v digests=%v", image.name, runtimeImage.Status.RepoTags, runtimeImage.Status.RepoDigests)
-	}
-	_, digest, found := strings.Cut(runtimeImage.Status.RepoDigests[0], "@")
-	if !found || !regexp.MustCompile(`^sha256:[0-9a-f]{64}$`).MatchString(digest) {
-		t.Fatalf("Kind %s image has no canonical runtime digest: %v", image.name, runtimeImage.Status.RepoDigests)
-	}
-	image.digest = digest
+	image.digest = identity.RuntimeDigest
 }
 
 func installCertificateSubstrateStage(t *testing.T, state *deployedState) {

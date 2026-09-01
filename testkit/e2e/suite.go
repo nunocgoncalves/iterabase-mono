@@ -233,12 +233,17 @@ func runScenario[S any](t *testing.T, scenario Scenario[S], execution scenarioEx
 			for _, stage := range scenario.Stages {
 				stages = append(stages, StageResult{Name: stage.Name, DependsOn: slices.Clone(stage.DependsOn), Status: string(statuses[stage.Name])})
 			}
+			artifacts, identityErr := resultArtifactsWithRuntimeIdentities(execution.bundle.Artifacts, status == "passed")
+			if identityErr != nil {
+				status = "failed"
+				t.Errorf("reconcile observed runtime image identities: %v", identityErr)
+			}
 			result := ScenarioResult{
 				SchemaVersion: 1, ScenarioID: execution.scenarioID, Status: status,
 				SourceSHA: execution.bundle.SourceSHA, PlanSHA256: execution.bundle.PlanSHA256,
 				CatalogueSHA256: execution.bundle.CatalogueSHA256, RuntimeSHA256: execution.runtimeSHA256,
 				StageGraphSHA256: stageGraphSHA256(cloneStagesFromScenario(scenario.Stages)),
-				FixtureMode:      execution.fixture.Mode, Artifacts: execution.bundle.Artifacts, Stages: stages,
+				FixtureMode:      execution.fixture.Mode, Artifacts: artifacts, Stages: stages,
 			}
 			if err := writeScenarioResult(os.Getenv(ResultOutputEnv), result); err != nil {
 				t.Errorf("write required scenario result: %v", err)

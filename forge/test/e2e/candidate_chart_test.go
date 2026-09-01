@@ -1,11 +1,15 @@
 package e2e
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
+
+	sharede2e "github.com/nunocgoncalves/iterabase-mono/testkit/e2e"
 )
 
 const (
@@ -17,40 +21,46 @@ const (
 // companion archives to the ephemeral host. Forge then gives remote Helm those
 // extracted directories, so real-machine validation consumes the candidate
 // bytes without publishing a persistent candidate package.
-func prepareCandidateImages(t *testing.T, ip, keyPath string) {
+func prepareCandidateImages(t *testing.T, ip, keyPath string) map[string]string {
 	t.Helper()
-	productArchives := []string{
-		os.Getenv("FORGE_E2E_CONTROL_PLANE_IMAGE_ARCHIVE"),
-		os.Getenv("FORGE_E2E_HARNESS_IMAGE_ARCHIVE"),
-		os.Getenv("FORGE_E2E_TOOL_RUNNER_IMAGE_ARCHIVE"),
-		os.Getenv("FORGE_E2E_INFERENCE_IMAGE_ARCHIVE"),
+	runtimeDigests := make(map[string]string)
+	type imageInput struct {
+		name       string
+		prefix     string
+		archiveEnv string
 	}
-	fixtureArchive := os.Getenv("FORGE_E2E_RUNTIME_IMAGE_ARCHIVE")
-	archives := make([]string, 0, len(productArchives)+1)
-	productArchiveCount := 0
-	for _, archive := range productArchives {
-		if archive != "" {
-			productArchiveCount++
+	inputs := []imageInput{
+		{name: "control-plane", prefix: "CONTROL_PLANE", archiveEnv: "FORGE_E2E_CONTROL_PLANE_IMAGE_ARCHIVE"},
+		{name: "harness", prefix: "HARNESS", archiveEnv: "FORGE_E2E_HARNESS_IMAGE_ARCHIVE"},
+		{name: "tool-runner", prefix: "TOOL_RUNNER", archiveEnv: "FORGE_E2E_TOOL_RUNNER_IMAGE_ARCHIVE"},
+		{name: "inference-gateway", prefix: "INFERENCE_GATEWAY", archiveEnv: "FORGE_E2E_INFERENCE_IMAGE_ARCHIVE"},
+		{name: "runtime-fixture", prefix: "FORGE_E2E_RUNTIME", archiveEnv: "FORGE_E2E_RUNTIME_IMAGE_ARCHIVE"},
+	}
+	selected := make([]imageInput, 0, len(inputs))
+	for _, input := range inputs {
+		if os.Getenv(input.archiveEnv) == "" && os.Getenv(input.prefix+"_IMAGE_REPO") == "" &&
+			os.Getenv(input.prefix+"_IMAGE_TAG") == "" && os.Getenv(input.prefix+"_IMAGE_CONFIG_DIGEST") == "" {
+			continue
 		}
+		selected = append(selected, input)
 	}
-	if productArchiveCount != 0 && productArchiveCount != len(productArchives) {
-		t.Fatal("exact source workspace candidate requires all four local product image archives")
-	}
-	if productArchiveCount == len(productArchives) {
-		archives = append(archives, productArchives...)
-	}
-	if fixtureArchive != "" {
-		archives = append(archives, fixtureArchive)
-	}
-	if len(archives) == 0 {
-		return
+	if len(selected) == 0 {
+		return runtimeDigests
 	}
 	client, err := sshDial(ip, keyPath)
 	if err != nil {
 		t.Fatalf("dial candidate host to transfer images: %v", err)
 	}
 	defer client.Close()
-	for _, archive := range archives {
+	for _, input := range selected {
+		archive := os.Getenv(input.archiveEnv)
+		repository := os.Getenv(input.prefix + "_IMAGE_REPO")
+		tag := os.Getenv(input.prefix + "_IMAGE_TAG")
+		configDigest := os.Getenv(input.prefix + "_IMAGE_CONFIG_DIGEST")
+		if repository == "" || tag == "" || !isCanonicalSHA256Digest(configDigest) {
+			t.Fatalf("composed %s image has incomplete repository/tag/config-digest identity", input.name)
+		}
+		reference := repository + ":" + tag
 		source, err := os.Open(archive)
 		if err != nil {
 			t.Fatalf("open candidate image archive %s: %v", archive, err)
@@ -71,6 +81,93 @@ func prepareCandidateImages(t *testing.T, ip, keyPath string) {
 		if output, err := sshOutput(client, "sudo k3s ctr images import "+candidateShellQuote(remote)+" && rm -f "+candidateShellQuote(remote)); err != nil {
 			t.Fatalf("import candidate image %s: %v\n%s", archive, err, output)
 		}
+		inspection, err := sshOutput(client, "sudo k3s crictl inspecti "+candidateShellQuote(reference))
+		if err != nil {
+			t.Fatalf("inspect imported candidate image %s: %v\n%s", reference, err, inspection)
+		}
+		repoTag, labels, err := importedRuntimeImageConfig([]byte(inspection), configDigest)
+		if err != nil {
+			t.Fatalf("verify imported candidate image %s config: %v", reference, err)
+		}
+		manifest, err := sshOutput(client, "sudo k3s ctr images inspect "+candidateShellQuote(repoTag))
+		if err != nil {
+			t.Fatalf("inspect imported candidate image %s manifest: %v\n%s", reference, err, manifest)
+		}
+		runtimeDigest, err := importedRuntimeManifestDigest([]byte(manifest))
+		if err != nil {
+			t.Fatalf("verify imported candidate image %s manifest: %v", reference, err)
+		}
+		if sourceSHA := os.Getenv(input.prefix + "_IMAGE_SOURCE_SHA"); sourceSHA != "" && labels["org.opencontainers.image.revision"] != sourceSHA {
+			t.Fatalf("imported %s image revision label=%q want=%q", input.name, labels["org.opencontainers.image.revision"], sourceSHA)
+		}
+		runtimeDigests[input.prefix] = runtimeDigest
+		artifact := map[string]string{
+			"CONTROL_PLANE": "control-plane-image", "HARNESS": "harness-image", "TOOL_RUNNER": "tool-runner-image",
+			"INFERENCE_GATEWAY": "inference-gateway-image", "FORGE_E2E_RUNTIME": "runtime-fixture-image",
+		}[input.prefix]
+		if err := sharede2e.RecordRuntimeImageIdentity(artifact, runtimeDigest); err != nil {
+			t.Fatalf("record imported %s runtime identity: %v", input.name, err)
+		}
+	}
+	return runtimeDigests
+}
+
+func importedRuntimeImageConfig(data []byte, expectedConfigDigest string) (string, map[string]string, error) {
+	var image struct {
+		Status struct {
+			ID       string   `json:"id"`
+			RepoTags []string `json:"repoTags"`
+		} `json:"status"`
+		Info struct {
+			ImageSpec struct {
+				Config struct {
+					Labels map[string]string `json:"Labels"`
+				} `json:"config"`
+			} `json:"imageSpec"`
+		} `json:"info"`
+	}
+	if err := json.Unmarshal(data, &image); err != nil {
+		return "", nil, fmt.Errorf("decode CRI image identity: %w", err)
+	}
+	if image.Status.ID != expectedConfigDigest {
+		return "", nil, fmt.Errorf("CRI config digest %q != %q", image.Status.ID, expectedConfigDigest)
+	}
+	if len(image.Status.RepoTags) != 1 {
+		return "", nil, fmt.Errorf("CRI runtime tags are ambiguous: %v", image.Status.RepoTags)
+	}
+	return image.Status.RepoTags[0], image.Info.ImageSpec.Config.Labels, nil
+}
+
+var importedManifestDigestPattern = regexp.MustCompile(`(?m)application/vnd\.(?:oci\.image\.manifest|docker\.distribution\.manifest)[^@\n]*@(sha256:[0-9a-f]{64})`)
+
+func importedRuntimeManifestDigest(data []byte) (string, error) {
+	matches := importedManifestDigestPattern.FindAllSubmatch(data, -1)
+	if len(matches) != 1 {
+		return "", fmt.Errorf("imported runtime manifest identity is ambiguous")
+	}
+	return string(matches[0][1]), nil
+}
+
+func TestImportedRuntimeImageIdentityKeepsConfigAndManifestDigestsDistinct(t *testing.T) {
+	configDigest := "sha256:" + strings.Repeat("a", 64)
+	runtimeDigest := "sha256:" + strings.Repeat("b", 64)
+	configData := []byte(fmt.Sprintf(
+		`{"status":{"id":%q,"repoTags":["docker.io/iterabase-e2e/control-plane:exact-head"]},"info":{"imageSpec":{"config":{"Labels":{"org.opencontainers.image.revision":"exact-head"}}}}}`,
+		configDigest,
+	))
+	repoTag, labels, err := importedRuntimeImageConfig(configData, configDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := importedRuntimeManifestDigest([]byte("└── application/vnd.oci.image.manifest.v1+json @" + runtimeDigest + " (1170 bytes)\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repoTag != "docker.io/iterabase-e2e/control-plane:exact-head" || got != runtimeDigest || labels["org.opencontainers.image.revision"] != "exact-head" {
+		t.Fatalf("repoTag=%s runtime identity=%s labels=%v", repoTag, got, labels)
+	}
+	if _, _, err := importedRuntimeImageConfig(configData, "sha256:"+strings.Repeat("c", 64)); err == nil {
+		t.Fatal("mismatched composer config digest unexpectedly passed remote import verification")
 	}
 }
 

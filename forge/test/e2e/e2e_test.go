@@ -135,6 +135,7 @@ type digitalOceanCPUState struct {
 	initialWorkerPodUID string
 	workspaceAdminKey   string
 	workspaceWorkKey    string
+	runtimeImageDigests map[string]string
 	diagnostics         forgeDiagnostics
 }
 
@@ -156,13 +157,14 @@ func newDigitalOceanCPUStateForScenario(t *testing.T, scenario string) *digitalO
 	}
 
 	state := &digitalOceanCPUState{
-		ctx:         context.Background(),
-		provisioner: &doCPUVMProvisioner{client: godo.NewFromToken(token), size: managedSize},
-		ready:       waitForHostReady,
-		runID:       fmt.Sprintf("forge-e2e-%d", time.Now().Unix()),
-		keep:        os.Getenv("FORGE_E2E_KEEP") != "",
-		forgeHome:   t.TempDir(),
-		diagnostics: newForgeDiagnostics(t, scenario),
+		ctx:                 context.Background(),
+		provisioner:         &doCPUVMProvisioner{client: godo.NewFromToken(token), size: managedSize},
+		ready:               waitForHostReady,
+		runID:               fmt.Sprintf("forge-e2e-%d", time.Now().Unix()),
+		keep:                os.Getenv("FORGE_E2E_KEEP") != "",
+		forgeHome:           t.TempDir(),
+		runtimeImageDigests: make(map[string]string),
+		diagnostics:         newForgeDiagnostics(t, scenario),
 	}
 	if githubToken := os.Getenv("GITHUB_TOKEN"); githubToken != "" {
 		state.diagnostics.redactor.Add(githubToken)

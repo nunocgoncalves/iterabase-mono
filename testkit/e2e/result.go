@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -28,15 +29,105 @@ const (
 
 // RuntimeArtifact is one identity verified by the shared runtime composer.
 type RuntimeArtifact struct {
-	Name       string `json:"name"`
-	Kind       string `json:"kind"`
-	Custody    string `json:"custody"`
-	SourceSHA  string `json:"source_sha,omitempty"`
-	Reference  string `json:"reference"`
-	Digest     string `json:"digest,omitempty"`
-	Checksum   string `json:"checksum,omitempty"`
-	Path       string `json:"path,omitempty"`
-	RecipeHash string `json:"recipe_sha256,omitempty"`
+	Name          string `json:"name"`
+	Kind          string `json:"kind"`
+	Custody       string `json:"custody"`
+	SourceSHA     string `json:"source_sha,omitempty"`
+	Reference     string `json:"reference"`
+	Digest        string `json:"digest,omitempty"`
+	ConfigDigest  string `json:"config_digest,omitempty"`
+	RuntimeDigest string `json:"runtime_digest,omitempty"`
+	Checksum      string `json:"checksum,omitempty"`
+	Path          string `json:"path,omitempty"`
+	RecipeHash    string `json:"recipe_sha256,omitempty"`
+}
+
+var observedRuntimeIdentityMu sync.Mutex
+
+// RecordRuntimeImageIdentity retains the immutable single-platform manifest
+// digest observed after an exact archive is imported into the execution host.
+// Required result assembly reconciles this set with the bundle's image set.
+func RecordRuntimeImageIdentity(name, digest string) error {
+	if os.Getenv(RequiredEnv) != "true" {
+		return nil
+	}
+	if name == "" || !canonicalHash.MatchString(digest) || !strings.HasPrefix(digest, "sha256:") {
+		return fmt.Errorf("observed runtime image identity is invalid: %q=%q", name, digest)
+	}
+	resultPath := os.Getenv(ResultOutputEnv)
+	if resultPath == "" {
+		return fmt.Errorf("%s is empty while recording runtime image identity", ResultOutputEnv)
+	}
+	path := resultPath + ".runtime-images.json"
+	observedRuntimeIdentityMu.Lock()
+	defer observedRuntimeIdentityMu.Unlock()
+	identities := make(map[string]string)
+	if data, err := os.ReadFile(path); err == nil {
+		if err := json.Unmarshal(data, &identities); err != nil {
+			return fmt.Errorf("decode observed runtime image identities: %w", err)
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("read observed runtime image identities: %w", err)
+	}
+	if _, exists := identities[name]; exists {
+		return fmt.Errorf("runtime image identity %q was already recorded", name)
+	}
+	identities[name] = digest
+	data, err := json.MarshalIndent(identities, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	temporary := path + ".tmp"
+	if err := os.WriteFile(temporary, data, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(temporary, path)
+}
+
+func resultArtifactsWithRuntimeIdentities(artifacts []RuntimeArtifact, requireComplete bool) ([]RuntimeArtifact, error) {
+	result := append([]RuntimeArtifact(nil), artifacts...)
+	expected := make(map[string]int)
+	for index := range result {
+		if result[index].Kind == "image" {
+			expected[result[index].Name] = index
+		}
+	}
+	if len(expected) == 0 {
+		return result, nil
+	}
+	path := os.Getenv(ResultOutputEnv) + ".runtime-images.json"
+	identities := make(map[string]string)
+	if data, err := os.ReadFile(path); err == nil {
+		if err := json.Unmarshal(data, &identities); err != nil {
+			return result, fmt.Errorf("decode observed runtime image identities: %w", err)
+		}
+	} else if !os.IsNotExist(err) {
+		return result, fmt.Errorf("read observed runtime image identities: %w", err)
+	}
+	for name, digest := range identities {
+		index, exists := expected[name]
+		if !exists {
+			return result, fmt.Errorf("observed unexpected runtime image identity %q", name)
+		}
+		if !canonicalHash.MatchString(digest) || !strings.HasPrefix(digest, "sha256:") {
+			return result, fmt.Errorf("observed runtime image %q has invalid digest", name)
+		}
+		result[index].RuntimeDigest = digest
+		delete(expected, name)
+	}
+	if requireComplete && len(expected) != 0 {
+		missing := make([]string, 0, len(expected))
+		for name := range expected {
+			missing = append(missing, name)
+		}
+		sort.Strings(missing)
+		return result, fmt.Errorf("passed scenario has no observed runtime identity for images: %v", missing)
+	}
+	return result, nil
 }
 
 // RuntimeBundle binds a generated plan to the exact artifacts supplied to a scenario.
@@ -132,6 +223,9 @@ func validateRuntimeBundle(bundle RuntimeBundle) error {
 		if artifact.Digest != "" && !canonicalHash.MatchString(artifact.Digest) {
 			return fmt.Errorf("runtime artifact %q has invalid digest", artifact.Name)
 		}
+		if artifact.Kind == "image" && (!canonicalHash.MatchString(artifact.Digest) || !canonicalHash.MatchString(artifact.ConfigDigest)) {
+			return fmt.Errorf("runtime image artifact %q has incomplete artifact/config digest pair", artifact.Name)
+		}
 		if artifact.Checksum != "" && !canonicalHash.MatchString(artifact.Checksum) {
 			return fmt.Errorf("runtime artifact %q has invalid checksum", artifact.Name)
 		}
@@ -155,7 +249,8 @@ func fixtureFromRuntimeBundle(bundle RuntimeBundle) Fixture {
 		fixture.Inputs = append(fixture.Inputs, FixtureInput{
 			Name: artifact.Name, Kind: artifact.Kind, Custody: artifact.Custody,
 			SourceSHA: artifact.SourceSHA, Reference: artifact.Reference,
-			Digest: artifact.Digest, Checksum: artifact.Checksum, Path: artifact.Path,
+			Digest: artifact.Digest, ConfigDigest: artifact.ConfigDigest,
+			Checksum: artifact.Checksum, Path: artifact.Path,
 		})
 	}
 	sort.Slice(fixture.Inputs, func(i, j int) bool { return fixture.Inputs[i].Name < fixture.Inputs[j].Name })

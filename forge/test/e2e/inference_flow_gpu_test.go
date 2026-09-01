@@ -27,6 +27,7 @@ import (
 // and inference correctness remain authoritative in control-plane E2E.
 func applyInferencePlatformStage(t *testing.T, state *digitalOceanGPUState) {
 	prepareCandidateChart(t, state.vm.IP, state.privKeyPath)
+	state.runtimeImageDigests = prepareCandidateImages(t, state.vm.IP, state.privKeyPath)
 	plan := prepareCandidateOverlay(t, state.runID, state.vm.IP, state.privKeyPath)
 	// GPU readiness was already proven on this host. Reconcile the same config
 	// with the platform chart while skipping a redundant GPU-operator upgrade.
@@ -39,7 +40,7 @@ func applyInferencePlatformStage(t *testing.T, state *digitalOceanGPUState) {
 	assertApplyMarkers(t, out, markers...)
 	t.Logf("apply output:\n%s", out)
 	candidateCluster := remotecluster.Use(t, filepath.Join(state.forgeHome, state.runID, "kubeconfig.yaml"))
-	assertCandidateImageDigests(t, candidateCluster, "iterabase-system",
+	assertCandidateImageDigests(t, candidateCluster, "iterabase-system", state.runtimeImageDigests,
 		controlPlaneDigestEnv, inferenceGatewayDigestEnv, toolRunnerDigestEnv)
 }
 

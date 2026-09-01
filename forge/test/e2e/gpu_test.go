@@ -164,18 +164,19 @@ func newGPUDropletRequest(name, pubKeyStr, region, sizeSlug string) *godo.Drople
 }
 
 type digitalOceanGPUState struct {
-	ctx             context.Context
-	provisioner     GPUVMProvisioner
-	runID           string
-	keep            bool
-	pubKey          string
-	privKeyPath     string
-	vm              *GPUVM
-	forgeBin        string
-	forgeHome       string
-	chartVersion    string
-	upgradeEvidence *gpuUpgradeEvidence
-	diagnostics     forgeDiagnostics
+	ctx                 context.Context
+	provisioner         GPUVMProvisioner
+	runID               string
+	keep                bool
+	pubKey              string
+	privKeyPath         string
+	vm                  *GPUVM
+	forgeBin            string
+	forgeHome           string
+	chartVersion        string
+	upgradeEvidence     *gpuUpgradeEvidence
+	runtimeImageDigests map[string]string
+	diagnostics         forgeDiagnostics
 }
 
 func newDigitalOceanGPUState(t *testing.T) *digitalOceanGPUState {
@@ -188,16 +189,17 @@ func newDigitalOceanGPUState(t *testing.T) *digitalOceanGPUState {
 	client := godo.NewFromToken(token)
 	pubKey, privKeyPath := generateKey(t)
 	state := &digitalOceanGPUState{
-		ctx:          ctx,
-		provisioner:  &doGPUVMProvisioner{client: client},
-		runID:        fmt.Sprintf("forge-gpu-%d", time.Now().Unix()),
-		keep:         os.Getenv("FORGE_E2E_KEEP") != "",
-		pubKey:       pubKey,
-		privKeyPath:  privKeyPath,
-		forgeBin:     buildForge(t),
-		forgeHome:    t.TempDir(),
-		chartVersion: platformChartVersion(t, ""),
-		diagnostics:  newForgeDiagnostics(t, "digitalocean-gpu"),
+		ctx:                 ctx,
+		provisioner:         &doGPUVMProvisioner{client: client},
+		runID:               fmt.Sprintf("forge-gpu-%d", time.Now().Unix()),
+		keep:                os.Getenv("FORGE_E2E_KEEP") != "",
+		pubKey:              pubKey,
+		privKeyPath:         privKeyPath,
+		forgeBin:            buildForge(t),
+		forgeHome:           t.TempDir(),
+		chartVersion:        platformChartVersion(t, ""),
+		runtimeImageDigests: make(map[string]string),
+		diagnostics:         newForgeDiagnostics(t, "digitalocean-gpu"),
 	}
 	return state
 }

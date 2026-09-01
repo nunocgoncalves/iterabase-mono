@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -70,6 +71,7 @@ type chartState struct {
 	platform             kube.Chart
 	substrate            kube.Chart
 	transitionBaselines  map[string]transitionBaseline
+	runtimeImageDigests  map[string]string
 	snapshots            map[string]lifecycleSnapshot
 	internalIngressIP    string
 	internalPool         string
@@ -106,7 +108,8 @@ func newChartState(t *testing.T) *chartState {
 	redactor := redact.New()
 	state := &chartState{
 		ctx: context.Background(), chartsRoot: chartsRoot, outputDir: outputDir, diagnosticsDir: diagnosticsDir, redactor: redactor,
-		runner: process.Runner{Redactor: redactor, OutputDir: outputDir}, snapshots: make(map[string]lifecycleSnapshot),
+		runner:              process.Runner{Redactor: redactor, OutputDir: outputDir},
+		runtimeImageDigests: make(map[string]string), snapshots: make(map[string]lifecycleSnapshot),
 	}
 	state.platform, state.substrate = resolveCharts(t, chartsRoot)
 	return state
@@ -177,30 +180,43 @@ func importRuntimeImagesStage(t *testing.T, state *chartState) {
 	t.Helper()
 	images := []struct {
 		name       string
+		artifact   string
 		prefix     string
 		archiveEnv string
 	}{
-		{name: "control-plane", prefix: "CONTROL_PLANE", archiveEnv: "FORGE_E2E_CONTROL_PLANE_IMAGE_ARCHIVE"},
-		{name: "inference-gateway", prefix: "INFERENCE_GATEWAY", archiveEnv: "FORGE_E2E_INFERENCE_IMAGE_ARCHIVE"},
-		{name: "harness", prefix: "HARNESS", archiveEnv: "FORGE_E2E_HARNESS_IMAGE_ARCHIVE"},
-		{name: "tool-runner", prefix: "TOOL_RUNNER", archiveEnv: "FORGE_E2E_TOOL_RUNNER_IMAGE_ARCHIVE"},
-		{name: "runtime-fixture", prefix: "FORGE_E2E_RUNTIME", archiveEnv: "FORGE_E2E_RUNTIME_IMAGE_ARCHIVE"},
+		{name: "control-plane", artifact: "control-plane-image", prefix: "CONTROL_PLANE", archiveEnv: "FORGE_E2E_CONTROL_PLANE_IMAGE_ARCHIVE"},
+		{name: "inference-gateway", artifact: "inference-gateway-image", prefix: "INFERENCE_GATEWAY", archiveEnv: "FORGE_E2E_INFERENCE_IMAGE_ARCHIVE"},
+		{name: "harness", artifact: "harness-image", prefix: "HARNESS", archiveEnv: "FORGE_E2E_HARNESS_IMAGE_ARCHIVE"},
+		{name: "tool-runner", artifact: "tool-runner-image", prefix: "TOOL_RUNNER", archiveEnv: "FORGE_E2E_TOOL_RUNNER_IMAGE_ARCHIVE"},
+		{name: "runtime-fixture", artifact: "runtime-fixture-image", prefix: "FORGE_E2E_RUNTIME", archiveEnv: "FORGE_E2E_RUNTIME_IMAGE_ARCHIVE"},
 	}
 	imported := 0
 	for _, image := range images {
 		repository := os.Getenv(image.prefix + "_IMAGE_REPO")
 		tag := os.Getenv(image.prefix + "_IMAGE_TAG")
 		digest := os.Getenv(image.prefix + "_IMAGE_DIGEST")
+		configDigest := os.Getenv(image.prefix + "_IMAGE_CONFIG_DIGEST")
 		archive := os.Getenv(image.archiveEnv)
-		if repository == "" && tag == "" && digest == "" && archive == "" {
+		if repository == "" && tag == "" && digest == "" && configDigest == "" && archive == "" {
 			continue
 		}
-		if repository == "" || tag == "" || archive == "" || !regexp.MustCompile(`^sha256:[0-9a-f]{64}$`).MatchString(digest) {
-			t.Fatalf("composed %s runtime image has incomplete repository/tag/digest/archive identity", image.name)
+		if repository == "" || tag == "" || archive == "" ||
+			!regexp.MustCompile(`^sha256:[0-9a-f]{64}$`).MatchString(digest) ||
+			!regexp.MustCompile(`^sha256:[0-9a-f]{64}$`).MatchString(configDigest) {
+			t.Fatalf("composed %s runtime image has incomplete repository/tag/artifact-digest/config-digest/archive identity", image.name)
 		}
 		reference := repository + ":" + tag
-		if err := state.cluster.ImportImageArchive(state.ctx, archive, reference); err != nil {
+		identity, err := state.cluster.ImportImageArchive(state.ctx, archive, reference, configDigest)
+		if err != nil {
 			t.Fatalf("import composed %s image before chart install: %v", image.name, err)
+		}
+		if sourceSHA := os.Getenv(image.prefix + "_IMAGE_SOURCE_SHA"); sourceSHA != "" &&
+			identity.Labels["org.opencontainers.image.revision"] != sourceSHA {
+			t.Fatalf("imported %s image revision label=%q want=%q", image.name, identity.Labels["org.opencontainers.image.revision"], sourceSHA)
+		}
+		state.runtimeImageDigests[image.prefix] = identity.RuntimeDigest
+		if err := sharede2e.RecordRuntimeImageIdentity(image.artifact, identity.RuntimeDigest); err != nil {
+			t.Fatalf("record imported %s runtime identity: %v", image.name, err)
 		}
 		imported++
 	}
@@ -304,14 +320,25 @@ func assertCandidateImages(t *testing.T, state *chartState) {
 		{selector: "app.kubernetes.io/name=control-plane,app.kubernetes.io/component=api", prefix: "CONTROL_PLANE"},
 		{selector: "app.kubernetes.io/name=inference-gateway", prefix: "INFERENCE_GATEWAY"},
 	} {
-		digest := os.Getenv(image.prefix + "_IMAGE_DIGEST")
-		if digest == "" {
+		repository := os.Getenv(image.prefix + "_IMAGE_REPO")
+		tag := os.Getenv(image.prefix + "_IMAGE_TAG")
+		runtimeDigest := state.runtimeImageDigests[image.prefix]
+		if repository == "" && tag == "" && runtimeDigest == "" {
 			continue
 		}
+		if repository == "" || tag == "" || !regexp.MustCompile(`^sha256:[0-9a-f]{64}$`).MatchString(runtimeDigest) {
+			t.Fatalf("%s imported runtime request/digest identity is incomplete", image.prefix)
+		}
+		reference := repository + ":" + tag
+		requested := state.kubectl(t, 30*time.Second, "get", "pods", "-n", testNamespace, "-l", image.selector,
+			"-o", "jsonpath={.items[*].spec.containers[*].image} {.items[*].spec.initContainers[*].image}")
+		if !slices.Contains(strings.Fields(requested), reference) {
+			t.Fatalf("%s pods did not request exact composed reference %s: %s", image.prefix, reference, requested)
+		}
 		imageIDs := state.kubectl(t, 30*time.Second, "get", "pods", "-n", testNamespace, "-l", image.selector,
-			"-o", "jsonpath={.items[*].status.containerStatuses[*].imageID}")
-		if !strings.Contains(imageIDs, digest) {
-			t.Fatalf("%s pods do not run exact candidate digest %s: %s", image.prefix, digest, imageIDs)
+			"-o", "jsonpath={.items[*].status.containerStatuses[*].imageID} {.items[*].status.initContainerStatuses[*].imageID}")
+		if !strings.Contains(imageIDs, runtimeDigest) {
+			t.Fatalf("%s pods do not run imported runtime digest %s: %s", image.prefix, runtimeDigest, imageIDs)
 		}
 	}
 }
@@ -369,6 +396,7 @@ func setPlatformImage(values map[string]any, component, repository, tag string) 
 	if tag != "" {
 		image["tag"] = tag
 	}
+	image["pullPolicy"] = "Never"
 }
 
 func applyCandidateImages(values map[string]any) {

@@ -32,7 +32,11 @@ scenarios with image requirements must declare `create-kind` followed by
 `import-runtime-images`; every later stage depends transitively on that import.
 The shared Kind helper restores the downloaded archive and transports the exact
 reference into the created nodes, so pre-cluster runner-daemon state cannot
-silently satisfy an install.
+silently satisfy an install. It verifies the archive's config digest and returns
+the imported single-platform manifest digest. Owners then prove that workloads
+requested the composer reference and that CRI reports that runtime digest;
+registry/index, config, and runtime-manifest digests are retained as distinct
+identities rather than compared as if they were interchangeable.
 
 The runner records exactly one terminal status for every declared stage. Failed
 or skipped prerequisites block only dependents, so independent work,

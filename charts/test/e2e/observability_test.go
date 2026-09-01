@@ -177,7 +177,7 @@ func observabilityPlatformValues(t *testing.T) map[string]any {
 	if repository, tag := os.Getenv("TOOL_RUNNER_IMAGE_REPO"), os.Getenv("TOOL_RUNNER_IMAGE_TAG"); repository != "" && tag != "" {
 		controlPlane["toolRunner"] = map[string]any{
 			"enabled": true,
-			"image":   map[string]any{"repository": repository, "tag": tag},
+			"image":   map[string]any{"repository": repository, "tag": tag, "pullPolicy": "Never"},
 			"flux":    map[string]any{"namespace": testNamespace, "sourceName": observabilityToolSourceName},
 		}
 	}
