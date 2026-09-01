@@ -135,7 +135,7 @@ type digitalOceanCPUState struct {
 	initialWorkerPodUID string
 	workspaceAdminKey   string
 	workspaceWorkKey    string
-	runtimeImageDigests map[string]string
+	runtimeImageDigests map[string]importedRuntimeIdentity
 	diagnostics         forgeDiagnostics
 }
 
@@ -163,7 +163,7 @@ func newDigitalOceanCPUStateForScenario(t *testing.T, scenario string) *digitalO
 		runID:               fmt.Sprintf("forge-e2e-%d", time.Now().Unix()),
 		keep:                os.Getenv("FORGE_E2E_KEEP") != "",
 		forgeHome:           t.TempDir(),
-		runtimeImageDigests: make(map[string]string),
+		runtimeImageDigests: make(map[string]importedRuntimeIdentity),
 		diagnostics:         newForgeDiagnostics(t, scenario),
 	}
 	if githubToken := os.Getenv("GITHUB_TOKEN"); githubToken != "" {

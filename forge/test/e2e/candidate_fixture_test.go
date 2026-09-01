@@ -36,11 +36,11 @@ type candidateContainerStatus struct {
 const candidateControlPlaneReadyTimeout = 10 * time.Minute
 
 // assertCandidateImageDigests verifies both sides of the unified runtime
-// contract: Pods request the exact composer reference, while CRI reports the
-// immutable manifest digest established when that archive was imported. The
-// request may carry a registry index digest; the imported runtime digest may be
-// its selected child manifest and is therefore recorded separately.
-func assertCandidateImageDigests(t *testing.T, cluster *remotecluster.Cluster, namespace string, runtimeDigests map[string]string, digestEnvs ...string) {
+// contract. Pods request the exact composer reference and K3s CRI binds their
+// imageID to the config digest proven at import. The same import separately
+// binds that tag to its single-platform manifest digest, which remains the
+// runtime identity retained in scenario evidence.
+func assertCandidateImageDigests(t *testing.T, cluster *remotecluster.Cluster, namespace string, runtimeDigests map[string]importedRuntimeIdentity, digestEnvs ...string) {
 	t.Helper()
 	waitForCandidateControlPlaneReady(t, cluster, namespace, candidateControlPlaneReadyTimeout)
 	var pods struct {
@@ -72,12 +72,13 @@ func assertCandidateImageDigests(t *testing.T, cluster *remotecluster.Cluster, n
 			t.Fatalf("image digest environment %s has no repository/tag authority", envName)
 		}
 		repository, tag := os.Getenv(prefix+"_IMAGE_REPO"), os.Getenv(prefix+"_IMAGE_TAG")
-		runtimeDigest := runtimeDigests[prefix]
-		if repository == "" && tag == "" && runtimeDigest == "" {
+		identity := runtimeDigests[prefix]
+		if repository == "" && tag == "" && identity == (importedRuntimeIdentity{}) {
 			continue
 		}
-		if repository == "" || tag == "" || !isCanonicalSHA256Digest(runtimeDigest) {
-			t.Fatalf("%s composed request/runtime digest identity is incomplete", prefix)
+		if repository == "" || tag == "" || !isCanonicalSHA256Digest(identity.ConfigDigest) ||
+			!isCanonicalSHA256Digest(identity.ManifestDigest) {
+			t.Fatalf("%s composed request/config/manifest digest identity is incomplete", prefix)
 		}
 		expectedReference := repository + ":" + tag
 		found := false
@@ -89,7 +90,7 @@ func assertCandidateImageDigests(t *testing.T, cluster *remotecluster.Cluster, n
 					continue
 				}
 				for _, status := range statuses {
-					if status.Name == spec.Name && strings.Contains(status.ImageID, runtimeDigest) {
+					if status.Name == spec.Name && imageIDMatchesConfigDigest(status.ImageID, identity.ConfigDigest) {
 						found = true
 						break
 					}
@@ -97,9 +98,26 @@ func assertCandidateImageDigests(t *testing.T, cluster *remotecluster.Cluster, n
 			}
 		}
 		if !found {
-			t.Fatalf("no running container in %s requested %s and reported imported runtime digest %s", namespace, expectedReference, runtimeDigest)
+			t.Fatalf("no running container in %s requested %s and reported imported CRI config digest %s", namespace, expectedReference, identity.ConfigDigest)
 		}
-		t.Logf("verified composed request %s and imported runtime digest %s", expectedReference, runtimeDigest)
+		t.Logf("verified composed request %s, CRI config digest %s, and imported runtime manifest %s", expectedReference, identity.ConfigDigest, identity.ManifestDigest)
+	}
+}
+
+func imageIDMatchesConfigDigest(imageID, configDigest string) bool {
+	return imageID == configDigest || strings.HasSuffix(imageID, "@"+configDigest)
+}
+
+func TestImageIDMatchesOnlyImportedConfigDigest(t *testing.T) {
+	configDigest := "sha256:" + strings.Repeat("a", 64)
+	manifestDigest := "sha256:" + strings.Repeat("b", 64)
+	if !imageIDMatchesConfigDigest(configDigest, configDigest) ||
+		!imageIDMatchesConfigDigest("docker.io/iterabase/control-plane@"+configDigest, configDigest) {
+		t.Fatal("valid CRI config identity was rejected")
+	}
+	if imageIDMatchesConfigDigest(manifestDigest, configDigest) ||
+		imageIDMatchesConfigDigest("sha256:prefix"+configDigest, configDigest) {
+		t.Fatal("non-config or substring image identity unexpectedly passed")
 	}
 }
 

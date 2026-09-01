@@ -175,7 +175,7 @@ type digitalOceanGPUState struct {
 	forgeHome           string
 	chartVersion        string
 	upgradeEvidence     *gpuUpgradeEvidence
-	runtimeImageDigests map[string]string
+	runtimeImageDigests map[string]importedRuntimeIdentity
 	diagnostics         forgeDiagnostics
 }
 
@@ -198,7 +198,7 @@ func newDigitalOceanGPUState(t *testing.T) *digitalOceanGPUState {
 		forgeBin:            buildForge(t),
 		forgeHome:           t.TempDir(),
 		chartVersion:        platformChartVersion(t, ""),
-		runtimeImageDigests: make(map[string]string),
+		runtimeImageDigests: make(map[string]importedRuntimeIdentity),
 		diagnostics:         newForgeDiagnostics(t, "digitalocean-gpu"),
 	}
 	return state
