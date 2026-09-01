@@ -17,6 +17,7 @@ from e2e import (
     load_catalogue,
     load_contract,
     make_plan,
+    runtime_image_tag,
     validate_catalogue_contract,
     validate_results,
     set_chart_dependency_version,
@@ -235,6 +236,21 @@ class E2EPlanTests(unittest.TestCase):
 
 
 class RuntimeCompositionContractTests(unittest.TestCase):
+    def test_image_runtime_reference_distinguishes_archive_and_registry_digest(self) -> None:
+        digest = "sha256:" + "b" * 64
+        self.assertEqual(
+            "exact-source-sha",
+            runtime_image_tag("selected-temporary", "exact-source-sha", digest),
+        )
+        self.assertEqual(
+            "candidate-run@" + digest,
+            runtime_image_tag("selected-candidate", "candidate-run", digest),
+        )
+        self.assertEqual(
+            "0.0.30@" + digest,
+            runtime_image_tag("published-baseline", "0.0.30", digest),
+        )
+
     def test_exact_downloaded_artifact_shape_updates_helm_canonical_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as value:
             root = Path(value)

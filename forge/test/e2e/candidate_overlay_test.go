@@ -110,12 +110,13 @@ func prepareCandidateOverlay(t *testing.T, runID, ip, keyPath string) candidateO
 }
 
 func candidateOverlayValues(t *testing.T) string {
+	sourceFixture := os.Getenv("ITERABASE_E2E_FIXTURE_MODE") == "source"
 	imageValues := func(repositoryEnv, tagEnv, digestEnv, prefix string) string {
 		repository, tag, digest := os.Getenv(repositoryEnv), os.Getenv(tagEnv), os.Getenv(digestEnv)
 		if repository == "" || tag == "" {
 			return ""
 		}
-		if digest != "" && !strings.Contains(tag, "@"+digest) {
+		if digest != "" && !sourceFixture && !strings.Contains(tag, "@"+digest) {
 			t.Fatalf("candidate image %s/%s tag %q does not carry selected digest %s", repositoryEnv, tagEnv, tag, digest)
 		}
 		return fmt.Sprintf("%srepository: %q\n%stag: %q\n", prefix, repository, prefix, tag)
@@ -182,6 +183,22 @@ func TestCandidateOverlayValues(t *testing.T) {
 		if !strings.Contains(plan.values, expected) {
 			t.Fatalf("candidate values missing %q:\n%s", expected, plan.values)
 		}
+	}
+}
+
+func TestSourceOverlayValuesRetainImportedTagAndConfigDigest(t *testing.T) {
+	t.Setenv("ITERABASE_E2E_FIXTURE_MODE", "source")
+	t.Setenv("CONTROL_PLANE_IMAGE_REPO", "iterabase-e2e/control-plane")
+	t.Setenv("CONTROL_PLANE_IMAGE_TAG", "exact-source-sha")
+	t.Setenv(controlPlaneDigestEnv, "sha256:"+strings.Repeat("c", 64))
+
+	values := candidateOverlayValues(t)
+	if !strings.Contains(values, "repository: \"iterabase-e2e/control-plane\"") ||
+		!strings.Contains(values, "tag: \"exact-source-sha\"") {
+		t.Fatalf("source overlay lost the exact imported image tag:\n%s", values)
+	}
+	if strings.Contains(values, "tag: \"exact-source-sha@") {
+		t.Fatalf("source overlay treated a docker config digest as a registry manifest digest:\n%s", values)
 	}
 }
 
