@@ -700,6 +700,18 @@ def split_image(reference: str) -> tuple[str, str]:
     return reference[:index], reference[index + 1 :]
 
 
+def runtime_image_tag(custody: str, tag: str, digest: str) -> str:
+    # Temporary docker-save archives are addressed by their exact source tag;
+    # their sha256 identity is the image config digest verified after local
+    # import. Registry-backed candidate/baseline images are requested by their
+    # immutable manifest/index digest as well as their human-readable tag.
+    if custody == "selected-temporary":
+        return tag
+    if not SHA256.fullmatch(digest):
+        raise E2EError(f"registry-backed runtime image has invalid digest {digest!r}")
+    return f"{tag}@{digest}"
+
+
 def split_chart(reference: str) -> tuple[str, str, str]:
     index = reference.rfind(":")
     if index <= reference.rfind("/") or index == len(reference) - 1:
@@ -918,7 +930,7 @@ def compose_runtime(plan_path: Path, scenario_id: str, artifacts: Path, output: 
             record.update({"reference": reference, "digest": digest, "checksum": hash_file(local_archive), "path": str(local_archive)})
             prefix = IMAGE_ENV[name]
             env[f"{prefix}_IMAGE_REPO"] = repository
-            env[f"{prefix}_IMAGE_TAG"] = tag
+            env[f"{prefix}_IMAGE_TAG"] = runtime_image_tag(custody, tag, digest)
             env[f"{prefix}_IMAGE_DIGEST"] = digest
             env[f"{prefix}_IMAGE_ARCHIVE"] = str(local_archive)
             if custody != "published-baseline":
