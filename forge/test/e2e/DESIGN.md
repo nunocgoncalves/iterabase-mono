@@ -68,7 +68,7 @@ volume.
 [`model-cache.json`](model-cache.json) pins the public
 `Qwen/Qwen3.5-0.8B` model at revision
 `2fc06364715b967f1860aea9cf38778875588b17` and pins the selected weight file to
-SHA-256 `f0140d845aced424f17b1c75ebc5a67ef75fe309c68d2f613acda2eb551db7dd`.
+SHA-256 `04b1c301231dd422b8860db31311ab2721511346a32cb1e079c4c4e5f1fe4696`.
 Every GPU use verifies device, mount, UUID, revision path, and content hash
 before product execution. The ModelBackend receives that exact revision. Cache
 bytes can accelerate model loading but cannot satisfy product artifact/runtime

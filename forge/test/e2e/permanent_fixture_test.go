@@ -1,7 +1,6 @@
 package e2e
 
 import (
-	"context"
 	"crypto/sha256"
 	_ "embed"
 	"encoding/hex"
@@ -134,21 +133,22 @@ func (fixture *permanentFixture) reset(t *testing.T, forgeBin, forgeHome string)
 	if err != nil {
 		return fmt.Errorf("forge destroy --purge-workspace --reboot --yes failed: %w\n%s", err, output)
 	}
-	after, err := fixture.waitForReboot(before)
+	after, client, err := fixture.waitForReboot(before)
 	if err != nil {
 		return err
 	}
-	if err := waitForWorkspaceDevice(context.Background(), fixture.address, fixture.sshKeyPath, fixture.workspaceDevice); err != nil {
+	defer client.Close()
+	if err := fixture.waitForWorkspaceDevice(client); err != nil {
 		return err
 	}
-	if err := fixture.cleanHarnessState(); err != nil {
+	if err := fixture.cleanHarnessState(client); err != nil {
 		return err
 	}
 	if err := fixture.recordEvidence("lifecycle", before, after, modelCacheAuthority{}); err != nil {
 		return err
 	}
 	if fixture.capacity == "gpu" {
-		authority, err := fixture.validateModelCache()
+		authority, err := fixture.validateModelCache(client)
 		if err != nil {
 			return err
 		}
@@ -166,6 +166,30 @@ func (fixture *permanentFixture) bootID() (string, error) {
 		return "", err
 	}
 	defer client.Close()
+	return bootIDFromClient(client)
+}
+
+func (fixture *permanentFixture) waitForReboot(before string) (string, *ssh.Client, error) {
+	deadline := time.Now().Add(8 * time.Minute)
+	disconnected := false
+	for time.Now().Before(deadline) {
+		client, err := sshDial(fixture.address, fixture.sshKeyPath)
+		if err != nil {
+			disconnected = true
+			time.Sleep(3 * time.Second)
+			continue
+		}
+		bootID, bootErr := bootIDFromClient(client)
+		if bootErr == nil && disconnected && bootID != before {
+			return bootID, client, nil
+		}
+		client.Close()
+		time.Sleep(2 * time.Second)
+	}
+	return "", nil, fmt.Errorf("permanent %s fixture did not prove SSH disconnect, reconnect, and a changed boot ID", fixture.capacity)
+}
+
+func bootIDFromClient(client *ssh.Client) (string, error) {
 	output, err := sshOutput(client, "cat /proc/sys/kernel/random/boot_id")
 	if err != nil {
 		return "", err
@@ -177,30 +201,20 @@ func (fixture *permanentFixture) bootID() (string, error) {
 	return bootID, nil
 }
 
-func (fixture *permanentFixture) waitForReboot(before string) (string, error) {
-	deadline := time.Now().Add(8 * time.Minute)
-	disconnected := false
+func (fixture *permanentFixture) waitForWorkspaceDevice(client *ssh.Client) error {
+	deadline := time.Now().Add(2 * time.Minute)
+	command := "test -L " + candidateShellQuote(fixture.workspaceDevice) + " && test -b \"$(readlink -f " + candidateShellQuote(fixture.workspaceDevice) + ")\""
+	var lastErr error
 	for time.Now().Before(deadline) {
-		bootID, err := fixture.bootID()
-		if err != nil {
-			disconnected = true
-			time.Sleep(3 * time.Second)
-			continue
-		}
-		if disconnected && bootID != before {
-			return bootID, nil
+		if _, lastErr = sshOutput(client, command); lastErr == nil {
+			return nil
 		}
 		time.Sleep(2 * time.Second)
 	}
-	return "", fmt.Errorf("permanent %s fixture did not prove SSH disconnect, reconnect, and a changed boot ID", fixture.capacity)
+	return fmt.Errorf("dedicated workspace device %s did not appear on %s: %w", fixture.workspaceDevice, fixture.address, lastErr)
 }
 
-func (fixture *permanentFixture) cleanHarnessState() error {
-	client, err := sshDial(fixture.address, fixture.sshKeyPath)
-	if err != nil {
-		return err
-	}
-	defer client.Close()
+func (fixture *permanentFixture) cleanHarnessState(client *ssh.Client) error {
 	script := fmt.Sprintf(`
 rm -rf -- /tmp/edge-overlay /tmp/forge-secrets-overlay /tmp/iterabase-release-overlay-* /tmp/forge-e2e-workspace-consumer.pid /tmp/forge-e2e-workspace-consumer.log %s
 ! command -v k3s >/dev/null 2>&1
@@ -235,16 +249,11 @@ func decodeModelCacheAuthority(data []byte) (modelCacheAuthority, error) {
 	return authority, nil
 }
 
-func (fixture *permanentFixture) validateModelCache() (modelCacheAuthority, error) {
+func (fixture *permanentFixture) validateModelCache(client *ssh.Client) (modelCacheAuthority, error) {
 	authority, err := loadModelCacheAuthority()
 	if err != nil {
 		return authority, err
 	}
-	client, err := sshDial(fixture.address, fixture.sshKeyPath)
-	if err != nil {
-		return authority, err
-	}
-	defer client.Close()
 	weightPath := filepath.Join(permanentFixtureModelMount, authority.WeightPath)
 	script := fmt.Sprintf(`
 workspace=$(readlink -f -- %s)
@@ -290,7 +299,7 @@ func TestModelCacheAuthorityPinsImmutablePublicWeight(t *testing.T) {
 		t.Fatal(err)
 	}
 	if authority.ModelID != "Qwen/Qwen3.5-0.8B" || authority.Revision != "2fc06364715b967f1860aea9cf38778875588b17" ||
-		authority.SHA256 != "f0140d845aced424f17b1c75ebc5a67ef75fe309c68d2f613acda2eb551db7dd" {
+		authority.SHA256 != "04b1c301231dd422b8860db31311ab2721511346a32cb1e079c4c4e5f1fe4696" {
 		t.Fatalf("model-cache authority drifted: %+v", authority)
 	}
 }

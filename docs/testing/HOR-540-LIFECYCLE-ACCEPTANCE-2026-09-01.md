@@ -46,7 +46,7 @@ Pinned model authority:
 - model: `Qwen/Qwen3.5-0.8B`
 - revision: `2fc06364715b967f1860aea9cf38778875588b17`
 - selected weight SHA-256:
-  `f0140d845aced424f17b1c75ebc5a67ef75fe309c68d2f613acda2eb551db7dd`
+  `04b1c301231dd422b8860db31311ab2721511346a32cb1e079c4c4e5f1fe4696`
 
 | Streak | Workflow run / job | Source SHA | Plan/result artifact | Pre/post boot IDs | Workspace + model-cache identity | Result |
 | --- | --- | --- | --- | --- | --- | --- |
