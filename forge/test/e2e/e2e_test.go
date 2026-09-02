@@ -1,18 +1,12 @@
-// Package e2e runs the forge end-to-end test against an ephemeral
-// DigitalOcean droplet. It is a separate module so godo/client-go stay out of
-// the main module's dependency graph.
-//
-// Run: make test-e2e   (requires DIGITALOCEAN_TOKEN)
+// Package e2e runs Forge's composed scenarios against fixed, pinned permanent
+// fixtures. The separate module keeps client-go and harness-only dependencies
+// out of Forge's production module.
 package e2e
 
 import (
 	"context"
-	"crypto/ed25519"
-	"crypto/rand"
 	"crypto/tls"
 	"encoding/json"
-	"encoding/pem"
-	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -23,7 +17,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/digitalocean/godo"
 	"golang.org/x/crypto/ssh"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -31,99 +24,12 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 )
 
-const (
-	region      = "fra1"
-	size        = "s-2vcpu-4gb" // smallest published baseline fixture
-	managedSize = "s-4vcpu-8gb" // full platform plus two concurrent workers needs independent headroom
-	image       = "ubuntu-24-04-x64"
-	k3sPort     = 6443
-)
-
-type cpuVMProvisioner interface {
-	Create(context.Context, string, string) (*godo.Droplet, error)
-	AttachWorkspace(context.Context, string, int) (string, error)
-	PublicIP(context.Context, int) (string, error)
-	Destroy(context.Context, int) error
-}
-
-type doCPUVMProvisioner struct {
-	client          *godo.Client
-	size            string
-	workspaceVolume string
-}
-
-func (provisioner *doCPUVMProvisioner) Create(ctx context.Context, runID, pubKey string) (*godo.Droplet, error) {
-	request := newCPUDropletRequest(runID, pubKey)
-	if provisioner.size != "" {
-		request.Size = provisioner.size
-	}
-	droplet, _, err := provisioner.client.Droplets.Create(ctx, request)
-	return droplet, err
-}
-
-func (provisioner *doCPUVMProvisioner) AttachWorkspace(ctx context.Context, runID string, dropletID int) (string, error) {
-	name := runID + "-workspaces"
-	volume, _, err := provisioner.client.Storage.CreateVolume(ctx, newWorkspaceVolumeRequest(runID, name, region))
-	if err != nil {
-		return "", fmt.Errorf("create dedicated workspace volume: %w", err)
-	}
-	provisioner.workspaceVolume = volume.ID
-	if _, _, err := provisioner.client.StorageActions.Attach(ctx, volume.ID, dropletID); err != nil {
-		return "", fmt.Errorf("attach dedicated workspace volume: %w", err)
-	}
-	return "/dev/disk/by-id/scsi-0DO_Volume_" + name, nil
-}
-
-func newWorkspaceVolumeRequest(runID, name, targetRegion string) *godo.VolumeCreateRequest {
-	return &godo.VolumeCreateRequest{
-		Region: targetRegion, Name: name, Description: "HOR-538 dedicated AgentPool workspace filesystem", SizeGigaBytes: 25,
-		Tags: []string{"forge-e2e", runID},
-	}
-}
-
-func (provisioner *doCPUVMProvisioner) PublicIP(ctx context.Context, id int) (string, error) {
-	return waitForIP(ctx, provisioner.client, id)
-}
-
-func (provisioner *doCPUVMProvisioner) Destroy(ctx context.Context, id int) error {
-	_, dropletErr := provisioner.client.Droplets.Delete(ctx, id)
-	return errors.Join(dropletErr, deleteWorkspaceVolume(ctx, provisioner.client, provisioner.workspaceVolume))
-}
-
-func deleteWorkspaceVolume(ctx context.Context, client *godo.Client, volumeID string) error {
-	if volumeID == "" {
-		return nil
-	}
-	deadline := time.Now().Add(2 * time.Minute)
-	var lastErr error
-	for time.Now().Before(deadline) {
-		if _, err := client.Storage.DeleteVolume(ctx, volumeID); err == nil {
-			return nil
-		} else {
-			lastErr = err
-			if !strings.Contains(strings.ToLower(err.Error()), "attached volume") {
-				return err
-			}
-		}
-		select {
-		case <-ctx.Done():
-			return errors.Join(lastErr, ctx.Err())
-		case <-time.After(2 * time.Second):
-		}
-	}
-	return fmt.Errorf("workspace volume %s remained attached after droplet deletion: %w", volumeID, lastErr)
-}
+const k3sPort = 6443
 
 type digitalOceanCPUState struct {
-	ctx                 context.Context
 	fixture             *permanentFixture
-	provisioner         cpuVMProvisioner
-	ready               func(context.Context, string, string) error
 	runID               string
-	keep                bool
-	pubKey              string
 	privKeyPath         string
-	droplet             *godo.Droplet
 	ip                  string
 	forgeBin            string
 	forgeHome           string
@@ -152,80 +58,33 @@ func newDigitalOceanWorkspaceState(t *testing.T) *digitalOceanCPUState {
 }
 
 func newDigitalOceanCPUStateForScenario(t *testing.T, scenario string) *digitalOceanCPUState {
+	fixture := requirePermanentFixture(t, "cpu")
 	state := &digitalOceanCPUState{
-		ctx:                 context.Background(),
+		fixture:             fixture,
+		runID:               fixture.installName(),
+		privKeyPath:         fixture.sshKeyPath,
+		ip:                  fixture.address,
 		forgeHome:           t.TempDir(),
+		workspaceDevice:     fixture.workspaceDevice,
 		runtimeImageDigests: make(map[string]importedRuntimeIdentity),
 		diagnostics:         newForgeDiagnostics(t, scenario),
-	}
-	if permanentFixtureEnabled() {
-		state.fixture = requirePermanentFixture(t, "cpu")
-		state.runID = state.fixture.installName()
-		state.ip = state.fixture.address
-		state.privKeyPath = state.fixture.sshKeyPath
-		state.workspaceDevice = state.fixture.workspaceDevice
-	} else {
-		token := os.Getenv("DIGITALOCEAN_TOKEN")
-		if token == "" {
-			t.Fatal("mandatory CPU capacity incomplete — permanent fixture is disabled and DIGITALOCEAN_TOKEN is not set")
-		}
-		state.provisioner = &doCPUVMProvisioner{client: godo.NewFromToken(token), size: managedSize}
-		state.ready = waitForHostReady
-		state.runID = fmt.Sprintf("forge-e2e-%d", time.Now().Unix())
-		state.keep = os.Getenv("FORGE_E2E_KEEP") != ""
-		state.pubKey, state.privKeyPath = generateKey(t)
 	}
 	if githubToken := os.Getenv("GITHUB_TOKEN"); githubToken != "" {
 		state.diagnostics.redactor.Add(githubToken)
 	}
 	state.forgeBin = buildForge(t)
 	state.chartVersion = platformChartVersion(t, "")
-	t.Logf("run %s (permanent=%v keep=%v)", state.runID, state.fixture != nil, state.keep)
+	t.Logf("run %s on the permanent CPU fixture", state.runID)
 	return state
 }
 
 func provisionCPUStage(t *testing.T, state *digitalOceanCPUState) {
 	t.Helper()
-	if state.fixture != nil {
-		if err := state.fixture.reset(t, state.forgeBin, state.forgeHome); err != nil {
-			t.Fatal(err)
-		}
-		rememberWorkspaceDevice(state.ip, state.workspaceDevice)
-		t.Logf("permanent CPU fixture %s workspace=%s", state.ip, state.workspaceDevice)
-		return
-	}
-	if err := provisionCPUHost(state); err != nil {
+	if err := state.fixture.reset(t, state.forgeBin, state.forgeHome); err != nil {
 		t.Fatal(err)
 	}
-	t.Logf("qualification droplet ip %s workspace=%s", state.ip, state.workspaceDevice)
-}
-
-func provisionCPUHost(state *digitalOceanCPUState) error {
-	droplet, err := state.provisioner.Create(state.ctx, state.runID, state.pubKey)
-	if err != nil {
-		return fmt.Errorf("create droplet: %w", err)
-	}
-	// Retain the resource identity immediately so shared scenario cleanup owns
-	// every failure after the cloud API accepts creation.
-	state.droplet = droplet
-	workspaceDevice, err := state.provisioner.AttachWorkspace(state.ctx, state.runID, droplet.ID)
-	if err != nil {
-		return err
-	}
-	state.workspaceDevice = workspaceDevice
-	ip, err := state.provisioner.PublicIP(state.ctx, droplet.ID)
-	if err != nil {
-		return fmt.Errorf("wait for droplet IP: %w", err)
-	}
-	state.ip = ip
-	if err := state.ready(state.ctx, ip, state.privKeyPath); err != nil {
-		return fmt.Errorf("wait for host readiness: %w", err)
-	}
-	if err := waitForWorkspaceDevice(state.ctx, ip, state.privKeyPath, workspaceDevice); err != nil {
-		return err
-	}
-	rememberWorkspaceDevice(ip, workspaceDevice)
-	return nil
+	rememberWorkspaceDevice(state.ip, state.workspaceDevice)
+	t.Logf("permanent CPU fixture %s workspace=%s", state.ip, state.workspaceDevice)
 }
 
 func rejectGPUOnCPUStage(t *testing.T, state *digitalOceanCPUState) {
@@ -609,104 +468,10 @@ func assertApplyMarkers(t *testing.T, out string, markers ...string) {
 
 func (state *digitalOceanCPUState) cleanup(t *testing.T) {
 	t.Helper()
-	if state.fixture != nil {
-		state.diagnostics.setDomain(failureDomainCleanup)
-		workspaceDevicesByAddress.Delete(state.ip)
-		if err := state.fixture.reset(t, state.forgeBin, state.forgeHome); err != nil {
-			t.Errorf("reset permanent CPU fixture after diagnostics: %v", err)
-		}
-		return
-	}
-	if state.droplet == nil {
-		return
-	}
-	if state.keep {
-		t.Logf("keeping droplet %d (run %s) for debugging", state.droplet.ID, state.runID)
-		return
-	}
-	if err := state.destroyCPUHost(); err != nil {
-		t.Errorf("destroy CPU droplet %d: %v (tagged reaper remains the crash-safety fallback)", state.droplet.ID, err)
-	}
-}
-
-func (state *digitalOceanCPUState) destroyCPUHost() error {
 	state.diagnostics.setDomain(failureDomainCleanup)
 	workspaceDevicesByAddress.Delete(state.ip)
-	return state.provisioner.Destroy(state.ctx, state.droplet.ID)
-}
-
-func generateKey(t *testing.T) (pubKeyStr, privKeyPath string) {
-	t.Helper()
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatalf("generate key: %v", err)
-	}
-	pubSSH, err := ssh.NewPublicKey(pub)
-	if err != nil {
-		t.Fatalf("new public key: %v", err)
-	}
-	pubKeyStr = strings.TrimSpace(string(ssh.MarshalAuthorizedKey(pubSSH)))
-
-	block, err := ssh.MarshalPrivateKey(priv, "")
-	if err != nil {
-		t.Fatalf("marshal private key: %v", err)
-	}
-	privPEM := pem.EncodeToMemory(block)
-
-	privKeyPath = filepath.Join(t.TempDir(), "id_ed25519")
-	if err := os.WriteFile(privKeyPath, privPEM, 0o600); err != nil {
-		t.Fatalf("write key file: %v", err)
-	}
-	return pubKeyStr, privKeyPath
-}
-
-func cloudInit(pubKeyStr string) string {
-	return fmt.Sprintf(`#cloud-config
-packages: [curl]
-users:
-  - name: forge
-    sudo: ALL=(ALL) NOPASSWD:ALL
-    shell: /bin/bash
-    ssh_authorized_keys:
-      - %s
-`, pubKeyStr)
-}
-
-func createDroplet(ctx context.Context, client *godo.Client, name, pubKeyStr string) (*godo.Droplet, error) {
-	d, _, err := client.Droplets.Create(ctx, newCPUDropletRequest(name, pubKeyStr))
-	return d, err
-}
-
-func newCPUDropletRequest(name, pubKeyStr string) *godo.DropletCreateRequest {
-	return &godo.DropletCreateRequest{
-		Name:     name,
-		Region:   region,
-		Size:     size,
-		UserData: cloudInit(pubKeyStr),
-		IPv6:     true,
-		Tags:     []string{"forge-e2e", name},
-		Image:    godo.DropletCreateImage{Slug: image},
-	}
-}
-
-func waitForIP(ctx context.Context, client *godo.Client, id int) (string, error) {
-	deadline := time.Now().Add(3 * time.Minute)
-	for {
-		d, _, err := client.Droplets.Get(ctx, id)
-		if err != nil {
-			return "", err
-		}
-		if d.Status == "active" {
-			for _, n := range d.Networks.V4 {
-				if n.Type == "public" {
-					return n.IPAddress, nil
-				}
-			}
-		}
-		if time.Now().After(deadline) {
-			return "", fmt.Errorf("droplet %d never became active with a public IP", id)
-		}
-		time.Sleep(5 * time.Second)
+	if err := state.fixture.reset(t, state.forgeBin, state.forgeHome); err != nil {
+		t.Errorf("reset permanent CPU fixture after diagnostics: %v", err)
 	}
 }
 
@@ -744,26 +509,6 @@ func waitForHostReady(ctx context.Context, ip, keyPath string) error {
 		}
 	}
 	return fmt.Errorf("host %s never became ready (SSH up + cloud-init done) within %s (last status %q, last error %v)", ip, deadline, lastStatus, lastErr)
-}
-
-func waitForWorkspaceDevice(ctx context.Context, ip, keyPath, device string) error {
-	end := time.Now().Add(2 * time.Minute)
-	for time.Now().Before(end) {
-		client, err := sshDial(ip, keyPath)
-		if err == nil {
-			_, probeErr := sshOutput(client, "test -L "+candidateShellQuote(device)+" && test -b \"$(readlink -f "+candidateShellQuote(device)+")\"")
-			client.Close()
-			if probeErr == nil {
-				return nil
-			}
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(2 * time.Second):
-		}
-	}
-	return fmt.Errorf("dedicated workspace device %s did not appear on %s", device, ip)
 }
 
 // sshOutput runs a command over an SSH client and returns its combined output.
