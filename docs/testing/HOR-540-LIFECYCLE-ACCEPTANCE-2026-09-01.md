@@ -60,9 +60,12 @@ Pinned model authority:
 | 2 | `33669629252` / `100380842401` | `6795e23e9f0b79e99ac1a4af1ee787ffc081ca39` | `forge-digitalocean-gpu.json` in `e2e-result-capacity-gpu`; plan `75922686281a50962cc3c39a1c5062fa19b4109acd435751454eb0d7bd27cbd7`; bundle `8af305340a8a160a88f429c04ef4aad405df79a6ad83ecd20d5e309675193b49`; stages `4d83e55aa22cc91e78a4b796d26dba774ced34dfa2a388fe1b6a41a4f4eb468e` | `29b08749-c0c7-4bac-9b42-4ea7c0bb6637` → `653f8497-9abe-4038-a165-a0706be91471` → `10acaa06-f67c-40f8-934d-32545de9bbdf` | workspace `/dev/disk/by-id/virtio-5b0889ae-a1d9-4e0d-b`; host key SHA-256 `9460d21d576b58e898a0bf68d8c1f7690e3101b4b0da5d467aa29cea0e906678`; cache `/dev/disk/by-id/virtio-43ff9b5b-1f97-49ba-9`, UUID `2eb63d10-3d60-418e-bced-cae2f3a26f08`, revision `2fc06364715b967f1860aea9cf38778875588b17`, content `04b1c301231dd422b8860db31311ab2721511346a32cb1e079c4c4e5f1fe4696` | Passed in a complete-catalogue run; Forge restored deliberately absent `dkms`, exact GPU/runtime/model inference passed, and post-test purge/reboot passed. |
 | 3 | `33676336351` / `100402866399` | `6795e23e9f0b79e99ac1a4af1ee787ffc081ca39` | `forge-digitalocean-gpu.json` in `e2e-result-capacity-gpu`; plan `75922686281a50962cc3c39a1c5062fa19b4109acd435751454eb0d7bd27cbd7`; bundle `46f50cdeb7ff931249d09565f31335caf8a53aae1b34207460c3cad217736cd8`; stages `4d83e55aa22cc91e78a4b796d26dba774ced34dfa2a388fe1b6a41a4f4eb468e` | `10acaa06-f67c-40f8-934d-32545de9bbdf` → `89f3b82f-5408-463b-9cdd-d92eb256cd70` → `659c2436-afc0-4f87-b75c-5879f068ccb0` | workspace `/dev/disk/by-id/virtio-5b0889ae-a1d9-4e0d-b`; host key SHA-256 `9460d21d576b58e898a0bf68d8c1f7690e3101b4b0da5d467aa29cea0e906678`; cache `/dev/disk/by-id/virtio-43ff9b5b-1f97-49ba-9`, UUID `2eb63d10-3d60-418e-bced-cae2f3a26f08`, revision `2fc06364715b967f1860aea9cf38778875588b17`, content `04b1c301231dd422b8860db31311ab2721511346a32cb1e079c4c4e5f1fe4696` | Passed in a second complete-catalogue run; Forge restored deliberately absent `dkms`, exact GPU/runtime/model inference passed, and post-test purge/reboot passed. |
 
-Current consecutive count: **3**. Qualification is complete. The final successful
-run leaves Forge-owned `dkms` installed with empty `dkms status`, no host-managed
-NVIDIA DKMS module, and matching headers, `gcc`, and `make` present.
+Pre-removal qualification count: **3**. Qualification completed before legacy
+removal. Intentional cleanup-negative run `33689860332` subsequently reset the
+current operational streak to **0** without invalidating that ordering evidence. The
+last qualifying run left Forge-owned `dkms` installed with empty `dkms status`,
+no host-managed NVIDIA DKMS module, and matching headers, `gcc`, and `make`
+present.
 
 ## Non-qualifying/reset evidence
 
@@ -80,6 +83,7 @@ These attempts remain failures; none starts or advances a streak:
 | `33632117921` / `100254864975` | `fe3161b45ba8d5e9a03df54319f1925903b211af` | CPU | `digitalocean-workspace` again failed its two-arrival barrier on the pre-resize 4 GiB fixture. |
 | `33632117921` / `100254863954` | `fe3161b45ba8d5e9a03df54319f1925903b211af` | GPU | The pinned SSH API tunnel passed the real GPU smoke and the complete 580.126.20 → 595.71.05 driver/runtime transition. Platform apply then failed closed because the scenario had not selected/imported the chart's tool-runner image and its obsolete published fallback was unavailable; model inference did not run. |
 | `33657855724` / `100341857789` | `e756f5f3e5426cbbe4cee2662b53a7430eaca11d` | GPU | SSH and purge/reboot succeeded, but the permanent harness handed Forge the host before `cloud-final` completed. The first operating-system probe was not usable, Forge reported an empty OS identity, and the run failed before restoring `dkms`; post-failure purge/reboot succeeded. This resets the prior GPU streak to zero. |
+| `33689860332` / `100446279492` | `6b47d6a991b51011368c5719c22e62ac037f4781` | GPU | The first post-removal cleanup-negative attempt completed real purge/reboot (`f97a9133-2dfe-4977-b443-af6f00af713e` → `d79b92b0-856e-4fe9-a329-cf2e0a88c842`), raised the intentional owner cleanup error, and retained `e2e-red-proof-cleanup`. Its wrapper also required a diagnostics-after marker that could not occur because an unrelated missing exact-chart input had already failed a stage; the dedicated minimal cleanup proof added afterward removes that ambiguity. |
 
 Before `33626838744`, the Ubuntu HWE baseline was updated and rebooted to
 `7.0.0-30-generic`, whose exact header package remains available from the

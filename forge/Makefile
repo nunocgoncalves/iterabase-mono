@@ -67,7 +67,7 @@ test-e2e-gpu-broken-cleanup:
 	@output=$$(mktemp); trap 'rm -f "$$output"' EXIT; \
 	set +e; (cd test/e2e && FORGE_E2E_BREAK_CLEANUP=true FORGE_E2E_REQUIRE_CAPACITY=true \
 		ITERABASE_E2E_SOURCE_INPUTS="$(ITERABASE_E2E_SOURCE_INPUTS)" \
-		go test -v -race -count=1 -timeout 100m -run '^TestE2E$$/^digitalocean-gpu$$' .) >"$$output" 2>&1; status=$$?; set -e; \
+		go test -v -race -count=1 -timeout 20m -run '^TestPermanentGPUCleanupRedProof$$' .) >"$$output" 2>&1; status=$$?; set -e; \
 	cat "$$output"; \
 	if [ "$$status" -eq 0 ]; then echo "forced cleanup failure unexpectedly passed" >&2; exit 1; fi; \
 	grep -Fq 'intentional HOR-540 cleanup failure after successful permanent GPU reset' "$$output"; \
