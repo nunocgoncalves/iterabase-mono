@@ -18,6 +18,11 @@ on:
         required: false
         type: boolean
         default: false
+      fixture_cleanup_red_proof:
+        description: "Run the intentional HOR-540 permanent-GPU cleanup failure proof"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -59,8 +64,14 @@ jobs:
         if: github.event_name == 'workflow_dispatch'
         env:
           COMPLETE: ${{ inputs.complete_catalogue }}
-          RED_PROOF: ${{ inputs.gpu_policy_red_proof }}
-        run: test "$COMPLETE:$RED_PROOF" != "true:true"
+          GPU_RED_PROOF: ${{ inputs.gpu_policy_red_proof }}
+          CLEANUP_RED_PROOF: ${{ inputs.fixture_cleanup_red_proof }}
+        run: |
+          selected=0
+          for value in "$COMPLETE" "$GPU_RED_PROOF" "$CLEANUP_RED_PROOF"; do
+            if [ "$value" = true ]; then selected=$((selected + 1)); fi
+          done
+          test "$selected" -le 1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -92,7 +103,7 @@ jobs:
         env:
           SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           COMPLETE: ${{ github.event_name == 'schedule' || inputs.complete_catalogue == true }}
-          RED_PROOF: ${{ inputs.gpu_policy_red_proof == true }}
+          RED_PROOF: ${{ inputs.gpu_policy_red_proof == true || inputs.fixture_cleanup_red_proof == true }}
         run: |
           if [ "$RED_PROOF" = true ]; then
             : > /tmp/changed-paths
@@ -399,12 +410,68 @@ jobs:
           ITERABASE_E2E_FIXTURE_MODE: source
           ITERABASE_E2E_SOURCE_SHA: ${{ github.sha }}
           ITERABASE_E2E_SOURCE_INPUTS: ${{ github.workspace }}/forge/test/e2e/published-fixture.json
+          ITERABASE_E2E_DIAGNOSTICS: ${{ runner.temp }}/diagnostics/gpu-policy
         run: make test-e2e-gpu-broken-policy
+      - name: Retain intentional policy-failure diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: e2e-red-proof-gpu-policy
+          path: ${{ runner.temp }}/diagnostics
+          if-no-files-found: error
+          retention-days: 30
+
+  cleanup-red-proof:
+    name: Intentional HOR-540 permanent cleanup red proof
+    needs: plan
+    if: inputs.fixture_cleanup_red_proof == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 115
+    concurrency:
+      group: iterabase-permanent-fixtures
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+      - uses: ./.github/actions/setup-go
+        with:
+          go-version: 1.26.5
+          cache-dependency-path: forge/test/e2e/go.sum
+          cache-scope: e2e-cleanup-red-proof
+      - name: Bind the fixed permanent GPU fixture
+        uses: ./.github/actions/setup-permanent-fixture
+        with:
+          capacity: gpu
+          address: ${{ vars.FORGE_E2E_GPU_ADDRESS }}
+          ssh-user: ${{ vars.FORGE_E2E_GPU_SSH_USER }}
+          ssh-private-key: ${{ secrets.FORGE_E2E_GPU_SSH_KEY }}
+          ssh-host-key: ${{ vars.FORGE_E2E_GPU_SSH_HOST_KEY }}
+          workspace-device: ${{ vars.FORGE_E2E_GPU_WORKSPACE_DEVICE }}
+          model-cache-device: ${{ vars.FORGE_E2E_GPU_MODEL_CACHE_DEVICE }}
+          model-cache-uuid: ${{ vars.FORGE_E2E_GPU_MODEL_CACHE_UUID }}
+      - name: Prove a cleanup-hook failure stays red after the real reset
+        working-directory: forge
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ITERABASE_E2E_FIXTURE_MODE: source
+          ITERABASE_E2E_SOURCE_SHA: ${{ github.sha }}
+          ITERABASE_E2E_SOURCE_INPUTS: ${{ github.workspace }}/forge/test/e2e/published-fixture.json
+          ITERABASE_E2E_DIAGNOSTICS: ${{ runner.temp }}/diagnostics/cleanup
+        run: make test-e2e-gpu-broken-cleanup
+      - name: Retain intentional cleanup-failure diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: e2e-red-proof-cleanup
+          path: ${{ runner.temp }}/diagnostics
+          if-no-files-found: error
+          retention-days: 30
 
   required:
     name: E2E / required
     if: always()
-    needs: [plan, runtime-contract, artifacts, kind, real-machine, gpu-red-proof]
+    needs: [plan, runtime-contract, artifacts, kind, real-machine, gpu-red-proof, cleanup-red-proof]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -420,7 +487,7 @@ jobs:
           pattern: e2e-result-*
           path: ${{ runner.temp }}/results
       - name: Reconcile the exact plan, result set, stages, and identities
-        if: inputs.gpu_policy_red_proof != true
+        if: inputs.gpu_policy_red_proof != true && inputs.fixture_cleanup_red_proof != true
         env:
           NEEDS: ${{ toJSON(needs) }}
         run: >-
@@ -428,8 +495,13 @@ jobs:
           --plan '${{ runner.temp }}/plan/e2e-plan.json'
           --results '${{ runner.temp }}/results'
           --needs-env NEEDS
-      - name: Require the intentional red proof only
-        if: inputs.gpu_policy_red_proof == true
+      - name: Require only the selected intentional red proof
+        if: inputs.gpu_policy_red_proof == true || inputs.fixture_cleanup_red_proof == true
         env:
-          RESULT: ${{ needs.gpu-red-proof.result }}
-        run: test "$RESULT" = success
+          GPU_SELECTED: ${{ inputs.gpu_policy_red_proof }}
+          GPU_RESULT: ${{ needs.gpu-red-proof.result }}
+          CLEANUP_SELECTED: ${{ inputs.fixture_cleanup_red_proof }}
+          CLEANUP_RESULT: ${{ needs.cleanup-red-proof.result }}
+        run: |
+          if [ "$GPU_SELECTED" = true ]; then test "$GPU_RESULT" = success; fi
+          if [ "$CLEANUP_SELECTED" = true ]; then test "$CLEANUP_RESULT" = success; fi

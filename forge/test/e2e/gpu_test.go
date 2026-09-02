@@ -1,20 +1,15 @@
-// Package e2e contains the composed CPU/GPU cloud scenarios. The no-GPU
-// preflight runs on the shared CPU fixture; GPU readiness and real inference
-// share the cheapest creatable GPU VM. See GPUVMProvisioner for the Verda seam.
+// Package e2e contains the composed CPU/GPU scenarios. The no-GPU preflight
+// runs on the fixed CPU fixture; GPU readiness and real inference run on the
+// fixed GPU fixture under the shared permanent-fixture lock.
 package e2e
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
-	"strings"
 	"testing"
 	"time"
 
-	"github.com/digitalocean/godo"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -23,153 +18,16 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 )
 
-// GPUVMProvisioner creates and destroys an ephemeral GPU VM for the GPU e2e.
-// The DigitalOcean implementation iterates the cheapest creatable GPU droplets;
-// a future Verda implementation can replace it when DO GPU capacity is
-// insufficient. Test-harness only.
-type GPUVMProvisioner interface {
-	Provision(ctx context.Context, runID, pubKeyStr, privKeyPath string) (*GPUVM, error)
-	Destroy(ctx context.Context, id int) error
-}
-
-// GPUVM is an ephemeral GPU VM reachable over SSH with the forge sudo user.
+// GPUVM identifies the fixed GPU fixture surface consumed by the scenario.
 type GPUVM struct {
-	ID              int
 	IP              string
 	PrivKeyPath     string
 	WorkspaceDevice string
-	Tags            []string
-}
-
-// ErrNoGPUCapacity signals no GPU instance could be created in any region.
-// Every selected PR, nightly, or candidate capacity route remains failed until
-// capacity returns; unselected capacity creates no job.
-var ErrNoGPUCapacity = errors.New("no GPU capacity available in any region")
-
-type doGPUVMProvisioner struct {
-	client          *godo.Client
-	workspaceVolume string
-}
-
-func (p *doGPUVMProvisioner) Provision(ctx context.Context, runID, pubKeyStr, privKeyPath string) (*GPUVM, error) {
-	cands, err := gpuCandidates(ctx, p.client)
-	if err != nil {
-		return nil, fmt.Errorf("list gpu sizes: %w", err)
-	}
-	var lastErr error
-	for _, c := range cands {
-		d, err := createDropletIn(ctx, p.client, runID, pubKeyStr, c.region, c.size)
-		if err != nil {
-			lastErr = err
-			continue // capacity/availability -> try next cheapest candidate
-		}
-		vm := &GPUVM{ID: d.ID, PrivKeyPath: privKeyPath, Tags: []string{"forge-e2e", "forge-gpu-e2e", runID}}
-		volumeName := runID + "-workspaces"
-		volume, _, volumeErr := p.client.Storage.CreateVolume(ctx, newWorkspaceVolumeRequest(runID, volumeName, c.region))
-		if volumeErr != nil {
-			_, _ = p.client.Droplets.Delete(ctx, d.ID)
-			lastErr = volumeErr
-			continue
-		}
-		p.workspaceVolume = volume.ID
-		if _, _, volumeErr = p.client.StorageActions.Attach(ctx, volume.ID, d.ID); volumeErr != nil {
-			_, _ = p.client.Droplets.Delete(ctx, d.ID)
-			_, _ = p.client.Storage.DeleteVolume(ctx, volume.ID)
-			lastErr = volumeErr
-			continue
-		}
-		vm.WorkspaceDevice = "/dev/disk/by-id/scsi-0DO_Volume_" + volumeName
-		ip, err := waitForIP(ctx, p.client, d.ID)
-		if err != nil {
-			if _, cleanupErr := p.client.Droplets.Delete(ctx, d.ID); cleanupErr != nil {
-				return vm, fmt.Errorf("wait for GPU VM %d IP: %v; immediate cleanup failed: %w", d.ID, err, cleanupErr)
-			}
-			lastErr = err
-			continue
-		}
-		vm.IP = ip
-		if err := waitForHostReady(ctx, ip, privKeyPath); err != nil {
-			if _, cleanupErr := p.client.Droplets.Delete(ctx, d.ID); cleanupErr != nil {
-				return vm, fmt.Errorf("wait for GPU VM %d readiness: %v; immediate cleanup failed: %w", d.ID, err, cleanupErr)
-			}
-			lastErr = err
-			continue
-		}
-		if err := waitForWorkspaceDevice(ctx, ip, privKeyPath, vm.WorkspaceDevice); err != nil {
-			return vm, err
-		}
-		return vm, nil
-	}
-	if lastErr == nil {
-		lastErr = errors.New("no candidates")
-	}
-	return nil, fmt.Errorf("%w: tried %d (size,region) candidates: %v", ErrNoGPUCapacity, len(cands), lastErr)
-}
-
-func (p *doGPUVMProvisioner) Destroy(ctx context.Context, id int) error {
-	_, dropletErr := p.client.Droplets.Delete(ctx, id)
-	return errors.Join(dropletErr, deleteWorkspaceVolume(ctx, p.client, p.workspaceVolume))
-}
-
-type gpuCandidate struct {
-	size, region string
-	price        float64
-}
-
-// gpuCandidates returns creatable single-GPU (size, region) pairs, cheapest
-// first. A size's `available` flag is not a real-time capacity signal, so we
-// use its `regions` list (regions that actually offer it) and discover true
-// capacity at creation time by falling through on errors.
-func gpuCandidates(ctx context.Context, client *godo.Client) ([]gpuCandidate, error) {
-	sizes, _, err := client.Sizes.List(ctx, &godo.ListOptions{PerPage: 200})
-	if err != nil {
-		return nil, err
-	}
-	var out []gpuCandidate
-	for _, s := range sizes {
-		if !strings.Contains(s.Slug, "gpu") {
-			continue
-		}
-		if strings.Contains(s.Slug, "x8") { // skip 8-GPU nodes (very expensive)
-			continue
-		}
-		if s.PriceHourly <= 0 {
-			continue
-		}
-		for _, r := range s.Regions {
-			out = append(out, gpuCandidate{size: s.Slug, region: r, price: s.PriceHourly})
-		}
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].price < out[j].price })
-	return out, nil
-}
-
-// createDropletIn creates a droplet in an explicit region/size (generalized
-// createDroplet for the CPU preflight-fail and GPU provisioner paths).
-func createDropletIn(ctx context.Context, client *godo.Client, name, pubKeyStr, region, sizeSlug string) (*godo.Droplet, error) {
-	d, _, err := client.Droplets.Create(ctx, newGPUDropletRequest(name, pubKeyStr, region, sizeSlug))
-	return d, err
-}
-
-func newGPUDropletRequest(name, pubKeyStr, region, sizeSlug string) *godo.DropletCreateRequest {
-	return &godo.DropletCreateRequest{
-		Name:     name,
-		Region:   region,
-		Size:     sizeSlug,
-		UserData: cloudInit(pubKeyStr),
-		IPv6:     false,
-		Tags:     []string{"forge-e2e", "forge-gpu-e2e", name},
-		Image:    godo.DropletCreateImage{Slug: "ubuntu-24-04-x64"},
-	}
 }
 
 type digitalOceanGPUState struct {
-	ctx                 context.Context
 	fixture             *permanentFixture
-	provisioner         GPUVMProvisioner
 	runID               string
-	keep                bool
-	pubKey              string
 	privKeyPath         string
 	vm                  *GPUVM
 	forgeBin            string
@@ -183,57 +41,25 @@ type digitalOceanGPUState struct {
 }
 
 func newDigitalOceanGPUState(t *testing.T) *digitalOceanGPUState {
+	fixture := requirePermanentFixture(t, "gpu")
 	state := &digitalOceanGPUState{
-		ctx:                 context.Background(),
+		fixture:             fixture,
+		runID:               fixture.installName(),
+		privKeyPath:         fixture.sshKeyPath,
+		vm:                  &GPUVM{IP: fixture.address, PrivKeyPath: fixture.sshKeyPath, WorkspaceDevice: fixture.workspaceDevice},
 		forgeHome:           t.TempDir(),
 		chartVersion:        platformChartVersion(t, ""),
 		runtimeImageDigests: make(map[string]importedRuntimeIdentity),
 		diagnostics:         newForgeDiagnostics(t, "digitalocean-gpu"),
-	}
-	if permanentFixtureEnabled() {
-		state.fixture = requirePermanentFixture(t, "gpu")
-		state.runID = state.fixture.installName()
-		state.privKeyPath = state.fixture.sshKeyPath
-		state.vm = &GPUVM{IP: state.fixture.address, PrivKeyPath: state.fixture.sshKeyPath, WorkspaceDevice: state.fixture.workspaceDevice}
-	} else {
-		token := os.Getenv("DIGITALOCEAN_TOKEN")
-		if token == "" {
-			t.Fatal("mandatory GPU capacity incomplete — permanent fixture is disabled and DIGITALOCEAN_TOKEN is not set")
-		}
-		pubKey, privKeyPath := generateKey(t)
-		state.provisioner = &doGPUVMProvisioner{client: godo.NewFromToken(token)}
-		state.runID = fmt.Sprintf("forge-gpu-%d", time.Now().Unix())
-		state.keep = os.Getenv("FORGE_E2E_KEEP") != ""
-		state.pubKey = pubKey
-		state.privKeyPath = privKeyPath
 	}
 	state.forgeBin = buildForge(t)
 	return state
 }
 
 func provisionGPUStage(t *testing.T, state *digitalOceanGPUState) {
-	if state.fixture != nil {
-		require.NoError(t, state.fixture.reset(t, state.forgeBin, state.forgeHome))
-		rememberWorkspaceDevice(state.vm.IP, state.vm.WorkspaceDevice)
-		t.Logf("permanent GPU fixture %s workspace=%s", state.vm.IP, state.vm.WorkspaceDevice)
-		return
-	}
-	err := provisionGPUHost(state)
-	if errors.Is(err, ErrNoGPUCapacity) {
-		t.Fatalf("mandatory GPU capacity blocked by an evidenced external-capacity dependency: %v", err)
-	}
-	require.NoError(t, err)
+	require.NoError(t, state.fixture.reset(t, state.forgeBin, state.forgeHome))
 	rememberWorkspaceDevice(state.vm.IP, state.vm.WorkspaceDevice)
-	t.Logf("qualification GPU VM %s workspace=%s (keep=%v)", state.vm.IP, state.vm.WorkspaceDevice, state.keep)
-}
-
-func provisionGPUHost(state *digitalOceanGPUState) error {
-	vm, err := state.provisioner.Provision(state.ctx, state.runID, state.pubKey, state.privKeyPath)
-	// A provisioner can return a resource identity together with a later-stage
-	// provisioning error. Retain it so scenario cleanup, then the tagged reaper,
-	// continue to own the accepted cloud resource.
-	state.vm = vm
-	return err
+	t.Logf("permanent GPU fixture %s workspace=%s", state.vm.IP, state.vm.WorkspaceDevice)
 }
 
 func applyGPUSubstrateStage(t *testing.T, state *digitalOceanGPUState) {
@@ -251,30 +77,15 @@ func assertGPUSmokeStage(t *testing.T, state *digitalOceanGPUState) {
 func (state *digitalOceanGPUState) cleanup(t *testing.T) {
 	t.Helper()
 	state.stopAPITunnel()
-	if state.fixture != nil {
-		state.diagnostics.setDomain(failureDomainCleanup)
-		workspaceDevicesByAddress.Delete(state.vm.IP)
-		if err := state.fixture.reset(t, state.forgeBin, state.forgeHome); err != nil {
-			t.Errorf("reset permanent GPU fixture after diagnostics: %v", err)
-		}
-		return
-	}
-	if state.vm == nil {
-		return
-	}
-	if state.keep {
-		t.Logf("keeping GPU VM %d (run %s) for debugging", state.vm.ID, state.runID)
-		return
-	}
-	if err := state.destroyGPUHost(); err != nil {
-		t.Errorf("destroy GPU VM %d: %v (tagged reaper remains the crash-safety fallback)", state.vm.ID, err)
-	}
-}
-
-func (state *digitalOceanGPUState) destroyGPUHost() error {
 	state.diagnostics.setDomain(failureDomainCleanup)
 	workspaceDevicesByAddress.Delete(state.vm.IP)
-	return state.provisioner.Destroy(state.ctx, state.vm.ID)
+	if err := state.fixture.reset(t, state.forgeBin, state.forgeHome); err != nil {
+		t.Errorf("reset permanent GPU fixture after diagnostics: %v", err)
+		return
+	}
+	if os.Getenv("FORGE_E2E_BREAK_CLEANUP") == "true" {
+		t.Error("intentional HOR-540 cleanup failure after successful permanent GPU reset")
+	}
 }
 
 // checkGPUSmoke schedules a one-off pod requesting nvidia.com/gpu that runs

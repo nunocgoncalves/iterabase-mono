@@ -166,6 +166,14 @@ preflight executes the same purge/reboot and may recover interrupted state.
 Never rerun a failed assertion to launder it into a pass; qualification streaks
 reset on any failed or incomplete cycle.
 
+For a controlled cleanup-hook negative, manually dispatch E2E with only
+`fixture_cleanup_red_proof=true`. The GPU scenario performs the real post-test
+purge/reboot first, then deliberately fails its owner cleanup hook; the shared
+runner must execute `diagnostics-after-cleanup-failure`, the wrapper must prove
+the underlying test was red, and Actions retains `e2e-red-proof-cleanup`. This
+proof is not a successful lifecycle cycle and must be followed by an ordinary
+globally serialized green run.
+
 If SSH, purge, or reboot cannot recover the host:
 
 1. Stop fixture-backed workflow dispatch and let the active job fail.

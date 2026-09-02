@@ -160,6 +160,22 @@ class WorkflowContractTests(unittest.TestCase):
         ):
             self.assertNotIn(stale, workflow)
 
+    def test_fixture_cleanup_red_proof_is_serialized_and_retains_diagnostics(self) -> None:
+        workflow = (ROOT / ".github/workflows/e2e.yml").read_text()
+        cleanup = workflow.split("  cleanup-red-proof:\n", 1)[1].split(
+            "\n  required:\n", 1
+        )[0]
+        for value in (
+            "fixture_cleanup_red_proof:",
+            "make test-e2e-gpu-broken-cleanup",
+            "name: e2e-red-proof-cleanup",
+            "group: iterabase-permanent-fixtures",
+            "cancel-in-progress: false",
+            "uses: ./.github/actions/setup-permanent-fixture",
+        ):
+            self.assertIn(value, workflow if value == "fixture_cleanup_red_proof:" else cleanup)
+        self.assertNotIn("DIGITALOCEAN_TOKEN", cleanup)
+
     def test_harness_isolation_static_gate_remains_required(self) -> None:
         root_makefile = (ROOT / "Makefile").read_text()
         workflow = (ROOT / ".github/workflows/ci.yml").read_text()

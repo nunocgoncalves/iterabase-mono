@@ -54,10 +54,6 @@ type permanentFixture struct {
 	modelUUID       string
 }
 
-func permanentFixtureEnabled() bool {
-	return os.Getenv(permanentFixtureEnabledEnv) == "true"
-}
-
 func fixtureSSHUser() string {
 	if user := strings.TrimSpace(os.Getenv(permanentFixtureSSHUserEnv)); user != "" {
 		return user
@@ -67,6 +63,9 @@ func fixtureSSHUser() string {
 
 func requirePermanentFixture(t *testing.T, capacity string) *permanentFixture {
 	t.Helper()
+	if os.Getenv(permanentFixtureEnabledEnv) != "true" {
+		t.Fatalf("mandatory permanent %s fixture is disabled — %s must be true", capacity, permanentFixtureEnabledEnv)
+	}
 	values := map[string]string{
 		permanentFixtureAddressEnv:         strings.TrimSpace(os.Getenv(permanentFixtureAddressEnv)),
 		permanentFixtureSSHUserEnv:         strings.TrimSpace(os.Getenv(permanentFixtureSSHUserEnv)),

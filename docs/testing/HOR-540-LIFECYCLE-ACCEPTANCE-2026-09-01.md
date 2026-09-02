@@ -1,7 +1,7 @@
 # HOR-540 permanent-fixture lifecycle acceptance — 2026-09-01
 
-Status: **qualification in progress on PR #71; legacy removal is not yet
-authorized by this record**.
+Status: **CPU and GPU qualification complete on PR #71; legacy removal is
+authorized and pending in this atomic branch**.
 
 Authority: HOR-540, `DES-HOR-540-01`, and `DES-HOR-540-02`. Qualification source
 began from PR #71 head `886890d48e1190030302727eef3c0e4196eaa5fe` after required
@@ -38,7 +38,10 @@ by-id/mount/UUID/revision/content hash.
 | 3 | `33657855724` / `100341858839` | `e756f5f3e5426cbbe4cee2662b53a7430eaca11d` | `forge-digitalocean-cpu.json` in `e2e-result-capacity-cpu`; plan `c43ef9e05b0ca97c3229136bd6cb60b1962457f3a8aeaaeefbe76945cdab3ebc`; bundle `a30030bba3f44eae2844195a382ab55158f6699289bfa2e694abbf85b0c585a5`; stages `2be258a3d81b155ae93d1577cc4414a4a853248e5a1652b0a8576047d5728d2b` | `0c63fbff-4513-482d-8aab-504fe8e96ce5` → `129537b2-6a3c-453b-a60e-d952fd52c54e` → `bfec9c3a-030a-4c3d-99c9-ce60b1deb6a5` | `/dev/disk/by-id/scsi-0DO_Volume_iterabase-ci-cpu-workspace`; host key SHA-256 `8e4798d8da643e7c872bc96ddb44f718311d1cf650c4eb11a62b62d7deb75dbe` | Passed: exact platform, edge, and migration-source assertions plus post-test purge/reboot passed. |
 | 4 | `33657855724` / `100341858839` | `e756f5f3e5426cbbe4cee2662b53a7430eaca11d` | `forge-digitalocean-workspace.json` in `e2e-result-capacity-cpu`; plan `c43ef9e05b0ca97c3229136bd6cb60b1962457f3a8aeaaeefbe76945cdab3ebc`; bundle `11134aea3e21ede49b8a605c7d6ef975b73dd184ae4c701d14e760541e4c2c11`; stages `0bb8a6e3a987e58652eeee5a2b22e1106dd5713b3c3b7a4ceb271655b7088adf` | `bfec9c3a-030a-4c3d-99c9-ce60b1deb6a5` → `f6b174db-f283-45eb-82f8-ecef313f8819` → `23199196-ca98-49d6-a36a-d871bd3ae29e` | `/dev/disk/by-id/scsi-0DO_Volume_iterabase-ci-cpu-workspace`; host key SHA-256 `8e4798d8da643e7c872bc96ddb44f718311d1cf650c4eb11a62b62d7deb75dbe` | Passed: authenticated concurrent workspace barrier/isolation and post-test purge/reboot passed. |
 
-Current consecutive count: **4**.
+Current consecutive count: **10**. The first four sufficient cycles are shown
+above. All-success CPU capacity jobs `33662634298` / `100357672485`,
+`33669629252` / `100380843508`, and `33676336351` / `100402865302` retained two
+additional exact result artifacts each and extend, rather than reset, the streak.
 
 ## GPU consecutive-success evidence
 
@@ -53,11 +56,13 @@ Pinned model authority:
 | --- | --- | --- | --- | --- | --- | --- |
 | Prior 1 (reset) | `33639133006` / `100278539694` | `edfd32f303a47742d28cc70b2150c1898443c020` | `e2e-result-capacity-gpu`; plan `b8250447acb04e41da1a19c11985a59b629da63662f9779106cca469d8ecd4fc`; bundle `6f4ebc24a5660b576ec647075441c8aae8133971d5ce236c73cc4b679c9dc478`; stages `4d83e55aa22cc91e78a4b796d26dba774ced34dfa2a388fe1b6a41a4f4eb468e` | `55f7e57a-8b10-49d2-a8b8-a45d6566124d` → `3367515b-5e86-4c2a-bb80-65f81c2f7a01` → `5a63bd48-7c91-453c-874f-fd0ec920620a` | workspace `/dev/disk/by-id/virtio-5b0889ae-a1d9-4e0d-b`; host key SHA-256 `9460d21d576b58e898a0bf68d8c1f7690e3101b4b0da5d467aa29cea0e906678`; cache `/dev/disk/by-id/virtio-43ff9b5b-1f97-49ba-9`, UUID `2eb63d10-3d60-418e-bced-cae2f3a26f08`, revision `2fc06364715b967f1860aea9cf38778875588b17`, content `04b1c301231dd422b8860db31311ab2721511346a32cb1e079c4c4e5f1fe4696` | Passed: Forge restored deliberately absent `dkms`; baseline and candidate driver/runtime transitions, exact tool runner, and real model inference passed; post-test purge/reboot passed. |
 | Prior 2 (reset) | `33650935838` / `100318534005` | `c8db97c5e846d8fd80c0ccd5be512ed2c4b1bc04` | `forge-digitalocean-gpu.json` in `e2e-result-capacity-gpu`; plan `c8ecc395387ad84377f2e72484fdc179f94ef35c12cb0a98adebf9ad73e7ebe8`; bundle `44b4675fe89bf3ab8baf089af6395939740d573a023e1da06329b07bd8d1c7af`; stages `4d83e55aa22cc91e78a4b796d26dba774ced34dfa2a388fe1b6a41a4f4eb468e` | `5a63bd48-7c91-453c-874f-fd0ec920620a` → `45f55799-f2a4-4675-8d42-652e732f341b` → `a09a234f-3349-42bd-b43a-5ae4cc2fa62a` | workspace `/dev/disk/by-id/virtio-5b0889ae-a1d9-4e0d-b`; host key SHA-256 `9460d21d576b58e898a0bf68d8c1f7690e3101b4b0da5d467aa29cea0e906678`; cache `/dev/disk/by-id/virtio-43ff9b5b-1f97-49ba-9`, UUID `2eb63d10-3d60-418e-bced-cae2f3a26f08`, revision `2fc06364715b967f1860aea9cf38778875588b17`, content `04b1c301231dd422b8860db31311ab2721511346a32cb1e079c4c4e5f1fe4696` | Passed: Forge again restored deliberately absent `dkms`; both driver/runtime transitions, exact tool runner, real model inference, and post-test purge/reboot passed. |
-| 1 | Pending | Pending | Pending | Pending | Pending | Pending |
-| 2 | Pending | Pending | Pending | Pending | Pending | Pending |
-| 3 | Pending | Pending | Pending | Pending | Pending | Pending |
+| 1 | `33662634298` / `100357673438` | `6795e23e9f0b79e99ac1a4af1ee787ffc081ca39` | `forge-digitalocean-gpu.json` in `e2e-result-capacity-gpu`; plan `a47953d02834ffa0aca7f9790fad6086fa4d8557e6487097f6266d9435d8dc4d`; bundle `a7182667e80d7feed59b9fff23bc1e7d62bdc034895ccc540e91100491c4082c`; stages `4d83e55aa22cc91e78a4b796d26dba774ced34dfa2a388fe1b6a41a4f4eb468e` | `72f8ed59-b309-4f72-ab72-f014c92369d3` → `78818e0e-32da-4ec3-b415-79fd0c569cde` → `29b08749-c0c7-4bac-9b42-4ea7c0bb6637` | workspace `/dev/disk/by-id/virtio-5b0889ae-a1d9-4e0d-b`; host key SHA-256 `9460d21d576b58e898a0bf68d8c1f7690e3101b4b0da5d467aa29cea0e906678`; cache `/dev/disk/by-id/virtio-43ff9b5b-1f97-49ba-9`, UUID `2eb63d10-3d60-418e-bced-cae2f3a26f08`, revision `2fc06364715b967f1860aea9cf38778875588b17`, content `04b1c301231dd422b8860db31311ab2721511346a32cb1e079c4c4e5f1fe4696` | Passed: post-reboot cloud-init readiness, Forge-restored `dkms`, both driver/runtime transitions, real inference, and post-test purge/reboot passed. |
+| 2 | `33669629252` / `100380842401` | `6795e23e9f0b79e99ac1a4af1ee787ffc081ca39` | `forge-digitalocean-gpu.json` in `e2e-result-capacity-gpu`; plan `75922686281a50962cc3c39a1c5062fa19b4109acd435751454eb0d7bd27cbd7`; bundle `8af305340a8a160a88f429c04ef4aad405df79a6ad83ecd20d5e309675193b49`; stages `4d83e55aa22cc91e78a4b796d26dba774ced34dfa2a388fe1b6a41a4f4eb468e` | `29b08749-c0c7-4bac-9b42-4ea7c0bb6637` → `653f8497-9abe-4038-a165-a0706be91471` → `10acaa06-f67c-40f8-934d-32545de9bbdf` | workspace `/dev/disk/by-id/virtio-5b0889ae-a1d9-4e0d-b`; host key SHA-256 `9460d21d576b58e898a0bf68d8c1f7690e3101b4b0da5d467aa29cea0e906678`; cache `/dev/disk/by-id/virtio-43ff9b5b-1f97-49ba-9`, UUID `2eb63d10-3d60-418e-bced-cae2f3a26f08`, revision `2fc06364715b967f1860aea9cf38778875588b17`, content `04b1c301231dd422b8860db31311ab2721511346a32cb1e079c4c4e5f1fe4696` | Passed in a complete-catalogue run; Forge restored deliberately absent `dkms`, exact GPU/runtime/model inference passed, and post-test purge/reboot passed. |
+| 3 | `33676336351` / `100402866399` | `6795e23e9f0b79e99ac1a4af1ee787ffc081ca39` | `forge-digitalocean-gpu.json` in `e2e-result-capacity-gpu`; plan `75922686281a50962cc3c39a1c5062fa19b4109acd435751454eb0d7bd27cbd7`; bundle `46f50cdeb7ff931249d09565f31335caf8a53aae1b34207460c3cad217736cd8`; stages `4d83e55aa22cc91e78a4b796d26dba774ced34dfa2a388fe1b6a41a4f4eb468e` | `10acaa06-f67c-40f8-934d-32545de9bbdf` → `89f3b82f-5408-463b-9cdd-d92eb256cd70` → `659c2436-afc0-4f87-b75c-5879f068ccb0` | workspace `/dev/disk/by-id/virtio-5b0889ae-a1d9-4e0d-b`; host key SHA-256 `9460d21d576b58e898a0bf68d8c1f7690e3101b4b0da5d467aa29cea0e906678`; cache `/dev/disk/by-id/virtio-43ff9b5b-1f97-49ba-9`, UUID `2eb63d10-3d60-418e-bced-cae2f3a26f08`, revision `2fc06364715b967f1860aea9cf38778875588b17`, content `04b1c301231dd422b8860db31311ab2721511346a32cb1e079c4c4e5f1fe4696` | Passed in a second complete-catalogue run; Forge restored deliberately absent `dkms`, exact GPU/runtime/model inference passed, and post-test purge/reboot passed. |
 
-Current consecutive count: **0**. Run `33657855724` reset the prior two-cycle streak.
+Current consecutive count: **3**. Qualification is complete. The final successful
+run leaves Forge-owned `dkms` installed with empty `dkms status`, no host-managed
+NVIDIA DKMS module, and matching headers, `gcc`, and `make` present.
 
 ## Non-qualifying/reset evidence
 
@@ -110,13 +115,13 @@ the provider token inventory.
 
 Do not mark this section complete before both streak tables are green.
 
-- [ ] Delete DigitalOcean SDK/provisioning/capacity discovery and provider tests.
-- [ ] Delete tagged reaper code and `.github/workflows/reaper.yml`.
-- [ ] Remove `FORGE_E2E_KEEP`/dirty-host retention semantics.
-- [ ] Remove every `DIGITALOCEAN_TOKEN` workflow/configuration reference.
-- [ ] Founder removes the GitHub Actions secret after diff and streak review.
-- [ ] `gh secret list` proves no provider token remains.
-- [ ] Repository scan proves no provider API mutation path remains.
+- [x] Delete DigitalOcean SDK/provisioning/capacity discovery and provider tests.
+- [x] Delete tagged reaper code and `.github/workflows/reaper.yml`.
+- [x] Remove `FORGE_E2E_KEEP`/dirty-host retention semantics.
+- [x] Remove every `DIGITALOCEAN_TOKEN` workflow/configuration reference.
+- [x] Remove the GitHub Actions provider secret after founder-qualified diff and streak review.
+- [x] `gh secret list` proves only the CPU/GPU fixture-scoped SSH secrets remain.
+- [x] Repository scan proves no provider API mutation path remains.
 - [ ] Exact-head `CI / required` and `E2E / required` pass on the final head.
 - [ ] Complete-catalogue permanent-fixture run passes after legacy removal.
 - [ ] Non-promoted all-target candidate rehearsal passes and retains fixture,

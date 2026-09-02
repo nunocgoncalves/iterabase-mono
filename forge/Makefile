@@ -1,6 +1,6 @@
-.PHONY: build test test-unit test-e2e test-e2e-workspace test-e2e-overlay test-e2e-secrets test-e2e-flux test-e2e-gpu test-e2e-gpu-broken-policy test-e2e-inference-gpu test-e2e-unit lint fmt fmt-check install-hooks clean
+.PHONY: build test test-unit test-e2e test-e2e-workspace test-e2e-gpu test-e2e-gpu-broken-policy test-e2e-gpu-broken-cleanup test-e2e-unit lint fmt fmt-check install-hooks clean
 
-# Load .env if present (e.g. DIGITALOCEAN_TOKEN for e2e). .env is gitignored.
+# Load an optional gitignored local environment file.
 -include .env
 export
 
@@ -41,10 +41,6 @@ test-e2e-workspace:
 	cd test/e2e && ITERABASE_E2E_SOURCE_INPUTS="$(ITERABASE_E2E_SOURCE_INPUTS)" \
 		go test -v -race -count=1 -timeout 95m -run '^TestE2E$$/^digitalocean-workspace$$' .
 
-# Compatibility aliases: overlay, secret-sync, and Flux now compose on the one
-# CPU fixture instead of provisioning three additional droplets.
-test-e2e-overlay test-e2e-secrets test-e2e-flux: test-e2e
-
 test-e2e-gpu:
 	cd test/e2e && ITERABASE_E2E_SOURCE_INPUTS="$(ITERABASE_E2E_SOURCE_INPUTS)" go test -v -race -count=1 -timeout 100m -run '^TestE2E$$/^digitalocean-gpu$$' .
 
@@ -64,8 +60,18 @@ test-e2e-gpu-broken-policy:
 	grep -Fq 'pod-deletion-required' "$$output"; \
 	grep -Fq 'upgrade-failed' "$$output"
 
-# Compatibility alias: real inference now follows GPU smoke on the same VM.
-test-e2e-inference-gpu: test-e2e-gpu
+# Intentional HOR-540 cleanup red proof. The real reset completes first so the
+# permanent fixture remains clean; the owner cleanup hook then reports a forced
+# failure and the shared runner collects diagnostics-after-cleanup-failure.
+test-e2e-gpu-broken-cleanup:
+	@output=$$(mktemp); trap 'rm -f "$$output"' EXIT; \
+	set +e; (cd test/e2e && FORGE_E2E_BREAK_CLEANUP=true FORGE_E2E_REQUIRE_CAPACITY=true \
+		ITERABASE_E2E_SOURCE_INPUTS="$(ITERABASE_E2E_SOURCE_INPUTS)" \
+		go test -v -race -count=1 -timeout 100m -run '^TestE2E$$/^digitalocean-gpu$$' .) >"$$output" 2>&1; status=$$?; set -e; \
+	cat "$$output"; \
+	if [ "$$status" -eq 0 ]; then echo "forced cleanup failure unexpectedly passed" >&2; exit 1; fi; \
+	grep -Fq 'intentional HOR-540 cleanup failure after successful permanent GPU reset' "$$output"; \
+	grep -Fq 'diagnostics-after-cleanup-failure' "$$output"
 
 # Run the hermetic shared-runner scenario and Forge-specific fixture,
 # diagnostics, GPU-transition, and candidate-composition tests. Direct chart
