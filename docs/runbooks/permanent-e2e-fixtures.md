@@ -132,9 +132,11 @@ Expected evidence:
 4. reboot is requested only after successful purge;
 5. SSH disconnects, then reconnects under the same pinned host key;
 6. `/proc/sys/kernel/random/boot_id` changes;
-7. workspace receipt/mount/fstab/signatures, K3s, run-scoped overlays,
+7. `cloud-init status` reaches `done` before Forge preflight begins; SSH becoming
+   reachable alone is not post-reboot readiness;
+8. workspace receipt/mount/fstab/signatures, K3s, run-scoped overlays,
    transferred artifacts, and stale test processes are absent;
-8. on GPU, `/data/hf-cache` still resolves to its distinct by-id device/UUID and
+9. on GPU, `/data/hf-cache` still resolves to its distinct by-id device/UUID and
    its pinned model file still matches revision and SHA-256 authority.
 
 Ordinary `forge destroy` remains data-preserving. `--reboot`, CI mode,
