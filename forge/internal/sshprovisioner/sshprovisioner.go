@@ -327,6 +327,12 @@ func (p *SSHProvisioner) EnsureDriverBuildDeps(ctx context.Context) error {
 		case <-time.After(aptLockRetryInterval):
 		}
 	}
+	// The driver container resolves and downloads this exact package from the
+	// Ubuntu archives independently of the host. An installed-but-retired HWE
+	// kernel package is therefore unusable even when its local build tree remains.
+	if _, err := p.run(ctx, "apt-cache show linux-headers-$(uname -r) >/dev/null 2>&1"); err != nil {
+		return fmt.Errorf("verify GPU driver build dependencies: running kernel headers are not available from configured apt repositories: %w", err)
+	}
 	if _, err := p.run(ctx, "test -f /lib/modules/$(uname -r)/build/Makefile && command -v dkms >/dev/null && command -v gcc >/dev/null && command -v make >/dev/null"); err != nil {
 		return fmt.Errorf("verify GPU driver build dependencies: %w", err)
 	}

@@ -56,6 +56,26 @@ Pinned model authority:
 
 Current consecutive count: **0**.
 
+## Non-qualifying/reset evidence
+
+These attempts remain failures; none starts or advances a streak:
+
+| Workflow run / job | Source SHA | Capacity | Reset reason |
+| --- | --- | --- | --- |
+| `33609868347` | `a6ce9b8203e100db151b759139caa6d773c47d14` | CPU + GPU | Both pinned sessions failed closed on host-key algorithm negotiation. |
+| `33611404151` / `100187936569` | `4c32f315ab8776182877611b6f90582d3ae801e2` | CPU | The reserved-IP NAT path did not expose the edge listener and the concurrent workspace assertion never reached its two-arrival barrier. |
+| `33611404151` / `100187937276` | `4c32f315ab8776182877611b6f90582d3ae801e2` | GPU | GPU Operator driver installation could not resolve the running kernel; dependent runtime and inference stages did not run. |
+| `33620416814` / `100216730899` | `332fbb718df81deef85ff5592ff854da4156f461` | CPU | The primary public interface fixed the edge path and the complete `digitalocean-cpu` scenario passed, but `digitalocean-workspace` again failed its two-arrival barrier on the 4 GiB fixture. |
+| `33620416814` / `100216731899` | `332fbb718df81deef85ff5592ff854da4156f461` | GPU | Forge restored the deliberately removed `dkms` package, but the driver container could not resolve retired `linux-headers-6.11.0-26-generic`; no driver/runtime/inference assertion passed. |
+
+After the last GPU attempt, the empty `dkms status` and absence of any
+host-managed NVIDIA DKMS module were reverified. Only the Forge-installed
+`dkms` package was removed (no `apt autoremove`); matching headers and
+`build-essential` were retained. The Ubuntu HWE baseline was updated and
+rebooted to `7.0.0-30-generic`, whose exact header package remains available
+from the configured Ubuntu archive. `dkms` is deliberately absent so the next
+exact Forge apply must restore and verify it before GPU Operator reconciliation.
+
 ## Required negative evidence
 
 | Proof | Run/job or local contract | Result |

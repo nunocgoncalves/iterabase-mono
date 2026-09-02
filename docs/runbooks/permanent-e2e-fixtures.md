@@ -41,7 +41,10 @@ each host:
    matching kernel build Makefile plus `dkms`, `gcc`, and `make`, then every GPU
    apply idempotently installs `linux-headers-$(uname -r)`, `build-essential`,
    and `dkms` and verifies that exact build surface before installing the GPU
-   Operator. Do not rely on an out-of-band package install as qualification
+   Operator. The running kernel's exact header package must still be available
+   from the configured Ubuntu archives because the driver container resolves it
+   independently; upgrade and reboot a stale HWE baseline before qualification.
+   Do not rely on an out-of-band build-dependency install as qualification
    evidence.
 5. Obtain the host public key through a trusted provider console or first-boot
    channel. Compare it independently before recording the exact one-line
