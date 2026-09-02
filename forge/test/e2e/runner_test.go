@@ -98,9 +98,9 @@ func TestE2E(t *testing.T) {
 }
 
 func forgeScenarioMetadata(name, description string, tier sharede2e.Tier, references, targets []string, makeTarget string, timeout int, capacity string) sharede2e.ScenarioMetadata {
-	artifacts := []string{"forge-binary", "iterabase-platform-chart", "cert-manager-substrate-chart", "control-plane-image", "inference-gateway-image"}
+	artifacts := []string{"forge-binary", "iterabase-platform-chart", "cert-manager-substrate-chart", "control-plane-image", "tool-runner-image", "inference-gateway-image"}
 	if name == "digitalocean-cpu" || name == "digitalocean-workspace" {
-		artifacts = append(artifacts, "harness-image", "tool-runner-image", "certificate-migration-chart")
+		artifacts = append(artifacts, "harness-image", "certificate-migration-chart")
 	}
 	if name == "digitalocean-workspace" {
 		artifacts = append(artifacts, "runtime-fixture-image")
@@ -111,6 +111,15 @@ func forgeScenarioMetadata(name, description string, tier sharede2e.Tier, refere
 		Intents:      []sharede2e.ExecutionIntent{sharede2e.IntentPR, sharede2e.IntentNightly, sharede2e.IntentCandidate},
 		FixtureModes: []sharede2e.FixtureMode{sharede2e.FixtureSource, sharede2e.FixtureCandidate},
 		MakeTarget:   makeTarget, TimeoutMinutes: timeout, Capacity: capacity, Mandatory: capacity != "",
+	}
+}
+
+func TestGPUScenarioSelectsEveryChartRuntimeImage(t *testing.T) {
+	metadata := forgeScenarioMetadata("digitalocean-gpu", "gpu", sharede2e.TierF3, nil, nil, "test-e2e-gpu", 110, "gpu")
+	for _, artifact := range []string{"control-plane-image", "inference-gateway-image", "tool-runner-image"} {
+		if !slices.Contains(metadata.RequiredArtifacts, artifact) {
+			t.Fatalf("GPU scenario does not select chart runtime artifact %q: %v", artifact, metadata.RequiredArtifacts)
+		}
 	}
 }
 

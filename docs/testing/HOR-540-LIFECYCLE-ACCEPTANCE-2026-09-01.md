@@ -69,6 +69,8 @@ These attempts remain failures; none starts or advances a streak:
 | `33620416814` / `100216731899` | `332fbb718df81deef85ff5592ff854da4156f461` | GPU | Forge restored the deliberately removed `dkms` package, but the driver container could not resolve retired `linux-headers-6.11.0-26-generic`; no driver/runtime/inference assertion passed. |
 | `33626838744` / `100237361949` | `8aca830a29ee464e80cc126ba6ea1b994ab34c18` | CPU | `digitalocean-workspace` again failed its two-arrival barrier on the pre-resize 4 GiB fixture. |
 | `33626838744` / `100237362539` | `8aca830a29ee464e80cc126ba6ea1b994ab34c18` | GPU | Forge restored `dkms`; exact kernel resolution, GPU driver 580.126.20, runtime toolkit, device plugin, validator, and ClusterPolicy readiness passed. The first client-go smoke then failed because the provider does not expose public port 6443; dependent workload/upgrade/inference stages did not run. |
+| `33632117921` / `100254864975` | `fe3161b45ba8d5e9a03df54319f1925903b211af` | CPU | `digitalocean-workspace` again failed its two-arrival barrier on the pre-resize 4 GiB fixture. |
+| `33632117921` / `100254863954` | `fe3161b45ba8d5e9a03df54319f1925903b211af` | GPU | The pinned SSH API tunnel passed the real GPU smoke and the complete 580.126.20 → 595.71.05 driver/runtime transition. Platform apply then failed closed because the scenario had not selected/imported the chart's tool-runner image and its obsolete published fallback was unavailable; model inference did not run. |
 
 Before `33626838744`, the Ubuntu HWE baseline was updated and rebooted to
 `7.0.0-30-generic`, whose exact header package remains available from the
