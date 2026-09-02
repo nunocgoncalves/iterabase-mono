@@ -50,11 +50,11 @@ Pinned model authority:
 
 | Streak | Workflow run / job | Source SHA | Plan/result artifact | Pre/post boot IDs | Workspace + model-cache identity | Result |
 | --- | --- | --- | --- | --- | --- | --- |
-| 1 | Pending | Pending | Pending | Pending | Pending | Pending |
+| 1 | `33639133006` / `100278539694` | `edfd32f303a47742d28cc70b2150c1898443c020` | `e2e-result-capacity-gpu`; plan `b8250447acb04e41da1a19c11985a59b629da63662f9779106cca469d8ecd4fc`; bundle `6f4ebc24a5660b576ec647075441c8aae8133971d5ce236c73cc4b679c9dc478`; stages `4d83e55aa22cc91e78a4b796d26dba774ced34dfa2a388fe1b6a41a4f4eb468e` | `55f7e57a-8b10-49d2-a8b8-a45d6566124d` → `3367515b-5e86-4c2a-bb80-65f81c2f7a01` → `5a63bd48-7c91-453c-874f-fd0ec920620a` | workspace `/dev/disk/by-id/virtio-5b0889ae-a1d9-4e0d-b`; host key SHA-256 `9460d21d576b58e898a0bf68d8c1f7690e3101b4b0da5d467aa29cea0e906678`; cache `/dev/disk/by-id/virtio-43ff9b5b-1f97-49ba-9`, UUID `2eb63d10-3d60-418e-bced-cae2f3a26f08`, revision `2fc06364715b967f1860aea9cf38778875588b17`, content `04b1c301231dd422b8860db31311ab2721511346a32cb1e079c4c4e5f1fe4696` | Passed: Forge restored deliberately absent `dkms`; baseline and candidate driver/runtime transitions, exact tool runner, and real model inference passed; post-test purge/reboot passed. |
 | 2 | Pending | Pending | Pending | Pending | Pending | Pending |
 | 3 | Pending | Pending | Pending | Pending | Pending | Pending |
 
-Current consecutive count: **0**.
+Current consecutive count: **1**.
 
 ## Non-qualifying/reset evidence
 
