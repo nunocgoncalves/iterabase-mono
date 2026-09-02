@@ -37,7 +37,12 @@ each host:
    `findtime=10m`, `bantime=1d`) and set SSH `MaxStartups 100:30:200` plus
    `LoginGraceTime 30`; public fixture addresses otherwise receive enough
    unauthenticated scanning to starve rapid reboot/reconnect probes. The GPU
-   host must also satisfy Forge's NVIDIA/Ubuntu preflight.
+   host must also satisfy Forge's NVIDIA/Ubuntu preflight. Forge reports the
+   matching kernel build Makefile plus `dkms`, `gcc`, and `make`, then every GPU
+   apply idempotently installs `linux-headers-$(uname -r)`, `build-essential`,
+   and `dkms` and verifies that exact build surface before installing the GPU
+   Operator. Do not rely on an out-of-band package install as qualification
+   evidence.
 5. Obtain the host public key through a trusted provider console or first-boot
    channel. Compare it independently before recording the exact one-line
    OpenSSH public key. Do not trust an unauthenticated first `ssh-keyscan` result.

@@ -173,6 +173,9 @@ func printPlan(cmd *cobra.Command, plan *lifecycle.ReconcilePlan) {
 			fmt.Fprintf(out, "  gpu driver: (chart default)\n")
 		}
 		fmt.Fprintf(out, "  gpu pci:   %v\n", plan.Preflight.HasNVIDIAGPU)
+		fmt.Fprintf(out, "  gpu build: headers=%v dkms=%v gcc=%v make=%v\n",
+			plan.Preflight.KernelHeadersInstalled, plan.Preflight.HasDKMS,
+			plan.Preflight.HasGCC, plan.Preflight.HasMake)
 	}
 	if plan.OverlayRepo != "" {
 		fmt.Fprintf(out, "  overlay:  %s@%s\n", plan.OverlayRepo, plan.OverlayRef)
