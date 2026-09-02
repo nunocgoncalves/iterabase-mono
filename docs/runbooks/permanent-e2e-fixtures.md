@@ -50,6 +50,12 @@ each host:
    channel. Compare it independently before recording the exact one-line
    OpenSSH public key. Do not trust an unauthenticated first `ssh-keyscan` result.
 
+The permanent GPU fixture does not require provider ingress to K3s port 6443.
+The harness rewrites only the fetched kubeconfig transport endpoint and carries
+all client-go and `kubectl` API traffic through a fixture-scoped pinned SSH
+tunnel to host-local `127.0.0.1:6443`, while retaining the original API server
+identity for TLS verification.
+
 The GPU host additionally receives a second non-root whole disk, physically and
 logically distinct from the Forge workspace disk:
 

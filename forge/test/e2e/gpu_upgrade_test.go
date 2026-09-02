@@ -84,6 +84,7 @@ func applyGPUDriverUpgradeStage(t *testing.T, state *digitalOceanGPUState) {
 	t.Logf("reconciling exact GPU driver transition %s -> %s", gpuUpgradeBaselineDriver, gpuUpgradeCandidateDriver)
 	out := applyOnce(t, state.forgeBin, state.forgeHome, cfgPath)
 	assertApplyMarkers(t, out, "node ready: true", "gpu ready: true", "gpu driver: "+gpuUpgradeCandidateDriver)
+	state.bindKubeconfigTunnel(t)
 	t.Logf("driver upgrade apply output:\n%s", out)
 }
 
