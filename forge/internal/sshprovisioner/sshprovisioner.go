@@ -198,8 +198,13 @@ func (p *SSHProvisioner) run(ctx context.Context, cmd string) (string, error) {
 // Preflight implements provisioner.Provisioner.
 func (p *SSHProvisioner) Preflight(ctx context.Context) (*provisioner.PreflightResult, error) {
 	r := &provisioner.PreflightResult{}
-	if out, err := p.run(ctx, "cat /etc/os-release"); err == nil {
-		r.OS = parseOS(out)
+	out, err := p.run(ctx, "cat /etc/os-release")
+	if err != nil {
+		return nil, fmt.Errorf("inspect operating system: %w", err)
+	}
+	r.OS = parseOS(out)
+	if r.OS == "" {
+		return nil, fmt.Errorf("inspect operating system: /etc/os-release has no PRETTY_NAME")
 	}
 	if _, err := p.run(ctx, "sudo -n true"); err == nil {
 		r.HasSudo = true

@@ -262,6 +262,35 @@ func TestPreflight(t *testing.T) {
 	assert.True(t, r.HasMake)
 }
 
+func TestPreflightRequiresReadableOperatingSystemIdentity(t *testing.T) {
+	tests := []struct {
+		name       string
+		output     string
+		exitStatus int
+		want       string
+	}{
+		{name: "probe failure", exitStatus: 1, want: "inspect operating system: ssh run"},
+		{name: "missing pretty name", output: "NAME=Ubuntu\n", want: "has no PRETTY_NAME"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
+				if cmd == "cat /etc/os-release" {
+					return tt.output, tt.exitStatus
+				}
+				return "", 1
+			})
+			defer cleanup()
+
+			p := newProvisioner(t, addr, cfg)
+			defer p.Close()
+			result, err := p.Preflight(context.Background())
+			require.Nil(t, result)
+			require.ErrorContains(t, err, tt.want)
+		})
+	}
+}
+
 func TestInstall_CommandShape(t *testing.T) {
 	var got string
 	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {

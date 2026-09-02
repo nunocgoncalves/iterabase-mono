@@ -1,6 +1,7 @@
 package e2e
 
 import (
+	"context"
 	"crypto/sha256"
 	_ "embed"
 	"encoding/hex"
@@ -136,6 +137,17 @@ func (fixture *permanentFixture) reset(t *testing.T, forgeBin, forgeHome string)
 	after, client, err := fixture.waitForReboot(before)
 	if err != nil {
 		return err
+	}
+	client.Close()
+	// SSH can become available before cloud-final has completed after a reboot.
+	// Preserve the lifecycle's readiness boundary so Forge preflight never races
+	// provider boot configuration on a permanent fixture.
+	if err := waitForHostReady(context.Background(), fixture.address, fixture.sshKeyPath); err != nil {
+		return fmt.Errorf("wait for post-reboot host readiness: %w", err)
+	}
+	client, err = sshDial(fixture.address, fixture.sshKeyPath)
+	if err != nil {
+		return fmt.Errorf("reconnect after post-reboot host readiness: %w", err)
 	}
 	defer client.Close()
 	if err := fixture.waitForWorkspaceDevice(client); err != nil {
