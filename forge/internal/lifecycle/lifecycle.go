@@ -798,8 +798,26 @@ func Destroy(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner
 // explicitly requested purge only after the existing product/platform/K3s
 // destroy path succeeds. A requested reboot is last, after any purge.
 func DestroyWithOptions(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner, d deployer.Deployer, o overlayer.Overlayer, f fluxer.Fluxer, opts DestroyOpts) error {
-	// Flux is stopped first (reverse of apply's flux-last). Remaining chart
-	// cleanup is best-effort and never mutates the workspace disk.
+	destroyProductSubstrate(ctx, cfg, d, o, f)
+	if err := p.Uninstall(ctx); err != nil {
+		return err
+	}
+	if opts.PurgeWorkspace {
+		if err := purgeAgentPoolWorkspace(ctx, cfg, p); err != nil {
+			return err
+		}
+	}
+	if opts.Reboot {
+		if err := rebootHost(ctx, p); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// destroyProductSubstrate stops reconcilers and charts in reverse apply order.
+// Cleanup remains best-effort and never mutates the workspace disk.
+func destroyProductSubstrate(ctx context.Context, cfg *config.Cluster, d deployer.Deployer, o overlayer.Overlayer, f fluxer.Fluxer) {
 	if f != nil && cfg.Spec.Flux.Enabled {
 		_ = f.UninstallFlux(ctx)
 	}
@@ -817,31 +835,31 @@ func DestroyWithOptions(ctx context.Context, cfg *config.Cluster, p provisioner.
 		g := cfg.Spec.GPU.Operator
 		_ = d.UninstallChart(ctx, g.Release, g.Namespace)
 	}
-	if err := p.Uninstall(ctx); err != nil {
-		return err
+}
+
+func purgeAgentPoolWorkspace(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner) error {
+	purger, ok := p.(provisioner.WorkspacePurger)
+	if !ok {
+		return fmt.Errorf("workspace purge is unavailable for this provisioner")
 	}
-	if opts.PurgeWorkspace {
-		purger, ok := p.(provisioner.WorkspacePurger)
-		if !ok {
-			return fmt.Errorf("workspace purge is unavailable for this provisioner")
-		}
-		spec := provisioner.AgentPoolWorkspaceSpec{
-			InstallName: cfg.Metadata.Name,
-			Device:      cfg.Spec.AgentPoolWorkspace.Device,
-			Filesystem:  cfg.Spec.AgentPoolWorkspace.Filesystem,
-		}
-		if err := purger.PurgeAgentPoolWorkspace(ctx, spec); err != nil {
-			return fmt.Errorf("purge AgentPool workspace: %w", err)
-		}
+	spec := provisioner.AgentPoolWorkspaceSpec{
+		InstallName: cfg.Metadata.Name,
+		Device:      cfg.Spec.AgentPoolWorkspace.Device,
+		Filesystem:  cfg.Spec.AgentPoolWorkspace.Filesystem,
 	}
-	if opts.Reboot {
-		rebooter, ok := p.(provisioner.Rebooter)
-		if !ok {
-			return fmt.Errorf("host reboot is unavailable for this provisioner")
-		}
-		if err := rebooter.Reboot(ctx); err != nil {
-			return fmt.Errorf("reboot host: %w", err)
-		}
+	if err := purger.PurgeAgentPoolWorkspace(ctx, spec); err != nil {
+		return fmt.Errorf("purge AgentPool workspace: %w", err)
+	}
+	return nil
+}
+
+func rebootHost(ctx context.Context, p provisioner.Provisioner) error {
+	rebooter, ok := p.(provisioner.Rebooter)
+	if !ok {
+		return fmt.Errorf("host reboot is unavailable for this provisioner")
+	}
+	if err := rebooter.Reboot(ctx); err != nil {
+		return fmt.Errorf("reboot host: %w", err)
 	}
 	return nil
 }
