@@ -1562,6 +1562,8 @@ func TestEnsureDriverBuildDeps_CommandShape(t *testing.T) {
 		switch cmd {
 		case "sudo apt-get update && sudo apt-get install -y linux-headers-$(uname -r) build-essential dkms":
 			return "", 0
+		case "apt-cache show linux-headers-$(uname -r) >/dev/null 2>&1":
+			return "", 0
 		case "test -f /lib/modules/$(uname -r)/build/Makefile && command -v dkms >/dev/null && command -v gcc >/dev/null && command -v make >/dev/null":
 			return "", 0
 		default:
@@ -1574,6 +1576,7 @@ func TestEnsureDriverBuildDeps_CommandShape(t *testing.T) {
 	require.NoError(t, p.EnsureDriverBuildDeps(context.Background()))
 	assert.Equal(t, []string{
 		"sudo apt-get update && sudo apt-get install -y linux-headers-$(uname -r) build-essential dkms",
+		"apt-cache show linux-headers-$(uname -r) >/dev/null 2>&1",
 		"test -f /lib/modules/$(uname -r)/build/Makefile && command -v dkms >/dev/null && command -v gcc >/dev/null && command -v make >/dev/null",
 	}, got)
 }
@@ -2014,7 +2017,7 @@ func TestEnsureDriverBuildDeps_RetriesOnAptLock(t *testing.T) {
 			}
 			return "", 0
 		}
-		if strings.HasPrefix(cmd, "test -f /lib/modules/") {
+		if strings.HasPrefix(cmd, "apt-cache show linux-headers-") || strings.HasPrefix(cmd, "test -f /lib/modules/") {
 			return "", 0
 		}
 		return "", 1
@@ -2045,9 +2048,24 @@ func TestEnsureDriverBuildDeps_AptLockHeldTooLong(t *testing.T) {
 	assert.Contains(t, err.Error(), "install GPU driver build dependencies")
 }
 
-func TestEnsureDriverBuildDeps_VerifiesInstalledSurface(t *testing.T) {
+func TestEnsureDriverBuildDeps_RejectsUnavailableRunningKernelHeaders(t *testing.T) {
 	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
 		if strings.Contains(cmd, "apt-get install -y linux-headers-$(uname -r) build-essential dkms") {
+			return "", 0
+		}
+		return "", 1
+	})
+	defer cleanup()
+	p := newProvisioner(t, addr, cfg)
+	defer p.Close()
+	err := p.EnsureDriverBuildDeps(context.Background())
+	require.ErrorContains(t, err, "running kernel headers are not available")
+}
+
+func TestEnsureDriverBuildDeps_VerifiesInstalledSurface(t *testing.T) {
+	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
+		if strings.Contains(cmd, "apt-get install -y linux-headers-$(uname -r) build-essential dkms") ||
+			strings.HasPrefix(cmd, "apt-cache show linux-headers-") {
 			return "", 0
 		}
 		return "", 1
