@@ -84,6 +84,7 @@ These attempts remain failures; none starts or advances a streak:
 | `33632117921` / `100254863954` | `fe3161b45ba8d5e9a03df54319f1925903b211af` | GPU | The pinned SSH API tunnel passed the real GPU smoke and the complete 580.126.20 → 595.71.05 driver/runtime transition. Platform apply then failed closed because the scenario had not selected/imported the chart's tool-runner image and its obsolete published fallback was unavailable; model inference did not run. |
 | `33657855724` / `100341857789` | `e756f5f3e5426cbbe4cee2662b53a7430eaca11d` | GPU | SSH and purge/reboot succeeded, but the permanent harness handed Forge the host before `cloud-final` completed. The first operating-system probe was not usable, Forge reported an empty OS identity, and the run failed before restoring `dkms`; post-failure purge/reboot succeeded. This resets the prior GPU streak to zero. |
 | `33689860332` / `100446279492` | `6b47d6a991b51011368c5719c22e62ac037f4781` | GPU | The first post-removal cleanup-negative attempt completed real purge/reboot (`f97a9133-2dfe-4977-b443-af6f00af713e` → `d79b92b0-856e-4fe9-a329-cf2e0a88c842`), raised the intentional owner cleanup error, and retained `e2e-red-proof-cleanup`. Its wrapper also required a diagnostics-after marker that could not occur because an unrelated missing exact-chart input had already failed a stage; the dedicated minimal cleanup proof added afterward removes that ambiguity. |
+| `33696787601` / `100467399266` | `4cface99aad95b71b34345b805a8e9e7a8b3333c` | GPU | The intentional HOR-411 mutation run failed before reaching the target assertion because the first Forge handshake was reset immediately after otherwise successful pinned post-reboot readiness. Post-failure purge/reboot passed (`d86baa48-e308-4736-bf19-e3c84ce0e450` → `b7b23083-3849-4def-94fd-9b2c5277d036`). A bounded quiet handoff was added before repeating the proof. |
 
 Before `33626838744`, the Ubuntu HWE baseline was updated and rebooted to
 `7.0.0-30-generic`, whose exact header package remains available from the
@@ -111,7 +112,7 @@ the provider token inventory.
 | Ordinary `forge destroy` preserves workspace and never implies reboot | Forge lifecycle suite | Pending final SHA |
 | Corrupt/missing/wrong-device GPU cache fails closed | Forge harness unit suite | Pending final SHA |
 | Forced scenario assertion retains diagnostics and fails selected gate | Pending live run | Pending |
-| Forced cleanup/reboot failure fails selected gate | Pending live run | Pending |
+| Forced cleanup/reboot failure fails selected gate | `33696454144` / `100466351239`; retained `e2e-red-proof-cleanup` artifact `9872023116` | Passed: the real reset completed (`dfeee6d4-e265-4a6d-9bdb-5cfda0284f08` → `641d4a59-bbcb-4ca1-8528-c01ebd20fa9e`), the owner hook then failed intentionally, the underlying test was red, `diagnostics-after-cleanup-failure` passed, and the proof wrapper/required context accepted only that expected red. |
 | Interrupted run recovers through next serialized preflight when SSH is healthy | Pending live run | Pending |
 | Intentional HOR-411 policy mutation remains red-detecting | Pending live run | Pending |
 

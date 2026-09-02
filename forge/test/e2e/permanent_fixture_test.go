@@ -167,6 +167,11 @@ func (fixture *permanentFixture) reset(t *testing.T, forgeBin, forgeHome string)
 			return err
 		}
 	}
+	// Close the readiness session and leave a short quiet window before handing
+	// the fixture to Forge. Public SSH frontends can reset an immediate next
+	// handshake even after cloud-final and strict pinned probes have succeeded.
+	_ = client.Close()
+	time.Sleep(5 * time.Second)
 	t.Logf("permanent %s fixture reset: boot %s -> %s workspace=%s", fixture.capacity, before, after, fixture.workspaceDevice)
 	return nil
 }
