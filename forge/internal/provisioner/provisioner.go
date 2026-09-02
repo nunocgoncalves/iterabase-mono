@@ -69,7 +69,10 @@ type PreflightResult struct {
 	Installed              bool   // k3s already installed
 	HasIPv6                bool   // host has IPv6 (relevant when dualStack)
 	HasNVIDIAGPU           bool   // an NVIDIA GPU is on the PCI bus (GPU preflight; S11 passthrough precondition)
-	KernelHeadersInstalled bool   // linux-headers-$(uname -r) present (GPU driver build dep)
+	KernelHeadersInstalled bool   // /lib/modules/$(uname -r)/build/Makefile exists (matching GPU driver build headers)
+	HasDKMS                bool   // dkms executable present (GPU driver build dep)
+	HasGCC                 bool   // gcc executable present (GPU driver build dep)
+	HasMake                bool   // make executable present (GPU driver build dep)
 }
 
 // GPUReadiness is one coherent observation of the GPU operator and the
@@ -143,8 +146,8 @@ type Provisioner interface {
 	// NodeReady reports whether the cluster node is Ready (via remote k3s kubectl).
 	NodeReady(ctx context.Context) (bool, error)
 	// EnsureDriverBuildDeps ensures the host can compile the NVIDIA kernel module
-	// via the GPU operator's driver container (installs matching linux-headers on
-	// Ubuntu). Idempotent. Only called when GPU is enabled.
+	// via the GPU operator's driver container (installs matching linux-headers,
+	// build-essential, and dkms on Ubuntu). Idempotent. Only called when GPU is enabled.
 	EnsureDriverBuildDeps(ctx context.Context) error
 	// ListAgentPoolWorkspaceDevices returns stable non-removable whole-disk
 	// identities for the interactive init selection. It is strictly read-only.

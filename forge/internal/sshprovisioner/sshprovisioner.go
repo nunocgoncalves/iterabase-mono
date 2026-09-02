@@ -218,13 +218,22 @@ func (p *SSHProvisioner) Preflight(ctx context.Context) (*provisioner.PreflightR
 	}
 	// GPU preflight checks (read-only; only meaningful when GPU is enabled).
 	// NVIDIA GPU on the PCI bus via the vendor ID (0x10de) — no driver or
-	// pciutils needed. Kernel-headers presence via the /usr/src dir the driver
-	// container mounts.
+	// pciutils needed. Driver-build dependency checks use the exact paths and
+	// executables consumed by the GPU Operator driver container.
 	if _, err := p.run(ctx, "grep -qi 0x10de /sys/bus/pci/devices/*/vendor"); err == nil {
 		r.HasNVIDIAGPU = true
 	}
-	if _, err := p.run(ctx, "test -d /usr/src/linux-headers-$(uname -r)"); err == nil {
+	if _, err := p.run(ctx, "test -f /lib/modules/$(uname -r)/build/Makefile"); err == nil {
 		r.KernelHeadersInstalled = true
+	}
+	if _, err := p.run(ctx, "command -v dkms"); err == nil {
+		r.HasDKMS = true
+	}
+	if _, err := p.run(ctx, "command -v gcc"); err == nil {
+		r.HasGCC = true
+	}
+	if _, err := p.run(ctx, "command -v make"); err == nil {
+		r.HasMake = true
 	}
 	return r, nil
 }
@@ -296,20 +305,21 @@ func (p *SSHProvisioner) NodeReady(ctx context.Context) (bool, error) {
 var aptLockRetryInterval = 15 * time.Second
 
 // EnsureDriverBuildDeps implements provisioner.Provisioner. It installs the
-// kernel headers matching the running kernel so the GPU operator's driver
-// container can compile the NVIDIA module. Ubuntu/apt in v1; idempotent. It
-// retries on apt/dpkg lock contention (cloud-init/unattended-upgrades holding
-// the lock on first boot) rather than failing fast.
+// kernel headers matching the running kernel plus the compiler, make, and DKMS
+// required by the GPU Operator driver container. Ubuntu/apt in v1; idempotent.
+// It retries on apt/dpkg lock contention (cloud-init/unattended-upgrades holding
+// the lock on first boot) rather than failing fast, then verifies the exact
+// build surface before allowing GPU Operator reconciliation to continue.
 func (p *SSHProvisioner) EnsureDriverBuildDeps(ctx context.Context) error {
-	cmd := "sudo apt-get update && sudo apt-get install -y linux-headers-$(uname -r)"
+	cmd := "sudo apt-get update && sudo apt-get install -y linux-headers-$(uname -r) build-essential dkms"
 	for attempt := 0; ; attempt++ {
 		out, err := p.run(ctx, cmd)
 		if err == nil {
-			return nil
+			break
 		}
 		lockHeld := isAptLockHeld(err.Error()) || isAptLockHeld(out)
 		if !lockHeld || attempt >= 20 {
-			return fmt.Errorf("install kernel headers: %w", err)
+			return fmt.Errorf("install GPU driver build dependencies: %w", err)
 		}
 		select {
 		case <-ctx.Done():
@@ -317,6 +327,10 @@ func (p *SSHProvisioner) EnsureDriverBuildDeps(ctx context.Context) error {
 		case <-time.After(aptLockRetryInterval):
 		}
 	}
+	if _, err := p.run(ctx, "test -f /lib/modules/$(uname -r)/build/Makefile && command -v dkms >/dev/null && command -v gcc >/dev/null && command -v make >/dev/null"); err != nil {
+		return fmt.Errorf("verify GPU driver build dependencies: %w", err)
+	}
+	return nil
 }
 
 // isAptLockHeld reports whether an apt/dpkg error is lock contention

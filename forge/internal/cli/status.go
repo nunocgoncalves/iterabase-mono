@@ -66,6 +66,9 @@ func runStatus(cmd *cobra.Command, _ []string) error {
 		fmt.Fprintf(out, "  enabled:       true\n")
 		fmt.Fprintf(out, "  pci present:   %v\n", plan.Preflight.HasNVIDIAGPU)
 		fmt.Fprintf(out, "  headers:       %s\n", boolLabel(plan.Preflight.KernelHeadersInstalled, "installed", "absent"))
+		fmt.Fprintf(out, "  dkms:          %s\n", boolLabel(plan.Preflight.HasDKMS, "installed", "absent"))
+		fmt.Fprintf(out, "  gcc:           %s\n", boolLabel(plan.Preflight.HasGCC, "installed", "absent"))
+		fmt.Fprintf(out, "  make:          %s\n", boolLabel(plan.Preflight.HasMake, "installed", "absent"))
 		if cs, _ := p.Status(ctx, g.Release, g.Namespace); cs != nil && cs.Installed {
 			fmt.Fprintf(out, "  operator:      %s (%s)\n", g.Version, cs.Status)
 		} else {

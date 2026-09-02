@@ -225,8 +225,14 @@ func TestPreflight(t *testing.T) {
 			return "1: lo ...\n", 0
 		case "grep -qi 0x10de /sys/bus/pci/devices/*/vendor":
 			return "", 0
-		case "test -d /usr/src/linux-headers-$(uname -r)":
+		case "test -f /lib/modules/$(uname -r)/build/Makefile":
 			return "", 0
+		case "command -v dkms":
+			return "/usr/sbin/dkms\n", 0
+		case "command -v gcc":
+			return "/usr/bin/gcc\n", 0
+		case "command -v make":
+			return "/usr/bin/make\n", 0
 		case "command -v iscsiadm >/dev/null && systemctl is-active --quiet iscsid":
 			return "", 0
 		case "command -v mount.nfs >/dev/null":
@@ -251,6 +257,9 @@ func TestPreflight(t *testing.T) {
 	assert.True(t, r.HasIPv6)
 	assert.True(t, r.HasNVIDIAGPU)
 	assert.True(t, r.KernelHeadersInstalled)
+	assert.True(t, r.HasDKMS)
+	assert.True(t, r.HasGCC)
+	assert.True(t, r.HasMake)
 }
 
 func TestInstall_CommandShape(t *testing.T) {
@@ -1498,7 +1507,8 @@ func TestPreflight_NoGPU(t *testing.T) {
 		case "cat /etc/os-release":
 			return "PRETTY_NAME=\"Ubuntu 24.04 LTS\"\n", 0
 		case "sudo -n true", "command -v curl", "pidof systemd", "command -v k3s",
-			"ip -6 addr show scope global", "test -d /usr/src/linux-headers-$(uname -r)":
+			"ip -6 addr show scope global", "test -f /lib/modules/$(uname -r)/build/Makefile",
+			"command -v dkms", "command -v gcc", "command -v make":
 			return "", 0
 		case "grep -qi 0x10de /sys/bus/pci/devices/*/vendor":
 			return "", 1 // no NVIDIA device
@@ -1513,9 +1523,12 @@ func TestPreflight_NoGPU(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, r.HasNVIDIAGPU)
 	assert.True(t, r.KernelHeadersInstalled)
+	assert.True(t, r.HasDKMS)
+	assert.True(t, r.HasGCC)
+	assert.True(t, r.HasMake)
 }
 
-func TestPreflight_NoKernelHeaders(t *testing.T) {
+func TestPreflight_MissingDriverBuildDeps(t *testing.T) {
 	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
 		switch cmd {
 		case "cat /etc/os-release":
@@ -1523,8 +1536,9 @@ func TestPreflight_NoKernelHeaders(t *testing.T) {
 		case "sudo -n true", "command -v curl", "pidof systemd", "command -v k3s",
 			"ip -6 addr show scope global", "grep -qi 0x10de /sys/bus/pci/devices/*/vendor":
 			return "", 0
-		case "test -d /usr/src/linux-headers-$(uname -r)":
-			return "", 1 // headers absent
+		case "test -f /lib/modules/$(uname -r)/build/Makefile", "command -v dkms",
+			"command -v gcc", "command -v make":
+			return "", 1
 		default:
 			return "", 1
 		}
@@ -1536,23 +1550,32 @@ func TestPreflight_NoKernelHeaders(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, r.HasNVIDIAGPU)
 	assert.False(t, r.KernelHeadersInstalled)
+	assert.False(t, r.HasDKMS)
+	assert.False(t, r.HasGCC)
+	assert.False(t, r.HasMake)
 }
 
 func TestEnsureDriverBuildDeps_CommandShape(t *testing.T) {
-	var got string
+	var got []string
 	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
-		got = cmd
-		if strings.Contains(cmd, "apt-get install -y linux-headers-$(uname -r)") {
+		got = append(got, cmd)
+		switch cmd {
+		case "sudo apt-get update && sudo apt-get install -y linux-headers-$(uname -r) build-essential dkms":
 			return "", 0
+		case "test -f /lib/modules/$(uname -r)/build/Makefile && command -v dkms >/dev/null && command -v gcc >/dev/null && command -v make >/dev/null":
+			return "", 0
+		default:
+			return "", 1
 		}
-		return "", 1
 	})
 	defer cleanup()
 	p := newProvisioner(t, addr, cfg)
 	defer p.Close()
 	require.NoError(t, p.EnsureDriverBuildDeps(context.Background()))
-	assert.Contains(t, got, "apt-get update")
-	assert.Contains(t, got, "apt-get install -y linux-headers-$(uname -r)")
+	assert.Equal(t, []string{
+		"sudo apt-get update && sudo apt-get install -y linux-headers-$(uname -r) build-essential dkms",
+		"test -f /lib/modules/$(uname -r)/build/Makefile && command -v dkms >/dev/null && command -v gcc >/dev/null && command -v make >/dev/null",
+	}, got)
 }
 
 func TestWorkspacePurgeScriptIsIdentityBoundedAndIdempotent(t *testing.T) {
@@ -1983,15 +2006,18 @@ func TestEnsureDriverBuildDeps_RetriesOnAptLock(t *testing.T) {
 
 	calls := 0
 	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
-		if !strings.Contains(cmd, "apt-get install -y linux-headers-$(uname -r)") {
-			return "", 1
+		if strings.Contains(cmd, "apt-get install -y linux-headers-$(uname -r) build-essential dkms") {
+			calls++
+			if calls < 3 {
+				// apt lock held by cloud-init/unattended-upgrades on first boot
+				return "E: Could not get lock /var/lib/apt/lists/lock. It is held by process 1238 (apt-get)\n", 100
+			}
+			return "", 0
 		}
-		calls++
-		if calls < 3 {
-			// apt lock held by cloud-init/unattended-upgrades on first boot
-			return "E: Could not get lock /var/lib/apt/lists/lock. It is held by process 1238 (apt-get)\n", 100
+		if strings.HasPrefix(cmd, "test -f /lib/modules/") {
+			return "", 0
 		}
-		return "", 0
+		return "", 1
 	})
 	defer cleanup()
 	p := newProvisioner(t, addr, cfg)
@@ -2016,7 +2042,21 @@ func TestEnsureDriverBuildDeps_AptLockHeldTooLong(t *testing.T) {
 	defer p.Close()
 	err := p.EnsureDriverBuildDeps(context.Background())
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "install kernel headers")
+	assert.Contains(t, err.Error(), "install GPU driver build dependencies")
+}
+
+func TestEnsureDriverBuildDeps_VerifiesInstalledSurface(t *testing.T) {
+	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
+		if strings.Contains(cmd, "apt-get install -y linux-headers-$(uname -r) build-essential dkms") {
+			return "", 0
+		}
+		return "", 1
+	})
+	defer cleanup()
+	p := newProvisioner(t, addr, cfg)
+	defer p.Close()
+	err := p.EnsureDriverBuildDeps(context.Background())
+	require.ErrorContains(t, err, "verify GPU driver build dependencies")
 }
 
 func TestIsAptLockHeld(t *testing.T) {
