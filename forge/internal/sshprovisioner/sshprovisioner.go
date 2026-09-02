@@ -57,14 +57,15 @@ func WithSSHConfig(c *ssh.ClientConfig) Option {
 // SSH agent as fallback). Encrypted keys must be agent-loaded (no passphrase
 // prompt).
 func New(host config.Host, opts ...Option) (*SSHProvisioner, error) {
-	hostKeyCallback, err := configuredHostKeyCallback(host.SSHHostKey)
+	hostKeyCallback, hostKeyAlgorithms, err := configuredHostKey(host.SSHHostKey)
 	if err != nil {
 		return nil, err
 	}
 	cfg := &ssh.ClientConfig{
-		User:            host.SSHUser,
-		HostKeyCallback: hostKeyCallback,
-		Timeout:         10 * time.Second,
+		User:              host.SSHUser,
+		HostKeyCallback:   hostKeyCallback,
+		HostKeyAlgorithms: hostKeyAlgorithms,
+		Timeout:           10 * time.Second,
 	}
 	p := &SSHProvisioner{host: host, cfg: cfg, dial: defaultDial}
 	for _, opt := range opts {
@@ -80,19 +81,19 @@ func New(host config.Host, opts ...Option) (*SSHProvisioner, error) {
 	return p, nil
 }
 
-func configuredHostKeyCallback(value string) (ssh.HostKeyCallback, error) {
+func configuredHostKey(value string) (ssh.HostKeyCallback, []string, error) {
 	value = strings.TrimSpace(value)
 	if value == "" {
-		return ssh.InsecureIgnoreHostKey(), nil //nolint:gosec // backward-compatible interactive config
+		return ssh.InsecureIgnoreHostKey(), nil, nil //nolint:gosec // backward-compatible interactive config
 	}
 	publicKey, _, _, rest, err := ssh.ParseAuthorizedKey([]byte(value + "\n"))
 	if err != nil {
-		return nil, fmt.Errorf("parse pinned SSH host key: %w", err)
+		return nil, nil, fmt.Errorf("parse pinned SSH host key: %w", err)
 	}
 	if len(bytes.TrimSpace(rest)) != 0 {
-		return nil, fmt.Errorf("parse pinned SSH host key: unexpected trailing data")
+		return nil, nil, fmt.Errorf("parse pinned SSH host key: unexpected trailing data")
 	}
-	return ssh.FixedHostKey(publicKey), nil
+	return ssh.FixedHostKey(publicKey), []string{publicKey.Type()}, nil
 }
 
 // Close releases the underlying SSH connection.
