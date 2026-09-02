@@ -177,6 +177,8 @@ type digitalOceanGPUState struct {
 	chartVersion        string
 	upgradeEvidence     *gpuUpgradeEvidence
 	runtimeImageDigests map[string]importedRuntimeIdentity
+	apiTunnel           *sshAPITunnel
+	apiServerName       string
 	diagnostics         forgeDiagnostics
 }
 
@@ -238,6 +240,7 @@ func applyGPUSubstrateStage(t *testing.T, state *digitalOceanGPUState) {
 	cfgPath := writeForgeConfigGPUDriver(t, state.runID, state.vm.IP, state.privKeyPath, gpuUpgradeBaselineDriver)
 	out := applyOnce(t, state.forgeBin, state.forgeHome, cfgPath)
 	assertApplyMarkers(t, out, "node ready: true", "AgentPool workspace:", "AgentPool local-path ready: true", "gpu ready: true", "gpu driver: "+gpuUpgradeBaselineDriver)
+	state.bindKubeconfigTunnel(t)
 	t.Logf("apply output:\n%s", out)
 }
 
@@ -247,6 +250,7 @@ func assertGPUSmokeStage(t *testing.T, state *digitalOceanGPUState) {
 
 func (state *digitalOceanGPUState) cleanup(t *testing.T) {
 	t.Helper()
+	state.stopAPITunnel()
 	if state.fixture != nil {
 		state.diagnostics.setDomain(failureDomainCleanup)
 		workspaceDevicesByAddress.Delete(state.vm.IP)

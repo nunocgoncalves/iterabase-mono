@@ -67,13 +67,15 @@ These attempts remain failures; none starts or advances a streak:
 | `33611404151` / `100187937276` | `4c32f315ab8776182877611b6f90582d3ae801e2` | GPU | GPU Operator driver installation could not resolve the running kernel; dependent runtime and inference stages did not run. |
 | `33620416814` / `100216730899` | `332fbb718df81deef85ff5592ff854da4156f461` | CPU | The primary public interface fixed the edge path and the complete `digitalocean-cpu` scenario passed, but `digitalocean-workspace` again failed its two-arrival barrier on the 4 GiB fixture. |
 | `33620416814` / `100216731899` | `332fbb718df81deef85ff5592ff854da4156f461` | GPU | Forge restored the deliberately removed `dkms` package, but the driver container could not resolve retired `linux-headers-6.11.0-26-generic`; no driver/runtime/inference assertion passed. |
+| `33626838744` / `100237361949` | `8aca830a29ee464e80cc126ba6ea1b994ab34c18` | CPU | `digitalocean-workspace` again failed its two-arrival barrier on the pre-resize 4 GiB fixture. |
+| `33626838744` / `100237362539` | `8aca830a29ee464e80cc126ba6ea1b994ab34c18` | GPU | Forge restored `dkms`; exact kernel resolution, GPU driver 580.126.20, runtime toolkit, device plugin, validator, and ClusterPolicy readiness passed. The first client-go smoke then failed because the provider does not expose public port 6443; dependent workload/upgrade/inference stages did not run. |
 
-After the last GPU attempt, the empty `dkms status` and absence of any
-host-managed NVIDIA DKMS module were reverified. Only the Forge-installed
+Before `33626838744`, the Ubuntu HWE baseline was updated and rebooted to
+`7.0.0-30-generic`, whose exact header package remains available from the
+configured Ubuntu archive. After that run, the empty `dkms status` and absence
+of any host-managed NVIDIA DKMS module were reverified. Only the Forge-installed
 `dkms` package was removed (no `apt autoremove`); matching headers and
-`build-essential` were retained. The Ubuntu HWE baseline was updated and
-rebooted to `7.0.0-30-generic`, whose exact header package remains available
-from the configured Ubuntu archive. `dkms` is deliberately absent so the next
+`build-essential` were retained. `dkms` is deliberately absent so the next
 exact Forge apply must restore and verify it before GPU Operator reconciliation.
 
 ## Required negative evidence
