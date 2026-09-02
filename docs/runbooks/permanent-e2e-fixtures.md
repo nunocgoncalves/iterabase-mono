@@ -32,8 +32,12 @@ each host:
    swap, `/var/lib/rancher/k3s`, or `/var/lib/kubelet` and has no partitions,
    holders, mounts, or signatures.
 4. Install the baseline packages required by Forge and the lifecycle probe:
-   `curl`, `git`, `psmisc` (`fuser`), `util-linux`, and the applicable ext4/XFS
-   tools. The GPU host must also satisfy Forge's NVIDIA/Ubuntu preflight.
+   `curl`, `git`, `psmisc` (`fuser`), `util-linux`, `fail2ban`, and the applicable
+   ext4/XFS tools. Enable the `sshd` fail2ban jail (`maxretry=5`,
+   `findtime=10m`, `bantime=1d`) and set SSH `MaxStartups 100:30:200` plus
+   `LoginGraceTime 30`; public fixture addresses otherwise receive enough
+   unauthenticated scanning to starve rapid reboot/reconnect probes. The GPU
+   host must also satisfy Forge's NVIDIA/Ubuntu preflight.
 5. Obtain the host public key through a trusted provider console or first-boot
    channel. Compare it independently before recording the exact one-line
    OpenSSH public key. Do not trust an unauthenticated first `ssh-keyscan` result.
@@ -58,10 +62,10 @@ python3 -m pip install --user 'huggingface_hub[cli]'
 huggingface-cli download Qwen/Qwen3.5-0.8B \
   --revision 2fc06364715b967f1860aea9cf38778875588b17 \
   --cache-dir /data/hf-cache
-sha256sum /data/hf-cache/hub/models--Qwen--Qwen3.5-0.8B/snapshots/\
+sha256sum /data/hf-cache/models--Qwen--Qwen3.5-0.8B/snapshots/\
 2fc06364715b967f1860aea9cf38778875588b17/\
 model.safetensors-00001-of-00001.safetensors
-# must equal f0140d845aced424f17b1c75ebc5a67ef75fe309c68d2f613acda2eb551db7dd
+# must equal 04b1c301231dd422b8860db31311ab2721511346a32cb1e079c4c4e5f1fe4696
 ```
 
 Do not mount this disk at
