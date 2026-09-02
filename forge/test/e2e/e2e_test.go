@@ -787,18 +787,21 @@ func sshDial(ip, keyPath string) (*ssh.Client, error) {
 		return nil, err
 	}
 	hostKeyCallback := ssh.InsecureIgnoreHostKey() //nolint:gosec // branch-qualification droplets only
+	var hostKeyAlgorithms []string
 	if pin := strings.TrimSpace(os.Getenv(permanentFixtureHostKeyEnv)); pin != "" {
 		publicKey, _, _, rest, parseErr := ssh.ParseAuthorizedKey([]byte(pin + "\n"))
 		if parseErr != nil || len(strings.TrimSpace(string(rest))) != 0 {
 			return nil, fmt.Errorf("parse pinned fixture SSH host key: %w", parseErr)
 		}
 		hostKeyCallback = ssh.FixedHostKey(publicKey)
+		hostKeyAlgorithms = []string{publicKey.Type()}
 	}
 	cfg := &ssh.ClientConfig{
-		User:            fixtureSSHUser(),
-		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
-		HostKeyCallback: hostKeyCallback,
-		Timeout:         10 * time.Second,
+		User:              fixtureSSHUser(),
+		Auth:              []ssh.AuthMethod{ssh.PublicKeys(signer)},
+		HostKeyCallback:   hostKeyCallback,
+		HostKeyAlgorithms: hostKeyAlgorithms,
+		Timeout:           10 * time.Second,
 	}
 	return ssh.Dial("tcp", ip+":22", cfg)
 }

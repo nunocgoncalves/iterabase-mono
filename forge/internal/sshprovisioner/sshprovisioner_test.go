@@ -51,8 +51,9 @@ func TestConfiguredHostKeyCallbackPinsExactKey(t *testing.T) {
 	require.NoError(t, err)
 	key, err := ssh.NewPublicKey(public)
 	require.NoError(t, err)
-	callback, err := configuredHostKeyCallback(strings.TrimSpace(string(ssh.MarshalAuthorizedKey(key))))
+	callback, algorithms, err := configuredHostKey(strings.TrimSpace(string(ssh.MarshalAuthorizedKey(key))))
 	require.NoError(t, err)
+	require.Equal(t, []string{ssh.KeyAlgoED25519}, algorithms)
 	require.NoError(t, callback("fixture", &net.TCPAddr{}, key))
 
 	otherPublic, _, err := ed25519.GenerateKey(rand.Reader)
@@ -63,7 +64,7 @@ func TestConfiguredHostKeyCallbackPinsExactKey(t *testing.T) {
 }
 
 func TestConfiguredHostKeyCallbackRejectsMalformedPin(t *testing.T) {
-	_, err := configuredHostKeyCallback("not-an-openssh-key")
+	_, _, err := configuredHostKey("not-an-openssh-key")
 	require.ErrorContains(t, err, "parse pinned SSH host key")
 }
 
