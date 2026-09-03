@@ -8,9 +8,14 @@ on:
         required: true
         type: string
       master_sha:
-        description: Full commit SHA contained in master
+        description: Full source SHA (contained in master unless rehearsal)
         required: true
         type: string
+      rehearsal:
+        description: Validate an exact branch head without creating a promotable candidate
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   group: release-candidate-${{ inputs.master_sha }}-${{ inputs.targets }}
@@ -58,19 +63,32 @@ jobs:
       run_kind: ${{ steps.resolved.outputs.run_kind }}
       run_real_machine: ${{ steps.resolved.outputs.run_real_machine }}
     steps:
-      - name: Require workflow dispatch from master
-        run: test '${{ github.ref }}' = refs/heads/master
+      - name: Require an explicit candidate source mode
+        env:
+          REHEARSAL: ${{ inputs.rehearsal }}
+        run: |
+          if [ "$REHEARSAL" = true ]; then
+            test '${{ github.ref }}' != refs/heads/master
+          else
+            test '${{ github.ref }}' = refs/heads/master
+          fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.master_sha }}
           fetch-depth: 0
-      - name: Verify exact source is contained in master
+      - name: Verify exact source authority
         env:
           REQUESTED_SHA: ${{ inputs.master_sha }}
+          REHEARSAL: ${{ inputs.rehearsal }}
+          DISPATCH_SHA: ${{ github.sha }}
         run: |
           test "$(git rev-parse HEAD)" = "$REQUESTED_SHA"
-          git fetch --no-tags origin master
-          git merge-base --is-ancestor "$REQUESTED_SHA" origin/master
+          if [ "$REHEARSAL" = true ]; then
+            test "$REQUESTED_SHA" = "$DISPATCH_SHA"
+          else
+            git fetch --no-tags origin master
+            git merge-base --is-ancestor "$REQUESTED_SHA" origin/master
+          fi
       - uses: ./.github/actions/setup-go
         with:
           go-version: 1.26.5
@@ -104,11 +122,13 @@ jobs:
             --run-attempt "$RUN_ATTEMPT" \
             --output candidate-plan.json
       - name: Reject existing protected production tags
+        if: inputs.rehearsal != true
         run: |
           while IFS= read -r tag; do
             test -z "$(git ls-remote --tags origin "refs/tags/$tag" "refs/tags/$tag^{}")"
           done < <(jq -r '.[].production_tag' candidate-plan.json)
       - name: Reject existing semantic artifacts before candidate validation
+        if: inputs.rehearsal != true
         run: .github/scripts/check_release_availability.sh candidate-plan.json '${{ github.repository_owner }}'
       - name: Resolve every immutable published baseline identity
         run: |

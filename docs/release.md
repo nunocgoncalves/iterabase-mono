@@ -69,6 +69,15 @@ The workflow trims, validates, deduplicates, and canonicalizes targets in
 repository order. Versions are read from source authority; callers cannot supply
 conflicting versions.
 
+For an explicit pre-merge validation rehearsal, dispatch the same workflow from
+the ticket branch with `rehearsal: true` and the exact dispatch-head SHA. That
+mode skips only existing semantic destination availability checks; it still
+builds, composes, executes, reconciles, and retains the complete candidate
+bundle. A rehearsal is structurally non-promotable: promotion accepts only a
+successful candidate workflow whose recorded head branch is `master` and whose
+source is contained in `master`. Rehearsal does not publish or promote semantic
+artifacts.
+
 1. **Preflight** verifies exact checkout/membership, recipes, version authorities,
    candidate alias uniqueness, semantic destination availability, compiled
    candidate routing, and immutable published baselines.

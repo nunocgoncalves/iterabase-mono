@@ -301,6 +301,19 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         ):
             self.assertNotIn(stale, workflow)
 
+    def test_branch_rehearsal_is_explicit_exact_and_non_promotable(self) -> None:
+        candidate = (ROOT / ".github/workflows/release-candidate.yml").read_text()
+        promotion = (ROOT / ".github/workflows/release-promote.yml").read_text()
+        for value in (
+            "rehearsal:",
+            'test "$REQUESTED_SHA" = "$DISPATCH_SHA"',
+            "if: inputs.rehearsal != true",
+        ):
+            self.assertIn(value, candidate)
+        self.assertEqual(2, candidate.count("if: inputs.rehearsal != true"))
+        self.assertIn("test \"$(jq -r '.head_branch' <<<\"$run\")\" = master", promotion)
+        self.assertIn('git merge-base --is-ancestor "$source_sha" origin/master', promotion)
+
     def test_candidate_recipes_match_production_authority(self) -> None:
         workflow = (ROOT / ".github/workflows/release-candidate.yml").read_text()
         self.assertIn("matrix.labels_text", workflow)
