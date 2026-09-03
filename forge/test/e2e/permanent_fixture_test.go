@@ -28,6 +28,7 @@ const (
 	permanentFixtureModelDeviceEnv     = "FORGE_E2E_MODEL_CACHE_DEVICE"
 	permanentFixtureModelUUIDEnv       = "FORGE_E2E_MODEL_CACHE_UUID"
 	permanentFixtureModelMount         = "/data/hf-cache"
+	permanentFixtureHarnessStatePaths  = "/tmp/edge-overlay /tmp/forge-secrets-overlay /tmp/iterabase-release-overlay-* /tmp/iterabase-release-charts-* /tmp/control-plane-image.tar /tmp/harness-image.tar /tmp/tool-runner-image.tar /tmp/inference-gateway-image.tar /tmp/runtime-fixture-image.tar /tmp/forge-e2e-workspace-consumer.pid /tmp/forge-e2e-workspace-consumer.log"
 )
 
 var bootIDPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
@@ -236,7 +237,7 @@ func (fixture *permanentFixture) waitForWorkspaceDevice(client *ssh.Client) erro
 
 func (fixture *permanentFixture) cleanHarnessState(client *ssh.Client) error {
 	script := fmt.Sprintf(`
-rm -rf -- /tmp/edge-overlay /tmp/forge-secrets-overlay /tmp/iterabase-release-overlay-* /tmp/forge-e2e-workspace-consumer.pid /tmp/forge-e2e-workspace-consumer.log %s
+rm -rf -- %s %s
 ! command -v k3s >/dev/null 2>&1
 test ! -e /var/lib/iterabase/agentpool-workspace.receipt
 ! findmnt --mountpoint /var/lib/iterabase/agentpool-workspaces >/dev/null 2>&1
@@ -245,7 +246,7 @@ workspace=$(readlink -f -- %s)
 test -b "$workspace"
 test -z "$(wipefs -n --noheadings --output TYPE -- "$workspace" | awk 'NF')"
 test ! -e /var/lib/rancher/k3s
-`, candidateShellQuote("/var/lib/forge/overlay/"+fixture.installName()), candidateShellQuote(fixture.workspaceDevice))
+`, permanentFixtureHarnessStatePaths, candidateShellQuote("/var/lib/forge/overlay/"+fixture.installName()), candidateShellQuote(fixture.workspaceDevice))
 	if output, err := sshOutput(client, "sudo bash -ceu "+candidateShellQuote(script)); err != nil {
 		return fmt.Errorf("permanent fixture clean-baseline assertion failed: %w\n%s", err, output)
 	}
@@ -311,6 +312,19 @@ func (fixture *permanentFixture) recordEvidence(name, before, after string, auth
 		evidence.ModelContentSHA256 = authority.SHA256
 	}
 	return sharede2e.RecordFixtureEvidence(evidence)
+}
+
+func TestPermanentFixtureCleanupCoversTransferredRunState(t *testing.T) {
+	for _, path := range []string{
+		"/tmp/iterabase-release-overlay-*",
+		"/tmp/iterabase-release-charts-*",
+		"/tmp/control-plane-image.tar",
+		"/tmp/runtime-fixture-image.tar",
+	} {
+		if !strings.Contains(permanentFixtureHarnessStatePaths, path) {
+			t.Fatalf("permanent fixture cleanup does not cover %s", path)
+		}
+	}
 }
 
 func TestModelCacheAuthorityPinsImmutablePublicWeight(t *testing.T) {

@@ -986,6 +986,9 @@ def compose_runtime(plan_path: Path, scenario_id: str, artifacts: Path, output: 
             "reference": expected.get("reference", name),
             "recipe_sha256": expected["recipe_sha256"],
         }
+        for field in ("reference", "digest", "checksum"):
+            if field in expected:
+                record[f"planned_{field}"] = expected[field]
         if custody != "published-baseline":
             record["source_sha"] = source_sha
         discovered = find_metadata(artifacts, name, recipe)
@@ -1284,7 +1287,91 @@ def resolve_baselines(plan_path: Path, contract: dict[str, Any]) -> None:
     plan_path.write_text(compact(plan) + "\n", encoding="utf-8")
 
 
-def validate_result(result: dict[str, Any], scenario: dict[str, Any], execution: dict[str, Any], plan_sha: str) -> None:
+def result_runtime_bundle_path(result_path: Path) -> Path:
+    if result_path.name == "result.json":
+        return result_path.with_name("runtime-bundle.json")
+    return result_path.with_name(result_path.name.removesuffix(".json") + ".runtime-bundle.json")
+
+
+def validate_retained_runtime_bundle(
+    bundle_path: Path,
+    result: dict[str, Any],
+    scenario: dict[str, Any],
+    execution: dict[str, Any],
+    plan_sha: str,
+) -> dict[str, dict[str, Any]]:
+    scenario_id = scenario["id"]
+    bundle = read_object(bundle_path)
+    expected_bundle_fields = {
+        "schema_version": RUNTIME_SCHEMA_VERSION,
+        "intent": execution["intent"],
+        "source_sha": execution["source_sha"],
+        "plan_sha256": plan_sha,
+        "catalogue_sha256": execution["catalogue_sha256"],
+    }
+    for field, value in expected_bundle_fields.items():
+        if bundle.get(field) != value:
+            raise E2EError(f"runtime bundle for {scenario_id} has wrong {field}")
+    if result.get("runtime_bundle_sha256") != hash_file(bundle_path):
+        raise E2EError(f"result for {scenario_id} does not match its retained runtime bundle")
+
+    artifacts = bundle.get("artifacts")
+    if not isinstance(artifacts, list):
+        raise E2EError(f"runtime bundle for {scenario_id} has no artifact identities")
+    expected_artifacts = {item["name"]: item for item in scenario["artifacts"]}
+    actual_artifacts = {item.get("name"): item for item in artifacts if isinstance(item, dict)}
+    if set(actual_artifacts) != set(expected_artifacts) or len(actual_artifacts) != len(artifacts):
+        raise E2EError(f"runtime bundle for {scenario_id} has missing, extra, or duplicate artifacts")
+    for name, expected in expected_artifacts.items():
+        actual = actual_artifacts[name]
+        for field in ("kind", "custody", "recipe_sha256"):
+            if actual.get(field) != expected[field]:
+                raise E2EError(f"runtime bundle for {scenario_id} has wrong {field} for {name}")
+        expected_source = execution["source_sha"] if expected["custody"] != "published-baseline" else None
+        if actual.get("source_sha") != expected_source:
+            raise E2EError(f"runtime bundle for {scenario_id} has wrong source custody for {name}")
+        for field in ("reference", "digest", "checksum"):
+            planned_field = f"planned_{field}"
+            if field in expected and actual.get(planned_field) != expected[field]:
+                raise E2EError(
+                    f"runtime bundle for {scenario_id} does not retain planned {field} for {name}"
+                )
+            if field not in expected and actual.get(planned_field) is not None:
+                raise E2EError(
+                    f"runtime bundle for {scenario_id} invents planned {field} for {name}"
+                )
+        if actual.get("runtime_digest") is not None:
+            raise E2EError(f"runtime bundle for {scenario_id} preclaims an observed runtime identity for {name}")
+        composed_chart = name in {"iterabase-platform-chart", "cert-manager-substrate-chart"}
+        if "reference" in expected:
+            expected_reference = expected["reference"] + ("#composed-runtime" if composed_chart else "")
+            if actual.get("reference") != expected_reference:
+                raise E2EError(f"runtime bundle for {scenario_id} has wrong resolved reference for {name}")
+        if "digest" in expected and actual.get("digest") != expected["digest"]:
+            raise E2EError(f"runtime bundle for {scenario_id} has wrong resolved digest for {name}")
+        if "checksum" in expected and not composed_chart and actual.get("checksum") != expected["checksum"]:
+            raise E2EError(f"runtime bundle for {scenario_id} has wrong resolved checksum for {name}")
+        if not isinstance(actual.get("reference"), str) or not actual["reference"]:
+            raise E2EError(f"runtime bundle for {scenario_id} has no reference for {name}")
+        if expected["kind"] == "image":
+            if (
+                not SHA256.fullmatch(str(actual.get("digest", "")))
+                or not SHA256.fullmatch(str(actual.get("config_digest", "")))
+                or not SHA256.fullmatch(str(actual.get("checksum", "")))
+            ):
+                raise E2EError(f"runtime bundle for {scenario_id} has incomplete image identity for {name}")
+        elif not SHA256.fullmatch(str(actual.get("checksum", ""))):
+            raise E2EError(f"runtime bundle for {scenario_id} has incomplete checksum for {name}")
+    return actual_artifacts
+
+
+def validate_result(
+    result: dict[str, Any],
+    result_path: Path,
+    scenario: dict[str, Any],
+    execution: dict[str, Any],
+    plan_sha: str,
+) -> None:
     scenario_id = scenario["id"]
     if result.get("schema_version") != RESULT_SCHEMA_VERSION or result.get("scenario_id") != scenario_id:
         raise E2EError(f"result for {scenario_id} has invalid schema or identity")
@@ -1300,8 +1387,9 @@ def validate_result(result: dict[str, Any], scenario: dict[str, Any], execution:
     for field, value in expected_fields.items():
         if result.get(field) != value:
             raise E2EError(f"result for {scenario_id} has wrong {field}")
-    if not SHA256.fullmatch(str(result.get("runtime_bundle_sha256", ""))):
-        raise E2EError(f"result for {scenario_id} has no runtime bundle identity")
+    bundle_artifacts = validate_retained_runtime_bundle(
+        result_runtime_bundle_path(result_path), result, scenario, execution, plan_sha
+    )
     if scenario.get("tier") == "F3":
         fixture_evidence = result.get("fixture_evidence")
         if not isinstance(fixture_evidence, list):
@@ -1350,22 +1438,36 @@ def validate_result(result: dict[str, Any], scenario: dict[str, Any], execution:
     actual_artifacts = {item.get("name"): item for item in artifacts if isinstance(item, dict)}
     if set(actual_artifacts) != set(expected_artifacts) or len(actual_artifacts) != len(artifacts):
         raise E2EError(f"result for {scenario_id} has missing, extra, or duplicate artifacts")
+    static_identity_fields = (
+        "name", "kind", "custody", "source_sha", "reference", "digest",
+        "config_digest", "checksum", "path", "recipe_sha256",
+        "planned_reference", "planned_digest", "planned_checksum",
+    )
+    image_names: set[str] = set()
     for name, expected in expected_artifacts.items():
         actual = actual_artifacts[name]
-        if actual.get("custody") != expected["custody"] or actual.get("recipe_sha256") != expected["recipe_sha256"]:
-            raise E2EError(f"result for {scenario_id} has wrong identity for {name}")
-        if expected["custody"] != "published-baseline" and actual.get("source_sha") != execution["source_sha"]:
-            raise E2EError(f"result for {scenario_id} substitutes a baseline for selected {name}")
-        if expected["custody"] == "published-baseline" and actual.get("source_sha"):
-            raise E2EError(f"result for {scenario_id} gives baseline {name} selected-source custody")
-        if expected["kind"] == "image" and (
-            not SHA256.fullmatch(str(actual.get("digest", "")))
-            or not SHA256.fullmatch(str(actual.get("config_digest", "")))
-            or not SHA256.fullmatch(str(actual.get("runtime_digest", "")))
-        ):
-            raise E2EError(f"result for {scenario_id} has incomplete image artifact/config/runtime digest identity for {name}")
-        if expected["kind"] != "image" and not SHA256.fullmatch(str(actual.get("checksum", ""))):
-            raise E2EError(f"result for {scenario_id} has incomplete checksum for {name}")
+        authoritative = bundle_artifacts[name]
+        if any(actual.get(field) != authoritative.get(field) for field in static_identity_fields):
+            raise E2EError(f"result for {scenario_id} does not match the retained runtime identity for {name}")
+        if expected["kind"] == "image":
+            image_names.add(name)
+            if not SHA256.fullmatch(str(actual.get("runtime_digest", ""))):
+                raise E2EError(f"result for {scenario_id} has no observed runtime digest for {name}")
+
+    observations_path = Path(str(result_path) + ".runtime-images.json")
+    if image_names:
+        observations = read_object(observations_path)
+        if set(observations) != image_names:
+            raise E2EError(f"result for {scenario_id} has missing or extra observed runtime identities")
+        for name in sorted(image_names):
+            observed = observations.get(name)
+            if not isinstance(observed, str) or not SHA256.fullmatch(observed) or not observed.startswith("sha256:"):
+                raise E2EError(f"result for {scenario_id} has invalid observed runtime identity for {name}")
+            if actual_artifacts[name].get("runtime_digest") != observed:
+                raise E2EError(f"result for {scenario_id} does not match the observed runtime identity for {name}")
+    elif observations_path.exists():
+        if read_object(observations_path):
+            raise E2EError(f"result for {scenario_id} retains unexpected runtime image identities")
 
 
 def validate_results(plan_path: Path, results_dir: Path, needs: dict[str, Any] | None = None) -> list[dict[str, Any]]:
@@ -1375,7 +1477,7 @@ def validate_results(plan_path: Path, results_dir: Path, needs: dict[str, Any] |
     if not isinstance(scenarios, list):
         raise E2EError("execution plan has no scenario matrix")
     expected = {scenario["id"]: scenario for scenario in scenarios}
-    discovered: dict[str, dict[str, Any]] = {}
+    discovered: dict[str, tuple[dict[str, Any], Path]] = {}
     for path in sorted(results_dir.rglob("*.json")) if results_dir.exists() else []:
         value = read_object(path)
         if value.get("schema_version") != RESULT_SCHEMA_VERSION or "scenario_id" not in value:
@@ -1383,7 +1485,7 @@ def validate_results(plan_path: Path, results_dir: Path, needs: dict[str, Any] |
         scenario_id = value["scenario_id"]
         if scenario_id in discovered:
             raise E2EError(f"result for {scenario_id} is duplicated")
-        discovered[scenario_id] = value
+        discovered[scenario_id] = (value, path)
     if set(discovered) != set(expected):
         raise E2EError(
             "result artifact set does not match the generated plan: "
@@ -1391,7 +1493,8 @@ def validate_results(plan_path: Path, results_dir: Path, needs: dict[str, Any] |
         )
     plan_sha = hash_file(plan_path)
     for scenario_id in sorted(expected):
-        validate_result(discovered[scenario_id], expected[scenario_id], execution, plan_sha)
+        result, result_path = discovered[scenario_id]
+        validate_result(result, result_path, expected[scenario_id], execution, plan_sha)
     if needs is not None:
         for name, job in needs.items():
             result = job.get("result") if isinstance(job, dict) else None
@@ -1405,7 +1508,7 @@ def validate_results(plan_path: Path, results_dir: Path, needs: dict[str, Any] |
         for name, selected in selected_jobs.items():
             if selected and (not isinstance(needs.get(name), dict) or needs[name].get("result") != "success"):
                 raise E2EError(f"selected workflow job {name} did not succeed")
-    return [discovered[name] for name in sorted(discovered)]
+    return [discovered[name][0] for name in sorted(discovered)]
 
 
 def parse_targets(value: str) -> list[str]:

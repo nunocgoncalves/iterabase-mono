@@ -22,7 +22,7 @@ type importedRuntimeIdentity struct {
 }
 
 // prepareCandidateChart transfers the exact Actions-retained platform and
-// companion archives to the ephemeral host. Forge then gives remote Helm those
+// companion archives to the permanent fixture. Forge then gives remote Helm those
 // extracted directories, so real-machine validation consumes the candidate
 // bytes without publishing a persistent candidate package.
 func prepareCandidateImages(t *testing.T, ip, keyPath string) map[string]importedRuntimeIdentity {
@@ -191,6 +191,11 @@ func candidateShellQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
 }
 
+func resetCandidateChartRootCommand(root string) string {
+	quoted := candidateShellQuote(root)
+	return "rm -rf -- " + quoted + " && install -d -m 0700 -- " + quoted
+}
+
 func prepareCandidateChart(t *testing.T, ip, keyPath string) {
 	t.Helper()
 	platform := os.Getenv(platformChartArchiveEnv)
@@ -205,7 +210,7 @@ func prepareCandidateChart(t *testing.T, ip, keyPath string) {
 		t.Fatalf("dial candidate host to transfer charts: %v", err)
 	}
 	defer client.Close()
-	if output, err := sshOutput(client, "mkdir -p "+candidateShellQuote(root)); err != nil {
+	if output, err := sshOutput(client, resetCandidateChartRootCommand(root)); err != nil {
 		t.Fatalf("prepare remote candidate chart directory: %v\n%s", err, output)
 	}
 
@@ -245,4 +250,12 @@ func prepareCandidateChart(t *testing.T, ip, keyPath string) {
 		}
 	})
 	t.Log("transferred exact platform and certificate-substrate candidate archives to the real-machine host")
+}
+
+func TestCandidateChartTransferRecreatesAnEmptyPrivateRoot(t *testing.T) {
+	root := "/tmp/iterabase-release-charts-123"
+	want := "rm -rf -- '/tmp/iterabase-release-charts-123' && install -d -m 0700 -- '/tmp/iterabase-release-charts-123'"
+	if got := resetCandidateChartRootCommand(root); got != want {
+		t.Fatalf("candidate chart reset command = %q, want %q", got, want)
+	}
 }

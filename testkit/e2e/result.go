@@ -29,17 +29,20 @@ const (
 
 // RuntimeArtifact is one identity verified by the shared runtime composer.
 type RuntimeArtifact struct {
-	Name          string `json:"name"`
-	Kind          string `json:"kind"`
-	Custody       string `json:"custody"`
-	SourceSHA     string `json:"source_sha,omitempty"`
-	Reference     string `json:"reference"`
-	Digest        string `json:"digest,omitempty"`
-	ConfigDigest  string `json:"config_digest,omitempty"`
-	RuntimeDigest string `json:"runtime_digest,omitempty"`
-	Checksum      string `json:"checksum,omitempty"`
-	Path          string `json:"path,omitempty"`
-	RecipeHash    string `json:"recipe_sha256,omitempty"`
+	Name             string `json:"name"`
+	Kind             string `json:"kind"`
+	Custody          string `json:"custody"`
+	SourceSHA        string `json:"source_sha,omitempty"`
+	Reference        string `json:"reference"`
+	Digest           string `json:"digest,omitempty"`
+	ConfigDigest     string `json:"config_digest,omitempty"`
+	RuntimeDigest    string `json:"runtime_digest,omitempty"`
+	Checksum         string `json:"checksum,omitempty"`
+	Path             string `json:"path,omitempty"`
+	RecipeHash       string `json:"recipe_sha256,omitempty"`
+	PlannedReference string `json:"planned_reference,omitempty"`
+	PlannedDigest    string `json:"planned_digest,omitempty"`
+	PlannedChecksum  string `json:"planned_checksum,omitempty"`
 }
 
 var observedRuntimeIdentityMu sync.Mutex
@@ -313,6 +316,16 @@ func validateRuntimeBundle(bundle RuntimeBundle) error {
 		}
 		if artifact.Checksum != "" && !canonicalHash.MatchString(artifact.Checksum) {
 			return fmt.Errorf("runtime artifact %q has invalid checksum", artifact.Name)
+		}
+		if artifact.PlannedReference != "" && strings.Contains(strings.ToLower(artifact.PlannedReference), "latest") {
+			return fmt.Errorf("runtime artifact %q has floating planned reference", artifact.Name)
+		}
+		for label, value := range map[string]string{
+			"planned_digest": artifact.PlannedDigest, "planned_checksum": artifact.PlannedChecksum,
+		} {
+			if value != "" && !canonicalHash.MatchString(value) {
+				return fmt.Errorf("runtime artifact %q has invalid %s", artifact.Name, label)
+			}
 		}
 		if artifact.RecipeHash != "" && (!canonicalHash.MatchString(artifact.RecipeHash) || strings.HasPrefix(artifact.RecipeHash, "sha256:")) {
 			return fmt.Errorf("runtime artifact %q has invalid recipe hash", artifact.Name)

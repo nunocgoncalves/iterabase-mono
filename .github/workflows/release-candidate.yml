@@ -495,7 +495,11 @@ jobs:
           --artifacts '${{ runner.temp }}/artifacts'
           --output '${{ runner.temp }}/runtime'
           --env-output "$GITHUB_ENV"
-      - run: echo 'ITERABASE_E2E_RESULT=${{ runner.temp }}/result/result.json' >> "$GITHUB_ENV"
+      - name: Bind the candidate result and retained runtime authority
+        run: |
+          mkdir -p '${{ runner.temp }}/result'
+          cp '${{ runner.temp }}/runtime/runtime-bundle.json' '${{ runner.temp }}/result/runtime-bundle.json'
+          echo 'ITERABASE_E2E_RESULT=${{ runner.temp }}/result/result.json' >> "$GITHUB_ENV"
       - name: Run the compiled scenario against that runtime
         working-directory: ${{ matrix.owner }}
         env:
@@ -509,7 +513,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: candidate-result-${{ matrix.artifact }}
-          path: ${{ runner.temp }}/result/result.json
+          path: ${{ runner.temp }}/result/
           if-no-files-found: error
           retention-days: 90
       - name: Retain diagnostics
@@ -587,6 +591,7 @@ jobs:
               --artifacts '${{ runner.temp }}/artifacts' \
               --output "$runtime" \
               --env-output "$envfile"
+            cp "$runtime/runtime-bundle.json" '${{ runner.temp }}/results/'"$artifact.runtime-bundle.json"
             if ! (
               set -a
               source "$envfile"

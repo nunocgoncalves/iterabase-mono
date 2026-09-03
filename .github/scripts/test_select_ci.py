@@ -78,6 +78,19 @@ class ChangedPathCollectionTests(unittest.TestCase):
         self.git(repo, "commit", "--quiet", "-m", "base")
         return repo, self.git(repo, "rev-parse", "HEAD")
 
+    def test_manual_dispatch_selects_all_without_changed_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repo, head_sha = self.create_repo(directory)
+            select_all, paths = collect_changed_paths(
+                repo,
+                "workflow_dispatch",
+                "",
+                head_sha,
+                all_events={"workflow_dispatch"},
+            )
+            self.assertTrue(select_all)
+            self.assertEqual([], paths)
+
     def test_deletion_only_change_retains_source_owner(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             repo, base_sha = self.create_repo(directory)
@@ -140,6 +153,8 @@ class WorkflowContractTests(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/e2e.yml").read_text()
         for value in (
             "ref: ${{ github.event.pull_request.head.sha || github.sha }}",
+            "ALL: ${{ steps.paths.outputs.all }}",
+            'elif [ "$ALL" = true ]; then',
             "test \"$(git rev-parse HEAD)\" = \"$SOURCE_SHA\"",
             "fromJSON(needs.plan.outputs.kind_matrix)",
             "fromJSON(needs.plan.outputs.real_machine_matrix)",

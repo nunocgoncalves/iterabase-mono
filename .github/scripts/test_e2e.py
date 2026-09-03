@@ -474,6 +474,14 @@ class ResultReconciliationTests(unittest.TestCase):
         )
         # Keep one scenario so result fixtures remain small and exact.
         selected = next(item for item in plan["scenario_matrix"] if item["id"] == "forge/digitalocean-gpu")
+        # Model the baseline resolver's immutable identities without network I/O.
+        for artifact in selected["artifacts"]:
+            if artifact["custody"] != "published-baseline":
+                continue
+            if artifact["kind"] == "image":
+                artifact["digest"] = "sha256:" + "4" * 64
+            else:
+                artifact["checksum"] = "5" * 64
         plan["scenario_matrix"] = [selected]
         plan["kind_matrix"] = []
         plan["real_machine_matrix"] = [selected]
@@ -481,6 +489,46 @@ class ResultReconciliationTests(unittest.TestCase):
         plan["scenario_total"] = 1
         plan_path = directory / "plan.json"
         plan_path.write_text(json.dumps(plan, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+
+        bundle_artifacts = []
+        observations = {}
+        for artifact in selected["artifacts"]:
+            record = {
+                "name": artifact["name"],
+                "kind": artifact["kind"],
+                "custody": artifact["custody"],
+                "reference": artifact.get("reference", artifact["name"]),
+                "recipe_sha256": artifact["recipe_sha256"],
+                "path": "/runtime/" + artifact["name"],
+            }
+            for field in ("reference", "digest", "checksum"):
+                if field in artifact:
+                    record[f"planned_{field}"] = artifact[field]
+            if artifact["name"] in {"iterabase-platform-chart", "cert-manager-substrate-chart"}:
+                record["reference"] += "#composed-runtime"
+            if artifact["custody"] != "published-baseline":
+                record["source_sha"] = SOURCE_SHA
+            if artifact["kind"] == "image":
+                record["digest"] = artifact.get("digest", "sha256:" + "c" * 64)
+                record["config_digest"] = "sha256:" + "e" * 64
+                record["checksum"] = "a" * 64
+                observations[artifact["name"]] = "sha256:" + "f" * 64
+            else:
+                record["checksum"] = artifact.get("checksum", "d" * 64)
+            bundle_artifacts.append(record)
+
+        results = directory / "results"
+        results.mkdir()
+        bundle = {
+            "schema_version": 1,
+            "intent": plan["intent"],
+            "source_sha": SOURCE_SHA,
+            "plan_sha256": hash_file(plan_path),
+            "catalogue_sha256": plan["catalogue_sha256"],
+            "artifacts": bundle_artifacts,
+        }
+        bundle_path = results / "runtime-bundle.json"
+        bundle_path.write_text(json.dumps(bundle, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         result = {
             "schema_version": 1,
             "scenario_id": selected["id"],
@@ -488,10 +536,10 @@ class ResultReconciliationTests(unittest.TestCase):
             "source_sha": SOURCE_SHA,
             "plan_sha256": hash_file(plan_path),
             "catalogue_sha256": plan["catalogue_sha256"],
-            "runtime_bundle_sha256": "b" * 64,
+            "runtime_bundle_sha256": hash_file(bundle_path),
             "stage_graph_sha256": selected["stage_graph_sha256"],
             "fixture_mode": "source",
-            "artifacts": [],
+            "artifacts": copy.deepcopy(bundle_artifacts),
             "fixture_evidence": [
                 {
                     "name": "lifecycle",
@@ -526,26 +574,14 @@ class ResultReconciliationTests(unittest.TestCase):
             ],
             "completed_at": "2026-09-01T00:00:00Z",
         }
-        for artifact in selected["artifacts"]:
-            record = {
-                "name": artifact["name"],
-                "kind": artifact["kind"],
-                "custody": artifact["custody"],
-                "reference": artifact.get("reference", artifact["name"]),
-                "recipe_sha256": artifact["recipe_sha256"],
-            }
-            if artifact["custody"] != "published-baseline":
-                record["source_sha"] = SOURCE_SHA
+        for artifact in result["artifacts"]:
             if artifact["kind"] == "image":
-                record["digest"] = "sha256:" + "c" * 64
-                record["config_digest"] = "sha256:" + "e" * 64
-                record["runtime_digest"] = "sha256:" + "f" * 64
-            else:
-                record["checksum"] = "d" * 64
-            result["artifacts"].append(record)
-        results = directory / "results"
-        results.mkdir()
-        (results / "result.json").write_text(json.dumps(result) + "\n", encoding="utf-8")
+                artifact["runtime_digest"] = observations[artifact["name"]]
+        result_path = results / "result.json"
+        result_path.write_text(json.dumps(result) + "\n", encoding="utf-8")
+        Path(str(result_path) + ".runtime-images.json").write_text(
+            json.dumps(observations) + "\n", encoding="utf-8"
+        )
         return plan_path, results, result
 
     def test_exact_result_set_and_stages_pass(self) -> None:
@@ -553,13 +589,60 @@ class ResultReconciliationTests(unittest.TestCase):
             plan, results, _ = self.fixture(Path(value))
             validate_results(plan, results)
 
-    def test_image_result_requires_artifact_and_config_digests(self) -> None:
+    def test_result_must_match_retained_runtime_artifact_identities(self) -> None:
+        for field in ("reference", "digest", "config_digest", "checksum"):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as value:
+                plan, results, result = self.fixture(Path(value))
+                artifact = next(
+                    item for item in result["artifacts"]
+                    if field in item and (field != "checksum" or item["kind"] != "image")
+                )
+                artifact[field] = "substituted"
+                (results / "result.json").write_text(json.dumps(result) + "\n")
+                with self.assertRaisesRegex(E2EError, "does not match the retained runtime identity"):
+                    validate_results(plan, results)
+
+    def test_result_must_match_retained_runtime_bundle_hash(self) -> None:
         with tempfile.TemporaryDirectory() as value:
             plan, results, result = self.fixture(Path(value))
-            image = next(artifact for artifact in result["artifacts"] if artifact["kind"] == "image")
-            image.pop("config_digest")
+            result["runtime_bundle_sha256"] = "b" * 64
             (results / "result.json").write_text(json.dumps(result) + "\n")
-            with self.assertRaisesRegex(E2EError, "artifact/config/runtime digest identity"):
+            with self.assertRaisesRegex(E2EError, "does not match its retained runtime bundle"):
+                validate_results(plan, results)
+
+    def test_runtime_bundle_must_retain_every_plan_known_identity(self) -> None:
+        for field in ("reference", "digest", "checksum"):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as value:
+                plan, results, result = self.fixture(Path(value))
+                bundle_path = results / "runtime-bundle.json"
+                bundle = json.loads(bundle_path.read_text())
+                planned = "planned_" + field
+                artifact = next(item for item in bundle["artifacts"] if planned in item)
+                artifact[planned] = "substituted"
+                result_artifact = next(item for item in result["artifacts"] if item["name"] == artifact["name"])
+                result_artifact[planned] = artifact[planned]
+                bundle_path.write_text(json.dumps(bundle, indent=2, sort_keys=True) + "\n")
+                result["runtime_bundle_sha256"] = hash_file(bundle_path)
+                (results / "result.json").write_text(json.dumps(result) + "\n")
+                with self.assertRaisesRegex(E2EError, f"does not retain planned {field}"):
+                    validate_results(plan, results)
+
+    def test_result_runtime_digest_must_match_retained_observation(self) -> None:
+        with tempfile.TemporaryDirectory() as value:
+            plan, results, result = self.fixture(Path(value))
+            image = next(item for item in result["artifacts"] if item["kind"] == "image")
+            observations_path = results / "result.json.runtime-images.json"
+            observations = json.loads(observations_path.read_text())
+            observations[image["name"]] = "sha256:" + "9" * 64
+            observations_path.write_text(json.dumps(observations) + "\n")
+            with self.assertRaisesRegex(E2EError, "does not match the observed runtime identity"):
+                validate_results(plan, results)
+
+    def test_missing_retained_runtime_bundle_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as value:
+            plan, results, _ = self.fixture(Path(value))
+            (results / "runtime-bundle.json").unlink()
+            with self.assertRaisesRegex(E2EError, "cannot read"):
                 validate_results(plan, results)
 
     def test_gpu_result_requires_distinct_exact_model_cache_evidence(self) -> None:
@@ -604,11 +687,15 @@ class WorkflowContractTests(unittest.TestCase):
             self.assertIn(".github/scripts/e2e.py", content)
             self.assertIn("e2e.py compose", content)
             self.assertIn("e2e.py validate-results", content)
+            self.assertIn("runtime-bundle.json", content)
+            self.assertIn("path: ${{ runner.temp }}/result/", content)
             self.assertNotIn("prepare_candidate_runtime.sh", content)
             self.assertNotIn("prepare_pr_workspace_runtime.sh", content)
         e2e = (ROOT / ".github/workflows/e2e.yml").read_text(encoding="utf-8")
         self.assertIn("github.event.pull_request.head.sha", e2e)
         self.assertIn("git rev-parse HEAD", e2e)
+        self.assertIn("ALL: ${{ steps.paths.outputs.all }}", e2e)
+        self.assertIn('elif [ "$ALL" = true ]; then', e2e)
         self.assertIn("cancel-in-progress: false", e2e)
         self.assertNotIn("control-plane-kind:", e2e)
         self.assertNotIn("charts-runtime:", e2e)
