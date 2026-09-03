@@ -133,20 +133,32 @@ Do not mark this section complete before both streak tables are green.
 - [x] Remove the GitHub Actions provider secret after founder-qualified diff and streak review.
 - [x] `gh secret list` proves only the CPU/GPU fixture-scoped SSH secrets remain.
 - [x] Repository scan proves no provider API mutation path remains.
-- [x] Final corrected exact-head `CI / required` and `E2E / required` passed on
-      `86185018e9b7f809d7da32941e6e33e3a3aaf59f`: CI run `33742857136`, required
-      job `100610187403`; E2E run `33742857160`, required job `100626490252`, CPU
-      job `100609349194`, and GPU job `100609348111`.
+- [x] Post-legacy-removal pre-review `CI / required` and `E2E / required` passed
+      on `86185018e9b7f809d7da32941e6e33e3a3aaf59f`: CI run `33742857136`,
+      required job `100610187403`; E2E run `33742857160`, required job
+      `100626490252`, CPU job `100609349194`, and GPU job `100609348111`.
+- [x] Review-fix implementation head `dd8da319b6b72128b9cda4d87871356165342a5f`
+      passed exact-head CI run `33759067349`, required job `100662288267`, and
+      E2E run `33759067629`, required job `100680717270`, CPU job
+      `100662105091`, and GPU job `100662103880`.
 - [x] Complete-catalogue permanent-fixture run `33708943294` passed after legacy removal and recovered the intentionally interrupted fixture.
-- [x] The final-head non-promoted all-target candidate rehearsal `33748652175`
+- [x] The pre-review non-promoted all-target candidate rehearsal `33748652175`
       passed on `86185018e9b7f809d7da32941e6e33e3a3aaf59f`: GPU job `100628383019`, CPU
       job `100628383859`, required validation `100647745050`, and immutable
       evidence assembly `100648042956`. Retained artifacts include plan
       `9890678155`, CPU result `9893118066`, GPU result `9891785559`, and
       `release-candidate` `9893215667`; the retained plan SHA-256 is
       `60ef6d9669dc4784dd810aaa94c9bf245ac2b96bafd150d0310c19998e40208a`.
-      The branch-only rehearsal was structurally non-promotable and no
-      publication or promotion occurred.
+- [x] The final implementation-head non-promoted all-target candidate rehearsal
+      `33765747561` passed on `dd8da319b6b72128b9cda4d87871356165342a5f`:
+      CPU job `100684547678`, GPU job `100684549036`, required validation
+      `100706177428`, and immutable evidence assembly `100706585936`. Retained
+      artifacts include plan `9897440181`, CPU result `9899054285`, GPU result
+      `9900222033`, and `release-candidate` `9900321895`; the retained plan
+      SHA-256 is
+      `95a62f999b5d27fe6d48a17b570f5eeee754806ac50d64e770fa4288c307fb47`.
+      Both branch rehearsals were structurally non-promotable and no publication
+      or promotion occurred.
 
 ## Publication and rollback
 
