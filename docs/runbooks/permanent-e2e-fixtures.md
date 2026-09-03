@@ -45,11 +45,7 @@ each host:
    from the configured Ubuntu archives because the driver container resolves it
    independently; upgrade and reboot a stale HWE baseline before qualification.
    Do not rely on an out-of-band build-dependency install as qualification
-   evidence. The permanent GPU hardware identity is exactly one PCI display
-   controller with vendor/device/class `0x10de 0x24b0 0x030000` (RTX A4000).
-   After every reboot the harness waits for that exact sysfs identity before
-   handing the host to Forge; an absent, wrong, or duplicate NVIDIA device fails
-   fixture readiness rather than consuming the GPU Operator convergence window.
+   evidence.
 5. Obtain the host public key through a trusted provider console or first-boot
    channel. Compare it independently before recording the exact one-line
    OpenSSH public key. Do not trust an unauthenticated first `ssh-keyscan` result.
@@ -59,6 +55,17 @@ The harness rewrites only the fetched kubeconfig transport endpoint and carries
 all client-go and `kubectl` API traffic through a fixture-scoped pinned SSH
 tunnel to host-local `127.0.0.1:6443`, while retaining the original API server
 identity for TLS verification.
+
+Do not repair GPU readiness by manually labeling the node. Forge keeps GPU
+Operator v26.3.3 but overrides its embedded NFD 0.18.3 subchart through supported
+values to run NFD v0.19.0 and set master `resyncPeriod=30s`. NFD v0.19.0 retains
+the embedded chart's NodeFeature CRDs and command surface; its periodic full
+reconcile bounds recovery when master misses a fresh NodeFeature event. The
+subchart already supplies worker `POD_UID`, and topology updater remains disabled,
+so the v0.19.0 topology-updater RBAC migration does not apply. Every live GPU run
+verifies that the rendered master/worker image is
+`registry.k8s.io/nfd/node-feature-discovery:v0.19.0` and the master argument is
+`-resync-period=30s` before accepting the scenario.
 
 The GPU host additionally receives a second non-root whole disk, physically and
 logically distinct from the Forge workspace disk:
