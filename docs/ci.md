@@ -171,8 +171,9 @@ safe parallelism.
 Every selected scenario starts and ends with `forge destroy
 --purge-workspace --reboot --yes`. The harness proves SSH disconnect/reconnect,
 a changed boot ID, blank authorized workspace state, absence of stale K3s/run
-state, and strict host-key verification. GPU execution also validates the
-separate `/data/hf-cache` volume and the model authority in
+state, and strict host-key verification. GPU execution waits for exactly one
+repository-pinned PCI vendor/device/class identity before Forge apply, then also
+validates the separate `/data/hf-cache` volume and the model authority in
 `forge/test/e2e/model-cache.json`; workspace purge never targets that device.
 Actions has no provider API credential. An SSH-unrecoverable fixture stops F3
 until founder-operated provider quarantine/recovery restores the documented
