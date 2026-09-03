@@ -90,7 +90,7 @@ These attempts remain failures; none starts or advances a streak:
 | `33707588356` / `100500592130` | `68642a5c58591e97ca56dd32da0e3e314935f8d2` | GPU | Intentionally force-canceled after the exact fixture became dirty; pinned observation retained boot `9b37792d-a077-4ee8-9284-dd1e78b22c96`, K3s present, and workspace mount present. No result was accepted. Recovery is separately proved by `33708943294`. |
 | `33697171404` / `100469108013` | `4acea96b78a9625cd956a8a48f1c8039af183706` | F2 setup | CPU job `100469107628` and GPU job `100469108487` both passed and retained strict results (`9873082375`, `9873777631`). The aggregate remained red because `charts/fresh-install` failed before scenario execution while redundantly fetching the reviewed Prometheus Helm repository index: the CDN reset the TCP connection. The identical step passed in the GPU lane. Product scenario jobs were changed to consume the already packaged chart artifacts without reacquiring dependency repositories; repository and locked dependency acquisition remains build-only and uses bounded command-level transport attempts. |
 | `33717323929` / `100543667039` | `a226ff78ac53fd9d38464100ecfe7b77b5b3279e` | Candidate aggregate | Every source/build job, every F2 scenario, GPU job `100530336119`, and CPU job `100530336877` passed with retained exact results (`9879753031`, `9880632419`). The final aggregate process could not start because embedding the complete plan a second time inside `toJSON(needs)` exceeded the host argument/environment limit. Validation now reads the retained plan and an explicit compact job-status map from files, preserving the exact fail-closed job set without an unbounded process environment. |
-| `33734405784` / `100582699523` | `ccbe04b90f53a04f681d43e2a4a31450cf15cf29` | GPU | Post-reboot cleanup and pinned storage/cache checks passed, but the hypervisor exposed the RTX A4000 PCI function only near the end of the 15-minute GPU Operator convergence window. NFD first updated the node at 09:28:43, the driver DaemonSet was then created, and the stage failed honestly before the driver could become ready; post-failure purge/reboot passed. Fixture readiness now waits for exactly one pinned `0x10de 0x24b0 0x030000` PCI identity before Forge apply. |
+| `33734405784` / `100582699523` | `ccbe04b90f53a04f681d43e2a4a31450cf15cf29` | GPU | Reset, storage/cache identity, and Forge preflight passed. NFD worker started at 09:14:17, completed discovery, and created the fresh `iterabase-ci-gpu` NodeFeature immediately; NFD master acquired leadership at 09:14:18 but did not publish the NVIDIA node label until its 09:28:43 node update. GPU operands were then created around 09:28:51 and the honest 15-minute readiness gate expired while the driver started (its image pull took 11.5 seconds). This was an NFD publication/reconciliation gap, not delayed PCI attachment. Forge now uses the GPU Operator v26.3.3 subchart's supported values to pin compatible NFD v0.19.0 and a 30-second master resync; v0.19.0 PR #2415 makes that resync drive periodic full reconciliation. The fresh NodeFeature means v0.19.0 PR #2545's node-rebuild path is not claimed as the correction. |
 
 Before `33626838744`, the Ubuntu HWE baseline was updated and rebooted to
 `7.0.0-30-generic`, whose exact header package remains available from the
@@ -133,13 +133,16 @@ Do not mark this section complete before both streak tables are green.
 - [x] Remove the GitHub Actions provider secret after founder-qualified diff and streak review.
 - [x] `gh secret list` proves only the CPU/GPU fixture-scoped SSH secrets remain.
 - [x] Repository scan proves no provider API mutation path remains.
-- [ ] Exact-head `CI / required` and `E2E / required` pass after the final GPU
-      PCI-readiness correction. Code-complete head
-      `5ea6f6dcdedb5a3e5c55434e1f29b5d92777c29e` previously passed both
-      (`33722576874`, `33722576851`); evidence-only head `ccbe04b` exposed the
-      delayed hardware-attachment readiness gap instead of laundering it.
+- [ ] Final corrected exact-head `CI / required` and `E2E / required` pass. The
+      code-complete head `5ea6f6dcdedb5a3e5c55434e1f29b5d92777c29e`
+      passed both (`33722576874`, `33722576851`), while evidence-only head
+      `ccbe04b` exposed the NFD publication gap recorded above.
 - [x] Complete-catalogue permanent-fixture run `33708943294` passed after legacy removal and recovered the intentionally interrupted fixture.
-- [x] Non-promoted all-target candidate rehearsal `33728274762` passed on `5ea6f6dcdedb5a3e5c55434e1f29b5d92777c29e`; CPU job `100563278474`, GPU job `100563279232`, validation `100580255132`, and evidence assembly `100580602392` retained exact result artifacts and non-promotable `release-candidate` artifact `9885072893`.
+- [ ] Exactly one final-head non-promoted all-target candidate rehearsal passes
+      after corrected exact-head CI/E2E. Earlier rehearsal `33728274762` passed
+      on `5ea6f6dcdedb5a3e5c55434e1f29b5d92777c29e` and retained artifact
+      `9885072893`; final terminal run identifiers are recorded externally in
+      Linear/PR metadata so no evidence-only commit invalidates them.
 
 ## Publication and rollback
 

@@ -717,6 +717,15 @@ func waitForGPU(ctx context.Context, p provisioner.Provisioner, requestedDriverV
 // overrides are a fast-follow. CDI is enabled so workloads request
 // nvidia.com/gpu with no runtimeClassName.
 //
+// GPU Operator v26.3.3 embeds the NFD 0.18.3 subchart. That subchart's supported
+// values can run the compatible NFD v0.19.0 image without replacing chart-owned
+// resources: it retains the same NodeFeature CRDs and master/worker commands,
+// while the disabled topology updater avoids v0.19.0's only mandatory image-only
+// RBAC change. v0.19.0 PR #2415 makes master resyncPeriod drive a full reconcile,
+// so a missed fresh-NodeFeature event is repaired within a bounded interval.
+// PR #2545 also improves node-rebuild relabeling, but is not the basis for the
+// fresh-NodeFeature failure mode or this periodic safety net.
+//
 // The driver version is pinned only when the operator set spec.gpu.driver.version
 // (a node-readiness substrate field). An empty version means the gpu-operator
 // chart's own default driver is used — no driver.version --set is emitted — so
@@ -755,6 +764,12 @@ func waitForGPU(ctx context.Context, p provisioner.Provisioner, requestedDriverV
 // storage, not in emptyDir. A driver upgrade therefore terminates active GPU
 // inference pods, discards their ephemeral state, and forces a model reload;
 // there is no zero-downtime driver upgrade on a single-node cluster (a non-goal).
+const (
+	gpuNFDImageRepository    = "registry.k8s.io/nfd/node-feature-discovery"
+	gpuNFDImageTag           = "v0.19.0"
+	gpuNFDMasterResyncPeriod = "30s"
+)
+
 func gpuOperatorValues(g config.GPU) []string {
 	values := []string{
 		"cdi.enabled=true",
@@ -762,6 +777,9 @@ func gpuOperatorValues(g config.GPU) []string {
 		"toolkit.enabled=true",
 		"devicePlugin.enabled=true",
 		"gfd.enabled=true",
+		"node-feature-discovery.image.repository=" + gpuNFDImageRepository,
+		"node-feature-discovery.image.tag=" + gpuNFDImageTag,
+		"node-feature-discovery.master.resyncPeriod=" + gpuNFDMasterResyncPeriod,
 		"toolkit.env[0].name=CONTAINERD_CONFIG",
 		"toolkit.env[0].value=/var/lib/rancher/k3s/agent/etc/containerd/config.toml",
 		"toolkit.env[1].name=CONTAINERD_SOCKET",

@@ -5,12 +5,14 @@ package e2e
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -67,7 +69,78 @@ func applyGPUSubstrateStage(t *testing.T, state *digitalOceanGPUState) {
 	out := applyOnce(t, state.forgeBin, state.forgeHome, cfgPath)
 	assertApplyMarkers(t, out, "node ready: true", "AgentPool workspace:", "AgentPool local-path ready: true", "gpu ready: true", "gpu driver: "+gpuUpgradeBaselineDriver)
 	state.bindKubeconfigTunnel(t)
+	assertPinnedNFDRender(t, filepath.Join(state.forgeHome, state.runID, "kubeconfig.yaml"), state.runID+"-gpu-operator")
 	t.Logf("apply output:\n%s", out)
+}
+
+const (
+	pinnedNFDImage        = "registry.k8s.io/nfd/node-feature-discovery:v0.19.0"
+	pinnedNFDResyncPeriod = "-resync-period=30s"
+)
+
+// assertPinnedNFDRender verifies the resources actually rendered by the
+// GPU Operator subchart. The lifecycle unit test protects the Helm value path;
+// this live assertion protects the parent/subchart value wiring.
+func assertPinnedNFDRender(t *testing.T, kcPath, release string) {
+	t.Helper()
+	restCfg, err := clientcmd.BuildConfigFromFlags("", kcPath)
+	require.NoError(t, err)
+	cs, err := kubernetes.NewForConfig(restCfg)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	master, err := cs.AppsV1().Deployments("gpu-operator").Get(ctx, release+"-node-feature-discovery-master", metav1.GetOptions{})
+	require.NoError(t, err)
+	worker, err := cs.AppsV1().DaemonSets("gpu-operator").Get(ctx, release+"-node-feature-discovery-worker", metav1.GetOptions{})
+	require.NoError(t, err)
+	require.NoError(t, validatePinnedNFDRender(master, worker))
+}
+
+func validatePinnedNFDRender(master *appsv1.Deployment, worker *appsv1.DaemonSet) error {
+	if len(master.Spec.Template.Spec.Containers) != 1 {
+		return fmt.Errorf("NFD master rendered %d containers, want exactly 1", len(master.Spec.Template.Spec.Containers))
+	}
+	masterContainer := master.Spec.Template.Spec.Containers[0]
+	if masterContainer.Image != pinnedNFDImage {
+		return fmt.Errorf("NFD master image %q, want %q", masterContainer.Image, pinnedNFDImage)
+	}
+	if !containsString(masterContainer.Args, pinnedNFDResyncPeriod) {
+		return fmt.Errorf("NFD master args %q omit %q", masterContainer.Args, pinnedNFDResyncPeriod)
+	}
+	if len(worker.Spec.Template.Spec.Containers) != 1 {
+		return fmt.Errorf("NFD worker rendered %d containers, want exactly 1", len(worker.Spec.Template.Spec.Containers))
+	}
+	if image := worker.Spec.Template.Spec.Containers[0].Image; image != pinnedNFDImage {
+		return fmt.Errorf("NFD worker image %q, want %q", image, pinnedNFDImage)
+	}
+	return nil
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
+func TestValidatePinnedNFDRender(t *testing.T) {
+	master := &appsv1.Deployment{Spec: appsv1.DeploymentSpec{Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+		Name: "master", Image: pinnedNFDImage, Args: []string{"-enable-leader-election", pinnedNFDResyncPeriod},
+	}}}}}}
+	worker := &appsv1.DaemonSet{Spec: appsv1.DaemonSetSpec{Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+		Name: "worker", Image: pinnedNFDImage,
+	}}}}}}
+	require.NoError(t, validatePinnedNFDRender(master, worker))
+
+	wrongImage := worker.DeepCopy()
+	wrongImage.Spec.Template.Spec.Containers[0].Image = "registry.k8s.io/nfd/node-feature-discovery:v0.18.3"
+	require.ErrorContains(t, validatePinnedNFDRender(master, wrongImage), "worker image")
+
+	missingResync := master.DeepCopy()
+	missingResync.Spec.Template.Spec.Containers[0].Args = []string{"-enable-leader-election"}
+	require.ErrorContains(t, validatePinnedNFDRender(missingResync, worker), "omit")
 }
 
 func assertGPUSmokeStage(t *testing.T, state *digitalOceanGPUState) {

@@ -28,9 +28,6 @@ const (
 	permanentFixtureModelDeviceEnv     = "FORGE_E2E_MODEL_CACHE_DEVICE"
 	permanentFixtureModelUUIDEnv       = "FORGE_E2E_MODEL_CACHE_UUID"
 	permanentFixtureModelMount         = "/data/hf-cache"
-	permanentGPUVendorID               = "0x10de"
-	permanentGPUDeviceID               = "0x24b0"
-	permanentGPUClass                  = "0x030000"
 )
 
 var bootIDPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
@@ -159,11 +156,6 @@ func (fixture *permanentFixture) reset(t *testing.T, forgeBin, forgeHome string)
 	if err := fixture.waitForWorkspaceDevice(client); err != nil {
 		return err
 	}
-	if fixture.capacity == "gpu" {
-		if err := fixture.waitForGPUDevice(client); err != nil {
-			return err
-		}
-	}
 	if err := fixture.cleanHarnessState(client); err != nil {
 		return err
 	}
@@ -240,36 +232,6 @@ func (fixture *permanentFixture) waitForWorkspaceDevice(client *ssh.Client) erro
 		time.Sleep(2 * time.Second)
 	}
 	return fmt.Errorf("dedicated workspace device %s did not appear on %s: %w", fixture.workspaceDevice, fixture.address, lastErr)
-}
-
-func (fixture *permanentFixture) waitForGPUDevice(client *ssh.Client) error {
-	deadline := time.Now().Add(20 * time.Minute)
-	command := `for device in /sys/bus/pci/devices/*; do
-	vendor=$(cat "$device/vendor" 2>/dev/null) || continue
-	test "$vendor" = 0x10de || continue
-	printf '%s %s %s\n' "$vendor" "$(cat "$device/device")" "$(cat "$device/class")"
-done`
-	var lastOutput string
-	var lastErr error
-	for time.Now().Before(deadline) {
-		lastOutput, lastErr = sshOutput(client, command)
-		if lastErr == nil {
-			lastErr = validatePermanentGPUDevice(lastOutput)
-			if lastErr == nil {
-				return nil
-			}
-		}
-		time.Sleep(5 * time.Second)
-	}
-	return fmt.Errorf("pinned permanent GPU PCI device did not become ready: observed=%q: %w", strings.TrimSpace(lastOutput), lastErr)
-}
-
-func validatePermanentGPUDevice(output string) error {
-	want := strings.Join([]string{permanentGPUVendorID, permanentGPUDeviceID, permanentGPUClass}, " ")
-	if strings.TrimSpace(output) != want {
-		return fmt.Errorf("GPU PCI identity mismatch: got %q, want exactly %q", strings.TrimSpace(output), want)
-	}
-	return nil
 }
 
 func (fixture *permanentFixture) cleanHarnessState(client *ssh.Client) error {
@@ -381,24 +343,6 @@ func TestModelCacheAuthorityRejectsFloatingCorruptAndEscapingRecords(t *testing.
 			}
 			if _, err := decodeModelCacheAuthority(data); err == nil {
 				t.Fatalf("invalid model-cache authority unexpectedly passed: %+v", authority)
-			}
-		})
-	}
-}
-
-func TestPermanentGPUFixturePinsExactlyOnePCIDevice(t *testing.T) {
-	valid := permanentGPUVendorID + " " + permanentGPUDeviceID + " " + permanentGPUClass + "\n"
-	if err := validatePermanentGPUDevice(valid); err != nil {
-		t.Fatalf("pinned GPU identity rejected: %v", err)
-	}
-	for name, output := range map[string]string{
-		"missing":  "",
-		"wrong":    permanentGPUVendorID + " 0xffff " + permanentGPUClass,
-		"multiple": valid + valid,
-	} {
-		t.Run(name, func(t *testing.T) {
-			if err := validatePermanentGPUDevice(output); err == nil {
-				t.Fatal("unexpected GPU PCI identity passed")
 			}
 		})
 	}
