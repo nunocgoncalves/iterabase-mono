@@ -311,6 +311,9 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         ):
             self.assertIn(value, candidate)
         self.assertEqual(2, candidate.count("if: inputs.rehearsal != true"))
+        self.assertNotIn("toJSON(needs)", candidate)
+        self.assertNotIn("NEEDS:", candidate)
+        self.assertIn("--needs '${{ runner.temp }}/candidate-job-results.json'", candidate)
         self.assertIn("test \"$(jq -r '.head_branch' <<<\"$run\")\" = master", promotion)
         self.assertIn('git merge-base --is-ancestor "$source_sha" origin/master', promotion)
 
