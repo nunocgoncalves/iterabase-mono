@@ -144,6 +144,10 @@ func (fixture *permanentFixture) reset(t *testing.T, forgeBin, forgeHome string)
 	if err := waitForHostReady(context.Background(), fixture.address, fixture.sshKeyPath); err != nil {
 		return fmt.Errorf("wait for post-reboot host readiness: %w", err)
 	}
+	// The readiness probe closes its connection. Leave the same bounded quiet
+	// window before opening the clean-baseline verification session; some public
+	// SSH frontends reset an otherwise valid immediate follow-up handshake.
+	time.Sleep(5 * time.Second)
 	client, err = sshDial(fixture.address, fixture.sshKeyPath)
 	if err != nil {
 		return fmt.Errorf("reconnect after post-reboot host readiness: %w", err)
