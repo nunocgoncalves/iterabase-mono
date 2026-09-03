@@ -233,8 +233,6 @@ jobs:
           node-version: 24.19.0
           cache-dependency-path: control-plane/test/e2e/playwright/package-lock.json
           cache-scope: e2e-browser
-      - name: Add reviewed Helm repositories
-        run: .github/scripts/add_helm_repositories.sh
       - name: Compose and verify the exact runtime bundle
         run: >-
           python3 .github/scripts/e2e.py compose
@@ -309,8 +307,6 @@ jobs:
           cache-dependency-path: ${{ env.GO_CACHE_DEPENDENCIES }}
           cache-scope: e2e-real-${{ matrix.capacity }}
       - uses: ./.github/actions/setup-kubernetes-tools
-      - name: Add reviewed Helm repositories
-        run: .github/scripts/add_helm_repositories.sh
       - name: Bind the fixed permanent fixture
         uses: ./.github/actions/setup-permanent-fixture
         with:

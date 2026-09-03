@@ -71,9 +71,14 @@ both temporary validation and immutable candidates. It defines:
 
 PR/nightly builders create each affected image, chart, companion, Forge binary,
 and source-only runtime fixture once. Candidate builders use the same recipe
-fields and add immutable candidate custody. Contract tests fail on context,
-Dockerfile, argument, label, dependency/package, companion, GoReleaser,
-version-authority, or recipe-hash drift.
+fields and add immutable candidate custody. External Helm repository indexes and
+locked dependency archives are acquired only by static checks or that single chart
+builder, with bounded command-level transport attempts. Product chart scenario
+composition and execution do not reacquire those dependency repositories; they
+consume the already checksummed chart artifacts. Contract tests fail on context,
+Dockerfile, argument, label,
+dependency/package, companion, GoReleaser, version-authority, or recipe-hash
+drift.
 
 An affected PR artifact or founder-selected candidate target may never resolve
 to a published baseline. Unselected dependencies may use only the explicit
