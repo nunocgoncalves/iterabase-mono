@@ -166,6 +166,11 @@ class WorkflowContractTests(unittest.TestCase):
         ):
             self.assertNotIn(stale, workflow)
 
+    def test_removed_nightly_fixture_is_absent_from_repository(self) -> None:
+        self.assertFalse(
+            (ROOT / ".github/ci/nightly-selection-fixture.json").exists()
+        )
+
     def test_helm_repository_acquisition_is_build_only_and_bounded(self) -> None:
         e2e_workflow = (ROOT / ".github/workflows/e2e.yml").read_text()
         candidate_workflow = (

@@ -97,6 +97,19 @@ class E2EPlanTests(unittest.TestCase):
                     "forge-binary",
                 },
             ),
+            "path-collector": (
+                [".github/scripts/collect_changed_paths.py"],
+                {
+                    "control-plane-image",
+                    "harness-image",
+                    "tool-runner-image",
+                    "inference-gateway-image",
+                    "runtime-fixture-image",
+                    "iterabase-platform-chart",
+                    "cert-manager-substrate-chart",
+                    "forge-binary",
+                },
+            ),
             "workflow": (
                 [".github/workflows/e2e.yml"],
                 {

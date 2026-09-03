@@ -32,6 +32,7 @@ JOB_GRACE_MINUTES = 5
 CAPACITY_JOB_GRACE_MINUTES = 30
 SHARED_PR_PATHS = (
     ".github/actions/**",
+    ".github/scripts/collect_changed_paths.py",
     ".github/scripts/e2e.py",
     ".github/scripts/test_e2e.py",
     ".github/workflows/e2e.yml",
