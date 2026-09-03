@@ -307,7 +307,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertIn("matrix.build_args_text", workflow)
         self.assertIn("recipe_sha256", workflow)
         self.assertIn("goreleaser/goreleaser-action", workflow)
-        self.assertIn("helm dependency build", workflow)
+        self.assertIn("bash charts/scripts/build-chart-dependency.sh", workflow)
 
     def test_promotion_remains_protected_and_never_rebuilds(self) -> None:
         workflow = (ROOT / ".github/workflows/release-promote.yml").read_text(

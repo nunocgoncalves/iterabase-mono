@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -159,6 +160,76 @@ class WorkflowContractTests(unittest.TestCase):
             "prepare_pr_workspace_runtime.sh",
         ):
             self.assertNotIn(stale, workflow)
+
+    def test_helm_repository_acquisition_is_build_only_and_bounded(self) -> None:
+        e2e_workflow = (ROOT / ".github/workflows/e2e.yml").read_text()
+        candidate_workflow = (
+            ROOT / ".github/workflows/release-candidate.yml"
+        ).read_text()
+        self.assertEqual(1, e2e_workflow.count(".github/scripts/add_helm_repositories.sh"))
+        self.assertEqual(2, candidate_workflow.count(".github/scripts/add_helm_repositories.sh"))
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            (fake_bin / "helm").write_text(
+                """#!/usr/bin/env bash
+set -euo pipefail
+name=$3
+count_file="$HELM_TEST_ROOT/$name"
+count=0
+test ! -f "$count_file" || count=$(cat "$count_file")
+count=$((count + 1))
+printf '%s\\n' "$count" > "$count_file"
+if [[ "$name" == "$HELM_TEST_FAIL_REPO" && "$count" -lt "$HELM_TEST_SUCCEED_AT" ]]; then
+  exit 1
+fi
+""",
+                encoding="utf-8",
+            )
+            (fake_bin / "sleep").write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+            (fake_bin / "helm").chmod(0o755)
+            (fake_bin / "sleep").chmod(0o755)
+            env = dict(os.environ)
+            env.update(
+                {
+                    "PATH": f"{fake_bin}:{env['PATH']}",
+                    "HELM_TEST_ROOT": str(root),
+                    "HELM_TEST_FAIL_REPO": "prometheus-community",
+                    "HELM_TEST_SUCCEED_AT": "2",
+                    "HELM_REPOSITORY_ATTEMPTS": "3",
+                }
+            )
+            subprocess.run(
+                ["bash", ".github/scripts/add_helm_repositories.sh"],
+                cwd=ROOT,
+                env=env,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            self.assertEqual("2", (root / "prometheus-community").read_text().strip())
+            self.assertEqual("1", (root / "grafana").read_text().strip())
+
+            for count_file in root.glob("*"):
+                if count_file.is_file():
+                    count_file.unlink()
+            env["HELM_TEST_FAIL_REPO"] = "ingress-nginx"
+            env["HELM_TEST_SUCCEED_AT"] = "99"
+            failed = subprocess.run(
+                ["bash", ".github/scripts/add_helm_repositories.sh"],
+                cwd=ROOT,
+                env=env,
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            self.assertNotEqual(0, failed.returncode)
+            self.assertEqual("3", (root / "ingress-nginx").read_text().strip())
+            self.assertIn("failed after 3 attempts", failed.stderr)
 
     def test_fixture_cleanup_red_proof_is_serialized_and_retains_diagnostics(self) -> None:
         workflow = (ROOT / ".github/workflows/e2e.yml").read_text()

@@ -658,7 +658,13 @@ def build_artifact(root: Path, plan: dict[str, Any], contract: dict[str, Any], a
         )
     elif kind in {"chart", "chart-companion"}:
         for dependency in recipe.get("dependency_builds", []):
-            run(["helm", "dependency", "build", str(root / "charts" / "charts" / dependency)])
+            run(
+                [
+                    "bash",
+                    str(root / "charts" / "scripts" / "build-chart-dependency.sh"),
+                    str(root / "charts" / "charts" / dependency),
+                ]
+            )
         chart = recipe["chart"]
         run(["helm", "package", str(root / "charts" / "charts" / chart), "--destination", str(output)])
         archive = output / f"{chart}-{version}.tgz"

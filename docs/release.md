@@ -74,9 +74,12 @@ conflicting versions.
    candidate routing, and immutable published baselines.
 2. **Build once.** Selected product images are pushed by digest and receive one
    immutable run-scoped alias `<source-sha>-<run-id>-<run-attempt>`. Selected
-   chart/companion and Forge outputs remain retained Actions artifacts. Required
-   validation-only artifacts are exact-source temporary Actions artifacts and
-   can never be promoted.
+   chart/companion and Forge outputs remain retained Actions artifacts. Locked
+   external Helm dependencies are acquired with bounded command-level transport
+   attempts only while packaging those chart artifacts; candidate product chart
+   scenarios do not reacquire those repositories. Required validation-only
+   artifacts are exact-source temporary Actions artifacts and can never be
+   promoted.
 3. **Compose once per scenario.** The shared composer verifies every selected or
    baseline digest/checksum/source/recipe identity, composes selected nested
    charts into the exact platform archive, and supplies the same runtime-bundle

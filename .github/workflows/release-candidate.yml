@@ -307,7 +307,7 @@ jobs:
         run: |
           mkdir -p candidate-charts
           for chart in control-plane observability cert-manager-substrate iterabase-platform; do
-            helm dependency build "charts/charts/$chart"
+            bash charts/scripts/build-chart-dependency.sh "charts/charts/$chart"
           done
           helm package 'charts/charts/${{ matrix.chart }}' --destination candidate-charts
           for companion in $(jq -r '.[]' <<<'${{ toJSON(matrix.companions) }}'); do
@@ -467,7 +467,6 @@ jobs:
           cache-dependency-path: control-plane/test/e2e/playwright/package-lock.json
           cache-scope: candidate-browser
       - uses: ./.github/actions/setup-kubernetes-tools
-      - run: .github/scripts/add_helm_repositories.sh
       - name: Compose the single verified candidate runtime
         run: >-
           python3 .github/scripts/e2e.py compose
@@ -536,7 +535,6 @@ jobs:
           cache-dependency-path: ${{ env.GO_CACHE_DEPENDENCIES }}
           cache-scope: candidate-real-${{ matrix.capacity }}
       - uses: ./.github/actions/setup-kubernetes-tools
-      - run: .github/scripts/add_helm_repositories.sh
       - name: Bind the fixed permanent fixture
         uses: ./.github/actions/setup-permanent-fixture
         with:
