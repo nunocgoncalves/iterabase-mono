@@ -1,7 +1,8 @@
 # HOR-540 permanent-fixture lifecycle acceptance — 2026-09-01
 
-Status: **CPU and GPU qualification complete on PR #71; legacy removal is
-authorized and pending in this atomic branch**.
+Status: **CPU and GPU qualification, legacy removal, negative proofs, complete
+catalogue, and non-promotable all-target candidate rehearsal are complete on PR
+#71**.
 
 Authority: HOR-540, `DES-HOR-540-01`, and `DES-HOR-540-02`. Qualification source
 began from PR #71 head `886890d48e1190030302727eef3c0e4196eaa5fe` after required
@@ -94,11 +95,11 @@ Before `33626838744`, the Ubuntu HWE baseline was updated and rebooted to
 `7.0.0-30-generic`, whose exact header package remains available from the
 configured Ubuntu archive. Before each qualifying GPU run, empty `dkms status`
 and absence of any host-managed NVIDIA DKMS module were reverified. After each
-qualifying run, only the Forge-installed `dkms` package was removed (no
-`apt autoremove`);
-matching headers and `build-essential` were retained. `dkms` is deliberately
-absent so the next exact Forge apply must restore and verify it before GPU
-Operator reconciliation.
+qualifying run except the final one, only the Forge-installed `dkms` package was
+removed (no `apt autoremove`); matching headers and `build-essential` were
+retained so the next exact Forge apply had to restore and verify the full build
+surface. The final and subsequent green runs leave Forge-owned `dkms` installed,
+with empty `dkms status` and no host-managed NVIDIA module.
 
 Before `33650935838`, founder-approved provider maintenance resized the permanent
 CPU fixture from `s-2vcpu-4gb` to `s-4vcpu-8gb` with the root disk left at 80 GiB.
@@ -112,10 +113,10 @@ the provider token inventory.
 
 | Proof | Run/job or local contract | Result |
 | --- | --- | --- |
-| Wrong/root/system/partition/in-use/workspace identity refuses purge | Forge unit + fake-SSH suite | Pending final SHA |
-| Ordinary `forge destroy` preserves workspace and never implies reboot | Forge lifecycle suite | Pending final SHA |
-| Corrupt/missing/wrong-device GPU cache fails closed | Forge harness unit suite | Pending final SHA |
-| Forced scenario assertion retains diagnostics and fails selected gate | Pending live run | Pending |
+| Wrong/root/system/partition/in-use/workspace identity refuses purge | Forge unit + fake-SSH suite on `5ea6f6dcdedb5a3e5c55434e1f29b5d92777c29e` | Passed in root `make check` and exact-head CI. |
+| Ordinary `forge destroy` preserves workspace and never implies reboot | Forge lifecycle suite on `5ea6f6dcdedb5a3e5c55434e1f29b5d92777c29e` | Passed in root `make check` and exact-head CI. |
+| Corrupt/missing/wrong-device GPU cache fails closed | Forge harness unit suite on `5ea6f6dcdedb5a3e5c55434e1f29b5d92777c29e` | Passed in root `make check` and exact-head CI. |
+| Forced scenario assertion retains diagnostics and fails selected gate | `33705999659` / `100495215806`; retained `e2e-red-proof-gpu-policy` artifact `9875741047` | Passed: the unmodified test gate detected the intentional policy mutation and retained redacted diagnostics. |
 | Forced cleanup/reboot failure fails selected gate | `33696454144` / `100466351239`; retained `e2e-red-proof-cleanup` artifact `9872023116` | Passed: the real reset completed (`dfeee6d4-e265-4a6d-9bdb-5cfda0284f08` → `641d4a59-bbcb-4ca1-8528-c01ebd20fa9e`), the owner hook then failed intentionally, the underlying test was red, `diagnostics-after-cleanup-failure` passed, and the proof wrapper/required context accepted only that expected red. |
 | Interrupted run recovers through next serialized preflight when SSH is healthy | Interrupted `33707588356` / `100500592130`; recovery `33708943294` / `100504597811` | Passed: force-cancel occurred only after pinned SSH observed boot `9b37792d-a077-4ee8-9284-dd1e78b22c96` with K3s and the workspace mount present. The next globally serialized complete-catalogue preflight purged that dirty host, rebooted to `f99e28df-e391-4a85-9503-000988443b12`, completed every GPU stage, and post-test rebooted to `12d60632-c0ab-40bc-b9ab-1b7f3891220f`. |
 | Intentional HOR-411 policy mutation remains red-detecting | `33705999659` / `100495215806`; retained `e2e-red-proof-gpu-policy` artifact `9875741047` | Passed: the underlying test was red only after the baseline workload, `deleteEmptyDir: false`, `pod-deletion-required`, and terminal `upgrade-failed` evidence; post-test purge/reboot passed and the proof wrapper/required context accepted only that expected red. |
@@ -131,10 +132,9 @@ Do not mark this section complete before both streak tables are green.
 - [x] Remove the GitHub Actions provider secret after founder-qualified diff and streak review.
 - [x] `gh secret list` proves only the CPU/GPU fixture-scoped SSH secrets remain.
 - [x] Repository scan proves no provider API mutation path remains.
-- [ ] Exact-head `CI / required` and `E2E / required` pass on the final head.
+- [x] Exact-head `CI / required` and `E2E / required` passed on code-complete head `5ea6f6dcdedb5a3e5c55434e1f29b5d92777c29e` (`33722576874`, `33722576851`); the evidence-only record commit remains subject to the same required contexts.
 - [x] Complete-catalogue permanent-fixture run `33708943294` passed after legacy removal and recovered the intentionally interrupted fixture.
-- [ ] Non-promoted all-target candidate rehearsal passes and retains fixture,
-      stage, and exact artifact identities.
+- [x] Non-promoted all-target candidate rehearsal `33728274762` passed on `5ea6f6dcdedb5a3e5c55434e1f29b5d92777c29e`; CPU job `100563278474`, GPU job `100563279232`, validation `100580255132`, and evidence assembly `100580602392` retained exact result artifacts and non-promotable `release-candidate` artifact `9885072893`.
 
 ## Publication and rollback
 
