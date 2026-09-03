@@ -114,9 +114,9 @@ the provider token inventory.
 
 | Proof | Run/job or local contract | Result |
 | --- | --- | --- |
-| Wrong/root/system/partition/in-use/workspace identity refuses purge | Forge unit + fake-SSH suite on `5ea6f6dcdedb5a3e5c55434e1f29b5d92777c29e` | Passed in root `make check` and exact-head CI. |
-| Ordinary `forge destroy` preserves workspace and never implies reboot | Forge lifecycle suite on `5ea6f6dcdedb5a3e5c55434e1f29b5d92777c29e` | Passed in root `make check` and exact-head CI. |
-| Corrupt/missing/wrong-device GPU cache fails closed | Forge harness unit suite on `5ea6f6dcdedb5a3e5c55434e1f29b5d92777c29e` | Passed in root `make check` and exact-head CI. |
+| Wrong/root/system/partition/in-use/workspace identity refuses purge | Forge unit + fake-SSH suite on `86185018e9b7f809d7da32941e6e33e3a3aaf59f` | Passed in root `make check` and exact-head CI run `33742857136`. |
+| Ordinary `forge destroy` preserves workspace and never implies reboot | Forge lifecycle suite on `86185018e9b7f809d7da32941e6e33e3a3aaf59f` | Passed in root `make check` and exact-head CI run `33742857136`. |
+| Corrupt/missing/wrong-device GPU cache fails closed | Forge harness unit suite on `86185018e9b7f809d7da32941e6e33e3a3aaf59f` | Passed in root `make check` and exact-head CI run `33742857136`. |
 | Forced scenario assertion retains diagnostics and fails selected gate | `33705999659` / `100495215806`; retained `e2e-red-proof-gpu-policy` artifact `9875741047` | Passed: the unmodified test gate detected the intentional policy mutation and retained redacted diagnostics. |
 | Forced cleanup/reboot failure fails selected gate | `33696454144` / `100466351239`; retained `e2e-red-proof-cleanup` artifact `9872023116` | Passed: the real reset completed (`dfeee6d4-e265-4a6d-9bdb-5cfda0284f08` → `641d4a59-bbcb-4ca1-8528-c01ebd20fa9e`), the owner hook then failed intentionally, the underlying test was red, `diagnostics-after-cleanup-failure` passed, and the proof wrapper/required context accepted only that expected red. |
 | Interrupted run recovers through next serialized preflight when SSH is healthy | Interrupted `33707588356` / `100500592130`; recovery `33708943294` / `100504597811` | Passed: force-cancel occurred only after pinned SSH observed boot `9b37792d-a077-4ee8-9284-dd1e78b22c96` with K3s and the workspace mount present. The next globally serialized complete-catalogue preflight purged that dirty host, rebooted to `f99e28df-e391-4a85-9503-000988443b12`, completed every GPU stage, and post-test rebooted to `12d60632-c0ab-40bc-b9ab-1b7f3891220f`. |
@@ -133,16 +133,20 @@ Do not mark this section complete before both streak tables are green.
 - [x] Remove the GitHub Actions provider secret after founder-qualified diff and streak review.
 - [x] `gh secret list` proves only the CPU/GPU fixture-scoped SSH secrets remain.
 - [x] Repository scan proves no provider API mutation path remains.
-- [ ] Final corrected exact-head `CI / required` and `E2E / required` pass. The
-      code-complete head `5ea6f6dcdedb5a3e5c55434e1f29b5d92777c29e`
-      passed both (`33722576874`, `33722576851`), while evidence-only head
-      `ccbe04b` exposed the NFD publication gap recorded above.
+- [x] Final corrected exact-head `CI / required` and `E2E / required` passed on
+      `86185018e9b7f809d7da32941e6e33e3a3aaf59f`: CI run `33742857136`, required
+      job `100610187403`; E2E run `33742857160`, required job `100626490252`, CPU
+      job `100609349194`, and GPU job `100609348111`.
 - [x] Complete-catalogue permanent-fixture run `33708943294` passed after legacy removal and recovered the intentionally interrupted fixture.
-- [ ] Exactly one final-head non-promoted all-target candidate rehearsal passes
-      after corrected exact-head CI/E2E. Earlier rehearsal `33728274762` passed
-      on `5ea6f6dcdedb5a3e5c55434e1f29b5d92777c29e` and retained artifact
-      `9885072893`; final terminal run identifiers are recorded externally in
-      Linear/PR metadata so no evidence-only commit invalidates them.
+- [x] The final-head non-promoted all-target candidate rehearsal `33748652175`
+      passed on `86185018e9b7f809d7da32941e6e33e3a3aaf59f`: GPU job `100628383019`, CPU
+      job `100628383859`, required validation `100647745050`, and immutable
+      evidence assembly `100648042956`. Retained artifacts include plan
+      `9890678155`, CPU result `9893118066`, GPU result `9891785559`, and
+      `release-candidate` `9893215667`; the retained plan SHA-256 is
+      `60ef6d9669dc4784dd810aaa94c9bf245ac2b96bafd150d0310c19998e40208a`.
+      The branch-only rehearsal was structurally non-promotable and no
+      publication or promotion occurred.
 
 ## Publication and rollback
 

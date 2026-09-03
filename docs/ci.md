@@ -141,12 +141,17 @@ The shared runner writes one result record for every selected scenario. It binds
 
 A passed scenario must record one observed post-import runtime manifest digest
 for every image in its bundle; result assembly rejects a missing/extra identity
-and retains artifact, config, and runtime digests separately. A direct skip,
-blocked/not-run stage, missing report, missing/extra stage, mode-dependent
-successful no-op, or failed stage makes required execution incomplete.
-Diagnostics and cleanup still run. Scenario jobs upload results even on failure;
-the aggregate downloads the exact result-artifact set and reconciles it against
-the plan rather than trusting matrix-job success alone.
+and retains artifact, config, and runtime digests separately. Each scenario
+artifact also retains the composer-authored runtime bundle and the independent
+post-import observation map. The aggregate hashes that retained bundle, compares
+every plan-known reference/digest/checksum and every result artifact identity to
+it, and requires each result runtime digest to match its retained observation.
+A direct skip, blocked/not-run stage, missing report/bundle/observation,
+missing/extra stage, mode-dependent successful no-op, or failed stage makes
+required execution incomplete. Diagnostics and cleanup still run. Scenario jobs
+upload results even on failure; the aggregate downloads the exact result-artifact
+set and reconciles it against the plan rather than trusting matrix-job success
+alone.
 
 Failure diagnostics are separate, redacted artifacts retained for seven days.
 PR/nightly plans and results are retained for 30 days. Candidate results and
