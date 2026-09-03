@@ -99,8 +99,11 @@ artifacts.
    intentional-red, and candidate workflows.
 5. **Reconcile actual evidence.** Candidate validation requires exactly one
    machine-readable result per planned scenario and one passed terminal result
-   per declared stage. Missing/extra/skipped/blocked/canceled results or identity
-   mismatches fail even when a matrix job itself appears successful.
+   per declared stage. The aggregate reads the retained plan and a compact,
+   explicit job-result map from files rather than expanding the full plan and
+   dependency graph into the process environment. Missing/extra/skipped/blocked/
+   canceled results or identity mismatches fail even when a matrix job itself
+   appears successful.
 6. **Retain promotion trust.** The 90-day `release-candidate` artifact contains
    the normalized plan, complete per-scenario/stage/runtime identity records,
    selected candidate files and metadata, checksums, SBOMs, and the generated
