@@ -15,8 +15,8 @@ A skipped, canceled, missing, extra, or superseded selected result cannot pass.
 
 For a pull request, every planning, artifact, and scenario job checks out
 `pull_request.head.sha` explicitly and verifies `git rev-parse HEAD` before doing
-work. The synthetic merge ref is not artifact source authority. Scheduled and
-complete manual runs bind the same checks to the exact scheduled `github.sha`.
+work. The synthetic merge ref is not artifact source authority. Master runs
+bind the same checks to the exact `github.sha`.
 Temporary artifacts are retained only as GitHub Actions artifacts and Docker
 state on the disposable runner; they are not semantically published.
 
@@ -30,7 +30,7 @@ catalogue.
 Every runnable owner registration declares, in compiled Go metadata:
 
 - scenario ID, owner, and Make target;
-- PR, nightly, and candidate routing;
+- PR and candidate routing;
 - source/candidate fixture support;
 - required runtime artifacts and release targets;
 - timeout, capacity, and mandatory-capacity semantics; and
@@ -42,14 +42,11 @@ runnable registration lacks artifact requirements, any workflow route, a
 supported fixture path, runtime metadata, candidate coverage, or a valid stage
 graph.
 
-The same schema represents three intents:
+The same schema represents two intents:
 
 - **PR:** map every changed/deleted/moved path to affected artifacts, then select
   the conservative union of scenarios requiring those artifacts. Owner-suite,
   workflow, and shared-testkit changes fan out conservatively.
-- **Nightly/manual complete:** select every runnable F2/F3 registration exactly
-  once and build every non-published runtime artifact once from the scheduled
-  source SHA.
 - **Candidate:** retain explicit founder-requested release targets, then select
   their conservative scenario union from the same compiled metadata. CI never
   chooses semantic release intent.
@@ -69,7 +66,7 @@ both temporary validation and immutable candidates. It defines:
 - the pinned GoReleaser version/config and Forge platform contract; and
 - explicit immutable published baselines and chart transition inputs.
 
-PR/nightly builders create each affected image, chart, companion, Forge binary,
+PR builders create each affected image, chart, companion, Forge binary,
 and source-only runtime fixture once. Candidate builders use the same recipe
 fields and add immutable candidate custody. External Helm repository indexes and
 locked dependency archives are acquired only by static checks or that single chart
@@ -154,7 +151,7 @@ set and reconciles it against the plan rather than trusting matrix-job success
 alone.
 
 Failure diagnostics are separate, redacted artifacts retained for seven days.
-PR/nightly plans and results are retained for 30 days. Candidate results and
+PR plans and results are retained for 30 days. Candidate results and
 artifact identities are retained in the 90-day immutable candidate record.
 
 ## Permanent fixture capacity and concurrency
@@ -167,9 +164,10 @@ workflow-dispatch inputs. Missing credentials, unreachable hosts, reboot/purge
 failure, or identity drift fails with retained diagnostics; it never calls
 `t.Skip`. Unselected capacity creates no job.
 
-All PR, nightly/manual, candidate, intentional-red, and cleanup/recovery fixture
-work uses the one literal `iterabase-permanent-fixtures` concurrency group with
-`cancel-in-progress: false`. CPU and GPU therefore cannot overlap. Build,
+PR, master, and candidate work for a capacity use its literal
+`iterabase-permanent-fixture-<capacity>` concurrency group with
+`cancel-in-progress: false`. Work targeting the same host is serialized across
+workflows; the independent CPU and GPU hosts may run concurrently. Build,
 static, unit, fresh F2 Kind/browser, and other non-fixture exact-head work retain
 safe parallelism.
 

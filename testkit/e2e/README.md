@@ -6,8 +6,8 @@ chart, browser, and Forge assertions remain in their owner modules.
 
 ## Compiled metadata
 
-Every runnable F2/F3 scenario declares artifact requirements; PR, nightly, and
-candidate routes; source/candidate fixture support; owner Make target; timeout;
+Every runnable F2/F3 scenario declares artifact requirements; PR and candidate
+routes; source/candidate fixture support; owner Make target; timeout;
 release targets; mandatory capacity where applicable; and its stage DAG.
 `make e2e-catalogue` compiles the real owner `TestE2E` registrations. A missing
 route, artifact, target, fixture mode, timeout, or stage fails catalogue

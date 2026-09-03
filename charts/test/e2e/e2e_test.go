@@ -49,7 +49,7 @@ func chartScenarioMetadata(name, description, makeTarget string, minutes int, re
 	return sharede2e.ScenarioMetadata{
 		Name: name, Description: description, Tier: sharede2e.TierF2,
 		References: references, ReleaseTargets: targets, RequiredArtifacts: artifacts,
-		Intents:      []sharede2e.ExecutionIntent{sharede2e.IntentPR, sharede2e.IntentNightly, sharede2e.IntentCandidate},
+		Intents:      []sharede2e.ExecutionIntent{sharede2e.IntentPR, sharede2e.IntentCandidate},
 		FixtureModes: []sharede2e.FixtureMode{sharede2e.FixtureSource, sharede2e.FixtureCandidate, sharede2e.FixturePublished},
 		MakeTarget:   makeTarget, TimeoutMinutes: minutes,
 	}

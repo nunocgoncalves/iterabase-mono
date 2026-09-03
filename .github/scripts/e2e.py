@@ -24,7 +24,7 @@ CATALOGUE_SCHEMA_VERSION = 2
 RUNTIME_SCHEMA_VERSION = 1
 RESULT_SCHEMA_VERSION = 1
 RUNNABLE_TIERS = {"F2", "F3"}
-INTENTS = {"pr", "nightly", "candidate"}
+INTENTS = {"pr", "candidate"}
 SHA = re.compile(r"^[0-9a-f]{40}$")
 SHA256 = re.compile(r"^(?:sha256:)?[0-9a-f]{64}$")
 NAME = re.compile(r"^[a-z0-9]+(?:[a-z0-9-]*[a-z0-9])?$")
@@ -219,7 +219,7 @@ def validate_catalogue_contract(catalogue: dict[str, Any], contract: dict[str, A
                 f"scenario {scenario['id']} requires unknown artifacts: {unknown_artifacts}"
             )
         if not isinstance(intents, list) or set(intents) != INTENTS:
-            raise E2EError(f"runnable scenario {scenario['id']} must route PR, nightly, and candidate intent")
+            raise E2EError(f"runnable scenario {scenario['id']} must route PR and candidate intent")
         if not isinstance(modes, list) or "source" not in modes or "candidate" not in modes:
             raise E2EError(f"runnable scenario {scenario['id']} lacks a supported source/candidate fixture path")
         if not metadata.get("make_target") or not isinstance(metadata.get("timeout_minutes"), int) or metadata["timeout_minutes"] <= 0:
@@ -331,7 +331,7 @@ def scenario_entry(scenario: dict[str, Any], fixture_mode: str, expected: list[d
             {
                 "capacity": capacity,
                 "mandatory": True,
-                "capacity_group": "iterabase-permanent-fixtures",
+                "capacity_group": f"iterabase-permanent-fixture-{capacity}",
             }
         )
     return entry
@@ -343,7 +343,6 @@ def select_scenarios(
     intent: str,
     paths: list[str],
     targets: list[str],
-    select_all: bool,
 ) -> tuple[list[dict[str, Any]], set[str]]:
     runnable = [
         scenario
@@ -351,13 +350,6 @@ def select_scenarios(
         if scenario["metadata"].get("tier") in RUNNABLE_TIERS
         and intent in scenario["metadata"].get("intents", [])
     ]
-    if intent == "nightly" or select_all:
-        return runnable, {
-            artifact
-            for scenario in runnable
-            for artifact in scenario["metadata"]["required_artifacts"]
-            if recipes[artifact]["kind"] not in {"published-chart"}
-        }
     if intent == "candidate":
         selected_targets = set(targets)
         selected = [
@@ -423,7 +415,7 @@ def expected_artifact(
     target = recipe.get("target")
     buildable = kind in {"image", "chart", "chart-companion", "forge"}
     selected_candidate = intent == "candidate" and target in selected_targets
-    temporary = (intent in {"pr", "nightly"} and artifact in affected) or recipe.get("temporary_only") is True
+    temporary = (intent == "pr" and artifact in affected) or recipe.get("temporary_only") is True
     if kind == "published-chart":
         custody = "published-baseline"
     elif selected_candidate and not recipe.get("temporary_only"):
@@ -471,7 +463,6 @@ def make_plan(
     source_sha: str,
     paths: list[str] | None = None,
     targets: list[str] | None = None,
-    select_all: bool = False,
 ) -> dict[str, Any]:
     if intent not in INTENTS:
         raise E2EError(f"unsupported E2E intent {intent!r}")
@@ -489,7 +480,6 @@ def make_plan(
         intent,
         paths,
         targets,
-        select_all,
     )
     selected_targets = set(targets)
     fixture_mode = "candidate" if intent == "candidate" else "source"
@@ -539,7 +529,7 @@ def make_plan(
         real_matrix.append(
             {
                 "capacity": capacity,
-                "capacity_group": "iterabase-permanent-fixtures",
+                "capacity_group": f"iterabase-permanent-fixture-{capacity}",
                 "artifact": capacity,
                 "timeout": sum(entry["timeout"] for entry in capacity_scenarios) + CAPACITY_JOB_GRACE_MINUTES,
                 "scenarios": capacity_scenarios,
@@ -1527,7 +1517,6 @@ def parser() -> argparse.ArgumentParser:
     plan.add_argument("--source-sha", required=True)
     plan.add_argument("--paths-file", type=Path)
     plan.add_argument("--targets", default="")
-    plan.add_argument("--all", action="store_true", dest="select_all")
     plan.add_argument("--output", type=Path, required=True)
     plan.add_argument("--github-output", type=Path)
     resolve = commands.add_parser("resolve-baselines")
@@ -1569,7 +1558,6 @@ def main() -> int:
                 source_sha=args.source_sha,
                 paths=paths,
                 targets=targets,
-                select_all=args.select_all,
             )
             args.output.write_text(compact(plan) + "\n", encoding="utf-8")
             output = args.github_output or (Path(os.environ["GITHUB_OUTPUT"]) if os.environ.get("GITHUB_OUTPUT") else None)

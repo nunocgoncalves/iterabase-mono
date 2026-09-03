@@ -1,8 +1,9 @@
 # Permanent CPU/GPU E2E fixture operations
 
 Authority: `DES-HOR-540-02`. These hosts are dedicated, reimageable CI fixtures;
-they contain no customer data. All fixture-backed work is globally serialized
-by `iterabase-permanent-fixtures` with cancellation disabled.
+they contain no customer data. Work is serialized per fixture by
+`iterabase-permanent-fixture-<capacity>` with cancellation disabled; independent
+CPU and GPU hosts may run concurrently.
 
 ## Security and ownership boundary
 
@@ -173,18 +174,10 @@ record why the identity changed.
 
 ## Failure, quarantine, and manual provider recovery
 
-If SSH remains healthy, leave the failed run red. The next globally serialized
+If SSH remains healthy, leave the failed run red. The next capacity-serialized
 preflight executes the same purge/reboot and may recover interrupted state.
 Never rerun a failed assertion to launder it into a pass; qualification streaks
 reset on any failed or incomplete cycle.
-
-For a controlled cleanup-hook negative, manually dispatch E2E with only
-`fixture_cleanup_red_proof=true`. The GPU scenario performs the real post-test
-purge/reboot first, then deliberately fails its owner cleanup hook; the shared
-runner must execute `diagnostics-after-cleanup-failure`, the wrapper must prove
-the underlying test was red, and Actions retains `e2e-red-proof-cleanup`. This
-proof is not a successful lifecycle cycle and must be followed by an ordinary
-globally serialized green run.
 
 If SSH, purge, or reboot cannot recover the host:
 
@@ -196,18 +189,18 @@ If SSH, purge, or reboot cannot recover the host:
    is lost.
 5. Restore the full baseline, stable by-id assignments, fixture user/key, pinned
    host key, and (GPU) separately mounted/cache-verified public model.
-6. Run a manual complete lifecycle cycle under the global lock before resuming
-   required CI. Record source SHA, workflow/job, boot IDs, workspace identity,
-   and model revision/hash.
+6. Run the next selected required PR or candidate lifecycle for that capacity
+   before resuming unrelated changes. Record source SHA, workflow/job, boot IDs,
+   workspace identity, and model revision/hash in the operational ticket.
 
 Never attach customer disks, restore customer snapshots, or copy customer data
 to a fixture.
 
 ## Rollback
 
-Rollback first stops fixture-backed dispatch, lets or forces no new holder of
-the global lock, and runs/verifies cleanup where pinned SSH remains healthy.
-Quarantine both fixtures while reverting source/workflow behavior.
+Rollback first stops fixture-backed execution, lets or forces no new holder of
+either capacity lock, and runs/verifies cleanup where pinned SSH remains
+healthy. Quarantine both fixtures while reverting source/workflow behavior.
 
 Do **not** restore a provider account token to Actions, re-enable dynamic
 provisioning/reaping, weaken host-key checks, share a key across fixtures, point

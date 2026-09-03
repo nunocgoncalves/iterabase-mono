@@ -108,7 +108,7 @@ func forgeScenarioMetadata(name, description string, tier sharede2e.Tier, refere
 	return sharede2e.ScenarioMetadata{
 		Name: name, Description: description, Tier: tier,
 		References: references, ReleaseTargets: targets, RequiredArtifacts: artifacts,
-		Intents:      []sharede2e.ExecutionIntent{sharede2e.IntentPR, sharede2e.IntentNightly, sharede2e.IntentCandidate},
+		Intents:      []sharede2e.ExecutionIntent{sharede2e.IntentPR, sharede2e.IntentCandidate},
 		FixtureModes: []sharede2e.FixtureMode{sharede2e.FixtureSource, sharede2e.FixtureCandidate},
 		MakeTarget:   makeTarget, TimeoutMinutes: timeout, Capacity: capacity, Mandatory: capacity != "",
 	}

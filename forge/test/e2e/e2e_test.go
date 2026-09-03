@@ -553,11 +553,7 @@ func sshDial(ip, keyPath string) (*ssh.Client, error) {
 
 func buildForge(t *testing.T) string {
 	t.Helper()
-	breakEmptyDirPolicy := os.Getenv("FORGE_E2E_BREAK_DELETE_EMPTYDIR") == "true"
 	if candidate := os.Getenv("FORGE_E2E_BINARY"); candidate != "" {
-		if breakEmptyDirPolicy {
-			t.Fatal("FORGE_E2E_BREAK_DELETE_EMPTYDIR cannot mutate an exact candidate Forge binary")
-		}
 		absolute, err := filepath.Abs(candidate)
 		if err != nil {
 			t.Fatalf("resolve FORGE_E2E_BINARY: %v", err)
@@ -579,37 +575,7 @@ func buildForge(t *testing.T) string {
 	}
 	repoRoot := filepath.Join(wd, "..", "..")
 	bin := filepath.Join(t.TempDir(), "forge")
-	args := []string{"build"}
-	if breakEmptyDirPolicy {
-		sourcePath, err := filepath.Abs(filepath.Join(repoRoot, "internal", "lifecycle", "lifecycle.go"))
-		if err != nil {
-			t.Fatalf("resolve lifecycle source for mutation: %v", err)
-		}
-		source, err := os.ReadFile(sourcePath)
-		if err != nil {
-			t.Fatalf("read lifecycle source for mutation: %v", err)
-		}
-		const enabled = `"driver.upgradePolicy.gpuPodDeletion.deleteEmptyDir=true",`
-		const disabled = `"driver.upgradePolicy.gpuPodDeletion.deleteEmptyDir=false",`
-		if strings.Count(string(source), enabled) != 1 {
-			t.Fatalf("expected one deleteEmptyDir policy value to mutate")
-		}
-		mutatedPath := filepath.Join(t.TempDir(), "lifecycle.go")
-		if err := os.WriteFile(mutatedPath, []byte(strings.Replace(string(source), enabled, disabled, 1)), 0o600); err != nil {
-			t.Fatalf("write mutated lifecycle source: %v", err)
-		}
-		overlayPath := filepath.Join(t.TempDir(), "overlay.json")
-		overlay, err := json.Marshal(map[string]map[string]string{"Replace": {sourcePath: mutatedPath}})
-		if err != nil {
-			t.Fatalf("encode Go build overlay: %v", err)
-		}
-		if err := os.WriteFile(overlayPath, overlay, 0o600); err != nil {
-			t.Fatalf("write Go build overlay: %v", err)
-		}
-		args = append(args, "-overlay", overlayPath)
-		t.Log("building intentional HOR-411 mutation with deleteEmptyDir=false")
-	}
-	args = append(args, "-o", bin, "./cmd/forge")
+	args := []string{"build", "-o", bin, "./cmd/forge"}
 	cmd := exec.Command("go", args...)
 	cmd.Dir = repoRoot
 	if out, err := cmd.CombinedOutput(); err != nil {

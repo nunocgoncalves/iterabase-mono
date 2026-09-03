@@ -49,10 +49,10 @@ Targets keep independent versions even when validated and promoted together.
 `release/targets.json` owns target/version identity and every reviewed production
 recipe: Docker context/file/arguments/labels, Helm dependency/package steps,
 companion membership, and Forge GoReleaser config/version. The same recipe hashes
-are consumed by temporary PR/nightly builders and candidate builders.
+are consumed by temporary PR builders and candidate builders.
 
 The candidate's execution plan is produced by `.github/scripts/e2e.py`, the same
-planner used by PR and complete nightly/manual E2E. Explicit requested targets
+planner used by PR E2E. Explicit requested targets
 select a conservative union from compiled owner registrations. Each selected
 scenario retains the same ID, owner Make target, timeout/capacity metadata, and
 stage DAG used in source mode. There is no chart-only matrix, pre-catalogue
@@ -92,11 +92,11 @@ artifacts.
 3. **Compose once per scenario.** The shared composer verifies every selected or
    baseline digest/checksum/source/recipe identity, composes selected nested
    charts into the exact platform archive, and supplies the same runtime-bundle
-   schema used by PR/nightly.
+   schema used by PR execution.
 4. **Execute the compiled union.** F2 and mandatory F3 jobs invoke the same owner
-   scenario and stage graph. Every CPU/GPU path shares the literal
-   `iterabase-permanent-fixtures` non-canceling lock across PR, nightly/manual,
-   intentional-red, and candidate workflows.
+   scenario and stage graph. Each CPU/GPU path shares its literal
+   `iterabase-permanent-fixture-<capacity>` non-canceling lock across PR, master,
+   and candidate workflows. Independent CPU and GPU hosts may run concurrently.
 5. **Reconcile actual evidence.** Candidate validation requires exactly one
    machine-readable result per planned scenario and one passed terminal result
    per declared stage. The aggregate reads the retained plan and a compact,

@@ -52,8 +52,9 @@ class E2EPlanTests(unittest.TestCase):
             ROOT,
             self.catalogue,
             self.contract,
-            intent="nightly",
+            intent="pr",
             source_sha=SOURCE_SHA,
+            paths=[".github/workflows/e2e.yml"],
         )
         runnable = [
             scenario
@@ -119,7 +120,7 @@ class E2EPlanTests(unittest.TestCase):
                 else:
                     self.assertGreater(plan["scenario_total"], 0)
 
-    def test_deletion_move_and_all_target_changes_keep_both_owners(self) -> None:
+    def test_deletion_and_move_changes_keep_both_owners(self) -> None:
         moved = self.plan(
             [
                 "control-plane/internal/api/moved.go",
@@ -128,42 +129,24 @@ class E2EPlanTests(unittest.TestCase):
         )
         self.assertIn("control-plane-image", moved["affected_artifacts"])
         self.assertIn("forge-binary", moved["affected_artifacts"])
-        all_targets = make_plan(
-            ROOT,
-            self.catalogue,
-            self.contract,
-            intent="pr",
-            source_sha=SOURCE_SHA,
-            select_all=True,
-        )
-        self.assertEqual(
-            set(all_targets["selected_scenario_ids"]),
-            set(
-                make_plan(
-                    ROOT,
-                    self.catalogue,
-                    self.contract,
-                    intent="nightly",
-                    source_sha=SOURCE_SHA,
-                )["selected_scenario_ids"]
-            ),
-        )
 
-    def test_capacity_groups_are_cross_intent_nonoverlapping_and_serial(self) -> None:
-        nightly = make_plan(
+    def test_capacity_groups_are_cross_intent_capacity_scoped_and_serial(self) -> None:
+        pull_request = make_plan(
             ROOT, self.catalogue, self.contract,
-            intent="nightly", source_sha=SOURCE_SHA,
+            intent="pr", source_sha=SOURCE_SHA,
+            paths=[".github/workflows/e2e.yml"],
         )
         candidate = make_plan(
             ROOT, self.catalogue, self.contract,
             intent="candidate", source_sha=SOURCE_SHA,
             targets=list(self.contract["targets"]),
         )
-        for plan in (nightly, candidate):
+        for plan in (pull_request, candidate):
             groups = {item["capacity"]: item for item in plan["real_machine_matrix"]}
             self.assertEqual({"cpu", "gpu"}, set(groups))
-            self.assertEqual("iterabase-permanent-fixtures", groups["cpu"]["capacity_group"])
-            self.assertEqual("iterabase-permanent-fixtures", groups["gpu"]["capacity_group"])
+            self.assertEqual("iterabase-permanent-fixture-cpu", groups["cpu"]["capacity_group"])
+            self.assertEqual("iterabase-permanent-fixture-gpu", groups["gpu"]["capacity_group"])
+            self.assertNotEqual(groups["cpu"]["capacity_group"], groups["gpu"]["capacity_group"])
             self.assertEqual(
                 ["forge/digitalocean-cpu", "forge/digitalocean-workspace"],
                 [item["id"] for item in groups["cpu"]["scenarios"]],
@@ -178,16 +161,17 @@ class E2EPlanTests(unittest.TestCase):
             source_sha=SOURCE_SHA,
             targets=["control-plane", "iterabase-platform-chart"],
         )
-        nightly = make_plan(
+        pull_request = make_plan(
             ROOT,
             self.catalogue,
             self.contract,
-            intent="nightly",
+            intent="pr",
             source_sha=SOURCE_SHA,
+            paths=[".github/workflows/e2e.yml"],
         )
-        nightly_by_id = {item["id"]: item for item in nightly["scenario_matrix"]}
+        pull_request_by_id = {item["id"]: item for item in pull_request["scenario_matrix"]}
         for scenario in candidate["scenario_matrix"]:
-            source = nightly_by_id[scenario["id"]]
+            source = pull_request_by_id[scenario["id"]]
             for field in ("id", "owner", "target", "scenario_timeout", "stage_graph_sha256", "stages"):
                 self.assertEqual(source[field], scenario[field])
             for artifact in scenario["artifacts"]:
@@ -694,9 +678,13 @@ class WorkflowContractTests(unittest.TestCase):
         e2e = (ROOT / ".github/workflows/e2e.yml").read_text(encoding="utf-8")
         self.assertIn("github.event.pull_request.head.sha", e2e)
         self.assertIn("git rev-parse HEAD", e2e)
-        self.assertIn("ALL: ${{ steps.paths.outputs.all }}", e2e)
-        self.assertIn('elif [ "$ALL" = true ]; then', e2e)
+        self.assertIn("--intent pr", e2e)
+        self.assertIn("--paths-file /tmp/changed-paths", e2e)
+        self.assertIn("group: iterabase-permanent-fixture-${{ matrix.capacity }}", e2e)
         self.assertIn("cancel-in-progress: false", e2e)
+        self.assertNotIn("schedule:", e2e)
+        self.assertNotIn("workflow_dispatch:", e2e)
+        self.assertNotIn("nightly", e2e)
         self.assertNotIn("control-plane-kind:", e2e)
         self.assertNotIn("charts-runtime:", e2e)
 

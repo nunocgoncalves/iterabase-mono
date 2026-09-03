@@ -448,7 +448,7 @@ jobs:
           retention-days: 90
 
   kind-candidates:
-    name: Exact candidate — ${{ matrix.id }}
+    name: ${{ matrix.id }}
     needs: [preflight, image-candidates, chart-candidate, forge-candidate, runtime-artifacts]
     if: >-
       always() && needs.preflight.result == 'success' && needs.preflight.outputs.run_kind == 'true' &&
@@ -526,7 +526,7 @@ jobs:
           retention-days: 7
 
   real-machine-candidates:
-    name: Exact candidate capacity — ${{ matrix.capacity }}
+    name: ${{ matrix.capacity }}
     needs: [preflight, image-candidates, chart-candidate, forge-candidate, runtime-artifacts]
     if: >-
       always() && needs.preflight.result == 'success' && needs.preflight.outputs.run_real_machine == 'true' &&
@@ -542,7 +542,7 @@ jobs:
       matrix:
         include: ${{ fromJSON(needs.preflight.outputs.real_machine_matrix) }}
     concurrency:
-      group: iterabase-permanent-fixtures
+      group: iterabase-permanent-fixture-${{ matrix.capacity }}
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

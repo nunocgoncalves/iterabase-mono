@@ -32,11 +32,6 @@ class StaticCIPathSelectionTests(unittest.TestCase):
                 )
                 self.assertEqual(bool(fixture["true"]), result["any"])
 
-    def test_select_all_is_explicit_and_complete(self) -> None:
-        result = selection([], select_all=True)
-        self.assertTrue(all(result[name] for name in OUTPUTS))
-        self.assertEqual(5, len(result["image_matrix"]))
-
     def test_unified_e2e_contract_changes_fan_out_static_owners(self) -> None:
         for path in (
             ".github/scripts/e2e.py",
@@ -77,19 +72,6 @@ class ChangedPathCollectionTests(unittest.TestCase):
         self.git(repo, "add", "-A")
         self.git(repo, "commit", "--quiet", "-m", "base")
         return repo, self.git(repo, "rev-parse", "HEAD")
-
-    def test_manual_dispatch_selects_all_without_changed_paths(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            repo, head_sha = self.create_repo(directory)
-            select_all, paths = collect_changed_paths(
-                repo,
-                "workflow_dispatch",
-                "",
-                head_sha,
-                all_events={"workflow_dispatch"},
-            )
-            self.assertTrue(select_all)
-            self.assertEqual([], paths)
 
     def test_deletion_only_change_retains_source_owner(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -153,8 +135,6 @@ class WorkflowContractTests(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/e2e.yml").read_text()
         for value in (
             "ref: ${{ github.event.pull_request.head.sha || github.sha }}",
-            "ALL: ${{ steps.paths.outputs.all }}",
-            'elif [ "$ALL" = true ]; then',
             "test \"$(git rev-parse HEAD)\" = \"$SOURCE_SHA\"",
             "fromJSON(needs.plan.outputs.kind_matrix)",
             "fromJSON(needs.plan.outputs.real_machine_matrix)",
@@ -162,11 +142,21 @@ class WorkflowContractTests(unittest.TestCase):
             "python3 .github/scripts/e2e.py validate-results",
             "export FORGE_E2E_REQUIRE_CAPACITY=true",
             "uses: ./.github/actions/setup-permanent-fixture",
-            "group: iterabase-permanent-fixtures",
+            "group: iterabase-permanent-fixture-${{ matrix.capacity }}",
         ):
             self.assertIn(value, workflow)
         self.assertNotIn("DIGITALOCEAN_TOKEN", workflow)
         for stale in (
+            "schedule:",
+            "workflow_dispatch:",
+            "complete_catalogue",
+            "gpu_policy_red_proof",
+            "fixture_cleanup_red_proof",
+            "gpu-red-proof:",
+            "cleanup-red-proof:",
+            "nightly",
+            "Exact source",
+            "Exact bundle",
             "control-plane-kind:",
             "control-plane-execution-kind:",
             "charts-runtime:",
@@ -245,22 +235,6 @@ fi
             self.assertNotEqual(0, failed.returncode)
             self.assertEqual("3", (root / "ingress-nginx").read_text().strip())
             self.assertIn("failed after 3 attempts", failed.stderr)
-
-    def test_fixture_cleanup_red_proof_is_serialized_and_retains_diagnostics(self) -> None:
-        workflow = (ROOT / ".github/workflows/e2e.yml").read_text()
-        cleanup = workflow.split("  cleanup-red-proof:\n", 1)[1].split(
-            "\n  required:\n", 1
-        )[0]
-        for value in (
-            "fixture_cleanup_red_proof:",
-            "make test-e2e-gpu-broken-cleanup",
-            "name: e2e-red-proof-cleanup",
-            "group: iterabase-permanent-fixtures",
-            "cancel-in-progress: false",
-            "uses: ./.github/actions/setup-permanent-fixture",
-        ):
-            self.assertIn(value, workflow if value == "fixture_cleanup_red_proof:" else cleanup)
-        self.assertNotIn("DIGITALOCEAN_TOKEN", cleanup)
 
     def test_harness_isolation_static_gate_remains_required(self) -> None:
         root_makefile = (ROOT / "Makefile").read_text()

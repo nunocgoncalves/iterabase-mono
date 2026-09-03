@@ -25,10 +25,10 @@ host public key, and Forge workspace `/dev/disk/by-id/...` identity. A separate
 repository secret supplies each fixture-scoped private key. These values are not
 workflow-dispatch inputs.
 
-Every fixture path uses the literal `iterabase-permanent-fixtures` concurrency
-group with `cancel-in-progress: false`: PR, complete nightly/manual, candidate,
-intentional-red, diagnostics, and cleanup execution are globally serial. CPU and
-GPU never overlap. Build/unit/F2 work remains parallel.
+Every fixture path uses its literal `iterabase-permanent-fixture-<capacity>`
+concurrency group with `cancel-in-progress: false` across PR, master, and
+candidate execution. Work targeting the same host is serial; the independent
+CPU and GPU hosts may overlap. Build/unit/F2 work remains parallel.
 
 Actions has no provider credential. It cannot list, create, delete, resize,
 power-cycle, rescue, reimage, or replace a fixture. If strict SSH cleanup and
@@ -94,9 +94,8 @@ worker replacement, persisted bytes, and idempotent reapply.
 Uses the GPU fixture for exact baseline/candidate driver transition, real GPU
 smoke, disposable `emptyDir` versus durable cache behavior, exact platform
 handoff, pinned model-cache validation, and one non-authoritative real-serving
-request. `make test-e2e-gpu-broken-policy` runs the same fixture under the same
-global lock and passes only when the intentional `deleteEmptyDir=false`
-mutation is detected as red.
+request. Ordinary unit and F3 assertions enforce the supported
+`deleteEmptyDir=true` policy without a ticket-specific negative workflow.
 
 Forge registers no chart-install-only Kind scenario. Product and chart behavior
 remains in control-plane/charts owner suites; Forge's deployed checks are
@@ -104,8 +103,8 @@ bounded dependent smokes after Forge-owned substrate and handoff assertions.
 
 ## Exact artifact and result contract
 
-The one compiled planner selects PR, complete nightly/manual, and explicit
-candidate intent. `.github/scripts/e2e.py` builds affected temporary or immutable
+The one compiled planner selects PR and explicit candidate intent.
+`.github/scripts/e2e.py` builds affected temporary or immutable
 candidate artifacts once from the reviewed production recipes, composes one
 verified runtime bundle, and supplies the same scenario ID, Make target,
 timeout, and stage DAG in both modes.
