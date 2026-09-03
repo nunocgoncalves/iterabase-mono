@@ -61,11 +61,11 @@ Pinned model authority:
 | 3 | `33676336351` / `100402866399` | `6795e23e9f0b79e99ac1a4af1ee787ffc081ca39` | `forge-digitalocean-gpu.json` in `e2e-result-capacity-gpu`; plan `75922686281a50962cc3c39a1c5062fa19b4109acd435751454eb0d7bd27cbd7`; bundle `46f50cdeb7ff931249d09565f31335caf8a53aae1b34207460c3cad217736cd8`; stages `4d83e55aa22cc91e78a4b796d26dba774ced34dfa2a388fe1b6a41a4f4eb468e` | `10acaa06-f67c-40f8-934d-32545de9bbdf` → `89f3b82f-5408-463b-9cdd-d92eb256cd70` → `659c2436-afc0-4f87-b75c-5879f068ccb0` | workspace `/dev/disk/by-id/virtio-5b0889ae-a1d9-4e0d-b`; host key SHA-256 `9460d21d576b58e898a0bf68d8c1f7690e3101b4b0da5d467aa29cea0e906678`; cache `/dev/disk/by-id/virtio-43ff9b5b-1f97-49ba-9`, UUID `2eb63d10-3d60-418e-bced-cae2f3a26f08`, revision `2fc06364715b967f1860aea9cf38778875588b17`, content `04b1c301231dd422b8860db31311ab2721511346a32cb1e079c4c4e5f1fe4696` | Passed in a second complete-catalogue run; Forge restored deliberately absent `dkms`, exact GPU/runtime/model inference passed, and post-test purge/reboot passed. |
 
 Pre-removal qualification count: **3**. Qualification completed before legacy
-removal. Intentional cleanup-negative run `33689860332` subsequently reset the
-current operational streak to **0** without invalidating that ordering evidence. The
-last qualifying run left Forge-owned `dkms` installed with empty `dkms status`,
-no host-managed NVIDIA DKMS module, and matching headers, `gcc`, and `make`
-present.
+removal. Post-removal negative and interrupted runs subsequently reset the
+operational streak without invalidating that ordering evidence; recovery run
+`33708943294` establishes a current green count of **1**. The final qualifying
+run left Forge-owned `dkms` installed with empty `dkms status`, no host-managed
+NVIDIA DKMS module, and matching headers, `gcc`, and `make` present.
 
 ## Non-qualifying/reset evidence
 
@@ -86,6 +86,7 @@ These attempts remain failures; none starts or advances a streak:
 | `33689860332` / `100446279492` | `6b47d6a991b51011368c5719c22e62ac037f4781` | GPU | The first post-removal cleanup-negative attempt completed real purge/reboot (`f97a9133-2dfe-4977-b443-af6f00af713e` → `d79b92b0-856e-4fe9-a329-cf2e0a88c842`), raised the intentional owner cleanup error, and retained `e2e-red-proof-cleanup`. Its wrapper also required a diagnostics-after marker that could not occur because an unrelated missing exact-chart input had already failed a stage; the dedicated minimal cleanup proof added afterward removes that ambiguity. |
 | `33696787601` / `100467399266` | `4cface99aad95b71b34345b805a8e9e7a8b3333c` | GPU | The intentional HOR-411 mutation run failed before reaching the target assertion because the first Forge handshake was reset immediately after otherwise successful pinned post-reboot readiness. Post-failure purge/reboot passed (`d86baa48-e308-4736-bf19-e3c84ce0e450` → `b7b23083-3849-4def-94fd-9b2c5277d036`). A bounded quiet Forge handoff was added before repeating the proof. |
 | `33701874707` / `100482825288` | `4acea96b78a9625cd956a8a48f1c8039af183706` | GPU | The next intentional HOR-411 attempt exposed the same frontend behavior one step earlier: cloud-init readiness succeeded, but its immediate follow-up clean-baseline SSH handshake was reset. Post-failure purge/reboot passed (`ccf7aaea-9406-40b3-853e-0c4017611028` → `f6770e30-8742-4577-babf-24cd8df4e2da`). The bounded quiet handoff now covers both post-readiness reconnects. |
+| `33707588356` / `100500592130` | `68642a5c58591e97ca56dd32da0e3e314935f8d2` | GPU | Intentionally force-canceled after the exact fixture became dirty; pinned observation retained boot `9b37792d-a077-4ee8-9284-dd1e78b22c96`, K3s present, and workspace mount present. No result was accepted. Recovery is separately proved by `33708943294`. |
 | `33697171404` / `100469108013` | `4acea96b78a9625cd956a8a48f1c8039af183706` | F2 setup | CPU job `100469107628` and GPU job `100469108487` both passed and retained strict results (`9873082375`, `9873777631`). The aggregate remained red because `charts/fresh-install` failed before scenario execution while redundantly fetching the reviewed Prometheus Helm repository index: the CDN reset the TCP connection. The identical step passed in the GPU lane. Product scenario jobs were changed to consume the already packaged chart artifacts without reacquiring dependency repositories; repository and locked dependency acquisition remains build-only and uses bounded command-level transport attempts. |
 
 Before `33626838744`, the Ubuntu HWE baseline was updated and rebooted to
@@ -115,8 +116,8 @@ the provider token inventory.
 | Corrupt/missing/wrong-device GPU cache fails closed | Forge harness unit suite | Pending final SHA |
 | Forced scenario assertion retains diagnostics and fails selected gate | Pending live run | Pending |
 | Forced cleanup/reboot failure fails selected gate | `33696454144` / `100466351239`; retained `e2e-red-proof-cleanup` artifact `9872023116` | Passed: the real reset completed (`dfeee6d4-e265-4a6d-9bdb-5cfda0284f08` → `641d4a59-bbcb-4ca1-8528-c01ebd20fa9e`), the owner hook then failed intentionally, the underlying test was red, `diagnostics-after-cleanup-failure` passed, and the proof wrapper/required context accepted only that expected red. |
-| Interrupted run recovers through next serialized preflight when SSH is healthy | Pending live run | Pending |
-| Intentional HOR-411 policy mutation remains red-detecting | Pending live run | Pending |
+| Interrupted run recovers through next serialized preflight when SSH is healthy | Interrupted `33707588356` / `100500592130`; recovery `33708943294` / `100504597811` | Passed: force-cancel occurred only after pinned SSH observed boot `9b37792d-a077-4ee8-9284-dd1e78b22c96` with K3s and the workspace mount present. The next globally serialized complete-catalogue preflight purged that dirty host, rebooted to `f99e28df-e391-4a85-9503-000988443b12`, completed every GPU stage, and post-test rebooted to `12d60632-c0ab-40bc-b9ab-1b7f3891220f`. |
+| Intentional HOR-411 policy mutation remains red-detecting | `33705999659` / `100495215806`; retained `e2e-red-proof-gpu-policy` artifact `9875741047` | Passed: the underlying test was red only after the baseline workload, `deleteEmptyDir: false`, `pod-deletion-required`, and terminal `upgrade-failed` evidence; post-test purge/reboot passed and the proof wrapper/required context accepted only that expected red. |
 
 ## Legacy-removal and final audit gate
 
@@ -130,7 +131,7 @@ Do not mark this section complete before both streak tables are green.
 - [x] `gh secret list` proves only the CPU/GPU fixture-scoped SSH secrets remain.
 - [x] Repository scan proves no provider API mutation path remains.
 - [ ] Exact-head `CI / required` and `E2E / required` pass on the final head.
-- [ ] Complete-catalogue permanent-fixture run passes after legacy removal.
+- [x] Complete-catalogue permanent-fixture run `33708943294` passed after legacy removal and recovered the intentionally interrupted fixture.
 - [ ] Non-promoted all-target candidate rehearsal passes and retains fixture,
       stage, and exact artifact identities.
 
