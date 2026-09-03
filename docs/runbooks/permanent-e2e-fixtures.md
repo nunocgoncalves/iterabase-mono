@@ -45,7 +45,11 @@ each host:
    from the configured Ubuntu archives because the driver container resolves it
    independently; upgrade and reboot a stale HWE baseline before qualification.
    Do not rely on an out-of-band build-dependency install as qualification
-   evidence.
+   evidence. The permanent GPU hardware identity is exactly one PCI display
+   controller with vendor/device/class `0x10de 0x24b0 0x030000` (RTX A4000).
+   After every reboot the harness waits for that exact sysfs identity before
+   handing the host to Forge; an absent, wrong, or duplicate NVIDIA device fails
+   fixture readiness rather than consuming the GPU Operator convergence window.
 5. Obtain the host public key through a trusted provider console or first-boot
    channel. Compare it independently before recording the exact one-line
    OpenSSH public key. Do not trust an unauthenticated first `ssh-keyscan` result.
