@@ -6,7 +6,6 @@ package e2e
 import (
 	"context"
 	"fmt"
-	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -154,10 +153,6 @@ func (state *digitalOceanGPUState) cleanup(t *testing.T) {
 	workspaceDevicesByAddress.Delete(state.vm.IP)
 	if err := state.fixture.reset(t, state.forgeBin, state.forgeHome); err != nil {
 		t.Errorf("reset permanent GPU fixture after diagnostics: %v", err)
-		return
-	}
-	if os.Getenv("FORGE_E2E_BREAK_CLEANUP") == "true" {
-		t.Error("intentional HOR-540 cleanup failure after successful permanent GPU reset")
 	}
 }
 

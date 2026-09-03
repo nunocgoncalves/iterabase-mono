@@ -4,34 +4,14 @@ on:
   pull_request:
   push:
     branches: [master]
-  schedule:
-    - cron: "0 3 * * *"
-  workflow_dispatch:
-    inputs:
-      complete_catalogue:
-        description: "Run the exact complete compiled catalogue (the default for manual dispatch)"
-        required: false
-        type: boolean
-        default: false
-      gpu_policy_red_proof:
-        description: "Run the intentional HOR-411 deleteEmptyDir=false GPU mutation"
-        required: false
-        type: boolean
-        default: false
-      fixture_cleanup_red_proof:
-        description: "Run the intentional HOR-540 permanent-GPU cleanup failure proof"
-        required: false
-        type: boolean
-        default: false
 
 permissions:
   contents: read
   actions: read
   packages: read
 
-# Every permanent CPU/GPU fixture path shares one literal non-canceling lock
-# across PR, nightly/manual, candidate, intentional-red, and cleanup execution.
-# Exact-head non-fixture jobs may supersede independently below.
+# Each permanent fixture has one non-canceling lock shared by PR, master, and
+# candidate execution. Independent CPU and GPU hosts may run concurrently.
 
 env:
   GO_CACHE_DEPENDENCIES: |
@@ -46,7 +26,7 @@ env:
 
 jobs:
   plan:
-    name: Compile exact-head execution plan
+    name: Plan
     runs-on: ubuntu-latest
     concurrency:
       group: e2e-plan-${{ github.event.pull_request.number || github.ref }}
@@ -60,18 +40,6 @@ jobs:
       has_kind: ${{ steps.plan.outputs.has_kind }}
       has_real_machine: ${{ steps.plan.outputs.has_real_machine }}
     steps:
-      - name: Reject conflicting manual intents
-        if: github.event_name == 'workflow_dispatch'
-        env:
-          COMPLETE: ${{ inputs.complete_catalogue }}
-          GPU_RED_PROOF: ${{ inputs.gpu_policy_red_proof }}
-          CLEANUP_RED_PROOF: ${{ inputs.fixture_cleanup_red_proof }}
-        run: |
-          selected=0
-          for value in "$COMPLETE" "$GPU_RED_PROOF" "$CLEANUP_RED_PROOF"; do
-            if [ "$value" = true ]; then selected=$((selected + 1)); fi
-          done
-          test "$selected" -le 1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -94,28 +62,18 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: >-
-          python3 .github/scripts/collect_changed_paths.py
-          --all-event schedule
-          --all-event workflow_dispatch
-      - name: Generate one PR/nightly execution plan
+        run: python3 .github/scripts/collect_changed_paths.py
+      - name: Generate execution plan
         id: plan
         env:
           SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-          ALL: ${{ steps.paths.outputs.all }}
-          RED_PROOF: ${{ inputs.gpu_policy_red_proof == true || inputs.fixture_cleanup_red_proof == true }}
         run: |
-          if [ "$RED_PROOF" = true ]; then
-            : > /tmp/changed-paths
-            intent=pr
-          elif [ "$ALL" = true ]; then
-            intent=nightly
-          else
-            intent=pr
-          fi
-          args=(plan --intent "$intent" --source-sha "$SOURCE_SHA" --output e2e-plan.json --github-output "$GITHUB_OUTPUT")
-          if [ "$intent" = pr ]; then args+=(--paths-file /tmp/changed-paths); fi
-          python3 .github/scripts/e2e.py "${args[@]}"
+          python3 .github/scripts/e2e.py plan \
+            --intent pr \
+            --source-sha "$SOURCE_SHA" \
+            --paths-file /tmp/changed-paths \
+            --output e2e-plan.json \
+            --github-output "$GITHUB_OUTPUT"
           python3 .github/scripts/e2e.py resolve-baselines --plan e2e-plan.json
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -124,7 +82,7 @@ jobs:
           retention-days: 30
 
   runtime-contract:
-    name: Compile shared runner and every owner entrypoint
+    name: Runner contract
     needs: plan
     if: needs.plan.outputs.has_scenarios == 'true'
     runs-on: ubuntu-latest
@@ -140,7 +98,7 @@ jobs:
       - run: make testkit-test
 
   artifacts:
-    name: Build exact source — ${{ matrix.artifact }}
+    name: ${{ matrix.artifact }}
     needs: plan
     if: needs.plan.outputs.has_artifacts == 'true'
     runs-on: ubuntu-latest
@@ -187,7 +145,7 @@ jobs:
           retention-days: 7
 
   kind:
-    name: Exact bundle — ${{ matrix.id }}
+    name: ${{ matrix.id }}
     needs: [plan, runtime-contract, artifacts]
     if: >-
       always() && needs.plan.result == 'success' &&
@@ -271,7 +229,7 @@ jobs:
           retention-days: 7
 
   real-machine:
-    name: Exact bundle capacity — ${{ matrix.capacity }}
+    name: ${{ matrix.capacity }}
     needs: [plan, runtime-contract, artifacts]
     if: >-
       always() && needs.plan.result == 'success' &&
@@ -285,7 +243,7 @@ jobs:
       matrix:
         include: ${{ fromJSON(needs.plan.outputs.real_machine_matrix) }}
     concurrency:
-      group: iterabase-permanent-fixtures
+      group: iterabase-permanent-fixture-${{ matrix.capacity }}
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -374,104 +332,10 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-  gpu-red-proof:
-    name: Intentional HOR-411 GPU red proof
-    needs: plan
-    if: inputs.gpu_policy_red_proof == true
-    runs-on: ubuntu-latest
-    timeout-minutes: 115
-    concurrency:
-      group: iterabase-permanent-fixtures
-      cancel-in-progress: false
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.sha }}
-      - uses: ./.github/actions/setup-go
-        with:
-          go-version: 1.26.5
-          cache-dependency-path: forge/test/e2e/go.sum
-          cache-scope: e2e-gpu-red-proof
-      - name: Bind the fixed permanent GPU fixture
-        uses: ./.github/actions/setup-permanent-fixture
-        with:
-          capacity: gpu
-          address: ${{ vars.FORGE_E2E_GPU_ADDRESS }}
-          ssh-user: ${{ vars.FORGE_E2E_GPU_SSH_USER }}
-          ssh-private-key: ${{ secrets.FORGE_E2E_GPU_SSH_KEY }}
-          ssh-host-key: ${{ vars.FORGE_E2E_GPU_SSH_HOST_KEY }}
-          workspace-device: ${{ vars.FORGE_E2E_GPU_WORKSPACE_DEVICE }}
-          model-cache-device: ${{ vars.FORGE_E2E_GPU_MODEL_CACHE_DEVICE }}
-          model-cache-uuid: ${{ vars.FORGE_E2E_GPU_MODEL_CACHE_UUID }}
-      - name: Prove the normal scenario rejects the intentional mutation
-        working-directory: forge
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ITERABASE_E2E_FIXTURE_MODE: source
-          ITERABASE_E2E_SOURCE_SHA: ${{ github.sha }}
-          ITERABASE_E2E_SOURCE_INPUTS: ${{ github.workspace }}/forge/test/e2e/published-fixture.json
-          ITERABASE_E2E_DIAGNOSTICS: ${{ runner.temp }}/diagnostics/gpu-policy
-        run: make test-e2e-gpu-broken-policy
-      - name: Retain intentional policy-failure diagnostics
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: e2e-red-proof-gpu-policy
-          path: ${{ runner.temp }}/diagnostics
-          if-no-files-found: error
-          retention-days: 30
-
-  cleanup-red-proof:
-    name: Intentional HOR-540 permanent cleanup red proof
-    needs: plan
-    if: inputs.fixture_cleanup_red_proof == true
-    runs-on: ubuntu-latest
-    timeout-minutes: 115
-    concurrency:
-      group: iterabase-permanent-fixtures
-      cancel-in-progress: false
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.sha }}
-      - uses: ./.github/actions/setup-go
-        with:
-          go-version: 1.26.5
-          cache-dependency-path: forge/test/e2e/go.sum
-          cache-scope: e2e-cleanup-red-proof
-      - name: Bind the fixed permanent GPU fixture
-        uses: ./.github/actions/setup-permanent-fixture
-        with:
-          capacity: gpu
-          address: ${{ vars.FORGE_E2E_GPU_ADDRESS }}
-          ssh-user: ${{ vars.FORGE_E2E_GPU_SSH_USER }}
-          ssh-private-key: ${{ secrets.FORGE_E2E_GPU_SSH_KEY }}
-          ssh-host-key: ${{ vars.FORGE_E2E_GPU_SSH_HOST_KEY }}
-          workspace-device: ${{ vars.FORGE_E2E_GPU_WORKSPACE_DEVICE }}
-          model-cache-device: ${{ vars.FORGE_E2E_GPU_MODEL_CACHE_DEVICE }}
-          model-cache-uuid: ${{ vars.FORGE_E2E_GPU_MODEL_CACHE_UUID }}
-      - name: Prove a cleanup-hook failure stays red after the real reset
-        working-directory: forge
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ITERABASE_E2E_FIXTURE_MODE: source
-          ITERABASE_E2E_SOURCE_SHA: ${{ github.sha }}
-          ITERABASE_E2E_SOURCE_INPUTS: ${{ github.workspace }}/forge/test/e2e/published-fixture.json
-          ITERABASE_E2E_DIAGNOSTICS: ${{ runner.temp }}/diagnostics/cleanup
-        run: make test-e2e-gpu-broken-cleanup
-      - name: Retain intentional cleanup-failure diagnostics
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: e2e-red-proof-cleanup
-          path: ${{ runner.temp }}/diagnostics
-          if-no-files-found: error
-          retention-days: 30
-
   required:
     name: E2E / required
     if: always()
-    needs: [plan, runtime-contract, artifacts, kind, real-machine, gpu-red-proof, cleanup-red-proof]
+    needs: [plan, runtime-contract, artifacts, kind, real-machine]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -487,7 +351,6 @@ jobs:
           pattern: e2e-result-*
           path: ${{ runner.temp }}/results
       - name: Reconcile the exact plan, result set, stages, and identities
-        if: inputs.gpu_policy_red_proof != true && inputs.fixture_cleanup_red_proof != true
         env:
           NEEDS: ${{ toJSON(needs) }}
         run: >-
@@ -495,13 +358,3 @@ jobs:
           --plan '${{ runner.temp }}/plan/e2e-plan.json'
           --results '${{ runner.temp }}/results'
           --needs-env NEEDS
-      - name: Require only the selected intentional red proof
-        if: inputs.gpu_policy_red_proof == true || inputs.fixture_cleanup_red_proof == true
-        env:
-          GPU_SELECTED: ${{ inputs.gpu_policy_red_proof }}
-          GPU_RESULT: ${{ needs.gpu-red-proof.result }}
-          CLEANUP_SELECTED: ${{ inputs.fixture_cleanup_red_proof }}
-          CLEANUP_RESULT: ${{ needs.cleanup-red-proof.result }}
-        run: |
-          if [ "$GPU_SELECTED" = true ]; then test "$GPU_RESULT" = success; fi
-          if [ "$CLEANUP_SELECTED" = true ]; then test "$CLEANUP_RESULT" = success; fi

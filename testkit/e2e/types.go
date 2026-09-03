@@ -34,7 +34,6 @@ type ExecutionIntent string
 
 const (
 	IntentPR        ExecutionIntent = "pr"
-	IntentNightly   ExecutionIntent = "nightly"
 	IntentCandidate ExecutionIntent = "candidate"
 )
 
@@ -181,7 +180,7 @@ func validateScenario(definition Definition) error {
 		intents := make(map[ExecutionIntent]struct{}, len(metadata.Intents))
 		for _, intent := range metadata.Intents {
 			switch intent {
-			case IntentPR, IntentNightly, IntentCandidate:
+			case IntentPR, IntentCandidate:
 			default:
 				return fmt.Errorf("scenario %q has invalid execution intent %q", metadata.Name, intent)
 			}
@@ -190,7 +189,7 @@ func validateScenario(definition Definition) error {
 			}
 			intents[intent] = struct{}{}
 		}
-		for _, required := range []ExecutionIntent{IntentPR, IntentNightly, IntentCandidate} {
+		for _, required := range []ExecutionIntent{IntentPR, IntentCandidate} {
 			if _, exists := intents[required]; !exists {
 				return fmt.Errorf("runnable scenario %q has no %s routing", metadata.Name, required)
 			}

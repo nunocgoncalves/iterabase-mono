@@ -280,7 +280,7 @@ func validateRuntimeBundle(bundle RuntimeBundle) error {
 	if bundle.SchemaVersion != 1 {
 		return fmt.Errorf("runtime bundle must use schema_version 1")
 	}
-	if bundle.Intent != IntentPR && bundle.Intent != IntentNightly && bundle.Intent != IntentCandidate {
+	if bundle.Intent != IntentPR && bundle.Intent != IntentCandidate {
 		return fmt.Errorf("runtime bundle has invalid intent %q", bundle.Intent)
 	}
 	if !fullSHA.MatchString(bundle.SourceSHA) {

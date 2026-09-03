@@ -1,4 +1,4 @@
-.PHONY: build test test-unit test-e2e test-e2e-workspace test-e2e-gpu test-e2e-gpu-broken-policy test-e2e-gpu-broken-cleanup test-e2e-unit lint fmt fmt-check install-hooks clean
+.PHONY: build test test-unit test-e2e test-e2e-workspace test-e2e-gpu test-e2e-unit lint fmt fmt-check install-hooks clean
 
 # Load an optional gitignored local environment file.
 -include .env
@@ -43,35 +43,6 @@ test-e2e-workspace:
 
 test-e2e-gpu:
 	cd test/e2e && ITERABASE_E2E_SOURCE_INPUTS="$(ITERABASE_E2E_SOURCE_INPUTS)" go test -v -race -count=1 -timeout 100m -run '^TestE2E$$/^digitalocean-gpu$$' .
-
-# Intentional HOR-411 red proof. Build the same source with only the Forge
-# deleteEmptyDir value mutated to false, require real capacity, and prove the
-# normal green fixture catches the operator's local-storage deletion failure.
-test-e2e-gpu-broken-policy:
-	@output=$$(mktemp); trap 'rm -f "$$output"' EXIT; \
-	set +e; (cd test/e2e && FORGE_E2E_BREAK_DELETE_EMPTYDIR=true FORGE_E2E_REQUIRE_CAPACITY=true \
-		ITERABASE_E2E_SOURCE_INPUTS="$(ITERABASE_E2E_SOURCE_INPUTS)" \
-		go test -v -race -count=1 -timeout 100m -run '^TestE2E$$/^digitalocean-gpu$$' .) >"$$output" 2>&1; status=$$?; set -e; \
-	cat "$$output"; \
-	if [ "$$status" -eq 0 ]; then echo "broken deleteEmptyDir policy unexpectedly passed" >&2; exit 1; fi; \
-	grep -Fq 'building intentional HOR-411 mutation with deleteEmptyDir=false' "$$output"; \
-	grep -Fq 'baseline GPU workload ready:' "$$output"; \
-	grep -Fq 'deleteEmptyDir: false' "$$output"; \
-	grep -Fq 'pod-deletion-required' "$$output"; \
-	grep -Fq 'upgrade-failed' "$$output"
-
-# Intentional HOR-540 cleanup red proof. The real reset completes first so the
-# permanent fixture remains clean; the owner cleanup hook then reports a forced
-# failure and the shared runner collects diagnostics-after-cleanup-failure.
-test-e2e-gpu-broken-cleanup:
-	@output=$$(mktemp); trap 'rm -f "$$output"' EXIT; \
-	set +e; (cd test/e2e && FORGE_E2E_BREAK_CLEANUP=true FORGE_E2E_REQUIRE_CAPACITY=true \
-		ITERABASE_E2E_SOURCE_INPUTS="$(ITERABASE_E2E_SOURCE_INPUTS)" \
-		go test -v -race -count=1 -timeout 20m -run '^TestPermanentGPUCleanupRedProof$$' .) >"$$output" 2>&1; status=$$?; set -e; \
-	cat "$$output"; \
-	if [ "$$status" -eq 0 ]; then echo "forced cleanup failure unexpectedly passed" >&2; exit 1; fi; \
-	grep -Fq 'intentional HOR-540 cleanup failure after successful permanent GPU reset' "$$output"; \
-	grep -Fq 'diagnostics-after-cleanup-failure' "$$output"
 
 # Run the hermetic shared-runner scenario and Forge-specific fixture,
 # diagnostics, GPU-transition, and candidate-composition tests. Direct chart

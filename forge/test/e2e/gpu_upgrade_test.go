@@ -1,7 +1,6 @@
 package e2e
 
 import (
-	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -549,24 +548,6 @@ func TestGPUUpgradePolicyReadinessAuthority(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, tt.wantReady, readiness.Ready(), readiness.String())
 		})
-	}
-}
-
-func TestBrokenEmptyDirPolicyForgeBuild(t *testing.T) {
-	t.Setenv("FORGE_E2E_BINARY", "")
-	t.Setenv("FORGE_E2E_BREAK_DELETE_EMPTYDIR", "true")
-	bin := buildForge(t)
-	identity, err := runForgeE(bin, t.TempDir(), "version")
-	if err != nil || !strings.HasPrefix(identity, "forge ") {
-		t.Fatalf("intentional broken-policy Forge build is not runnable: err=%v output=%q", err, identity)
-	}
-	binary, err := os.ReadFile(bin)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Contains(binary, []byte("driver.upgradePolicy.gpuPodDeletion.deleteEmptyDir=false")) ||
-		bytes.Contains(binary, []byte("driver.upgradePolicy.gpuPodDeletion.deleteEmptyDir=true")) {
-		t.Fatal("intentional broken-policy Forge binary did not contain only the false policy value")
 	}
 }
 

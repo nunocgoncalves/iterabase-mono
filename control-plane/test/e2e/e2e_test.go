@@ -33,7 +33,7 @@ func deployedMetadata(name, description, makeTarget string, timeout int, referen
 		RequiredArtifacts: []string{
 			"control-plane-image", "control-plane-chart", "iterabase-platform-chart", "cert-manager-substrate-chart",
 		},
-		Intents:      []sharede2e.ExecutionIntent{sharede2e.IntentPR, sharede2e.IntentNightly, sharede2e.IntentCandidate},
+		Intents:      []sharede2e.ExecutionIntent{sharede2e.IntentPR, sharede2e.IntentCandidate},
 		FixtureModes: []sharede2e.FixtureMode{sharede2e.FixtureSource, sharede2e.FixtureCandidate},
 		MakeTarget:   makeTarget, TimeoutMinutes: timeout,
 	}
