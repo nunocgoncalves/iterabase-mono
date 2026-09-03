@@ -526,16 +526,7 @@ Each target creates exactly one isolated Kind cluster, runs once without retries
 and collects shared redacted diagnostics on failure. See
 [`test/e2e/README.md`](test/e2e/README.md) for scenario and fixture contracts.
 
-Requires `helm` and `kubeconform`. Add the external repos first:
-
-```sh
-helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
-helm repo add metallb https://metallb.github.io/metallb
-helm repo add jetstack https://charts.jetstack.io
-helm repo add external-dns https://kubernetes-sigs.github.io/external-dns/
-```
-
-`make build-deps` resolves the platform's local and upstream dependencies plus the companion substrate's pinned `cert-manager` and `cert-manager-csi-driver` charts. The substrate contains no cert-manager custom resources, so Helm can establish and wait for the operator before the platform release submits issuers and Certificates.
+Requires `helm` and `kubeconform`; do not add or trust mutable Helm repository indexes. `make build-deps` reads `.github/inputs/remote-content.json`, downloads each reviewed external archive directly, verifies its exact SHA-256 before packaging, and vendors local dependencies recursively. A byte mismatch is terminal; bounded retries cover transport only. The same authority pins every rendered third-party runtime image by digest. The companion substrate contains exact `cert-manager` and `cert-manager-csi-driver` archives and no cert-manager custom resources, so Helm can establish and wait for the operator before the platform release submits issuers and Certificates.
 
 ## Observability (HOR-408)
 

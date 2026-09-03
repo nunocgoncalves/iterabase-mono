@@ -23,6 +23,7 @@ env:
     control-plane/test/e2e/go.mod
     charts/test/e2e/go.mod
     charts/test/e2e/go.sum
+    .github/tools/go.sum
 
 jobs:
   plan:
@@ -33,12 +34,14 @@ jobs:
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     outputs:
       artifact_build_matrix: ${{ steps.plan.outputs.artifact_build_matrix }}
+      scenario_matrix: ${{ steps.plan.outputs.scenario_matrix }}
       kind_matrix: ${{ steps.plan.outputs.kind_matrix }}
       real_machine_matrix: ${{ steps.plan.outputs.real_machine_matrix }}
       has_artifacts: ${{ steps.plan.outputs.has_artifacts }}
       has_scenarios: ${{ steps.plan.outputs.has_scenarios }}
       has_kind: ${{ steps.plan.outputs.has_kind }}
       has_real_machine: ${{ steps.plan.outputs.has_real_machine }}
+      scenario_total: ${{ steps.plan.outputs.scenario_total }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -71,7 +74,7 @@ jobs:
           python3 .github/scripts/e2e.py plan \
             --intent pr \
             --source-sha "$SOURCE_SHA" \
-            --paths-file /tmp/changed-paths \
+            --selection-file /tmp/changed-path-selection.json \
             --output e2e-plan.json \
             --github-output "$GITHUB_OUTPUT"
           python3 .github/scripts/e2e.py resolve-baselines --plan e2e-plan.json
@@ -268,6 +271,11 @@ jobs:
           cache-dependency-path: ${{ env.GO_CACHE_DEPENDENCIES }}
           cache-scope: e2e-real-${{ matrix.capacity }}
       - uses: ./.github/actions/setup-kubernetes-tools
+      - name: Authorize the founder-only fixture trust boundary
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+        run: .github/scripts/verify_fixture_trust.sh
       - name: Bind the fixed permanent fixture
         uses: ./.github/actions/setup-permanent-fixture
         with:

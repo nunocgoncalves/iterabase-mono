@@ -73,7 +73,7 @@ func applyGPUSubstrateStage(t *testing.T, state *digitalOceanGPUState) {
 }
 
 const (
-	pinnedNFDImage        = "registry.k8s.io/nfd/node-feature-discovery:v0.19.0"
+	pinnedNFDImage        = "registry.k8s.io/nfd/node-feature-discovery:v0.19.0@sha256:2fa1c99ad09bdf2c8ad97706a4ad2fd548c84d5ecd70ba32a6152c667b96c4d2"
 	pinnedNFDResyncPeriod = "-resync-period=30s"
 )
 
@@ -176,7 +176,7 @@ func checkGPUSmoke(t *testing.T, kcPath string) {
 			RestartPolicy:    corev1.RestartPolicyNever,
 			Containers: []corev1.Container{{
 				Name:    "smoke",
-				Image:   "nvidia/cuda:12.4.1-base-ubuntu22.04",
+				Image:   "nvidia/cuda:12.4.1-base-ubuntu22.04@sha256:0f6bfcbf267e65123bcc2287e2153dedfc0f24772fb5ce84afe16ac4b2fada95",
 				Command: []string{"sh", "-c", "nvidia-smi 2>/dev/null || ls /dev/nvidia* 2>/dev/null"},
 				Resources: corev1.ResourceRequirements{
 					Limits: corev1.ResourceList{

@@ -303,6 +303,54 @@ class CandidateAssetTests(unittest.TestCase):
             self.assertNotEqual(first, second)
 
 
+class ReleaseManifestTests(unittest.TestCase):
+    def fixture(self, directory: Path) -> tuple[dict, Path]:
+        candidate = directory / "candidate"
+        images = candidate / "assets/images"
+        images.mkdir(parents=True)
+        plan = {
+            "source_sha": SOURCE_SHA,
+            "run_id": "123",
+            "targets": ["control-plane"],
+            "releases": [{"target": "control-plane", "version": "1.2.3", "production_tag": "control-plane-v1.2.3", "artifact_types": ["image"]}],
+            "image_matrix": [{"target": "control-plane", "name": "control-plane"}],
+            "chart_matrix": [],
+        }
+        (candidate / "candidate-plan.json").write_text(json.dumps(plan) + "\n")
+        (candidate / "candidate-evidence.json").write_text("{}\n")
+        (images / "candidate-control-plane.json").write_text('{"digest":"sha256:test"}\n')
+        (images / "candidate-control-plane.spdx.json").write_text("{}\n")
+        return plan, candidate
+
+    def test_complete_manifest_binds_candidate_run_source_and_every_member(self) -> None:
+        with tempfile.TemporaryDirectory() as value:
+            plan, candidate = self.fixture(Path(value))
+            manifest = release.release_manifest(plan, candidate, "control-plane")
+            self.assertEqual("123", manifest["candidate_run_id"])
+            self.assertEqual(SOURCE_SHA, manifest["source_sha"])
+            self.assertEqual(
+                {"candidate-plan.json", "candidate-evidence.json", "candidate-control-plane.json", "candidate-control-plane.spdx.json"},
+                {item["name"] for item in manifest["assets"]},
+            )
+            release.validate_release_manifest(manifest, candidate, plan)
+
+    def test_missing_extra_duplicate_and_conflicting_manifest_members_fail(self) -> None:
+        for mutation in ("missing", "extra", "duplicate", "conflicting"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as value:
+                plan, candidate = self.fixture(Path(value))
+                manifest = release.release_manifest(plan, candidate, "control-plane")
+                if mutation == "missing":
+                    manifest["assets"].pop()
+                elif mutation == "extra":
+                    manifest["assets"].append({"name": "extra", "path": "extra", "size": 1, "sha256": "a" * 64})
+                elif mutation == "duplicate":
+                    manifest["assets"].append(copy.deepcopy(manifest["assets"][0]))
+                else:
+                    (candidate / "assets/images/candidate-control-plane.json").write_text("changed\n")
+                with self.assertRaises(release.ReleaseError):
+                    release.validate_release_manifest(manifest, candidate, plan)
+
+
 class ReleaseWorkflowContractTests(unittest.TestCase):
     def test_candidate_uses_unified_plan_composer_results_and_capacity_groups(self) -> None:
         workflow = (ROOT / ".github/workflows/release-candidate.yml").read_text(
@@ -353,17 +401,72 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertIn("goreleaser/goreleaser-action", workflow)
         self.assertIn("bash charts/scripts/build-chart-dependency.sh", workflow)
 
-    def test_promotion_remains_protected_and_never_rebuilds(self) -> None:
+    def test_promotion_remains_protected_pinned_reverified_and_never_rebuilds(self) -> None:
         workflow = (ROOT / ".github/workflows/release-promote.yml").read_text(
             encoding="utf-8"
         )
         self.assertIn("environment: release", workflow)
-        self.assertIn("verify-candidate", workflow)
-        self.assertIn("check_promotion_destinations.sh", workflow)
+        self.assertEqual(2, workflow.count("ref: ${{ github.sha }}"))
+        self.assertNotIn("ref: master", workflow)
+        for value in (
+            "github.workflow_sha",
+            "Re-verify every privileged-boundary invariant after approval",
+            "gh api \"repos/${{ github.repository }}/actions/runs/$RUN_ID\"",
+            "git merge-base --is-ancestor \"$SOURCE_SHA\" origin/master",
+            "audit_release_security.sh",
+            "verify-release-manifests",
+            "publish_github_releases.sh",
+            "check_promotion_destinations.sh",
+        ):
+            self.assertIn(value, workflow)
+        self.assertNotIn("Create or complete target GitHub Releases", workflow)
         self.assertNotIn("docker/build-push-action", workflow)
         self.assertNotIn("docker build -", workflow)
         self.assertNotIn("goreleaser/goreleaser-action", workflow.lower())
         self.assertNotIn("helm package", workflow)
+
+    def test_fixture_callers_gate_actor_writer_set_and_secretless_forks(self) -> None:
+        for name in ("e2e.yml", "release-candidate.yml"):
+            workflow = (ROOT / ".github/workflows" / name).read_text()
+            gate = workflow.index("verify_fixture_trust.sh")
+            fixture = workflow.index("setup-permanent-fixture", gate)
+            secret = workflow.index("FORGE_E2E_CPU_SSH_KEY", gate)
+            self.assertLess(gate, fixture)
+            self.assertLess(gate, secret)
+        e2e = (ROOT / ".github/workflows/e2e.yml").read_text()
+        self.assertIn("pull_request:", e2e)
+        self.assertNotIn("pull_request_target:", e2e)
+        audit = (ROOT / ".github/scripts/audit_release_security.sh").read_text()
+        for value in ("collaborators?affiliation=all", "FORGE_E2E_CPU_SSH_KEY", "FORGE_E2E_GPU_SSH_KEY", "immutable-releases"):
+            self.assertIn(value, audit)
+
+    def test_release_publication_is_complete_draft_first_and_published_verification_only(self) -> None:
+        script = (ROOT / ".github/scripts/publish_github_releases.sh").read_text()
+        self.assertNotIn("gh release upload", script)
+        self.assertIn("published release $tag already matches exactly; verification-only", script)
+        create = script.index("gh release create")
+        verify_draft = script.index("verify_release \"$tag\" \"$manifest\" \"$stage\"", create)
+        publish = script.index("--draft=false", verify_draft)
+        verify_published = script.index("verify_release \"$tag\" \"$manifest\" \"$stage\"", publish)
+        self.assertLess(create, verify_draft)
+        self.assertLess(verify_draft, publish)
+        self.assertLess(publish, verify_published)
+
+    def test_retained_immutability_gate_proves_asset_and_tag_refusal(self) -> None:
+        workflow = (ROOT / ".github/workflows/release-rehearsal.yml").read_text()
+        for value in (
+            "REQUIRE_IMMUTABLE_RELEASES: \"true\"",
+            "--draft",
+            "--draft=false",
+            "'.immutable'",
+            "gh release upload",
+            "releases/assets/$ASSET_ID",
+            "git push --force",
+            "immutable-release-gate-evidence",
+        ):
+            self.assertIn(value, workflow)
+        self.assertNotIn("gh release delete", workflow)
+        self.assertNotIn("Disposable", workflow)
 
     def test_release_only_manual_dispatch_and_no_push_publication(self) -> None:
         for workflow in ("release-candidate.yml", "release-promote.yml"):

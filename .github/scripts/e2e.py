@@ -19,6 +19,8 @@ import tempfile
 from typing import Any, Iterable
 from urllib.parse import urlparse
 
+import select_ci as ci_selection
+
 PLAN_SCHEMA_VERSION = 2
 CATALOGUE_SCHEMA_VERSION = 2
 RUNTIME_SCHEMA_VERSION = 1
@@ -32,7 +34,13 @@ JOB_GRACE_MINUTES = 5
 CAPACITY_JOB_GRACE_MINUTES = 30
 SHARED_PR_PATHS = (
     ".github/actions/**",
+    ".github/inputs/remote-content.json",
+    ".github/scripts/add_helm_repositories.sh",
     ".github/scripts/collect_changed_paths.py",
+    ".github/scripts/install_go_tool.sh",
+    ".github/scripts/install_kubernetes_tools.sh",
+    ".github/scripts/remote_content.py",
+    ".github/scripts/test_remote_content.py",
     ".github/scripts/e2e.py",
     ".github/scripts/test_e2e.py",
     ".github/workflows/e2e.yml",
@@ -365,7 +373,7 @@ def select_scenarios(
         }
         return selected, affected
 
-    normalized = [path.strip().removeprefix("./") for path in paths if path.strip()]
+    normalized = paths
     meaningful = [path for path in normalized if not is_docs(path)]
     if not meaningful:
         return [], set()
@@ -464,6 +472,7 @@ def make_plan(
     source_sha: str,
     paths: list[str] | None = None,
     targets: list[str] | None = None,
+    path_selection: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if intent not in INTENTS:
         raise E2EError(f"unsupported E2E intent {intent!r}")
@@ -472,6 +481,29 @@ def make_plan(
     validate_catalogue_contract(catalogue, contract)
     paths = paths or []
     targets = targets or []
+    selection_metadata: dict[str, Any] = {}
+    if intent == "pr":
+        if path_selection is not None:
+            try:
+                validated_paths, select_all = ci_selection.validate_selection_record(
+                    path_selection, expected_head=source_sha
+                )
+            except ValueError as exc:
+                raise E2EError(f"invalid E2E changed-path selection record: {exc}") from exc
+            if path_selection["event_name"] not in {"pull_request", "push"} or select_all or validated_paths != paths:
+                raise E2EError("E2E changed-path selection record does not describe PR/master intent")
+        try:
+            classified = ci_selection.selection(paths)
+        except ValueError as exc:
+            raise E2EError(f"invalid E2E changed-path selection: {exc}") from exc
+        selection_metadata = {
+            "schema_version": 1,
+            "event_name": path_selection.get("event_name", "pull_request") if path_selection else "pull_request",
+            "base_sha": path_selection.get("base_sha", "") if path_selection else "",
+            "head_sha": source_sha,
+            "classification": classified["classification"],
+            "paths": paths,
+        }
     unknown_targets = sorted(set(targets) - set(contract["targets"]))
     if unknown_targets:
         raise E2EError(f"unknown candidate targets: {unknown_targets}")
@@ -545,7 +577,8 @@ def make_plan(
         "source_sha": source_sha,
         "catalogue_schema_version": catalogue["schema_version"],
         "catalogue_sha256": hash_json(catalogue),
-        "changed_paths": sorted(set(paths)) if intent == "pr" else [],
+        "changed_paths": paths if intent == "pr" else [],
+        "path_selection": selection_metadata if intent == "pr" else None,
         "selected_targets": targets if intent == "candidate" else [],
         "affected_artifacts": sorted(affected),
         "scenario_total": len(matrix),
@@ -1487,18 +1520,39 @@ def validate_results(plan_path: Path, results_dir: Path, needs: dict[str, Any] |
         result, result_path = discovered[scenario_id]
         validate_result(result, result_path, expected[scenario_id], execution, plan_sha)
     if needs is not None:
-        for name, job in needs.items():
-            result = job.get("result") if isinstance(job, dict) else None
-            if result not in {"success", "skipped"}:
-                raise E2EError(f"required workflow job {name} is {result!r}")
         selected_jobs = {
+            "plan": True,
+            "runtime-contract": bool(execution.get("scenario_matrix")),
             "artifacts": bool(execution.get("artifact_build_matrix")),
             "kind": bool(execution.get("kind_matrix")),
             "real-machine": bool(execution.get("real_machine_matrix")),
         }
+        if set(needs) != set(selected_jobs):
+            raise E2EError("E2E aggregate needs set does not match the workflow contract")
         for name, selected in selected_jobs.items():
-            if selected and (not isinstance(needs.get(name), dict) or needs[name].get("result") != "success"):
-                raise E2EError(f"selected workflow job {name} did not succeed")
+            job = needs.get(name)
+            result = job.get("result") if isinstance(job, dict) else None
+            expected_result = "success" if selected else "skipped"
+            if result != expected_result:
+                raise E2EError(f"required workflow job {name} is {result!r}; expected {expected_result!r}")
+        plan_job = needs["plan"]
+        outputs = plan_job.get("outputs") if isinstance(plan_job, dict) else None
+        if not isinstance(outputs, dict):
+            raise E2EError("E2E plan job has no outputs")
+        expected_outputs = {
+            "artifact_build_matrix": compact(execution["artifact_build_matrix"]),
+            "scenario_matrix": compact(execution["scenario_matrix"]),
+            "kind_matrix": compact(execution["kind_matrix"]),
+            "real_machine_matrix": compact(execution["real_machine_matrix"]),
+            "has_artifacts": str(bool(execution["artifact_build_matrix"])).lower(),
+            "has_scenarios": str(bool(execution["scenario_matrix"])).lower(),
+            "has_kind": str(bool(execution["kind_matrix"])).lower(),
+            "has_real_machine": str(bool(execution["real_machine_matrix"])).lower(),
+            "scenario_total": str(execution["scenario_total"]),
+        }
+        for name, expected_output in expected_outputs.items():
+            if outputs.get(name) != expected_output:
+                raise E2EError(f"E2E plan output {name} is missing, malformed, or inconsistent")
     return [discovered[name][0] for name in sorted(discovered)]
 
 
@@ -1516,7 +1570,7 @@ def parser() -> argparse.ArgumentParser:
     plan = commands.add_parser("plan")
     plan.add_argument("--intent", choices=sorted(INTENTS), required=True)
     plan.add_argument("--source-sha", required=True)
-    plan.add_argument("--paths-file", type=Path)
+    plan.add_argument("--selection-file", type=Path)
     plan.add_argument("--targets", default="")
     plan.add_argument("--output", type=Path, required=True)
     plan.add_argument("--github-output", type=Path)
@@ -1549,7 +1603,10 @@ def main() -> int:
             validate_catalogue_contract(catalogue, contract)
             print("E2E plan, recipe, runtime, and result contract valid")
         elif args.command == "plan":
-            paths = args.paths_file.read_text(encoding="utf-8").splitlines() if args.paths_file else []
+            path_selection = read_object(args.selection_file) if args.selection_file else None
+            paths = path_selection.get("paths", []) if path_selection else []
+            if not isinstance(paths, list):
+                raise E2EError("changed-path selection record paths must be a list")
             targets = parse_targets(args.targets) if args.targets else []
             plan = make_plan(
                 root,
@@ -1559,6 +1616,7 @@ def main() -> int:
                 source_sha=args.source_sha,
                 paths=paths,
                 targets=targets,
+                path_selection=path_selection,
             )
             args.output.write_text(compact(plan) + "\n", encoding="utf-8")
             output = args.github_output or (Path(os.environ["GITHUB_OUTPUT"]) if os.environ.get("GITHUB_OUTPUT") else None)

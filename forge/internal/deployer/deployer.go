@@ -22,6 +22,7 @@ type ApplyOpts struct {
 	Release    string   // helm release name
 	Repository string   // chart ref (OCI URL, e.g. oci://.../iterabase-platform, or repo/name)
 	Version    string   // chart version (semver)
+	Checksum   string   // optional repository-reviewed archive SHA-256; required for mutable repo indexes
 	Namespace  string   // target namespace (--create-namespace)
 	Values     []string // --set inline values (e.g. GPU operator overrides)
 	ValueFiles []string // -f value files, applied in order (later wins); overlay values

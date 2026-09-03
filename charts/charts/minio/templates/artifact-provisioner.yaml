@@ -47,7 +47,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: provision
-          image: "{{ .Values.artifactService.mcImage.repository }}:{{ .Values.artifactService.mcImage.tag }}"
+          image: '{{ .Values.artifactService.mcImage.repository }}:{{ .Values.artifactService.mcImage.tag }}@{{ required "artifactService.mcImage.digest is required" .Values.artifactService.mcImage.digest }}'
           imagePullPolicy: {{ .Values.artifactService.mcImage.pullPolicy }}
           command: ["/bin/sh", "-ec"]
           args:

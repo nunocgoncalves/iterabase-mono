@@ -20,10 +20,16 @@ bind the same checks to the exact `github.sha`.
 Temporary artifacts are retained only as GitHub Actions artifacts and Docker
 state on the disposable runner; they are not semantically published.
 
-`.github/scripts/collect_changed_paths.py` retains deletion paths and both sides
-of moves. `.github/scripts/select_ci.py` remains the static/unit owner selector.
-E2E selection is owned only by `.github/scripts/e2e.py` and the compiled owner
-catalogue.
+`.github/scripts/collect_changed_paths.py` validates the event and full reachable
+source/base commits, retains deletion paths and both sides of moves, and emits a
+typed path record. `.github/scripts/select_ci.py` rejects empty, duplicated,
+non-canonical, traversing, and unknown input and classifies exactly one of
+`docs-only`, `release-only`, `selected`, or explicit manual `all`. Only a verified
+non-empty docs-only record can produce the ordinary zero-work result. CI and E2E
+aggregates re-check every selector boolean, matrix, selected/skipped job, and
+`needs` member against that record or generated plan; missing or malformed output
+fails closed. E2E scenario routing remains owned by `.github/scripts/e2e.py` and
+the compiled owner catalogue.
 
 ## One compiled execution plan
 
@@ -68,14 +74,18 @@ both temporary validation and immutable candidates. It defines:
 
 PR builders create each affected image, chart, companion, Forge binary,
 and source-only runtime fixture once. Candidate builders use the same recipe
-fields and add immutable candidate custody. External Helm repository indexes and
-locked dependency archives are acquired only by static checks or that single chart
-builder, with bounded command-level transport attempts. Product chart scenario
-composition and execution do not reacquire those dependency repositories; they
-consume the already checksummed chart artifacts. Contract tests fail on context,
-Dockerfile, argument, label,
-dependency/package, companion, GoReleaser, version-authority, or recipe-hash
-drift.
+fields and add immutable candidate custody. `.github/inputs/remote-content.json`
+inventories covered remote content: digest-pinned base and third-party runtime
+images (including vLLM, NFD, and GPU Operator operands), exact CI tools,
+SHA-256-pinned external Helm archives, and the checksummed Forge installer
+scripts, while naming repository Go/npm/model lock authorities. Chart builders do
+not trust mutable repository indexes: they download an exact archive, fail
+immediately on changed bytes, and only retry transport. Dockerfiles require
+reviewed tag-plus-digest identities; Go tools install from the checked-in tools
+module; third-party Actions use full commits. Product chart composition consumes
+the already verified packages. Contract tests substitute bytes behind the same
+URL and prove verification fails before materialization, extraction, packaging,
+or execution.
 
 An affected PR artifact or founder-selected candidate target may never resolve
 to a published baseline. Unselected dependencies may use only the explicit
@@ -157,12 +167,17 @@ artifact identities are retained in the 90-day immutable candidate record.
 ## Permanent fixture capacity and concurrency
 
 Every compiled F3 registration names mandatory `cpu` or `gpu` capacity.
-Selected execution binds founder-configured repository variables and one
-fixture-scoped private-key secret to a fixed address, SSH user, pinned host key,
-and exact workspace by-id device. Address, host identity, and devices are not
-workflow-dispatch inputs. Missing credentials, unreachable hosts, reboot/purge
-failure, or identity drift fails with retained diagnostics; it never calls
-`t.Skip`. Unselected capacity creates no job.
+Selected execution first re-queries the live push/maintain/admin collaborator set
+and requires the same-repository actor and complete writer set to equal only
+founder `nunocgoncalves`; this gate runs before a fixture secret is materialized
+or any host contact. Fork pull requests use `pull_request`, never
+`pull_request_target`, receive no fixture key, and fail the repository/actor gate.
+The authenticated security audit additionally requires exactly the two
+fixture-scoped SSH secrets and rejects alternate provider or credential authority.
+Only then does execution bind founder-configured variables and one key to a fixed
+address, SSH user, pinned host key, and exact workspace device. Missing authority,
+credentials, connectivity, reboot/purge, or identity fails with diagnostics and
+never becomes a skip.
 
 PR, master, and candidate work for a capacity use its literal
 `iterabase-permanent-fixture-<capacity>` concurrency group with
@@ -187,9 +202,12 @@ baseline.
 
 ## Cache and setup contract
 
-All third-party actions use immutable commit SHAs. Go/Node/tool versions are
-exact. Tool downloads are checksum verified. Caches contain only dependency or
-build inputs and use content-addressed keys without broad fallback keys.
+All third-party actions use immutable commit SHAs. Go/npm dependency locks,
+repository Go-tool module sums, exact download checksums, base-image digests,
+external chart archive checksums, and Forge installer-script checksums are
+validated through the remote-content inventory. Caches contain only verified
+dependency or build inputs and use content-addressed keys without broad fallback
+keys.
 
 Kind clusters, databases, mutable fixtures, runtime bundles, results,
 credentials, customer data, and release evidence are never cached. There are no
@@ -201,6 +219,8 @@ automatic scenario retries, pass-on-retry semantics, or accepted flakes.
 python3 .github/scripts/test_select_ci.py
 python3 .github/scripts/test_e2e.py
 python3 .github/scripts/test_release.py
+python3 .github/scripts/test_remote_content.py
+python3 .github/scripts/remote_content.py validate
 python3 .github/scripts/e2e.py validate-contract
 make testkit-test
 make release-check

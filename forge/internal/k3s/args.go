@@ -8,9 +8,6 @@ import (
 	"github.com/nunocgoncalves/iterabase-mono/forge/internal/config"
 )
 
-// InstallScriptURL is the official k3s install script.
-const InstallScriptURL = "https://get.k3s.io"
-
 // ServerArgs builds the k3s `server` flags from a cluster config. Output is
 // deterministic (labels sorted by key) so installs are reproducible.
 func ServerArgs(cfg *config.Cluster) []string {

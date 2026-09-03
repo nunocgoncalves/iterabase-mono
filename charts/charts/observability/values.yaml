@@ -58,6 +58,19 @@ certManager:
 # observability.kube-prometheus-stack.alertmanager.config).
 kube-prometheus-stack:
   enabled: true
+  prometheusOperator:
+    image:
+      sha: a001ed10a3823bbf2410ea347796d0e35ff8decd24fb98acbe7ab9e98d431c39
+    admissionWebhooks:
+      patch:
+        image:
+          sha: d0e80b2f62fe43bb5e1b96adc692132fb4522e802f4cf673c09b1f94722b8cb6
+  kube-state-metrics:
+    image:
+      sha: sha256:85108987d044b18a098126732f98602df408888c0f7d456241f5abefb9744bc1
+  prometheus-node-exporter:
+    image:
+      digest: sha256:8c9bac11973b94b59be88d6e11fee4429aa743c8846cdc75d65b18db33f6a106
 
   # kubernetes-mixin default rules (node/etcd/apiserver/pod/...). These plus the
   # iterabase-specific PrometheusRule (templates/iterabase-alerts.yaml) make up
@@ -69,6 +82,8 @@ kube-prometheus-stack:
   alertmanager:
     enabled: true
     alertmanagerSpec:
+      image:
+        sha: 9e082985f56f4c8c9f724e18f2288c6708f472e56a5286b8863d080434ea065d
       storage:
         volumeClaimTemplate:
           spec:
@@ -85,6 +100,11 @@ kube-prometheus-stack:
   # --- Grafana (PV-backed; Loki datasource wired via the sidecar ConfigMap) ---
   grafana:
     enabled: true
+    image:
+      sha: 7cb8c64c4d57a57e734073f3cc94620adb24a0acb929bd80ba9f14017e3a975b
+    initChownData:
+      image:
+        sha: dc2d74b28e4cf8984fa52af1f39bc7c3d9c73760b41a74d629f5d11b1ab28616
     persistence:
       enabled: true
       type: sts
@@ -103,6 +123,8 @@ kube-prometheus-stack:
     # annotations and are provisioned under Iterabase. Provisioned dashboards
     # are immutable in the UI so Git remains authoritative.
     sidecar:
+      image:
+        sha: 21b9fe7bb29d65caf2445ccbf96ff6eda5e589a92bd8f5188f957fe75b551d72
       dashboards:
         folderAnnotation: grafana_folder
         defaultFolderName: Kubernetes
@@ -116,6 +138,8 @@ kube-prometheus-stack:
   prometheus:
     enabled: true
     prometheusSpec:
+      image:
+        sha: 64f71bb84e03c855948418b0fc5dea53e9543d8e3fc9931598f583805507f05e
       replicas: 1
       retention: 15d
       # retentionSize is an absolute byte cap (the Prometheus Operator CRD
@@ -146,8 +170,25 @@ kube-prometheus-stack:
 # (non-goal: long-term retention tuning beyond PV-backed storage).
 loki:
   enabled: true
+  lokiCanary:
+    image:
+      digest: sha256:bc8c1cdd09266b56a83918524b115ae648028b40097534932e6ac1c0e1b1f7dc
+  test:
+    image:
+      digest: sha256:2ed6447bbdbcd23019c3fdb02bce6db3fbef296d5a8f77a68d3dbc386bfa43fb
+  gateway:
+    image:
+      digest: sha256:244cb405d38e102d9e6b165a8e956a6899617ba050b37d0100d0106cdf121232
+    deploymentStrategy:
+      type: Recreate
+      rollingUpdate: null
+  sidecar:
+    image:
+      sha: a6b3f707f883108376514489a94d6629109a327b2978e1d826cd104c4ca436df
   deploymentMode: SingleBinary
   loki:
+    image:
+      digest: sha256:9db961170b729dc38277963cbb4a79941626388562cc455db61bf85564aa8945
     # Single-tenant mode for the in-cluster platform install: promtail/Alloy
     # push without an X-Scope-OrgID header. The loki chart defaults
     # auth_enabled=true (multi-tenant), which 401-rejects every promtail push
@@ -177,12 +218,6 @@ loki:
   # isolation rule and accepts a brief gateway interruption during rollout.
   # HA/object-storage overlays may explicitly restore RollingUpdate when their
   # replica and topology contract can satisfy it (DES-HOR-506-01).
-  gateway:
-    deploymentStrategy:
-      type: Recreate
-      # Helm's server-side apply must explicitly clear the RollingUpdate fields
-      # owned by the 0.3.12 manifest when changing the strategy discriminator.
-      rollingUpdate: null
   # SimpleScalable targets default to 3 replicas each; zero them for
   # SingleBinary mode (only singleBinary.replicas runs).
   write:
@@ -218,6 +253,8 @@ loki:
 # ServiceAccount + the pod-discovery scrape config are the chart defaults.
 promtail:
   enabled: true
+  image:
+    tag: 3.0.0@sha256:d3de3da9431cfbe74a6a94555050df5257f357e827be8e63f8998d509c37af8b
   config:
     clients:
       - url: http://{{ .Release.Name }}-loki:3100/loki/api/v1/push

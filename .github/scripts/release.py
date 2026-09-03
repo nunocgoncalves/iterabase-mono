@@ -798,6 +798,103 @@ def asset_records(directory: Path) -> list[dict[str, Any]]:
     ]
 
 
+def release_asset_paths(plan: dict[str, Any], candidate: Path, target: str) -> list[Path]:
+    release = next((item for item in plan["releases"] if item["target"] == target), None)
+    if release is None:
+        raise ReleaseError(f"candidate has no release target {target!r}")
+    artifact_types = set(release["artifact_types"])
+    result = [candidate / "candidate-plan.json", candidate / "candidate-evidence.json"]
+    if "image" in artifact_types:
+        for image in plan["image_matrix"]:
+            if image["target"] == target:
+                result.extend(
+                    [
+                        candidate / "assets/images" / f"candidate-{image['name']}.json",
+                        candidate / "assets/images" / f"candidate-{image['name']}.spdx.json",
+                    ]
+                )
+    if "chart" in artifact_types:
+        chart = next(item for item in plan["chart_matrix"] if item["target"] == target)
+        name = chart["chart"]
+        result.extend(
+            [
+                candidate / "assets/charts" / f"candidate-chart-{name}.json",
+                candidate / "assets/charts" / f"candidate-chart-{name}.spdx.json",
+                candidate / "assets/charts" / f"checksums-{name}.txt",
+            ]
+        )
+        for archive in [name, *chart["companions"]]:
+            result.append(candidate / "assets/charts" / f"{archive}-{chart['version']}.tgz")
+    if "forge" in artifact_types:
+        result.extend(sorted(path for path in (candidate / "assets/forge").rglob("*") if path.is_file()))
+    names = [path.name for path in result]
+    if len(names) != len(set(names)):
+        raise ReleaseError(f"release target {target} has duplicate asset filenames")
+    for path in result:
+        if not path.is_file():
+            raise ReleaseError(f"release target {target} is missing candidate asset {path}")
+    return result
+
+
+def release_manifest(plan: dict[str, Any], candidate: Path, target: str) -> dict[str, Any]:
+    release = next(item for item in plan["releases"] if item["target"] == target)
+    paths = release_asset_paths(plan, candidate, target)
+    return {
+        "schema_version": 1,
+        "target": target,
+        "version": release["version"],
+        "tag": release["production_tag"],
+        "source_sha": plan["source_sha"],
+        "candidate_run_id": plan["run_id"],
+        "assets": [
+            {
+                "name": path.name,
+                "path": str(path.relative_to(candidate)),
+                "size": path.stat().st_size,
+                "sha256": sha256_file(path),
+            }
+            for path in paths
+        ],
+    }
+
+
+def validate_release_manifest(manifest: dict[str, Any], candidate: Path, plan: dict[str, Any]) -> None:
+    target = manifest.get("target")
+    if not isinstance(target, str):
+        raise ReleaseError("release manifest has no target")
+    expected = release_manifest(plan, candidate, target)
+    if manifest != expected:
+        raise ReleaseError(f"release manifest for {target} does not match the complete candidate member set")
+    names = [item.get("name") for item in manifest["assets"]]
+    paths = [item.get("path") for item in manifest["assets"]]
+    if len(names) != len(set(names)) or len(paths) != len(set(paths)):
+        raise ReleaseError(f"release manifest for {target} has duplicate members")
+
+
+def write_release_manifests(candidate: Path, output: Path) -> list[Path]:
+    plan = verify_candidate(candidate)
+    output.mkdir(parents=True, exist_ok=True)
+    paths: list[Path] = []
+    for target in plan["targets"]:
+        manifest = release_manifest(plan, candidate, target)
+        path = output / f"release-manifest-{target}.json"
+        path.write_text(compact(manifest) + "\n", encoding="utf-8")
+        paths.append(path)
+    return paths
+
+
+def verify_release_manifests(candidate: Path, directory: Path) -> list[dict[str, Any]]:
+    plan = verify_candidate(candidate)
+    expected_names = {f"release-manifest-{target}.json" for target in plan["targets"]}
+    discovered = {path.name for path in directory.glob("release-manifest-*.json")}
+    if discovered != expected_names:
+        raise ReleaseError("release manifest set is missing, extra, or ambiguous")
+    manifests = [load_json(directory / name) for name in sorted(expected_names)]
+    for manifest in manifests:
+        validate_release_manifest(manifest, candidate, plan)
+    return manifests
+
+
 def validate_candidate_assets(plan: dict[str, Any], assets: Path) -> None:
     validate_candidate_aliases(plan)
     if plan["image_matrix"]:
@@ -1021,6 +1118,12 @@ def build_parser() -> argparse.ArgumentParser:
     evidence.add_argument("--output", type=Path, required=True)
     verify = sub.add_parser("verify-candidate")
     verify.add_argument("--directory", type=Path, required=True)
+    manifests = sub.add_parser("release-manifests")
+    manifests.add_argument("--candidate", type=Path, required=True)
+    manifests.add_argument("--output", type=Path, required=True)
+    verify_manifests = sub.add_parser("verify-release-manifests")
+    verify_manifests.add_argument("--candidate", type=Path, required=True)
+    verify_manifests.add_argument("--directory", type=Path, required=True)
     image_version = sub.add_parser("image-version")
     image_version.add_argument("--values", type=Path, required=True)
     image_version.add_argument("--key", required=True)
@@ -1064,6 +1167,10 @@ def main() -> int:
             print(compact(evidence))
         elif args.command == "verify-candidate":
             print(compact(verify_candidate(args.directory)))
+        elif args.command == "release-manifests":
+            print(compact([str(path) for path in write_release_manifests(args.candidate, args.output)]))
+        elif args.command == "verify-release-manifests":
+            print(compact(verify_release_manifests(args.candidate, args.directory)))
         elif args.command == "image-version":
             print(chart_image_version(args.values, args.key))
     except ReleaseError as exc:

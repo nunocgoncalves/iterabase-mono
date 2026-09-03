@@ -23,6 +23,7 @@ env:
     control-plane/test/e2e/go.mod
     charts/test/e2e/go.mod
     charts/test/e2e/go.sum
+    .github/tools/go.sum
 
 jobs:
   changes:
@@ -36,9 +37,14 @@ jobs:
       proto: ${{ steps.select.outputs.proto }}
       inference_gateway: ${{ steps.select.outputs.inference_gateway }}
       forge: ${{ steps.select.outputs.forge }}
+      forge_e2e: ${{ steps.select.outputs.forge_e2e }}
+      forge_real_e2e: ${{ steps.select.outputs.forge_real_e2e }}
       charts: ${{ steps.select.outputs.charts }}
       images: ${{ steps.select.outputs.images }}
       image_matrix: ${{ steps.select.outputs.image_matrix }}
+      classification: ${{ steps.select.outputs.classification }}
+      selection: ${{ steps.select.outputs.selection }}
+      path_record: ${{ steps.select.outputs.path_record }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -52,10 +58,12 @@ jobs:
         run: make testkit-test
       - name: Test path-selection fixture matrix
         run: python3 .github/scripts/test_select_ci.py
-      - name: Test protected release contracts
+      - name: Test protected release and remote-content contracts
         run: |
           python3 .github/scripts/test_release.py
+          python3 .github/scripts/test_remote_content.py
           python3 .github/scripts/release.py validate
+          python3 .github/scripts/remote_content.py validate
       - name: Test cache invalidation and exclusions
         run: python3 .github/scripts/test_cache_contract.py
       - name: Test source-authority workflow boundary
@@ -67,14 +75,12 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: python3 .github/scripts/collect_changed_paths.py --all-event workflow_dispatch
-      - name: Select CI owners
+      - name: Select CI owners from the typed path record
         id: select
-        run: |
-          if [ "${{ steps.paths.outputs.all }}" = true ]; then
-            python3 .github/scripts/select_ci.py --all
-          else
-            python3 .github/scripts/select_ci.py --paths-file /tmp/changed-paths
-          fi
+        run: >-
+          python3 .github/scripts/select_ci.py
+          --selection-file /tmp/changed-path-selection.json
+          --expected-head '${{ github.event.pull_request.head.sha || github.sha }}'
 
   control-plane:
     name: control-plane
@@ -225,7 +231,7 @@ jobs:
           cache-dependency-path: ${{ env.GO_CACHE_DEPENDENCIES }}
           cache-scope: inference-gateway
       - name: Install pinned goimports
-        run: go install golang.org/x/tools/cmd/goimports@v0.48.0
+        run: .github/scripts/install_go_tool.sh goimports
       - name: Formatting and imports
         run: make fmt-check
         working-directory: inference-gateway
@@ -233,7 +239,7 @@ jobs:
         run: go vet ./...
         working-directory: inference-gateway
       - name: Install pinned golangci-lint
-        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
+        run: .github/scripts/install_go_tool.sh golangci-lint
       - name: Lint
         run: make lint
         working-directory: inference-gateway
@@ -260,7 +266,7 @@ jobs:
         run: make fmt-check
         working-directory: forge
       - name: Install pinned golangci-lint
-        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
+        run: .github/scripts/install_go_tool.sh golangci-lint
       - name: Lint
         run: make lint
         working-directory: forge
@@ -345,16 +351,16 @@ jobs:
       - images
     runs-on: ubuntu-latest
     steps:
-      - name: Require every selected owner
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Require the exact typed selection and every selected owner
         env:
           NEEDS: ${{ toJSON(needs) }}
+          PATH_RECORD: ${{ needs.changes.outputs.path_record }}
         run: |
-          python3 - <<'PY'
-          import json, os, sys
-          needs = json.loads(os.environ["NEEDS"])
-          failed = {name: job["result"] for name, job in needs.items() if job["result"] not in {"success", "skipped"}}
-          print("selected CI results:", json.dumps({name: job["result"] for name, job in needs.items()}, sort_keys=True))
-          if failed:
-              print("required CI owners failed:", json.dumps(failed, sort_keys=True), file=sys.stderr)
-              raise SystemExit(1)
-          PY
+          printf '%s\n' "$PATH_RECORD" > '${{ runner.temp }}/path-record.json'
+          python3 .github/scripts/select_ci.py \
+            --selection-file '${{ runner.temp }}/path-record.json' \
+            --expected-head '${{ github.event.pull_request.head.sha || github.sha }}' \
+            --validate-needs-env NEEDS

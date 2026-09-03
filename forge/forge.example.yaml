@@ -53,5 +53,7 @@ spec:
       # chart: gpu-operator                             # default
       # release: opo1-gpu-operator                      # default: <metadata.name>-gpu-operator
       # namespace: gpu-operator                         # default
+      # sha256: <64 lowercase hex>                       # required for custom chart input; default chart is content-pinned
     driver:                    # NVIDIA driver the operator loads (HOR-401); node-readiness, not an overlay value
-      # version: "570.186"    # pin a driver version for reproducibility; omit/empty => chart default
+      version: "580.126.20"   # module version expected on the Ubuntu 24.04 GPU node
+      sha256: 16b9830998d2f2795fe72e760169b51bd4185e3b412ea3d0c4e46f453af2cc30 # exact driver image digest

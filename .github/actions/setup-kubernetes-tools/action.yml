@@ -8,7 +8,7 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        digest=$(python3 "$GITHUB_WORKSPACE/.github/scripts/content_digest.py" "$GITHUB_WORKSPACE/.github/tools/checksums.txt")
+        digest=$(python3 "$GITHUB_WORKSPACE/.github/scripts/content_digest.py" "$GITHUB_WORKSPACE/.github/inputs/remote-content.json")
         key="${{ runner.os }}-${{ runner.arch }}-kubernetes-tools-${digest}"
         echo "key=$key" >> "$GITHUB_OUTPUT"
         echo "tool cache key: $key"

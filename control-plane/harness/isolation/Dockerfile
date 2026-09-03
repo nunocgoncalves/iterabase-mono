@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1
+# syntax=docker/dockerfile:1@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
 # The HOR-381 sandbox isolation test image. Builds the harness (for the real
 # launcher at dist/launcher.js), then runs the probe + runner as ROOT — the
 # runner needs root plus the container runtime's default capabilities to format
@@ -10,14 +10,14 @@
 # cross-pod ownership + Pod Security admission) are HOR-245's gate.
 # Run: make harness-isolation-test
 
-FROM node:24-bookworm-slim AS builder
+FROM node:24-bookworm-slim@sha256:ba849c60be29959425b8734d57b8b4b7d56f98edd9504c9af091d5281095a71e AS builder
 WORKDIR /src
 COPY package.json package-lock.json tsconfig.json ./
 RUN npm ci
 COPY src ./src
 RUN npm run build
 
-FROM node:24-bookworm-slim
+FROM node:24-bookworm-slim@sha256:ba849c60be29959425b8734d57b8b4b7d56f98edd9504c9af091d5281095a71e
 RUN apt-get update \
     && apt-get install -y --no-install-recommends e2fsprogs xfsprogs util-linux \
     && rm -rf /var/lib/apt/lists/*

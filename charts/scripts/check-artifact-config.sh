@@ -65,5 +65,5 @@ echo "OK: MinIO artifact provisioner remains an ordinary retained Job with uncha
 substrate=$(helm template artifact-cert-manager charts/cert-manager-substrate)
 grep -q '^kind: CSIDriver$' <<<"$substrate"
 grep -q '^  name: csi.cert-manager.io$' <<<"$substrate"
-grep -q 'image: "quay.io/jetstack/cert-manager-csi-driver:v0.15.0"' <<<"$substrate"
+grep -q 'image: "quay.io/jetstack/cert-manager-csi-driver@sha256:49c82164a9b4ae13eb2ab74f57d07efe13edfbf40766975f062bcce48230ce87"' <<<"$substrate"
 echo "OK: certificate substrate renders the pinned CSI driver for AgentPool leaves"

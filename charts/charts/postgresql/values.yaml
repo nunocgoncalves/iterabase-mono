@@ -3,6 +3,7 @@ enabled: true
 image:
   repository: postgres
   tag: "16-alpine"
+  digest: sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
   pullPolicy: IfNotPresent
 
 auth:
@@ -43,6 +44,7 @@ metrics:
   image:
     repository: quay.io/prometheuscommunity/postgres-exporter
     tag: "v0.15.0"
+    digest: sha256:386b12d19eab2a37d7cd8ca8b4c7491cc7a830d9581f49af6c98a393da9605e6
     pullPolicy: IfNotPresent
   resources: {}
   # scrapeInterval: 30s
