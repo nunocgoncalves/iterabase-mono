@@ -6,6 +6,8 @@ import copy
 import json
 import os
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -174,6 +176,30 @@ class CandidateJobTests(unittest.TestCase):
         self.assertNotIn("charts-runtime", selected)
         results = release.validate_candidate_job_results(self.plan, self.needs())
         self.assertEqual(set(selected), set(results))
+
+    def test_validate_jobs_cli_reads_bounded_file_inputs(self) -> None:
+        with tempfile.TemporaryDirectory() as value:
+            directory = Path(value)
+            plan = directory / "plan.json"
+            needs = directory / "needs.json"
+            plan.write_text(json.dumps(self.plan), encoding="utf-8")
+            needs.write_text(json.dumps(self.needs()), encoding="utf-8")
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / ".github/scripts/release.py"),
+                    "validate-jobs",
+                    "--plan",
+                    str(plan),
+                    "--needs",
+                    str(needs),
+                ],
+                check=True,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            self.assertIn("candidate validation results:", completed.stdout)
 
     def test_selected_skip_failure_cancel_and_job_set_drift_fail(self) -> None:
         for status in ("skipped", "failure", "cancelled"):
