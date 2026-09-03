@@ -33,6 +33,7 @@ type forgeConfigSpec struct {
 	DualStack        bool
 	GPU              bool
 	GPUDriverVersion string
+	GPUDriverSHA256  string
 	ChartVersion     string
 	ChartRepository  string
 	ChartRelease     string
@@ -102,14 +103,18 @@ spec:
 `)
 	}
 	if spec.GPU {
-		cfg.WriteString(`  gpu:
-    enabled: true
-`)
-		if spec.GPUDriverVersion != "" {
-			fmt.Fprintf(&cfg, `    driver:
-      version: %q
-`, spec.GPUDriverVersion)
+		if spec.GPUDriverVersion == "" {
+			spec.GPUDriverVersion = gpuUpgradeBaselineDriver
 		}
+		if spec.GPUDriverSHA256 == "" {
+			spec.GPUDriverSHA256 = e2eGPUDriverSHA256(t, spec.GPUDriverVersion)
+		}
+		fmt.Fprintf(&cfg, `  gpu:
+    enabled: true
+    driver:
+      version: %q
+      sha256: %s
+`, spec.GPUDriverVersion, spec.GPUDriverSHA256)
 	}
 	if spec.ChartVersion != "" {
 		fmt.Fprintf(&cfg, `  chart:

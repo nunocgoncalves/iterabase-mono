@@ -93,6 +93,8 @@ control-plane:
 ingress-nginx:
   enabled: true
   controller:
+    image:
+      digest: sha256:594ceea76b01c592858f803f9ff4d2cb40542cae2060410b2c95f75907d659e1
     kind: Deployment
     hostNetwork: false
     service:
@@ -123,6 +125,8 @@ ingress-nginx:
 internal-ingress-nginx:
   enabled: false
   controller:
+    image:
+      digest: sha256:594ceea76b01c592858f803f9ff4d2cb40542cae2060410b2c95f75907d659e1
     kind: Deployment
     hostNetwork: false
     electionID: ingress-nginx-internal-leader
@@ -185,6 +189,12 @@ internal-ingress-nginx:
 # webhook failurePolicy is Fail.
 metallb:
   enabled: false
+  controller:
+    image:
+      tag: v0.16.1@sha256:f51ab515de9ccd20dc3dccb093e48df8adddac019326c456f449e55ba91b6420
+  speaker:
+    image:
+      tag: v0.16.1@sha256:16561e96531e1852d5c229ad7fae6e994dcfa983ff7f4de6b6208b34a4e2ddbc
   crds:
     enabled: false
   frrk8s:
@@ -232,6 +242,8 @@ cert-issuers:
 # workloads); flip on with internalTLS (see values-tls.yaml / the prod overlay).
 reloader:
   enabled: false
+  image:
+    digest: sha256:0530cf462fa3ba530fab887372e3b79caf608d0093ffc2fded9fa33bac8b74cd
   # Metrics + ServiceMonitor (native to the reloader chart). Flip on with
   # observability; off by default to keep the default render lean.
   metrics:
@@ -253,6 +265,8 @@ reloader:
 #     Ingress is annotated with its host (external-dns then creates the A record).
 external-dns:
   enabled: false
+  image:
+    tag: v0.21.0@sha256:f53faaf71cb270d1ca9dce6ea0c94bfebf1a18696263487f0fbc74b9bf2bd7ff
   provider:
     name: cloudflare
   sources:

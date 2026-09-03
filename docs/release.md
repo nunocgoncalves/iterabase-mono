@@ -8,8 +8,8 @@ three manual workflows:
 - **Promote release** verifies a successful candidate run and publishes its
   unchanged members after one founder approval in the protected `release`
   environment.
-- **Release system rehearsal** exercises disposable package, protected-tag, and
-  prerelease operations after release-control or permission changes.
+- **Release immutability gate** performs or re-verifies the one retained,
+  non-semantic draft-first publication after immutable releases are enabled.
 
 No push to `master`, tag push, merge, acceptance step, or rehearsal implicitly
 publishes a semantic artifact.
@@ -83,10 +83,12 @@ artifacts.
    candidate routing, and immutable published baselines.
 2. **Build once.** Selected product images are pushed by digest and receive one
    immutable run-scoped alias `<source-sha>-<run-id>-<run-attempt>`. Selected
-   chart/companion and Forge outputs remain retained Actions artifacts. Locked
-   external Helm dependencies are acquired with bounded command-level transport
-   attempts only while packaging those chart artifacts; candidate product chart
-   scenarios do not reacquire those repositories. Required validation-only
+   chart/companion and Forge outputs remain retained Actions artifacts. Every
+   external Helm archive is downloaded directly through
+   `.github/inputs/remote-content.json`, and its reviewed SHA-256 is verified
+   before packaging; mutable repository indexes are not authority. A bounded
+   retry recovers transport only and never accepts changed bytes. Candidate
+   product chart scenarios do not reacquire those inputs. Required validation-only
    artifacts are exact-source temporary Actions artifacts and can never be
    promoted.
 3. **Compose once per scenario.** The shared composer verifies every selected or
@@ -121,7 +123,10 @@ immutable and retained for no-rebuild promotion.
 ## Promotion flow
 
 Dispatch **Promote release** from `master` with the successful candidate run ID.
-Before approval it verifies:
+Both jobs check out and assert the immutable workflow-dispatch control SHA;
+`master` is never resolved again as executable promotion code. The candidate
+source remains independently allowed to be any explicit full SHA contained in
+`master`. Before approval the workflow verifies:
 
 - repository/workflow identity, manual event, master branch, and successful run;
 - source SHA containment in `master`;
@@ -130,20 +135,24 @@ Before approval it verifies:
 - the complete reconciled scenario/stage/runtime result set.
 
 The publication job then waits once for founder approval in the protected
-`release` environment. After approval it re-verifies the candidate and preflights
-every semantic image, chart, tag, and GitHub Release destination before the first
-mutation. It then:
+`release` environment. After approval it reasserts the control checkout and
+workflow SHA; re-queries candidate workflow/run/source authority; re-verifies
+candidate bytes, source containment, environment, collaborator, immutable-release,
+and protected-tag authority; and preflights every semantic image, chart, tag, and
+GitHub Release destination before the first mutation. It then:
 
 - adds semantic image tags to the exact tested digests;
 - pushes unchanged chart/companion archives;
 - creates or verifies protected namespaced tags at the exact source SHA; and
-- creates or completes one GitHub Release per selected target using exact
-  retained candidate files and shared evidence.
+- stages each target's exact files plus a manifest binding target, version, tag,
+  source SHA, candidate run, filename, size, and SHA-256 as an unpublished draft,
+  verifies the complete draft, and publishes it exactly once.
 
-Nothing is rebuilt. GitHub and GHCR do not provide a cross-package transaction,
-so promotion is resumable rather than falsely atomic: an identical completed
-member is verified and skipped, a missing member continues, and any conflicting
-identity fails closed.
+Nothing is rebuilt. An unpublished draft may be replaced in full on retry. An
+existing published Release is verification-only: its complete member set and
+bytes must already match, and promotion never uploads a late member or changes a
+published asset. Other identical completed image/chart/tag members are verified
+and skipped; conflicts fail closed.
 
 ## Permanent fixtures and incomplete candidates
 
@@ -160,20 +169,28 @@ Actions has no provider credential and cannot power-cycle, rescue, reimage,
 replace, or delete a fixture. Founder-operated quarantine/recovery must restore
 the runbook baseline before a new candidate dispatch.
 
-## Release-system rehearsal
+## Post-merge immutable-release gate
 
-The rehearsal is manual and separate from product candidates. It runs through
-the protected environment, creates a unique temporary image manifest, protected
-`dry-run/rehearsal-<run-id>` tag, and prerelease, verifies them, and removes all
-three. Run it only after release workflow, environment, package permission,
-deploy-key, or ruleset changes.
+After the controlling change merges, the founder enables **release immutability**
+in repository settings before approving **Release immutability gate**. The
+workflow first audits that the setting, protected environment, deploy key, tag
+ruleset, and immutable control checkout are exact. It then creates or verifies
+the retained `dry-run/immutable-release-gate-v1` non-semantic release through the
+same recommended boundary: create draft, attach the complete manifest and probe,
+verify both, and publish once. It requires GitHub to report the release as
+immutable, proves a late asset upload, asset deletion, and tag movement are all
+denied, and retains the redacted run evidence for 90 days. It never deletes the
+release or tag. The first successful run is one-time publication evidence; later
+runs only verify that authority and repeat non-mutating refusal probes.
 
 ## Protection and operator audit
 
 The `release` environment must require founder review, permit only `master`, and
 hold `RELEASE_TAG_SSH_KEY`. The active ruleset protects production namespaces
 and `dry-run/**`. The release deploy key must remain the repository's only write
-deploy key.
+deploy key. The complete push/maintain/admin collaborator set must remain exactly
+`nunocgoncalves`; repository secrets must remain exactly the CPU/GPU fixture keys;
+and immutable releases must be enabled after the one-time post-merge rollout.
 
 ```bash
 make release-check

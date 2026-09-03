@@ -10,7 +10,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+import re
 import sys
 
 OUTPUTS = (
@@ -38,6 +39,95 @@ DOC_NAMES = {
     "SECURITY.md",
 }
 
+RELEASE_ONLY_PATHS = {
+    "control-plane/VERSION",
+    "inference-gateway/VERSION",
+    "forge/VERSION",
+    "release/targets.json",
+    ".github/scripts/release.py",
+    ".github/scripts/test_release.py",
+    ".github/scripts/audit_release_security.sh",
+    ".github/workflows/release.yml",
+    ".github/workflows/release-candidate.yml",
+    ".github/workflows/release-promote.yml",
+    ".github/workflows/release-rehearsal.yml",
+}
+KNOWN_TOP_LEVEL = {
+    ".github",
+    ".githooks",
+    "charts",
+    "control-plane",
+    "docs",
+    "forge",
+    "inference-gateway",
+    "release",
+    "testkit",
+}
+KNOWN_ROOT_FILES = {
+    ".gitignore",
+    ".gitleaks.toml",
+    "AGENTS.md",
+    "Makefile",
+    "README.md",
+    "go.work",
+    "go.work.sum",
+}
+SHA = re.compile(r"^[0-9a-f]{40}$")
+
+
+def validate_paths(paths: list[str], *, allow_empty: bool = False) -> list[str]:
+    if not isinstance(paths, list) or any(not isinstance(path, str) for path in paths):
+        raise ValueError("changed paths must be a list of strings")
+    if not paths and not allow_empty:
+        raise ValueError("empty changed-path input is ambiguous")
+    result: list[str] = []
+    for path in paths:
+        pure = PurePosixPath(path)
+        if (
+            not path
+            or path != path.strip()
+            or path.startswith(("/", "./"))
+            or "\\" in path
+            or pure.is_absolute()
+            or any(part in {"", ".", ".."} for part in pure.parts)
+            or pure.as_posix() != path
+        ):
+            raise ValueError(f"changed path is not canonical: {path!r}")
+        top = pure.parts[0]
+        if len(pure.parts) == 1:
+            if path not in KNOWN_ROOT_FILES:
+                raise ValueError(f"unknown repository path: {path}")
+        elif top not in KNOWN_TOP_LEVEL:
+            raise ValueError(f"unknown repository path: {path}")
+        result.append(path)
+    if len(result) != len(set(result)):
+        raise ValueError("changed paths contain duplicates")
+    return result
+
+
+def validate_selection_record(record: object, *, expected_head: str | None = None) -> tuple[list[str], bool]:
+    expected_fields = {"schema_version", "event_name", "base_sha", "head_sha", "select_all", "paths"}
+    if not isinstance(record, dict) or set(record) != expected_fields or record.get("schema_version") != 1:
+        raise ValueError("changed-path selection record must be one exact schema-v1 object")
+    event = record.get("event_name")
+    head = record.get("head_sha")
+    base = record.get("base_sha")
+    select_all = record.get("select_all")
+    paths = record.get("paths")
+    if event not in {"pull_request", "push", "workflow_dispatch"}:
+        raise ValueError("changed-path selection record has an invalid event")
+    if not isinstance(head, str) or not SHA.fullmatch(head) or (expected_head is not None and head != expected_head):
+        raise ValueError("changed-path selection record has an invalid head SHA")
+    if not isinstance(base, str) or (base and not SHA.fullmatch(base)):
+        raise ValueError("changed-path selection record has an invalid base SHA")
+    if event == "pull_request" and (not base or set(base) == {"0"}):
+        raise ValueError("pull_request selection requires a nonzero base SHA")
+    if not isinstance(select_all, bool) or not isinstance(paths, list):
+        raise ValueError("changed-path selection record is incomplete")
+    if select_all != (event == "workflow_dispatch"):
+        raise ValueError("only workflow_dispatch may request all-owner selection")
+    return validate_paths(paths, allow_empty=select_all), select_all
+
 
 def is_documentation(path: str) -> bool:
     parts = Path(path).parts
@@ -49,6 +139,9 @@ def is_documentation(path: str) -> bool:
 
 
 def selection(paths: list[str], select_all: bool = False) -> dict[str, object]:
+    normalized = validate_paths(paths, allow_empty=select_all)
+    if select_all and normalized:
+        raise ValueError("all-owner selection cannot also contain changed paths")
     selected = {name: select_all for name in OUTPUTS}
     selected_images: set[str] = set()
 
@@ -63,27 +156,14 @@ def selection(paths: list[str], select_all: bool = False) -> dict[str, object]:
             }
         )
     else:
-        for raw_path in paths:
-            path = raw_path.strip().removeprefix("./")
-            if not path or is_documentation(path):
+        for path in normalized:
+            if is_documentation(path):
                 continue
 
             # Release implementation and component version metadata are
             # validated by the lightweight release-contract tests in the
             # selector job. They do not change product binaries or scenarios.
-            if path in {
-                "control-plane/VERSION",
-                "inference-gateway/VERSION",
-                "forge/VERSION",
-                "release/targets.json",
-                ".github/scripts/release.py",
-                ".github/scripts/test_release.py",
-                ".github/scripts/audit_release_security.sh",
-                ".github/workflows/release.yml",
-                ".github/workflows/release-candidate.yml",
-                ".github/workflows/release-promote.yml",
-                ".github/workflows/release-rehearsal.yml",
-            }:
+            if path in RELEASE_ONLY_PATHS:
                 continue
 
             # Selection logic, shared setup/actions, and the PR/E2E workflow
@@ -102,11 +182,7 @@ def selection(paths: list[str], select_all: bool = False) -> dict[str, object]:
             }
             # Unknown GitHub automation remains conservative, but release-only
             # files above no longer force unrelated images, Kind, CPU, or GPU.
-            if shared_ci or path.startswith(".github/") or path in {
-                "Makefile",
-                "go.work",
-                "go.work.sum",
-            }:
+            if shared_ci or path.startswith((".github/", ".githooks/")) or len(PurePosixPath(path).parts) == 1:
                 for name in OUTPUTS:
                     selected[name] = True
                 selected_images.update(
@@ -122,7 +198,7 @@ def selection(paths: list[str], select_all: bool = False) -> dict[str, object]:
 
             # Shared E2E mechanics and catalogue discovery can invalidate every
             # owner and release-suite selection, so they deliberately fan out.
-            if path.startswith("testkit/e2e/"):
+            if path.startswith("testkit/"):
                 for name in OUTPUTS:
                     selected[name] = True
                 selected_images.update(
@@ -216,7 +292,61 @@ def selection(paths: list[str], select_all: bool = False) -> dict[str, object]:
         {"name": name, **IMAGE_CONFIG[name]} for name in sorted(selected_images)
     ]
     selected["any"] = any(bool(selected[name]) for name in OUTPUTS)
+    meaningful = [path for path in normalized if not is_documentation(path)]
+    if select_all:
+        classification = "all"
+    elif not meaningful:
+        classification = "docs-only"
+    elif all(path in RELEASE_ONLY_PATHS or path.startswith("release/") for path in meaningful):
+        classification = "release-only"
+    elif selected["any"]:
+        classification = "selected"
+    else:
+        raise ValueError(f"non-documentation paths have no owner: {meaningful}")
+    selected["classification"] = classification
+    selected["input_paths"] = normalized
     return selected
+
+
+def validate_needs(result: dict[str, object], needs: dict[str, object]) -> None:
+    expected_jobs = {
+        "control-plane": bool(result["control_plane"]),
+        "ui": bool(result["ui"]),
+        "harness": bool(result["harness"]),
+        "tool-runner": bool(result["tool_runner"]),
+        "proto": bool(result["proto"]),
+        "inference-gateway": bool(result["inference_gateway"]),
+        "forge": bool(result["forge"]),
+        "charts": bool(result["charts"]),
+        "images": bool(result["images"]),
+    }
+    if set(needs) != {"changes", *expected_jobs}:
+        raise ValueError("CI aggregate needs set does not match the workflow contract")
+    changes = needs.get("changes")
+    if not isinstance(changes, dict) or changes.get("result") != "success":
+        raise ValueError("CI selection job did not succeed")
+    outputs = changes.get("outputs")
+    if not isinstance(outputs, dict):
+        raise ValueError("CI selection job has no outputs")
+    for name in OUTPUTS:
+        if outputs.get(name) != str(bool(result[name])).lower():
+            raise ValueError(f"CI selector output {name} is missing or malformed")
+    try:
+        matrix = json.loads(str(outputs.get("image_matrix", "")))
+    except json.JSONDecodeError as exc:
+        raise ValueError("CI image matrix is malformed") from exc
+    if matrix != result["image_matrix"]:
+        raise ValueError("CI image matrix does not match the typed selection")
+    if outputs.get("classification") != result["classification"]:
+        raise ValueError("CI selection classification does not match")
+    if outputs.get("selection") != json.dumps(result, sort_keys=True, separators=(",", ":")):
+        raise ValueError("CI typed selection output does not match")
+    for job, selected_job in expected_jobs.items():
+        value = needs[job]
+        status = value.get("result") if isinstance(value, dict) else None
+        expected = "success" if selected_job else "skipped"
+        if status != expected:
+            raise ValueError(f"CI job {job} is {status!r}; expected {expected!r}")
 
 
 IMAGE_CONFIG = {
@@ -246,25 +376,59 @@ IMAGE_CONFIG = {
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("paths", nargs="*")
-    parser.add_argument("--paths-file", type=Path)
+    parser.add_argument("--selection-file", type=Path)
+    parser.add_argument("--selection-result-file", type=Path)
     parser.add_argument("--all", action="store_true", dest="select_all")
     parser.add_argument("--github-output", type=Path)
+    parser.add_argument("--expected-head", default="")
+    parser.add_argument("--validate-needs-env", default="")
     args = parser.parse_args()
 
     paths = list(args.paths)
-    if args.paths_file:
-        paths.extend(args.paths_file.read_text().splitlines())
+    select_all = args.select_all
+    selection_record = None
+    supplied_result = None
+    if args.selection_result_file:
+        if paths or select_all or args.selection_file:
+            parser.error("--selection-result-file cannot be combined with another selection input")
+        supplied_result = json.loads(args.selection_result_file.read_text(encoding="utf-8"))
+        if not isinstance(supplied_result, dict) or not isinstance(supplied_result.get("input_paths"), list):
+            raise ValueError("typed CI selection result is incomplete")
+        paths = supplied_result["input_paths"]
+        select_all = supplied_result.get("classification") == "all"
+    if args.selection_file:
+        if paths or select_all:
+            parser.error("--selection-file cannot be combined with paths or --all")
+        selection_record = json.loads(args.selection_file.read_text(encoding="utf-8"))
+        paths, select_all = validate_selection_record(
+            selection_record, expected_head=args.expected_head or None
+        )
 
-    result = selection(paths, args.select_all)
+    result = selection(paths, select_all)
+    if supplied_result is not None and supplied_result != result:
+        raise ValueError("typed CI selection result does not match its path classification")
     rendered = json.dumps(result, sort_keys=True)
     print(rendered)
+    if args.validate_needs_env:
+        try:
+            needs = json.loads(os.environ.get(args.validate_needs_env, ""))
+        except json.JSONDecodeError as exc:
+            raise ValueError("CI aggregate needs are not valid JSON") from exc
+        if not isinstance(needs, dict):
+            raise ValueError("CI aggregate needs must be an object")
+        validate_needs(result, needs)
 
     output_path = args.github_output
     if output_path is None and os.environ.get("GITHUB_OUTPUT"):
         output_path = Path(os.environ["GITHUB_OUTPUT"])
     if output_path:
         with output_path.open("a", encoding="utf-8") as output:
+            output.write(f"selection={json.dumps(result, sort_keys=True, separators=(',', ':'))}\n")
+            if selection_record is not None:
+                output.write(f"path_record={json.dumps(selection_record, sort_keys=True, separators=(',', ':'))}\n")
             for name, value in result.items():
+                if name in {"input_paths", "selection"}:
+                    continue
                 if isinstance(value, bool):
                     value = str(value).lower()
                 elif not isinstance(value, str):

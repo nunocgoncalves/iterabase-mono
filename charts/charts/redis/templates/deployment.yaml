@@ -41,7 +41,7 @@ spec:
       {{- end }}
       containers:
         - name: redis
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          image: '{{ .Values.image.repository }}:{{ .Values.image.tag }}@{{ required "image.digest is required" .Values.image.digest }}'
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           {{- if or (or .Values.tls.enabled (dig "internalTLS" "enabled" false (.Values.global | default (dict)))) $auth }}
           # sh -c so $REDIS_PASSWORD is expanded at runtime (not baked into the

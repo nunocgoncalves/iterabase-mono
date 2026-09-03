@@ -24,7 +24,6 @@ import (
 
 	"github.com/nunocgoncalves/iterabase-mono/forge/internal/config"
 	"github.com/nunocgoncalves/iterabase-mono/forge/internal/deployer"
-	"github.com/nunocgoncalves/iterabase-mono/forge/internal/k3s"
 	"github.com/nunocgoncalves/iterabase-mono/forge/internal/provisioner"
 )
 
@@ -292,13 +291,28 @@ func TestPreflightRequiresReadableOperatingSystemIdentity(t *testing.T) {
 }
 
 func TestInstall_CommandShape(t *testing.T) {
+	const installerPath = "/tmp/forge-k3s-installer.test"
 	var got string
+	sawChecksum := false
 	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
-		got = cmd
-		if strings.HasPrefix(cmd, "curl -sfL "+k3s.InstallScriptURL) {
+		switch {
+		case cmd == "mktemp /tmp/forge-k3s-installer.XXXXXX":
+			return installerPath + "\n", 0
+		case strings.HasPrefix(cmd, "curl -fsSL"):
+			assert.Contains(t, cmd, shellQuote(k3sInstallScriptURL))
 			return "", 0
+		case strings.Contains(cmd, "sha256sum --check --status"):
+			sawChecksum = true
+			assert.Contains(t, cmd, k3sInstallScriptSHA256)
+			return "", 0
+		case strings.HasPrefix(cmd, "sudo env INSTALL_K3S_VERSION="):
+			got = cmd
+			return "", 0
+		case cmd == "rm -f "+shellQuote(installerPath):
+			return "", 0
+		default:
+			return "", 1
 		}
-		return "", 1
 	})
 	defer cleanup()
 
@@ -307,8 +321,9 @@ func TestInstall_CommandShape(t *testing.T) {
 	args := []string{"server", "--cluster-cidr", "10.42.0.0/16,fd42::/48", "--disable", "traefik"}
 	err := p.Install(context.Background(), "v1.31.5", args)
 	require.NoError(t, err)
+	assert.True(t, sawChecksum)
 	assert.Contains(t, got, "INSTALL_K3S_VERSION='v1.31.5+k3s1'")
-	assert.Contains(t, got, "sh -s -")
+	assert.Contains(t, got, "sh '"+installerPath+"'")
 	assert.Contains(t, got, "'server'")
 	assert.Contains(t, got, "'--cluster-cidr'")
 	assert.Contains(t, got, "'10.42.0.0/16,fd42::/48'")
@@ -1026,8 +1041,8 @@ func TestDeployer_Apply_HelmBootstrapFailuresStopBeforeChart(t *testing.T) {
 		failAt  string
 		wantErr string
 	}{
-		{name: "download failure", failAt: "download", wantErr: "download helm installer: ssh run"},
-		{name: "empty installer input", failAt: "empty", wantErr: "downloaded installer is empty"},
+		{name: "download failure", failAt: "download", wantErr: "download helm-installer: ssh run"},
+		{name: "checksum mismatch", failAt: "checksum", wantErr: "verify helm-installer content checksum"},
 		{name: "installer failure", failAt: "installer", wantErr: "execute helm installer: ssh run"},
 		{name: "privileged PATH mismatch", failAt: "verify", wantErr: "verify helm installation through privileged PATH"},
 	}
@@ -1045,12 +1060,12 @@ func TestDeployer_Apply_HelmBootstrapFailuresStopBeforeChart(t *testing.T) {
 						return sshCommandResult{stderr: "curl: (22) The requested URL returned error: 503\n", code: 22}
 					}
 					return sshCommandResult{}
-				case cmd == "test -s "+shellQuote(installerPath):
-					if tt.failAt == "empty" {
+				case strings.Contains(cmd, "sha256sum --check --status"):
+					if tt.failAt == "checksum" {
 						return sshCommandResult{code: 1}
 					}
 					return sshCommandResult{}
-				case cmd == "sudo bash "+shellQuote(installerPath):
+				case cmd == "sudo env DESIRED_VERSION="+shellQuote(helmInstallVersion)+" bash "+shellQuote(installerPath):
 					installerCalled = true
 					if tt.failAt == "installer" {
 						return sshCommandResult{stdout: "get_helm.sh: unsupported architecture\n", code: 1}
@@ -1081,7 +1096,7 @@ func TestDeployer_Apply_HelmBootstrapFailuresStopBeforeChart(t *testing.T) {
 			case "verify":
 				require.ErrorContains(t, err, "sudo: helm: command not found")
 			}
-			if tt.failAt == "download" || tt.failAt == "empty" {
+			if tt.failAt == "download" || tt.failAt == "checksum" {
 				assert.False(t, installerCalled)
 			}
 			assert.False(t, chartCalled, "chart discovery/apply must not run after Helm bootstrap fails")
@@ -1106,9 +1121,9 @@ func TestEnsureHelmRetriesRecognizedInstallerTransportFailure(t *testing.T) {
 			return "", 1
 		case cmd == helmInstallerTempCmd:
 			return installerPath + "\n", 0
-		case strings.HasPrefix(cmd, "curl -fsSL"), cmd == "test -s "+shellQuote(installerPath), cmd == "rm -f "+shellQuote(installerPath):
+		case strings.HasPrefix(cmd, "curl -fsSL"), strings.Contains(cmd, "sha256sum --check --status"), cmd == "rm -f "+shellQuote(installerPath):
 			return "", 0
-		case cmd == "sudo bash "+shellQuote(installerPath):
+		case cmd == "sudo env DESIRED_VERSION="+shellQuote(helmInstallVersion)+" bash "+shellQuote(installerPath):
 			installerCalls++
 			if installerCalls == 1 {
 				return "Failed to install helm\n", 1
@@ -1142,8 +1157,8 @@ func TestDeployer_Apply_EnsuresHelm(t *testing.T) {
 		case cmd == helmInstallerTempCmd:
 			return installerPath + "\n", 0
 		case strings.HasPrefix(cmd, "curl -fsSL"),
-			cmd == "test -s "+shellQuote(installerPath),
-			cmd == "sudo bash "+shellQuote(installerPath),
+			strings.Contains(cmd, "sha256sum --check --status"),
+			cmd == "sudo env DESIRED_VERSION="+shellQuote(helmInstallVersion)+" bash "+shellQuote(installerPath),
 			cmd == "rm -f "+shellQuote(installerPath):
 			return "", 0
 		case strings.Contains(cmd, "'show' 'crds'"):
@@ -1170,8 +1185,9 @@ func TestDeployer_Apply_EnsuresHelm(t *testing.T) {
 	assert.Contains(t, commands[2], "curl -fsSL --retry 4 --retry-delay 2 --retry-all-errors --connect-timeout 10 -o '"+installerPath+"'")
 	assert.Contains(t, commands[2], shellQuote(helmInstallScript))
 	assert.NotContains(t, commands[2], "|")
-	assert.Equal(t, "test -s "+shellQuote(installerPath), commands[3])
-	assert.Equal(t, "sudo bash "+shellQuote(installerPath), commands[4])
+	assert.Contains(t, commands[3], "sha256sum --check --status")
+	assert.Contains(t, commands[3], helmInstallScriptSHA256)
+	assert.Equal(t, "sudo env DESIRED_VERSION="+shellQuote(helmInstallVersion)+" bash "+shellQuote(installerPath), commands[4])
 	assert.Equal(t, helmVerifyCommand, commands[5])
 	assert.Equal(t, "rm -f "+shellQuote(installerPath), commands[6])
 	assert.Contains(t, commands[7], "'show' 'crds'")
@@ -1868,6 +1884,11 @@ func TestEnsureAgentPoolWorkspaceToolsChecksExt4WithoutPackageMutation(t *testin
 	assert.NotContains(t, commands[0], "apt-get")
 }
 
+func TestDriverVersionWithoutDigest(t *testing.T) {
+	assert.Equal(t, "580.126.20", driverVersionWithoutDigest("580.126.20@sha256:"+strings.Repeat("a", 64)))
+	assert.Equal(t, "580.126.20", driverVersionWithoutDigest("580.126.20"))
+}
+
 func TestReadGPUReadiness(t *testing.T) {
 	const (
 		query     = "sudo k3s kubectl get clusterpolicy,nodes -o json"
@@ -2006,6 +2027,49 @@ func gpuReadinessSnapshot(policyState, readyCondition, errorCondition, policyDri
 		]
 	}`, policyDriver, policyState, readyCondition, errorCondition, nodeDriver, upgradeState, unschedulable, map[bool]string{true: "True", false: "False"}[nodeReady])
 }
+
+func TestDownloadVerifiedHelmChartRejectsSubstitutedBytesBeforeUse(t *testing.T) {
+	const directory = "/tmp/forge-chart.test"
+	for _, valid := range []bool{true, false} {
+		t.Run(map[bool]string{true: "exact", false: "substituted"}[valid], func(t *testing.T) {
+			used := false
+			addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
+				switch {
+				case cmd == "mktemp -d /tmp/forge-chart.XXXXXX":
+					return directory + "\n", 0
+				case strings.Contains(cmd, "'pull' 'nvidia/gpu-operator'"):
+					return "", 0
+				case strings.Contains(cmd, "sha256sum --check --status"):
+					if valid {
+						return "", 0
+					}
+					return "", 1
+				case cmd == "sudo rm -rf "+shellQuote(directory):
+					return "", 0
+				case strings.Contains(cmd, "'show' 'crds'"), strings.Contains(cmd, "'upgrade' '--install'"):
+					used = true
+					return "", 0
+				default:
+					return "", 1
+				}
+			})
+			defer cleanup()
+			p := newProvisioner(t, addr, cfg)
+			defer p.Close()
+			archive, remove, err := p.downloadVerifiedHelmChart(context.Background(), "nvidia/gpu-operator", "v26.3.3", defaultGPUOperatorChecksumForSSHTest)
+			if valid {
+				require.NoError(t, err)
+				assert.Equal(t, directory+"/gpu-operator-v26.3.3.tgz", archive)
+				remove()
+			} else {
+				require.ErrorContains(t, err, "verify Helm chart content checksum")
+			}
+			assert.False(t, used)
+		})
+	}
+}
+
+const defaultGPUOperatorChecksumForSSHTest = "59abb5852a24b3ae0ef757bfea3051f419acbf559ee5efd72f0672d28af56a68"
 
 func TestEnsureRepo_CommandShape(t *testing.T) {
 	var got string
@@ -2361,13 +2425,24 @@ func TestOverlayer_ReadFile(t *testing.T) {
 }
 
 func TestFluxer_EnsureFlux_InstallsCLI(t *testing.T) {
-	var gotInstall, gotFluxInstall string
+	const installerPath = "/tmp/forge-flux-installer.test"
+	var gotDownload, gotInstall, gotFluxInstall string
 	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
 		switch {
 		case cmd == "command -v flux":
 			return "", 1 // absent
-		case strings.Contains(cmd, "fluxcd.io/install.sh"):
+		case cmd == "mktemp /tmp/forge-flux-installer.XXXXXX":
+			return installerPath + "\n", 0
+		case strings.HasPrefix(cmd, "curl -fsSL"):
+			gotDownload = cmd
+			return "", 0
+		case strings.Contains(cmd, "sha256sum --check --status"):
+			assert.Contains(t, cmd, fluxInstallScriptSHA256)
+			return "", 0
+		case strings.HasPrefix(cmd, "sudo env FLUX_VERSION="):
 			gotInstall = cmd
+			return "", 0
+		case cmd == "rm -f "+shellQuote(installerPath):
 			return "", 0
 		case strings.Contains(cmd, "flux") && strings.Contains(cmd, "install") && strings.Contains(cmd, "--version="):
 			gotFluxInstall = cmd
@@ -2382,8 +2457,9 @@ func TestFluxer_EnsureFlux_InstallsCLI(t *testing.T) {
 	require.NoError(t, p.EnsureFlux(context.Background(), "v2.4.0"))
 	// CLI install script is version-pinned via FLUX_VERSION; the version never
 	// appears bare in a way that could mismatch a tag filter.
-	assert.Contains(t, gotInstall, "fluxcd.io/install.sh")
+	assert.Contains(t, gotDownload, shellQuote(fluxInstallScriptURL))
 	assert.Contains(t, gotInstall, "FLUX_VERSION='2.4.0'", "install script takes the version without the leading v (it prepends v internally)")
+	assert.Contains(t, gotInstall, shellQuote(installerPath))
 	// flux install runs against the k3s kubeconfig via KUBECONFIG env (sudo root
 	// reads the root-owned 0600 kubeconfig); version pinned.
 	assert.Contains(t, gotFluxInstall, "KUBECONFIG=/etc/rancher/k3s/k3s.yaml")
@@ -2416,14 +2492,17 @@ func TestFluxer_EnsureFlux_CLIPresent(t *testing.T) {
 }
 
 func TestFluxer_EnsureFlux_InstallFails(t *testing.T) {
+	const installerPath = "/tmp/forge-flux-installer.test"
 	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
 		switch {
 		case cmd == "command -v flux":
 			return "", 1
-		case strings.Contains(cmd, "fluxcd.io/install.sh"):
+		case cmd == "mktemp /tmp/forge-flux-installer.XXXXXX":
+			return installerPath + "\n", 0
+		case strings.HasPrefix(cmd, "curl -fsSL"), strings.Contains(cmd, "sha256sum --check --status"), cmd == "rm -f "+shellQuote(installerPath):
 			return "", 0
-		case strings.Contains(cmd, "flux") && strings.Contains(cmd, "install"):
-			return "", 1 // flux install fails
+		case strings.HasPrefix(cmd, "sudo env FLUX_VERSION="):
+			return "", 1 // CLI installer fails
 		default:
 			return "", 1
 		}
@@ -2433,7 +2512,7 @@ func TestFluxer_EnsureFlux_InstallFails(t *testing.T) {
 	defer p.Close()
 	err := p.EnsureFlux(context.Background(), "v2.4.0")
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "flux install")
+	assert.Contains(t, err.Error(), "install flux cli")
 }
 
 func TestFluxer_UninstallFlux(t *testing.T) {

@@ -32,8 +32,14 @@ jobs:
         run: test '${{ github.ref }}' = refs/heads/master
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: master
+          ref: ${{ github.sha }}
           fetch-depth: 0
+      - name: Bind immutable promotion control
+        env:
+          CONTROL_SHA: ${{ github.sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$CONTROL_SHA"
+          test "$CONTROL_SHA" = '${{ github.workflow_sha }}'
       - name: Verify trusted successful candidate workflow
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -66,10 +72,18 @@ jobs:
             printf 'has_chart=%s\n' "$(jq -r '(.chart_matrix | length) > 0' verified-plan.json)"
             printf 'has_forge=%s\n' "$(jq -r '.forge' verified-plan.json)"
           } >> "$GITHUB_OUTPUT"
+      - name: Build and verify complete per-target Release manifests
+        run: |
+          python3 .github/scripts/release.py release-manifests \
+            --candidate candidate --output release-manifests
+          python3 .github/scripts/release.py verify-release-manifests \
+            --candidate candidate --directory release-manifests
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: verified-release-candidate
-          path: candidate/
+          path: |
+            candidate/
+            release-manifests/
           retention-days: 7
 
   promote:
@@ -78,21 +92,49 @@ jobs:
     runs-on: ubuntu-latest
     environment: release
     permissions:
+      actions: read
       contents: write
+      deployments: read
       packages: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        # Promotion logic always executes from the protected default branch;
-        # the verified candidate source SHA is used only as the tag target.
+        # Promotion control always executes from the immutable dispatch SHA;
+        # the independently verified candidate source may be any master member.
         with:
-          ref: master
+          ref: ${{ github.sha }}
           fetch-depth: 0
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: verified-release-candidate
-          path: candidate
-      - name: Re-verify candidate after approval
-        run: python3 .github/scripts/release.py verify-candidate --directory candidate
+          path: .
+      - name: Re-verify every privileged-boundary invariant after approval
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_ID: ${{ inputs.candidate_run_id }}
+          CONTROL_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ needs.verify-candidate.outputs.source_sha }}
+          REQUIRE_IMMUTABLE_RELEASES: "true"
+          AUDIT_REPOSITORY_SECRETS: "false"
+          AUDIT_ADMIN_ENDPOINTS: "false"
+        run: |
+          test '${{ github.ref }}' = refs/heads/master
+          test "$(git rev-parse HEAD)" = "$CONTROL_SHA"
+          test "$CONTROL_SHA" = '${{ github.workflow_sha }}'
+          [[ "$RUN_ID" =~ ^[0-9]+$ ]]
+          run="$(gh api "repos/${{ github.repository }}/actions/runs/$RUN_ID")"
+          test "$(jq -r '.name' <<<"$run")" = 'Release candidate'
+          test "$(jq -r '.path' <<<"$run")" = '.github/workflows/release-candidate.yml'
+          test "$(jq -r '.event' <<<"$run")" = workflow_dispatch
+          test "$(jq -r '.head_branch' <<<"$run")" = master
+          test "$(jq -r '.conclusion' <<<"$run")" = success
+          python3 .github/scripts/release.py verify-candidate --directory candidate > verified-plan.json
+          python3 .github/scripts/release.py verify-release-manifests \
+            --candidate candidate --directory release-manifests
+          test "$(jq -r '.run_id' verified-plan.json)" = "$RUN_ID"
+          test "$(jq -r '.source_sha' verified-plan.json)" = "$SOURCE_SHA"
+          git fetch --no-tags origin master
+          git merge-base --is-ancestor "$SOURCE_SHA" origin/master
+          .github/scripts/audit_release_security.sh '${{ github.repository }}'
       - uses: ./.github/actions/setup-kubernetes-tools
         if: needs.verify-candidate.outputs.has_chart == 'true'
       - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
@@ -117,13 +159,35 @@ jobs:
           git config core.sshCommand 'ssh -i ~/.ssh/release-tag -o IdentitiesOnly=yes'
           git config user.name iterabase-release
           git config user.email release@iterabase.com
-      - name: Preflight every semantic destination before publication
+      - name: Final full authority and destination recheck before publication
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASES: ${{ needs.verify-candidate.outputs.releases }}
+          RUN_ID: ${{ inputs.candidate_run_id }}
+          CONTROL_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ needs.verify-candidate.outputs.source_sha }}
+          REQUIRE_IMMUTABLE_RELEASES: "true"
+          AUDIT_REPOSITORY_SECRETS: "false"
+          AUDIT_ADMIN_ENDPOINTS: "false"
         run: |
+          test "$(git rev-parse HEAD)" = "$CONTROL_SHA"
+          test "$CONTROL_SHA" = '${{ github.workflow_sha }}'
+          run="$(gh api "repos/${{ github.repository }}/actions/runs/$RUN_ID")"
+          test "$(jq -r '.name' <<<"$run")" = 'Release candidate'
+          test "$(jq -r '.path' <<<"$run")" = '.github/workflows/release-candidate.yml'
+          test "$(jq -r '.event' <<<"$run")" = workflow_dispatch
+          test "$(jq -r '.head_branch' <<<"$run")" = master
+          test "$(jq -r '.conclusion' <<<"$run")" = success
+          python3 .github/scripts/release.py verify-candidate --directory candidate > verified-plan.json
+          python3 .github/scripts/release.py verify-release-manifests \
+            --candidate candidate --directory release-manifests
+          test "$(jq -r '.run_id' verified-plan.json)" = "$RUN_ID"
+          test "$(jq -r '.source_sha' verified-plan.json)" = "$SOURCE_SHA"
+          git fetch --no-tags origin master
+          git merge-base --is-ancestor "$SOURCE_SHA" origin/master
+          .github/scripts/audit_release_security.sh '${{ github.repository }}'
           .github/scripts/check_promotion_destinations.sh \
-            candidate '${{ github.repository_owner }}' '${{ github.repository }}'
+            candidate '${{ github.repository_owner }}' '${{ github.repository }}' release-manifests
           while IFS=$'\t' read -r tag _target; do
             direct="$(git ls-remote --tags origin "refs/tags/$tag" | awk '{print $1}')"
             peeled="$(git ls-remote --tags origin "refs/tags/$tag^{}" | awk '{print $1}')"
@@ -181,60 +245,9 @@ jobs:
               git push origin "refs/tags/$tag"
             fi
           done < <(jq -r '.[].production_tag' <<<"$RELEASES")
-      - name: Create or complete target GitHub Releases with exact candidate files
+      - name: Stage complete drafts and publish each GitHub Release once
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASES: ${{ needs.verify-candidate.outputs.releases }}
-          SOURCE_SHA: ${{ needs.verify-candidate.outputs.source_sha }}
-        run: |
-          while IFS=$'\t' read -r target version tag artifact_types; do
-            assets=(candidate/candidate-plan.json candidate/candidate-evidence.json)
-            if jq -e 'index("image")' <<<"$artifact_types" >/dev/null; then
-              while IFS= read -r name; do
-                assets+=(
-                  "candidate/assets/images/candidate-$name.json"
-                  "candidate/assets/images/candidate-$name.spdx.json"
-                )
-              done < <(
-                jq -r --arg target "$target" \
-                  '.image_matrix[] | select(.target == $target) | .name' candidate/candidate-plan.json
-              )
-            fi
-            if jq -e 'index("chart")' <<<"$artifact_types" >/dev/null; then
-              chart="$(jq -r --arg target "$target" '.chart_matrix[] | select(.target == $target) | .chart' candidate/candidate-plan.json)"
-              assets+=(
-                "candidate/assets/charts/candidate-chart-$chart.json"
-                "candidate/assets/charts/candidate-chart-$chart.spdx.json"
-                "candidate/assets/charts/checksums-$chart.txt"
-              )
-              while IFS= read -r name; do
-                assets+=("candidate/assets/charts/$name-$version.tgz")
-              done < <(jq -r --arg target "$target" '.chart_matrix[] | select(.target == $target) | [.chart] + .companions | .[]' candidate/candidate-plan.json)
-            fi
-            if jq -e 'index("forge")' <<<"$artifact_types" >/dev/null; then
-              while IFS= read -r asset; do assets+=("$asset"); done \
-                < <(find candidate/assets/forge -type f | sort)
-            fi
-            notes="$(mktemp)"
-            cat > "$notes" <<EOF
-          Release of **$target $version** from \`$SOURCE_SHA\` as part of affected-target bundle ${{ inputs.candidate_run_id }}.
-
-          Built and validated once with the other selected targets; promoted without rebuilding. Exact bundle evidence is attached.
-          EOF
-
-            existing_dir="$(mktemp -d)"
-            if gh release view "$tag" >/dev/null 2>&1; then
-              for asset in "${assets[@]}"; do
-                name="$(basename "$asset")"
-                if gh release view "$tag" --json assets --jq '.assets[].name' | grep -Fxq "$name"; then
-                  gh release download "$tag" --pattern "$name" --dir "$existing_dir"
-                  cmp "$asset" "$existing_dir/$name"
-                  rm -f "$existing_dir/$name"
-                else
-                  gh release upload "$tag" "$asset"
-                fi
-              done
-            else
-              gh release create "$tag" "${assets[@]}" --verify-tag --title "$tag" --notes-file "$notes"
-            fi
-          done < <(jq -r '.[] | [.target,.version,.production_tag,(.artifact_types | tojson)] | @tsv' <<<"$RELEASES")
+        run: >-
+          .github/scripts/publish_github_releases.sh
+          candidate release-manifests '${{ github.repository }}'

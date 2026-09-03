@@ -245,9 +245,14 @@ func (p *SSHProvisioner) Preflight(ctx context.Context) (*provisioner.PreflightR
 
 // Install implements provisioner.Provisioner.
 func (p *SSHProvisioner) Install(ctx context.Context, version string, serverArgs []string) error {
-	cmd := fmt.Sprintf("curl -sfL %s | sudo env INSTALL_K3S_VERSION=%s sh -s - %s",
-		k3s.InstallScriptURL, shellQuote(k3s.ResolveVersion(version)), joinArgs(serverArgs))
-	_, err := p.run(ctx, cmd)
+	installer, err := p.downloadVerifiedRemoteContent(ctx, "k3s-installer", k3sInstallScriptURL, k3sInstallScriptSHA256)
+	if err != nil {
+		return err
+	}
+	defer p.removeRemoteContent(ctx, installer)
+	cmd := fmt.Sprintf("sudo env INSTALL_K3S_VERSION=%s sh %s %s",
+		shellQuote(k3s.ResolveVersion(version)), shellQuote(installer), joinArgs(serverArgs))
+	_, err = p.run(ctx, cmd)
 	return err
 }
 
@@ -410,7 +415,7 @@ func parseGPUReadiness(out, requestedDriverVersion string) (*provisioner.GPURead
 			}
 			readiness.PolicyName = item.Metadata.Name
 			readiness.PolicyState = item.Status.State
-			readiness.PolicyDriverVersion = item.Spec.Driver.Version
+			readiness.PolicyDriverVersion = driverVersionWithoutDigest(item.Spec.Driver.Version)
 			for _, condition := range item.Status.Conditions {
 				switch condition.Type {
 				case "Ready":
@@ -438,6 +443,11 @@ func parseGPUReadiness(out, requestedDriverVersion string) (*provisioner.GPURead
 	}
 	evaluateGPUReadiness(readiness)
 	return readiness, nil
+}
+
+func driverVersionWithoutDigest(version string) string {
+	version, _, _ = strings.Cut(version, "@sha256:")
+	return version
 }
 
 func evaluateGPUReadiness(readiness *provisioner.GPUReadiness) {
@@ -588,8 +598,6 @@ func joinArgs(args []string) string {
 }
 
 const (
-	helmInstallScript      = "https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-4"
-	helmInstallerTempCmd   = "mktemp /tmp/forge-helm-installer.XXXXXX"
 	helmVerifyCommand      = "sudo helm version --short"
 	helmInstallerAttempts  = 3
 	k3sKubeconfigPath      = "/etc/rancher/k3s/k3s.yaml"
@@ -617,25 +625,13 @@ func (p *SSHProvisioner) ensureHelm(ctx context.Context) error {
 		return nil
 	}
 
-	installerPath, err := p.run(ctx, helmInstallerTempCmd)
+	installerPath, err := p.downloadVerifiedRemoteContent(ctx, "helm-installer", helmInstallScriptURL, helmInstallScriptSHA256)
 	if err != nil {
-		return fmt.Errorf("prepare helm installer download: %w", err)
+		return err
 	}
-	installerPath = strings.TrimSpace(installerPath)
-	if installerPath == "" {
-		return errors.New("prepare helm installer download: mktemp returned an empty path")
-	}
-	defer func() {
-		_, _ = p.run(ctx, "rm -f "+shellQuote(installerPath))
-	}()
+	defer p.removeRemoteContent(ctx, installerPath)
 
-	if _, err := p.run(ctx, fmt.Sprintf("curl -fsSL --retry 4 --retry-delay 2 --retry-all-errors --connect-timeout 10 -o %s %s", shellQuote(installerPath), shellQuote(helmInstallScript))); err != nil {
-		return fmt.Errorf("download helm installer: %w", err)
-	}
-	if _, err := p.run(ctx, "test -s "+shellQuote(installerPath)); err != nil {
-		return fmt.Errorf("download helm installer: downloaded installer is empty: %w", err)
-	}
-	installCommand := "sudo bash " + shellQuote(installerPath)
+	installCommand := "sudo env DESIRED_VERSION=" + shellQuote(helmInstallVersion) + " bash " + shellQuote(installerPath)
 	for attempt := 1; ; attempt++ {
 		out, installErr := p.run(ctx, installCommand)
 		if installErr == nil {
@@ -886,7 +882,11 @@ func selectMetalLBCRDs(raw string) (string, error) {
 // intentionally remain on uninstall to protect custom-resource data, matching
 // Helm's CRD lifecycle semantics.
 func (p *SSHProvisioner) applyChartCRDs(ctx context.Context, opts deployer.ApplyOpts) (bool, error) {
-	raw, err := p.run(ctx, helmCmd("show", "crds", opts.Repository, "--version", opts.Version))
+	showArgs := []string{"show", "crds", opts.Repository}
+	if opts.Version != "" {
+		showArgs = append(showArgs, "--version", opts.Version)
+	}
+	raw, err := p.run(ctx, helmCmd(showArgs...))
 	if err != nil {
 		return false, fmt.Errorf("discover chart CRDs: %w", err)
 	}
@@ -943,7 +943,11 @@ func (p *SSHProvisioner) renderChartCRDs(ctx context.Context, opts deployer.Appl
 	// (e.g. the bgppeers conversion webhook's clientConfig.service.namespace)
 	// resolve identically to the subsequent `helm install`, avoiding an SSA
 	// conflict when Helm adopts the pre-applied CRD.
-	args := []string{"template", opts.Repository, "--version", opts.Version, "-n", opts.Namespace}
+	args := []string{"template", opts.Repository}
+	if opts.Version != "" {
+		args = append(args, "--version", opts.Version)
+	}
+	args = append(args, "-n", opts.Namespace)
 	for _, f := range opts.ValueFiles {
 		args = append(args, "-f", f)
 	}
@@ -1084,6 +1088,11 @@ func (p *SSHProvisioner) Apply(ctx context.Context, opts deployer.ApplyOpts) err
 	if err := p.ensureHelm(ctx); err != nil {
 		return err
 	}
+	opts, cleanup, err := p.verifiedApplyOpts(ctx, opts)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
 	metallbEnabled, err := p.applyChartCRDs(ctx, opts)
 	if err != nil {
 		return err
@@ -1132,6 +1141,19 @@ func (p *SSHProvisioner) Apply(ctx context.Context, opts deployer.ApplyOpts) err
 	return nil
 }
 
+func (p *SSHProvisioner) verifiedApplyOpts(ctx context.Context, opts deployer.ApplyOpts) (deployer.ApplyOpts, func(), error) {
+	if opts.Checksum == "" {
+		return opts, func() {}, nil
+	}
+	archive, cleanup, err := p.downloadVerifiedHelmChart(ctx, opts.Repository, opts.Version, opts.Checksum)
+	if err != nil {
+		return deployer.ApplyOpts{}, nil, err
+	}
+	opts.Repository = archive
+	opts.Version = ""
+	return opts, cleanup, nil
+}
+
 // releaseInstalled reports whether a helm release already exists for the target.
 func (p *SSHProvisioner) releaseInstalled(ctx context.Context, opts deployer.ApplyOpts) (bool, error) {
 	state, err := p.Status(ctx, opts.Release, opts.Namespace)
@@ -1174,12 +1196,15 @@ func applyArgs(opts deployer.ApplyOpts, override string) []string {
 	if timeout == "" {
 		timeout = "10m"
 	}
-	args := []string{"upgrade", "--install", opts.Release, opts.Repository,
-		"--version", opts.Version,
+	args := []string{"upgrade", "--install", opts.Release, opts.Repository}
+	if opts.Version != "" {
+		args = append(args, "--version", opts.Version)
+	}
+	args = append(args,
 		"-n", opts.Namespace,
 		"--create-namespace",
 		"--timeout", timeout,
-	}
+	)
 	if !opts.NoWait {
 		args = append(args, "--wait")
 	}

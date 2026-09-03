@@ -11,8 +11,6 @@ import (
 // Compile-time assertion: SSHProvisioner implements fluxer.Fluxer.
 var _ fluxer.Fluxer = (*SSHProvisioner)(nil)
 
-const fluxInstallScript = "https://fluxcd.io/install.sh"
-
 // EnsureFlux implements fluxer.Fluxer. Installs the flux CLI on the host if
 // absent (the official install script, version-pinned via FLUX_VERSION), then
 // runs `flux install` to apply the Flux components + CRDs into the cluster
@@ -24,7 +22,12 @@ func (p *SSHProvisioner) EnsureFlux(ctx context.Context, version string) error {
 		// (the config stores the release tag "vX.Y.Z"). flux install --version
 		// below takes the tag verbatim (with "v").
 		fluxVer := strings.TrimPrefix(version, "v")
-		if _, err := p.run(ctx, fmt.Sprintf("curl -fsSL %s | sudo FLUX_VERSION=%s bash", fluxInstallScript, shellQuote(fluxVer))); err != nil {
+		installer, err := p.downloadVerifiedRemoteContent(ctx, "flux-installer", fluxInstallScriptURL, fluxInstallScriptSHA256)
+		if err != nil {
+			return fmt.Errorf("install flux cli: %w", err)
+		}
+		defer p.removeRemoteContent(ctx, installer)
+		if _, err := p.run(ctx, fmt.Sprintf("sudo env FLUX_VERSION=%s bash %s", shellQuote(fluxVer), shellQuote(installer))); err != nil {
 			return fmt.Errorf("install flux cli: %w", err)
 		}
 	}

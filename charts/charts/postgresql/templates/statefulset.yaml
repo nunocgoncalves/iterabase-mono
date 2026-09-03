@@ -52,7 +52,7 @@ spec:
         {{- end }}
       containers:
         - name: postgresql
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          image: '{{ .Values.image.repository }}:{{ .Values.image.tag }}@{{ required "image.digest is required" .Values.image.digest }}'
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           {{- if (or .Values.tls.enabled (dig "internalTLS" "enabled" false (.Values.global | default (dict)))) }}
           # The official entrypoint prepends `postgres` when the first arg starts

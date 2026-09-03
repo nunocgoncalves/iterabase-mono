@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-candidate=${1:?usage: check_promotion_destinations.sh CANDIDATE REPOSITORY_OWNER REPOSITORY}
-repository_owner=${2:?usage: check_promotion_destinations.sh CANDIDATE REPOSITORY_OWNER REPOSITORY}
+candidate=${1:?usage: check_promotion_destinations.sh CANDIDATE REPOSITORY_OWNER REPOSITORY MANIFESTS}
+repository_owner=${2:?usage: check_promotion_destinations.sh CANDIDATE REPOSITORY_OWNER REPOSITORY MANIFESTS}
 github_repository=${3:-${GITHUB_REPOSITORY:-}}
+manifests=${4:-}
 docker_bin=${DOCKER_BIN:-docker}
 helm_bin=${HELM_BIN:-helm}
 gh_bin=${GH_BIN:-gh}
@@ -60,49 +61,18 @@ done < <(
   jq -r '.chart_matrix[] | .version as $version | ([.chart] + .companions)[] | [.,$version] | @tsv' "$plan"
 )
 
-release_assets() {
-  local target=$1 version=$2 artifact_types=$3 name chart
-  printf '%s\n' "$candidate/candidate-plan.json" "$candidate/candidate-evidence.json"
-  if jq -e 'index("image")' <<<"$artifact_types" >/dev/null; then
-    while IFS= read -r name; do
-      [[ -n "$name" ]] || continue
-      printf '%s\n' \
-        "$candidate/assets/images/candidate-$name.json" \
-        "$candidate/assets/images/candidate-$name.spdx.json"
-    done < <(jq -r --arg target "$target" '.image_matrix[] | select(.target == $target) | .name' "$plan")
-  fi
-  if jq -e 'index("chart")' <<<"$artifact_types" >/dev/null; then
-    chart=$(jq -r --arg target "$target" '.chart_matrix[] | select(.target == $target) | .chart' "$plan")
-    printf '%s\n' \
-      "$candidate/assets/charts/candidate-chart-$chart.json" \
-      "$candidate/assets/charts/candidate-chart-$chart.spdx.json" \
-      "$candidate/assets/charts/checksums-$chart.txt"
-    while IFS= read -r name; do
-      printf '%s\n' "$candidate/assets/charts/$name-$version.tgz"
-    done < <(
-      jq -r --arg target "$target" \
-        '.chart_matrix[] | select(.target == $target) | [.chart] + .companions | .[]' "$plan"
-    )
-  fi
-  if jq -e 'index("forge")' <<<"$artifact_types" >/dev/null; then
-    find "$candidate/assets/forge" -type f | sort
-  fi
-}
-
-# An existing Release is resumable only when every already-present asset is one
-# of this target's candidate files and has identical bytes. Perform all of these
-# reads before the first image/chart/tag/Release mutation.
 [[ -n "$github_repository" ]] || { echo "GitHub repository is required for Release preflight" >&2; exit 1; }
-while IFS=$'\t' read -r target version tag artifact_types; do
-  expected_assets=()
-  while IFS= read -r asset; do expected_assets+=("$asset"); done \
-    < <(release_assets "$target" "$version" "$artifact_types")
-  for asset in "${expected_assets[@]}"; do
-    [[ -f "$asset" ]] || { echo "missing candidate Release asset $asset" >&2; exit 1; }
-  done
+[[ -d "$manifests" ]] || { echo "complete Release manifests are required for preflight" >&2; exit 1; }
+python3 "$(git rev-parse --show-toplevel)/.github/scripts/release.py" verify-release-manifests \
+  --candidate "$candidate" --directory "$manifests" >/dev/null
 
+# Published Releases are verification-only and must already contain exactly the
+# manifest-complete member set. Unpublished drafts may be replaced atomically by
+# the publication step; no existing draft member is trusted.
+while IFS= read -r manifest; do
+  tag=$(jq -r '.tag' "$manifest")
   set +e
-  release_json=$($gh_bin release view "$tag" --repo "$github_repository" --json tagName,assets 2>&1)
+  release_json=$($gh_bin release view "$tag" --repo "$github_repository" --json tagName,isDraft,assets 2>&1)
   status=$?
   set -e
   if [[ $status -ne 0 ]]; then
@@ -117,28 +87,26 @@ while IFS=$'\t' read -r target version tag artifact_types; do
     echo "GitHub Release $tag resolved to a conflicting tag" >&2
     exit 1
   }
+  [[ $(jq -r '.isDraft' <<<"$release_json") == false ]] || continue
 
-  while IFS= read -r existing_name; do
-    [[ -n "$existing_name" ]] || continue
-    expected_path=
-    for asset in "${expected_assets[@]}"; do
-      if [[ $(basename "$asset") == "$existing_name" ]]; then
-        expected_path=$asset
-        break
-      fi
-    done
-    [[ -n "$expected_path" ]] || {
-      echo "GitHub Release $tag has unexpected conflicting asset $existing_name" >&2
-      exit 1
-    }
+  mapfile -t expected_names < <(jq -r '.assets[].name' "$manifest"; basename "$manifest")
+  mapfile -t actual_names < <(jq -r '.assets[].name' <<<"$release_json" | sort)
+  mapfile -t expected_sorted < <(printf '%s\n' "${expected_names[@]}" | sort)
+  [[ "${actual_names[*]}" == "${expected_sorted[*]}" ]] || {
+    echo "published GitHub Release $tag is not manifest-complete" >&2
+    exit 1
+  }
+  for name in "${expected_names[@]}"; do
+    expected_path="$manifests/$(basename "$manifest")"
+    if [[ "$name" != "$(basename "$manifest")" ]]; then
+      relative=$(jq -r --arg name "$name" '.assets[] | select(.name == $name) | .path' "$manifest")
+      expected_path="$candidate/$relative"
+    fi
     destination=$(mktemp -d)
-    $gh_bin release download "$tag" --repo "$github_repository" \
-      --pattern "$existing_name" --dir "$destination"
-    cmp "$expected_path" "$destination/$existing_name" || {
-      echo "GitHub Release $tag asset $existing_name conflicts with the candidate" >&2
+    $gh_bin release download "$tag" --repo "$github_repository" --pattern "$name" --dir "$destination"
+    cmp "$expected_path" "$destination/$name" || {
+      echo "published GitHub Release $tag asset $name conflicts with the complete manifest" >&2
       exit 1
     }
-  done < <(jq -r '.assets[].name' <<<"$release_json")
-done < <(
-  jq -r '.releases[] | [.target,.version,.production_tag,(.artifact_types | tojson)] | @tsv' "$plan"
-)
+  done
+done < <(find "$manifests" -maxdepth 1 -name 'release-manifest-*.json' -type f | sort)

@@ -1,9 +1,0 @@
-# tool version platform sha256 URL
-helm v4.2.3 linux-amd64 e9b88b4ee95b18c706839c28d3a0220e5bc470e9cd9262410c90793c45ff8b7c https://get.helm.sh/helm-v4.2.3-linux-amd64.tar.gz
-helm v4.2.3 linux-arm64 21abd9354d39b2cd79a8d76be6912cd137a983cbf997193503fb8a6a6e2f2785 https://get.helm.sh/helm-v4.2.3-linux-arm64.tar.gz
-kind v0.24.0 linux-amd64 b89aada5a39d620da3fcd16435b7f28d858927dd53f92cbac77686b0588b600d https://github.com/kubernetes-sigs/kind/releases/download/v0.24.0/kind-linux-amd64
-kind v0.24.0 linux-arm64 2968808d916e12d0a25c56d07c9a1c987163f972513fa8a94a2125a69f9c50eb https://github.com/kubernetes-sigs/kind/releases/download/v0.24.0/kind-linux-arm64
-kubectl v1.31.0 linux-amd64 7c27adc64a84d1c0cc3dcf7bf4b6e916cc00f3f576a2dbac51b318d926032437 https://dl.k8s.io/release/v1.31.0/bin/linux/amd64/kubectl
-kubectl v1.31.0 linux-arm64 f42832db7d77897514639c6df38214a6d8ae1262ee34943364ec1ffaee6c009c https://dl.k8s.io/release/v1.31.0/bin/linux/arm64/kubectl
-kubeconform v0.7.0 linux-amd64 c31518ddd122663b3f3aa874cfe8178cb0988de944f29c74a0b9260920d115d3 https://github.com/yannh/kubeconform/releases/download/v0.7.0/kubeconform-linux-amd64.tar.gz
-kubeconform v0.7.0 linux-arm64 cc907ccf9e3c34523f0f32b69745265e0a6908ca85b92f41931d4537860eb83c https://github.com/yannh/kubeconform/releases/download/v0.7.0/kubeconform-linux-arm64.tar.gz

@@ -133,6 +133,11 @@ class E2EPlanTests(unittest.TestCase):
                 else:
                     self.assertGreater(plan["scenario_total"], 0)
 
+    def test_ambiguous_unknown_and_noncanonical_paths_fail_closed(self) -> None:
+        for paths in ([], ["unknown/runtime.input"], ["../outside"], ["./docs/ci.md"]):
+            with self.subTest(paths=paths), self.assertRaises(E2EError):
+                self.plan(paths)
+
     def test_deletion_and_move_changes_keep_both_owners(self) -> None:
         moved = self.plan(
             [
@@ -586,6 +591,40 @@ class ResultReconciliationTests(unittest.TestCase):
             plan, results, _ = self.fixture(Path(value))
             validate_results(plan, results)
 
+    def test_aggregate_rejects_missing_malformed_and_inconsistent_plan_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as value:
+            plan_path, results, _ = self.fixture(Path(value))
+            plan = json.loads(plan_path.read_text())
+            outputs = {
+                "artifact_build_matrix": json.dumps(plan["artifact_build_matrix"], sort_keys=True, separators=(",", ":")),
+                "scenario_matrix": json.dumps(plan["scenario_matrix"], sort_keys=True, separators=(",", ":")),
+                "kind_matrix": "[]",
+                "real_machine_matrix": json.dumps(plan["real_machine_matrix"], sort_keys=True, separators=(",", ":")),
+                "has_artifacts": str(bool(plan["artifact_build_matrix"])).lower(),
+                "has_scenarios": "true",
+                "has_kind": "false",
+                "has_real_machine": "true",
+                "scenario_total": str(plan["scenario_total"]),
+            }
+            needs = {
+                "plan": {"result": "success", "outputs": outputs},
+                "runtime-contract": {"result": "success"},
+                "artifacts": {"result": "success" if plan["artifact_build_matrix"] else "skipped"},
+                "kind": {"result": "skipped"},
+                "real-machine": {"result": "success"},
+            }
+            validate_results(plan_path, results, needs)
+            for mutation in ("missing", "matrix", "status"):
+                broken = copy.deepcopy(needs)
+                if mutation == "missing":
+                    del broken["plan"]["outputs"]["has_kind"]
+                elif mutation == "matrix":
+                    broken["plan"]["outputs"]["real_machine_matrix"] = "[]"
+                else:
+                    broken["kind"]["result"] = "success"
+                with self.subTest(mutation=mutation), self.assertRaises(E2EError):
+                    validate_results(plan_path, results, broken)
+
     def test_result_must_match_retained_runtime_artifact_identities(self) -> None:
         for field in ("reference", "digest", "config_digest", "checksum"):
             with self.subTest(field=field), tempfile.TemporaryDirectory() as value:
@@ -692,7 +731,7 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("github.event.pull_request.head.sha", e2e)
         self.assertIn("git rev-parse HEAD", e2e)
         self.assertIn("--intent pr", e2e)
-        self.assertIn("--paths-file /tmp/changed-paths", e2e)
+        self.assertIn("--selection-file /tmp/changed-path-selection.json", e2e)
         self.assertIn("group: iterabase-permanent-fixture-${{ matrix.capacity }}", e2e)
         self.assertIn("cancel-in-progress: false", e2e)
         self.assertNotIn("schedule:", e2e)

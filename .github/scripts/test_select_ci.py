@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 import subprocess
 import tempfile
 import unittest
 
 from collect_changed_paths import collect_changed_paths
-from select_ci import OUTPUTS, selection
+from select_ci import OUTPUTS, selection, validate_needs
 
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = ROOT / ".github/ci/path-selection-fixtures.json"
@@ -49,6 +48,50 @@ class StaticCIPathSelectionTests(unittest.TestCase):
                 else:
                     self.assertTrue(all(result[name] for name in OUTPUTS))
 
+    def test_only_explicit_nonempty_docs_input_can_be_zero_work(self) -> None:
+        self.assertEqual("docs-only", selection(["docs/ci.md"])["classification"])
+        self.assertEqual("release-only", selection(["release/targets.json"])["classification"])
+        for paths in ([], ["unknown/runtime.input"], ["../outside"], ["./docs/ci.md"]):
+            with self.subTest(paths=paths), self.assertRaises(ValueError):
+                selection(paths)
+
+    def test_required_gate_rejects_missing_outputs_malformed_matrix_and_status_drift(self) -> None:
+        selected = selection(["control-plane/internal/api/server.go"])
+        outputs = {
+            name: str(bool(selected[name])).lower() for name in OUTPUTS
+        }
+        outputs.update(
+            {
+                "image_matrix": json.dumps(selected["image_matrix"], separators=(",", ":")),
+                "classification": selected["classification"],
+                "selection": json.dumps(selected, sort_keys=True, separators=(",", ":")),
+            }
+        )
+        jobs = {
+            "control-plane": True,
+            "ui": False,
+            "harness": False,
+            "tool-runner": False,
+            "proto": False,
+            "inference-gateway": False,
+            "forge": False,
+            "charts": False,
+            "images": True,
+        }
+        needs = {"changes": {"result": "success", "outputs": outputs}}
+        needs.update({name: {"result": "success" if value else "skipped"} for name, value in jobs.items()})
+        validate_needs(selected, needs)
+        for mutation in ("missing", "matrix", "status"):
+            broken = json.loads(json.dumps(needs))
+            if mutation == "missing":
+                del broken["changes"]["outputs"]["forge_real_e2e"]
+            elif mutation == "matrix":
+                broken["changes"]["outputs"]["image_matrix"] = "not-json"
+            else:
+                broken["ui"]["result"] = "success"
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                validate_needs(selected, broken)
+
 
 class ChangedPathCollectionTests(unittest.TestCase):
     def git(self, repo: Path, *args: str) -> str:
@@ -72,6 +115,24 @@ class ChangedPathCollectionTests(unittest.TestCase):
         self.git(repo, "add", "-A")
         self.git(repo, "commit", "--quiet", "-m", "base")
         return repo, self.git(repo, "rev-parse", "HEAD")
+
+    def test_invalid_event_sha_and_ambiguous_empty_diff_fail(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repo, head = self.create_repo(directory)
+            for event, base, source in (
+                ("unknown", head, head),
+                ("pull_request", "short", head),
+                ("pull_request", head, "short"),
+            ):
+                with self.subTest(event=event, base=base, source=source), self.assertRaises((ValueError, subprocess.CalledProcessError)):
+                    collect_changed_paths(repo, event, base, source)
+            # Equal commits produce a typed empty diff; the selector, not the
+            # collector, rejects that ambiguity rather than calling it docs-only.
+            select_all, paths = collect_changed_paths(repo, "push", head, head)
+            self.assertFalse(select_all)
+            self.assertEqual([], paths)
+            with self.assertRaises(ValueError):
+                selection(paths)
 
     def test_deletion_only_change_retains_source_owner(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -171,75 +232,15 @@ class WorkflowContractTests(unittest.TestCase):
             (ROOT / ".github/ci/nightly-selection-fixture.json").exists()
         )
 
-    def test_helm_repository_acquisition_is_build_only_and_bounded(self) -> None:
-        e2e_workflow = (ROOT / ".github/workflows/e2e.yml").read_text()
-        candidate_workflow = (
-            ROOT / ".github/workflows/release-candidate.yml"
-        ).read_text()
-        self.assertEqual(1, e2e_workflow.count(".github/scripts/add_helm_repositories.sh"))
-        self.assertEqual(2, candidate_workflow.count(".github/scripts/add_helm_repositories.sh"))
-
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            fake_bin = root / "bin"
-            fake_bin.mkdir()
-            (fake_bin / "helm").write_text(
-                """#!/usr/bin/env bash
-set -euo pipefail
-name=$3
-count_file="$HELM_TEST_ROOT/$name"
-count=0
-test ! -f "$count_file" || count=$(cat "$count_file")
-count=$((count + 1))
-printf '%s\\n' "$count" > "$count_file"
-if [[ "$name" == "$HELM_TEST_FAIL_REPO" && "$count" -lt "$HELM_TEST_SUCCEED_AT" ]]; then
-  exit 1
-fi
-""",
-                encoding="utf-8",
-            )
-            (fake_bin / "sleep").write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
-            (fake_bin / "helm").chmod(0o755)
-            (fake_bin / "sleep").chmod(0o755)
-            env = dict(os.environ)
-            env.update(
-                {
-                    "PATH": f"{fake_bin}:{env['PATH']}",
-                    "HELM_TEST_ROOT": str(root),
-                    "HELM_TEST_FAIL_REPO": "prometheus-community",
-                    "HELM_TEST_SUCCEED_AT": "2",
-                    "HELM_REPOSITORY_ATTEMPTS": "3",
-                }
-            )
-            subprocess.run(
-                ["bash", ".github/scripts/add_helm_repositories.sh"],
-                cwd=ROOT,
-                env=env,
-                check=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
-            self.assertEqual("2", (root / "prometheus-community").read_text().strip())
-            self.assertEqual("1", (root / "grafana").read_text().strip())
-
-            for count_file in root.glob("*"):
-                if count_file.is_file():
-                    count_file.unlink()
-            env["HELM_TEST_FAIL_REPO"] = "ingress-nginx"
-            env["HELM_TEST_SUCCEED_AT"] = "99"
-            failed = subprocess.run(
-                ["bash", ".github/scripts/add_helm_repositories.sh"],
-                cwd=ROOT,
-                env=env,
-                check=False,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
-            self.assertNotEqual(0, failed.returncode)
-            self.assertEqual("3", (root / "ingress-nginx").read_text().strip())
-            self.assertIn("failed after 3 attempts", failed.stderr)
+    def test_helm_inputs_use_exact_archive_authority_without_repository_indexes(self) -> None:
+        helper = (ROOT / ".github/scripts/add_helm_repositories.sh").read_text()
+        builder = (ROOT / "charts/scripts/build-chart-dependency.sh").read_text()
+        manifest = json.loads((ROOT / ".github/inputs/remote-content.json").read_text())
+        self.assertNotIn("helm repo add", helper)
+        self.assertIn("remote_content.py", helper)
+        self.assertIn("remote_content.py", builder)
+        self.assertGreaterEqual(len(manifest["helm_charts"]), 9)
+        self.assertTrue(all(len(item["sha256"]) == 64 for item in manifest["helm_charts"]))
 
     def test_harness_isolation_static_gate_remains_required(self) -> None:
         root_makefile = (ROOT / "Makefile").read_text()

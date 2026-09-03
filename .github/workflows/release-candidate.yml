@@ -36,6 +36,7 @@ env:
     control-plane/test/e2e/go.mod
     charts/test/e2e/go.mod
     charts/test/e2e/go.sum
+    .github/tools/go.sum
 
 jobs:
   preflight:
@@ -114,7 +115,9 @@ jobs:
         run: |
           python3 .github/scripts/test_e2e.py
           python3 .github/scripts/test_release.py
+          python3 .github/scripts/test_remote_content.py
           python3 .github/scripts/release.py validate
+          python3 .github/scripts/remote_content.py validate
           python3 .github/scripts/release.py plan \
             --targets "$REQUESTED_TARGETS" \
             --master-sha "$REQUESTED_SHA" \
@@ -189,8 +192,8 @@ jobs:
           go-version: 1.25.12
           cache-dependency-path: ${{ env.GO_CACHE_DEPENDENCIES }}
           cache-scope: candidate-inference-gateway
-      - run: go install golang.org/x/tools/cmd/goimports@v0.48.0
-      - run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
+      - run: .github/scripts/install_go_tool.sh goimports
+      - run: .github/scripts/install_go_tool.sh golangci-lint
       - run: make fmt-check lint build test
         working-directory: inference-gateway
 
@@ -209,7 +212,7 @@ jobs:
           cache-scope: candidate-forge
       - run: make fmt-check test test-e2e-unit
         working-directory: forge
-      - run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
+      - run: .github/scripts/install_go_tool.sh golangci-lint
       - run: make lint
         working-directory: forge
 
@@ -559,6 +562,11 @@ jobs:
           cache-dependency-path: ${{ env.GO_CACHE_DEPENDENCIES }}
           cache-scope: candidate-real-${{ matrix.capacity }}
       - uses: ./.github/actions/setup-kubernetes-tools
+      - name: Authorize the founder-only fixture trust boundary
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEAD_REPOSITORY: ${{ github.repository }}
+        run: .github/scripts/verify_fixture_trust.sh
       - name: Bind the fixed permanent fixture
         uses: ./.github/actions/setup-permanent-fixture
         with:

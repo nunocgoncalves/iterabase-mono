@@ -27,12 +27,27 @@ import (
 )
 
 const (
-	gpuUpgradeBaselineDriver  = "580.126.20"
-	gpuUpgradeCandidateDriver = "595.71.05"
-	gpuUpgradeNamespace       = "forge-gpu-upgrade"
-	gpuUpgradeWorkloadName    = "gpu-driver-upgrade-workload"
-	gpuUpgradeReadyPrefix     = "gpu-upgrade-ready "
+	gpuUpgradeBaselineDriver        = "580.126.20"
+	gpuUpgradeBaselineDriverSHA256  = "16b9830998d2f2795fe72e760169b51bd4185e3b412ea3d0c4e46f453af2cc30"
+	gpuUpgradeCandidateDriver       = "595.71.05"
+	gpuUpgradeCandidateDriverSHA256 = "d8c38c473375d7262e36ad100dc0732859592a5ff65b238e41057e1dc0763098"
+	gpuUpgradeNamespace             = "forge-gpu-upgrade"
+	gpuUpgradeWorkloadName          = "gpu-driver-upgrade-workload"
+	gpuUpgradeReadyPrefix           = "gpu-upgrade-ready "
 )
+
+func e2eGPUDriverSHA256(t *testing.T, version string) string {
+	t.Helper()
+	switch version {
+	case gpuUpgradeBaselineDriver:
+		return gpuUpgradeBaselineDriverSHA256
+	case gpuUpgradeCandidateDriver:
+		return gpuUpgradeCandidateDriverSHA256
+	default:
+		t.Fatalf("GPU driver %q has no reviewed Ubuntu 24.04 image digest", version)
+		return ""
+	}
+}
 
 type gpuUpgradeEvidence struct {
 	PodUID          types.UID
@@ -193,7 +208,7 @@ func gpuUpgradeDeployment(runID string) *appsv1.Deployment {
 					TerminationGracePeriodSeconds: &gracePeriod,
 					Containers: []corev1.Container{{
 						Name:  "inference",
-						Image: "nvidia/cuda:12.4.1-base-ubuntu22.04",
+						Image: "nvidia/cuda:12.4.1-base-ubuntu22.04@sha256:0f6bfcbf267e65123bcc2287e2153dedfc0f24772fb5ce84afe16ac4b2fada95",
 						Command: []string{"sh", "-ceu", `
 if [ ! -s /cache/owner ]; then
   printf '%s' "$POD_UID" > /cache/owner
@@ -459,6 +474,7 @@ func readGPUUpgradePolicyReadiness(policy *unstructured.Unstructured, expectedDr
 	if err != nil {
 		return readiness, fmt.Errorf("read spec.driver.version: %w", err)
 	}
+	readiness.DriverVersion, _, _ = strings.Cut(readiness.DriverVersion, "@sha256:")
 	conditions, found, err := unstructured.NestedSlice(policy.Object, "status", "conditions")
 	if err != nil {
 		return readiness, fmt.Errorf("read status.conditions: %w", err)

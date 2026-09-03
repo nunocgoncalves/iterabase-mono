@@ -32,6 +32,7 @@ const (
 var (
 	nameRe               = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
 	workspacePartitionRe = regexp.MustCompile(`-part[0-9]+$`)
+	contentSHA256Re      = regexp.MustCompile(`^[0-9a-f]{64}$`)
 )
 
 // Cluster is the top-level forge.yaml document.
@@ -264,13 +265,14 @@ type GPU struct {
 
 // GPUDriver is the NVIDIA driver the gpu-operator installs and loads as a host
 // kernel module. It is a node-readiness / substrate concern, on the same
-// footing as the operator chart pointer — NOT an overlay chart value. An empty
-// Version means the operator chart's own default driver is used (no
-// driver.version Helm --set emitted); setting it pins the driver version for
-// reproducibility across chart bumps and intentional driver moves. v1: the
-// operator compiles and loads the driver on the host; forge just sets the value.
+// footing as the operator chart pointer — NOT an overlay chart value. Version
+// and SHA256 are both required when GPU is enabled so the operator receives an
+// immutable tag-plus-digest image identity rather than resolving a mutable tag.
+// v1: the operator compiles and loads the driver on the host; forge sets the
+// reviewed content identity.
 type GPUDriver struct {
-	Version string `yaml:"version"` // NVIDIA driver version (e.g. 570.186); empty => chart default
+	Version string `yaml:"version"` // NVIDIA driver version reported by the loaded module (e.g. 580.126.20)
+	SHA256  string `yaml:"sha256"`  // exact resolved driver-container image digest
 }
 
 // GPUOperator is the NVIDIA GPU Operator Helm release pointer. Defaults are
@@ -282,6 +284,7 @@ type GPUOperator struct {
 	Chart      string `yaml:"chart"`      // chart name in the repo; default gpu-operator
 	Release    string `yaml:"release"`    // helm release name (default: <metadata.name>-gpu-operator)
 	Namespace  string `yaml:"namespace"`  // target namespace (default: gpu-operator)
+	SHA256     string `yaml:"sha256"`     // exact chart archive content identity
 }
 
 const (
@@ -289,6 +292,7 @@ const (
 	defaultGPUOperatorRepository = "https://helm.ngc.nvidia.com/nvidia"
 	defaultGPUOperatorChart      = "gpu-operator"
 	defaultGPUOperatorNamespace  = "gpu-operator"
+	defaultGPUOperatorSHA256     = "59abb5852a24b3ae0ef757bfea3051f419acbf559ee5efd72f0672d28af56a68"
 )
 
 // applyDefaults fills the GPU operator release pointer defaults when GPU is
@@ -312,24 +316,38 @@ func (g *GPU) applyDefaults(install string) {
 	if g.Operator.Namespace == "" {
 		g.Operator.Namespace = defaultGPUOperatorNamespace
 	}
+	if g.Operator.SHA256 == "" && g.Operator.Version == defaultGPUOperatorVersion &&
+		g.Operator.Repository == defaultGPUOperatorRepository && g.Operator.Chart == defaultGPUOperatorChart {
+		g.Operator.SHA256 = defaultGPUOperatorSHA256
+	}
 }
 
 // validate enforces v1 constraints on the GPU configuration. GPU readiness
 // supports single-node only in v1 (HA is already refused by mode validation;
 // this guard makes the intent explicit and keeps GPU enablement honest).
 //
-// A non-empty driver version with gpu.enabled: false is rejected: the pin is
+// A non-empty driver identity with gpu.enabled: false is rejected: the pin is
 // inert when GPU is disabled (no operator runs to materialize it), so keeping
-// it would be silently ignored config. Clear gpu.driver.version or enable gpu.
+// it would be silently ignored config. GPU enablement requires both the
+// operator chart archive checksum and the driver container digest.
 func (g GPU) validate(mode string) error {
 	if !g.Enabled {
-		if g.Driver.Version != "" {
-			return fmt.Errorf("gpu.driver.version %q is set but gpu.enabled is false — clear gpu.driver.version or enable gpu", g.Driver.Version)
+		if g.Driver.Version != "" || g.Driver.SHA256 != "" {
+			return fmt.Errorf("gpu.driver identity is set but gpu.enabled is false — clear gpu.driver or enable gpu")
 		}
 		return nil
 	}
 	if mode != ModeSingleNode {
 		return fmt.Errorf("gpu.enabled requires mode %q in v1, got %q", ModeSingleNode, mode)
+	}
+	if !contentSHA256Re.MatchString(g.Operator.SHA256) {
+		return fmt.Errorf("gpu.operator.sha256 must be the exact lowercase chart archive SHA-256")
+	}
+	if strings.TrimSpace(g.Driver.Version) == "" {
+		return fmt.Errorf("gpu.driver.version is required for immutable driver identity")
+	}
+	if !contentSHA256Re.MatchString(g.Driver.SHA256) {
+		return fmt.Errorf("gpu.driver.sha256 must be the exact lowercase driver image SHA-256")
 	}
 	return nil
 }

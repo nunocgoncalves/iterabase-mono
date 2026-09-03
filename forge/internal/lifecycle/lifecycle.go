@@ -650,6 +650,7 @@ func applyGPU(ctx context.Context, cfg *config.Cluster, p provisioner.Provisione
 		Release:    g.Release,
 		Repository: chartRef,
 		Version:    g.Version,
+		Checksum:   g.SHA256,
 		Namespace:  g.Namespace,
 		Values:     gpuOperatorValues(cfg.Spec.GPU),
 	}); err != nil {
@@ -726,11 +727,10 @@ func waitForGPU(ctx context.Context, p provisioner.Provisioner, requestedDriverV
 // PR #2545 also improves node-rebuild relabeling, but is not the basis for the
 // fresh-NodeFeature failure mode or this periodic safety net.
 //
-// The driver version is pinned only when the operator set spec.gpu.driver.version
-// (a node-readiness substrate field). An empty version means the gpu-operator
-// chart's own default driver is used — no driver.version --set is emitted — so
-// operators who do not care follow the chart, while a pinned version makes the
-// host driver reproducible across chart bumps and intentional driver moves.
+// The validated driver identity binds both the reported module version and the
+// exact driver-container digest. GPU Operator accepts tag-plus-digest in its
+// version field and therefore does not append a mutable OS tag; readiness
+// normalizes the digest suffix while retaining the requested module version.
 //
 // k3s containerd: the operator does not auto-detect k3s, so the toolkit must be
 // pointed at k3s's containerd config + socket via toolkit.env (the operator
@@ -765,9 +765,16 @@ func waitForGPU(ctx context.Context, p provisioner.Provisioner, requestedDriverV
 // inference pods, discards their ephemeral state, and forces a model reload;
 // there is no zero-downtime driver upgrade on a single-node cluster (a non-goal).
 const (
-	gpuNFDImageRepository    = "registry.k8s.io/nfd/node-feature-discovery"
-	gpuNFDImageTag           = "v0.19.0"
-	gpuNFDMasterResyncPeriod = "30s"
+	gpuOperatorImageVersion      = "v26.3.3@sha256:6584c36f153d18cfce284f7e5bc477887ce3c1ac566dc795bd80c9af6c6488f7"
+	gpuValidatorImageVersion     = gpuOperatorImageVersion
+	gpuDriverManagerImageVersion = "v0.11.0@sha256:8aec215a8b159b0162b55e688065efd58ebfa848ebc999c1797221686ff1243d"
+	gpuToolkitImageVersion       = "v1.19.1@sha256:c927adbc9b7755c5cb90022fdcc5c1295f5fe5fe1f38200a2dc65e85632b029c"
+	gpuDevicePluginImageVersion  = "v0.19.3@sha256:25cc340fe6fd53c101e16fc452f503e7a92c219c64a80ed5381784b522dbbf77"
+	gpuDCGMExporterImageVersion  = "4.5.3-4.8.2-distroless@sha256:60d3b00ac80b4ae77f94dae2f943685605585ad9e92fdccda3154d009ae317cc"
+	gpuMIGManagerImageVersion    = "v0.14.2@sha256:313586bfa5c07601a83f310dd700db0007d489df2ad42bb52c611802cbb7a278"
+	gpuNFDImageRepository        = "registry.k8s.io/nfd/node-feature-discovery"
+	gpuNFDImageTag               = "v0.19.0@sha256:2fa1c99ad09bdf2c8ad97706a4ad2fd548c84d5ecd70ba32a6152c667b96c4d2"
+	gpuNFDMasterResyncPeriod     = "30s"
 )
 
 func gpuOperatorValues(g config.GPU) []string {
@@ -777,6 +784,14 @@ func gpuOperatorValues(g config.GPU) []string {
 		"toolkit.enabled=true",
 		"devicePlugin.enabled=true",
 		"gfd.enabled=true",
+		"operator.version=" + gpuOperatorImageVersion,
+		"validator.version=" + gpuValidatorImageVersion,
+		"driver.manager.version=" + gpuDriverManagerImageVersion,
+		"toolkit.version=" + gpuToolkitImageVersion,
+		"devicePlugin.version=" + gpuDevicePluginImageVersion,
+		"dcgmExporter.version=" + gpuDCGMExporterImageVersion,
+		"gfd.version=" + gpuDevicePluginImageVersion,
+		"migManager.version=" + gpuMIGManagerImageVersion,
 		"node-feature-discovery.image.repository=" + gpuNFDImageRepository,
 		"node-feature-discovery.image.tag=" + gpuNFDImageTag,
 		"node-feature-discovery.master.resyncPeriod=" + gpuNFDMasterResyncPeriod,
@@ -792,7 +807,11 @@ func gpuOperatorValues(g config.GPU) []string {
 		"driver.upgradePolicy.drain.enable=false",
 	}
 	if v := strings.TrimSpace(g.Driver.Version); v != "" {
-		values = append(values, "driver.version="+v)
+		identity := v
+		if checksum := strings.TrimSpace(g.Driver.SHA256); checksum != "" {
+			identity += "@sha256:" + checksum
+		}
+		values = append(values, "driver.version="+identity)
 	}
 	return values
 }

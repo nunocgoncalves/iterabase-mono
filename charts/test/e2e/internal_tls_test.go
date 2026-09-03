@@ -184,7 +184,7 @@ spec:
   restartPolicy: Never
   containers:
     - name: probe
-      image: redis:7-alpine
+      image: redis:7-alpine@sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf
       env:
         - name: REDIS_PASSWORD
           valueFrom:
@@ -227,7 +227,7 @@ spec:
   restartPolicy: Never
   containers:
     - name: probe
-      image: postgres:16-alpine
+      image: postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
       env:
         - name: PGPASSWORD
           valueFrom:

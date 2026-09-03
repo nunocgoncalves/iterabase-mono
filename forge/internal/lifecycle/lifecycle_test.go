@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -325,6 +326,7 @@ func TestUpgrade_NotInstalled(t *testing.T) {
 
 type applyCall struct {
 	release, repository, version, namespace string
+	checksum                                string
 	values, valueFiles                      []string
 	noWait                                  bool
 	timeout                                 string
@@ -364,7 +366,7 @@ type fakeDeployer struct {
 func (f *fakeDeployer) Apply(_ context.Context, opts deployer.ApplyOpts) error {
 	f.applyCalls = append(f.applyCalls, applyCall{
 		release: opts.Release, repository: opts.Repository,
-		version: opts.Version, namespace: opts.Namespace,
+		version: opts.Version, namespace: opts.Namespace, checksum: opts.Checksum,
 		values: opts.Values, valueFiles: opts.ValueFiles, noWait: opts.NoWait, timeout: opts.Timeout,
 	})
 	f.order = append(f.order, "apply")
@@ -721,15 +723,21 @@ func TestDestroyWithOptions_StopsBeforeRebootOnPurgeFailure(t *testing.T) {
 	}, p.destroyCalls)
 }
 
+const defaultGPUOperatorChecksumForTest = "59abb5852a24b3ae0ef757bfea3051f419acbf559ee5efd72f0672d28af56a68"
+
 func testConfigWithGPU() *config.Cluster {
 	c := testConfigWithChart()
-	c.Spec.GPU = config.GPU{Enabled: true}
+	c.Spec.GPU = config.GPU{
+		Enabled: true,
+		Driver:  config.GPUDriver{Version: "580.126.20", SHA256: strings.Repeat("b", 64)},
+	}
 	c.Spec.GPU.Operator = config.GPUOperator{
 		Version:    "v26.3.3",
 		Repository: "https://helm.ngc.nvidia.com/nvidia",
 		Chart:      "gpu-operator",
 		Release:    "opo1-gpu-operator",
 		Namespace:  "gpu-operator",
+		SHA256:     defaultGPUOperatorChecksumForTest,
 	}
 	return c
 }
@@ -748,6 +756,7 @@ func TestPlan_GPUEnabled(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, plan.GPUEnabled)
 	assert.Equal(t, "v26.3.3", plan.GPUOperatorVersion)
+	assert.Equal(t, "580.126.20", plan.GPUDriverVersion)
 	assert.Equal(t, ActionInstall, plan.Action)
 }
 
@@ -789,6 +798,7 @@ func TestApply_GPU(t *testing.T) {
 	assert.Equal(t, "opo1-gpu-operator", op.release)
 	assert.Equal(t, "nvidia/gpu-operator", op.repository)
 	assert.Equal(t, "v26.3.3", op.version)
+	assert.Equal(t, defaultGPUOperatorChecksumForTest, op.checksum)
 	assert.Equal(t, "gpu-operator", op.namespace)
 	assert.Equal(t, []string{
 		"cdi.enabled=true",
@@ -796,8 +806,16 @@ func TestApply_GPU(t *testing.T) {
 		"toolkit.enabled=true",
 		"devicePlugin.enabled=true",
 		"gfd.enabled=true",
+		"operator.version=v26.3.3@sha256:6584c36f153d18cfce284f7e5bc477887ce3c1ac566dc795bd80c9af6c6488f7",
+		"validator.version=v26.3.3@sha256:6584c36f153d18cfce284f7e5bc477887ce3c1ac566dc795bd80c9af6c6488f7",
+		"driver.manager.version=v0.11.0@sha256:8aec215a8b159b0162b55e688065efd58ebfa848ebc999c1797221686ff1243d",
+		"toolkit.version=v1.19.1@sha256:c927adbc9b7755c5cb90022fdcc5c1295f5fe5fe1f38200a2dc65e85632b029c",
+		"devicePlugin.version=v0.19.3@sha256:25cc340fe6fd53c101e16fc452f503e7a92c219c64a80ed5381784b522dbbf77",
+		"dcgmExporter.version=4.5.3-4.8.2-distroless@sha256:60d3b00ac80b4ae77f94dae2f943685605585ad9e92fdccda3154d009ae317cc",
+		"gfd.version=v0.19.3@sha256:25cc340fe6fd53c101e16fc452f503e7a92c219c64a80ed5381784b522dbbf77",
+		"migManager.version=v0.14.2@sha256:313586bfa5c07601a83f310dd700db0007d489df2ad42bb52c611802cbb7a278",
 		"node-feature-discovery.image.repository=registry.k8s.io/nfd/node-feature-discovery",
-		"node-feature-discovery.image.tag=v0.19.0",
+		"node-feature-discovery.image.tag=v0.19.0@sha256:2fa1c99ad09bdf2c8ad97706a4ad2fd548c84d5ecd70ba32a6152c667b96c4d2",
 		"node-feature-discovery.master.resyncPeriod=30s",
 		"toolkit.env[0].name=CONTAINERD_CONFIG",
 		"toolkit.env[0].value=/var/lib/rancher/k3s/agent/etc/containerd/config.toml",
@@ -807,7 +825,9 @@ func TestApply_GPU(t *testing.T) {
 		"toolkit.env[2].value=nvidia",
 		"driver.upgradePolicy.gpuPodDeletion.deleteEmptyDir=true",
 		"driver.upgradePolicy.drain.enable=false",
+		"driver.version=580.126.20@sha256:" + strings.Repeat("b", 64),
 	}, op.values)
+	assert.Equal(t, "580.126.20", res.GPUDriverVersion)
 	assert.Equal(t, "opo1", chart.release)
 	assert.Equal(t, "0.3.0", chart.version)
 	assert.Equal(t, 1, p.ensureDepsCalls) // build deps ensured once
@@ -819,39 +839,9 @@ func TestApply_GPU(t *testing.T) {
 	assert.True(t, res.ChartApplied)
 }
 
-func TestApply_GPU_EmptyDriverOmitsSet(t *testing.T) {
-	// Empty driver version => no driver.version Helm --set emitted (chart default).
-	// Mirrors the existing TestApply_GPU values assertion but asserts the plan/result
-	// fields are empty too.
-	p := &fakeProv{pf: gpuReadyPf()}
-	plan, err := Plan(context.Background(), testConfigWithGPU(), p)
-	require.NoError(t, err)
-	assert.Empty(t, plan.GPUDriverVersion)
-
-	useTempHome(t)
-	p = &fakeProv{
-		pf:                gpuReadyPf(),
-		kubeconfig:        []byte(minKubeconfig),
-		readyAfterInstall: true,
-		gpuReady:          true,
-	}
-	d := &fakeDeployer{}
-	res, err := Apply(context.Background(), testConfigWithGPU(), p, d, nil, &fakeFluxer{}, ApplyOpts{
-		ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
-		GPUReadyTimeout: 1 * time.Second, GPUReadyInterval: 10 * time.Millisecond,
-	})
-	require.NoError(t, err)
-	require.Len(t, d.applyCalls, 3)
-	op := d.applyCalls[0]
-	for _, v := range op.values {
-		assert.NotContains(t, v, "driver.version")
-	}
-	assert.Empty(t, res.GPUDriverVersion)
-}
-
 func TestApply_GPU_PinnedDriverEmitsSet(t *testing.T) {
 	cfg := testConfigWithGPU()
-	cfg.Spec.GPU.Driver = config.GPUDriver{Version: "570.186"}
+	cfg.Spec.GPU.Driver = config.GPUDriver{Version: "570.186", SHA256: strings.Repeat("a", 64)}
 
 	p := &fakeProv{pf: gpuReadyPf()}
 	plan, err := Plan(context.Background(), cfg, p)
@@ -873,7 +863,7 @@ func TestApply_GPU_PinnedDriverEmitsSet(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, d.applyCalls, 3)
 	op := d.applyCalls[0]
-	assert.Contains(t, op.values, "driver.version=570.186")
+	assert.Contains(t, op.values, "driver.version=570.186@sha256:"+strings.Repeat("a", 64))
 	// ordering / other values unchanged — driver.version appended after the base set.
 	assert.Equal(t, []string{
 		"cdi.enabled=true",
@@ -881,8 +871,16 @@ func TestApply_GPU_PinnedDriverEmitsSet(t *testing.T) {
 		"toolkit.enabled=true",
 		"devicePlugin.enabled=true",
 		"gfd.enabled=true",
+		"operator.version=v26.3.3@sha256:6584c36f153d18cfce284f7e5bc477887ce3c1ac566dc795bd80c9af6c6488f7",
+		"validator.version=v26.3.3@sha256:6584c36f153d18cfce284f7e5bc477887ce3c1ac566dc795bd80c9af6c6488f7",
+		"driver.manager.version=v0.11.0@sha256:8aec215a8b159b0162b55e688065efd58ebfa848ebc999c1797221686ff1243d",
+		"toolkit.version=v1.19.1@sha256:c927adbc9b7755c5cb90022fdcc5c1295f5fe5fe1f38200a2dc65e85632b029c",
+		"devicePlugin.version=v0.19.3@sha256:25cc340fe6fd53c101e16fc452f503e7a92c219c64a80ed5381784b522dbbf77",
+		"dcgmExporter.version=4.5.3-4.8.2-distroless@sha256:60d3b00ac80b4ae77f94dae2f943685605585ad9e92fdccda3154d009ae317cc",
+		"gfd.version=v0.19.3@sha256:25cc340fe6fd53c101e16fc452f503e7a92c219c64a80ed5381784b522dbbf77",
+		"migManager.version=v0.14.2@sha256:313586bfa5c07601a83f310dd700db0007d489df2ad42bb52c611802cbb7a278",
 		"node-feature-discovery.image.repository=registry.k8s.io/nfd/node-feature-discovery",
-		"node-feature-discovery.image.tag=v0.19.0",
+		"node-feature-discovery.image.tag=v0.19.0@sha256:2fa1c99ad09bdf2c8ad97706a4ad2fd548c84d5ecd70ba32a6152c667b96c4d2",
 		"node-feature-discovery.master.resyncPeriod=30s",
 		"toolkit.env[0].name=CONTAINERD_CONFIG",
 		"toolkit.env[0].value=/var/lib/rancher/k3s/agent/etc/containerd/config.toml",
@@ -892,7 +890,7 @@ func TestApply_GPU_PinnedDriverEmitsSet(t *testing.T) {
 		"toolkit.env[2].value=nvidia",
 		"driver.upgradePolicy.gpuPodDeletion.deleteEmptyDir=true",
 		"driver.upgradePolicy.drain.enable=false",
-		"driver.version=570.186",
+		"driver.version=570.186@sha256:" + strings.Repeat("a", 64),
 	}, op.values)
 	assert.Equal(t, "570.186", res.GPUDriverVersion)
 	require.NotEmpty(t, p.gpuDriverRequests)
@@ -949,8 +947,8 @@ func TestApply_SkipGPU(t *testing.T) {
 	// Skipped phase does not claim the operator ran.
 	assert.False(t, res.GPUOperatorApplied)
 	assert.False(t, res.GPUReady)
-	// No pin configured => result stays empty (apply report shows chart default).
-	assert.Empty(t, res.GPUDriverVersion)
+	// Skipping reconciliation still reports the configured immutable driver identity.
+	assert.Equal(t, "580.126.20", res.GPUDriverVersion)
 }
 
 func TestApply_SkipGPU_SurfacesConfiguredPin(t *testing.T) {
@@ -960,7 +958,7 @@ func TestApply_SkipGPU_SurfacesConfiguredPin(t *testing.T) {
 	// reconciliation ran.
 	useTempHome(t)
 	cfg := testConfigWithGPU()
-	cfg.Spec.GPU.Driver = config.GPUDriver{Version: "570.186"}
+	cfg.Spec.GPU.Driver = config.GPUDriver{Version: "570.186", SHA256: strings.Repeat("a", 64)}
 	p := &fakeProv{
 		pf:                gpuReadyPf(),
 		kubeconfig:        []byte(minKubeconfig),
