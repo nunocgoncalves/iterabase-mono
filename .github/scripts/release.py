@@ -64,16 +64,6 @@ def catalogue_scenarios(catalogue: dict[str, Any]) -> list[dict[str, Any]]:
         raise ReleaseError(str(exc)) from exc
 
 
-def parse_json_object(value: str | None, label: str) -> dict[str, Any]:
-    try:
-        parsed = json.loads(value or "")
-    except json.JSONDecodeError as exc:
-        raise ReleaseError(f"{label} must contain a JSON object: {exc}") from exc
-    if not isinstance(parsed, dict):
-        raise ReleaseError(f"{label} must contain a JSON object")
-    return parsed
-
-
 def require_semver(value: Any, label: str) -> str:
     if not isinstance(value, str) or not SEMVER.fullmatch(value):
         raise ReleaseError(f"{label} must be stable SemVer without a v prefix: {value!r}")
@@ -1012,7 +1002,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("validate")
-    sub.add_parser("validate-jobs")
+    validate_jobs = sub.add_parser("validate-jobs")
+    validate_jobs.add_argument("--plan", type=Path, required=True)
+    validate_jobs.add_argument("--needs", type=Path, required=True)
     outputs = sub.add_parser("outputs")
     outputs.add_argument("--plan", type=Path, required=True)
     outputs.add_argument("--github-output", type=Path, required=True)
@@ -1044,8 +1036,8 @@ def main() -> int:
         if args.command == "validate":
             print("release contract valid")
         elif args.command == "validate-jobs":
-            plan = parse_json_object(os.environ.get("PLAN"), "PLAN")
-            needs = parse_json_object(os.environ.get("NEEDS"), "NEEDS")
+            plan = load_json(args.plan)
+            needs = load_json(args.needs)
             results = validate_candidate_job_results(plan, needs)
             print("candidate validation results:", compact(results))
         elif args.command == "outputs":

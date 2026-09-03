@@ -647,10 +647,35 @@ jobs:
           --plan '${{ runner.temp }}/plan/candidate-plan.json'
           --results '${{ runner.temp }}/results'
       - name: Require every selected build and execution job
-        env:
-          PLAN: ${{ needs.preflight.outputs.plan }}
-          NEEDS: ${{ toJSON(needs) }}
-        run: python3 .github/scripts/release.py validate-jobs
+        run: |
+          jq -n \
+            --arg preflight '${{ needs.preflight.result }}' \
+            --arg control_plane_source '${{ needs.control-plane-source.result }}' \
+            --arg inference_gateway_source '${{ needs.inference-gateway-source.result }}' \
+            --arg forge_source '${{ needs.forge-source.result }}' \
+            --arg charts_source '${{ needs.charts-source.result }}' \
+            --arg image_candidates '${{ needs.image-candidates.result }}' \
+            --arg runtime_artifacts '${{ needs.runtime-artifacts.result }}' \
+            --arg chart_candidate '${{ needs.chart-candidate.result }}' \
+            --arg forge_candidate '${{ needs.forge-candidate.result }}' \
+            --arg kind_candidates '${{ needs.kind-candidates.result }}' \
+            --arg real_machine_candidates '${{ needs.real-machine-candidates.result }}' \
+            '{
+              "preflight":{"result":$preflight},
+              "control-plane-source":{"result":$control_plane_source},
+              "inference-gateway-source":{"result":$inference_gateway_source},
+              "forge-source":{"result":$forge_source},
+              "charts-source":{"result":$charts_source},
+              "image-candidates":{"result":$image_candidates},
+              "runtime-artifacts":{"result":$runtime_artifacts},
+              "chart-candidate":{"result":$chart_candidate},
+              "forge-candidate":{"result":$forge_candidate},
+              "kind-candidates":{"result":$kind_candidates},
+              "real-machine-candidates":{"result":$real_machine_candidates}
+            }' > '${{ runner.temp }}/candidate-job-results.json'
+          python3 .github/scripts/release.py validate-jobs \
+            --plan '${{ runner.temp }}/plan/candidate-plan.json' \
+            --needs '${{ runner.temp }}/candidate-job-results.json'
 
   evidence:
     name: Assemble immutable candidate record
