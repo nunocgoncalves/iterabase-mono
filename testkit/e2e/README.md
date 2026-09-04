@@ -27,8 +27,11 @@ The runtime bundle must bind the exact source, plan and catalogue hashes, and th
 scenario's exact artifact set. Selected temporary/candidate artifacts carry the
 planned source SHA and recipe hash. Published baselines carry an immutable
 reference plus verified digest/checksum and cannot claim selected-source
-custody. Every image artifact also resolves to an archive/reference pair. F2
-scenarios with image requirements must declare `create-kind` followed by
+custody. Registry-backed images are pulled, inspected, and saved by their exact
+digest-qualified reference; the composer binds the planned runtime tag into the
+saved archive metadata without looking up or materializing that mutable daemon
+tag. Every image artifact resolves to this archive/reference pair. F2 scenarios
+with image requirements must declare `create-kind` followed by
 `import-runtime-images`; every later stage depends transitively on that import.
 The shared Kind helper restores the downloaded archive and transports the exact
 reference into the created nodes, so pre-cluster runner-daemon state cannot

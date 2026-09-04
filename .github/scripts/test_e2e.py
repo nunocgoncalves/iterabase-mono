@@ -10,6 +10,7 @@ from pathlib import Path
 import tarfile
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from e2e import (
     E2EError,
@@ -20,6 +21,7 @@ from e2e import (
     load_catalogue,
     load_contract,
     make_plan,
+    pull_image,
     runtime_image_tag,
     validate_catalogue_contract,
     validate_results,
@@ -327,6 +329,169 @@ class E2EPlanTests(unittest.TestCase):
 
 
 class RuntimeCompositionContractTests(unittest.TestCase):
+    @staticmethod
+    def write_image_archive(
+        archive: Path,
+        config: bytes,
+        repo_tags: list[str] | None,
+        config_path_digest: str | None = None,
+    ) -> str:
+        config_digest = hashlib.sha256(config).hexdigest()
+        manifest = json.dumps(
+            [
+                {
+                    "Config": f"blobs/sha256/{config_path_digest or config_digest}",
+                    "RepoTags": repo_tags,
+                    "Layers": [],
+                }
+            ]
+        ).encode()
+        index = json.dumps(
+            {
+                "schemaVersion": 2,
+                "manifests": [
+                    {
+                        "digest": "sha256:" + "1" * 64,
+                        "annotations": {},
+                    }
+                ],
+            }
+        ).encode()
+        with tarfile.open(archive, "w") as bundle:
+            for name, data in (
+                ("manifest.json", manifest),
+                ("index.json", index),
+                (f"blobs/sha256/{config_path_digest or config_digest}", config),
+            ):
+                member = tarfile.TarInfo(name)
+                member.size = len(data)
+                bundle.addfile(member, io.BytesIO(data))
+        return "sha256:" + config_digest
+
+    def test_digest_qualified_pull_inspects_and_archives_the_exact_image(self) -> None:
+        repository = "ghcr.io/nunocgoncalves/inference-gateway"
+        tag = "0.2.7"
+        digest = "sha256:" + "1" * 64
+        reference = f"{repository}:{tag}@{digest}"
+        plain_reference = f"{repository}:{tag}"
+        config = json.dumps({"config": {"Labels": {}}}).encode()
+        commands: list[list[str]] = []
+
+        with tempfile.TemporaryDirectory() as value:
+            def fake_run(command: list[str], *, cwd: Path | None = None, capture: bool = False) -> str:
+                commands.append(command)
+                if command[-1] == plain_reference:
+                    raise E2EError(f"No such image: {plain_reference}")
+                if command[:3] == ["docker", "image", "inspect"]:
+                    return f"{repository}@{digest}"
+                if command[:2] == ["docker", "save"]:
+                    archive = Path(command[command.index("-o") + 1])
+                    self.write_image_archive(archive, config, None)
+                return ""
+
+            with (
+                patch("e2e.run", side_effect=fake_run),
+                patch("e2e.tempfile.mkdtemp", return_value=value),
+            ):
+                actual = pull_image(reference, digest)
+
+            self.assertEqual((repository, tag, digest), actual[:3])
+            self.assertEqual("sha256:" + hashlib.sha256(config).hexdigest(), actual[3])
+            self.assertEqual(Path(value) / "image.tar", actual[4])
+            self.assertTrue(actual[4].is_file())
+            with tarfile.open(actual[4], "r") as bundle:
+                manifest = json.load(bundle.extractfile("manifest.json"))
+                index = json.load(bundle.extractfile("index.json"))
+            self.assertEqual([plain_reference], manifest[0]["RepoTags"])
+            self.assertEqual(
+                plain_reference,
+                index["manifests"][0]["annotations"]["io.containerd.image.name"],
+            )
+            self.assertEqual(
+                tag,
+                index["manifests"][0]["annotations"]["org.opencontainers.image.ref.name"],
+            )
+
+        image_references = [
+            command[-1]
+            for command in commands
+            if command[:2] in (["docker", "pull"], ["docker", "save"])
+            or command[:3] == ["docker", "image", "inspect"]
+        ]
+        self.assertTrue(image_references)
+        self.assertEqual({reference}, set(image_references))
+
+    def test_pull_image_rejects_malformed_or_conflicting_exact_digest(self) -> None:
+        repository = "ghcr.io/nunocgoncalves/inference-gateway:0.2.7"
+        digest = "sha256:" + "1" * 64
+        cases = (
+            (f"{repository}@sha256:invalid", None, "invalid immutable digest"),
+            (f"{repository}@{digest}", "sha256:" + "2" * 64, "does not match expected digest"),
+        )
+        for reference, expected, message in cases:
+            with self.subTest(reference=reference), patch("e2e.run") as docker_run:
+                with self.assertRaisesRegex(E2EError, message):
+                    pull_image(reference, expected)
+                docker_run.assert_not_called()
+
+    def test_pull_image_rejects_ambiguous_repository_identity(self) -> None:
+        repository = "ghcr.io/nunocgoncalves/inference-gateway"
+        digest = "sha256:" + "1" * 64
+        reference = f"{repository}:0.2.7@{digest}"
+
+        def fake_run(command: list[str], *, cwd: Path | None = None, capture: bool = False) -> str:
+            if command[:3] == ["docker", "image", "inspect"]:
+                return f"{repository}@{digest}\n{repository}@sha256:{'2' * 64}"
+            return ""
+
+        with patch("e2e.run", side_effect=fake_run):
+            with self.assertRaisesRegex(E2EError, "ambiguous immutable identity"):
+                pull_image(reference, digest)
+
+    def test_pull_image_rejects_resolved_digest_different_from_plan(self) -> None:
+        repository = "ghcr.io/nunocgoncalves/inference-gateway"
+        digest = "sha256:" + "1" * 64
+        reference = f"{repository}:0.2.7@{digest}"
+
+        def fake_run(command: list[str], *, cwd: Path | None = None, capture: bool = False) -> str:
+            if command[:3] == ["docker", "image", "inspect"]:
+                return f"{repository}@sha256:{'2' * 64}"
+            return ""
+
+        with patch("e2e.run", side_effect=fake_run):
+            with self.assertRaisesRegex(E2EError, "digest .* !="):
+                pull_image(reference, digest)
+
+    def test_pull_image_rejects_archive_config_mismatch_and_command_failure(self) -> None:
+        repository = "ghcr.io/nunocgoncalves/inference-gateway"
+        digest = "sha256:" + "1" * 64
+        reference = f"{repository}:0.2.7@{digest}"
+
+        with tempfile.TemporaryDirectory() as value:
+            def mismatched_archive(command: list[str], *, cwd: Path | None = None, capture: bool = False) -> str:
+                if command[:3] == ["docker", "image", "inspect"]:
+                    return f"{repository}@{digest}"
+                if command[:2] == ["docker", "save"]:
+                    archive = Path(command[command.index("-o") + 1])
+                    self.write_image_archive(
+                        archive,
+                        json.dumps({"config": {}}).encode(),
+                        None,
+                        "f" * 64,
+                    )
+                return ""
+
+            with (
+                patch("e2e.run", side_effect=mismatched_archive),
+                patch("e2e.tempfile.mkdtemp", return_value=value),
+            ):
+                with self.assertRaisesRegex(E2EError, "config path does not match its bytes"):
+                    pull_image(reference, digest)
+
+        with patch("e2e.run", side_effect=E2EError("command failed: docker pull")):
+            with self.assertRaisesRegex(E2EError, "command failed: docker pull"):
+                pull_image(reference, digest)
+
     def test_downloaded_image_archive_retains_config_identity_distinct_from_runtime_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as value:
             archive = Path(value) / "control-plane-image.tar"

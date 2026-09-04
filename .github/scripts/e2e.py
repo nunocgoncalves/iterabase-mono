@@ -7,6 +7,7 @@ import argparse
 from collections import Counter
 import fnmatch
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -29,6 +30,7 @@ RUNNABLE_TIERS = {"F2", "F3"}
 INTENTS = {"pr", "candidate"}
 SHA = re.compile(r"^[0-9a-f]{40}$")
 SHA256 = re.compile(r"^(?:sha256:)?[0-9a-f]{64}$")
+IMMUTABLE_SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 NAME = re.compile(r"^[a-z0-9]+(?:[a-z0-9-]*[a-z0-9])?$")
 JOB_GRACE_MINUTES = 5
 CAPACITY_JOB_GRACE_MINUTES = 30
@@ -769,13 +771,22 @@ def find_metadata(artifacts: Path, artifact: str, recipe: dict[str, Any]) -> tup
     return None
 
 
+def image_reference_digest(reference: str) -> str | None:
+    parts = reference.split("@")
+    if len(parts) == 1:
+        return None
+    if len(parts) != 2 or not IMMUTABLE_SHA256.fullmatch(parts[1]):
+        raise E2EError(f"image reference {reference!r} has an invalid immutable digest")
+    return parts[1]
+
+
 def split_image(reference: str) -> tuple[str, str]:
-    if "@" in reference:
-        reference = reference.split("@", 1)[0]
-    index = reference.rfind(":")
-    if index <= reference.rfind("/") or index == len(reference) - 1:
+    image_reference_digest(reference)
+    tagged_reference = reference.split("@", 1)[0]
+    index = tagged_reference.rfind(":")
+    if index <= tagged_reference.rfind("/") or index == len(tagged_reference) - 1:
         raise E2EError(f"image baseline is not exactly tagged: {reference!r}")
-    return reference[:index], reference[index + 1 :]
+    return tagged_reference[:index], tagged_reference[index + 1 :]
 
 
 def runtime_image_tag(custody: str, tag: str, digest: str) -> str:
@@ -801,6 +812,7 @@ def split_chart(reference: str) -> tuple[str, str, str]:
 
 
 def archive_image_config(archive: Path, reference: str) -> tuple[str, dict[str, Any]]:
+    qualified_digest = image_reference_digest(reference)
     tagged_reference = reference.split("@", 1)[0]
     with tarfile.open(archive, "r") as bundle:
         try:
@@ -811,11 +823,22 @@ def archive_image_config(archive: Path, reference: str) -> tuple[str, dict[str, 
         if manifest_file is None:
             raise E2EError(f"image archive {archive} has no manifest")
         manifest = json.load(manifest_file)
-        matches = [
-            entry
-            for entry in manifest
-            if isinstance(entry, dict) and tagged_reference in entry.get("RepoTags", [])
-        ]
+        if not isinstance(manifest, list) or not manifest or any(not isinstance(entry, dict) for entry in manifest):
+            raise E2EError(f"image archive {archive} has an invalid manifest")
+        matches = []
+        for entry in manifest:
+            repo_tags = entry.get("RepoTags")
+            if repo_tags is None:
+                repo_tags = []
+            if not isinstance(repo_tags, list) or any(not isinstance(tag, str) for tag in repo_tags):
+                raise E2EError(f"image archive {archive} has invalid repository tags")
+            if tagged_reference in repo_tags:
+                matches.append(entry)
+        # Docker archives an image selected by repository:tag@digest without a
+        # RepoTags entry. The exact save still identifies one platform image;
+        # accept only that unambiguous shape before adding the runtime tag.
+        if not matches and qualified_digest is not None and len(manifest) == 1:
+            matches = manifest
         if len(matches) != 1:
             raise E2EError(f"image archive {archive} does not bind {tagged_reference} exactly once")
         config_path = matches[0].get("Config")
@@ -837,6 +860,68 @@ def archive_image_config(archive: Path, reference: str) -> tuple[str, dict[str, 
     if not isinstance(config, dict):
         raise E2EError(f"image archive {archive} config is not an object")
     return digest, config
+
+
+def bind_image_archive_tag(archive: Path, tagged_reference: str) -> None:
+    _, tag = split_image(tagged_reference)
+    tagged_archive = archive.with_name(archive.name + ".tagged")
+    try:
+        with tarfile.open(archive, "r") as source:
+            members = source.getmembers()
+            manifest_members = [member for member in members if member.name == "manifest.json"]
+            if len(manifest_members) != 1:
+                raise E2EError(f"image archive {archive} has no unique manifest")
+            manifest_file = source.extractfile(manifest_members[0])
+            if manifest_file is None:
+                raise E2EError(f"image archive {archive} has no manifest")
+            manifest = json.load(manifest_file)
+            if not isinstance(manifest, list) or len(manifest) != 1 or not isinstance(manifest[0], dict):
+                raise E2EError(f"image archive {archive} has an ambiguous manifest")
+            manifest[0]["RepoTags"] = [tagged_reference]
+            replacements = {
+                "manifest.json": json.dumps(manifest, separators=(",", ":")).encode("utf-8")
+            }
+
+            index_members = [member for member in members if member.name == "index.json"]
+            if len(index_members) > 1:
+                raise E2EError(f"image archive {archive} has an ambiguous OCI index")
+            if index_members:
+                index_file = source.extractfile(index_members[0])
+                if index_file is None:
+                    raise E2EError(f"image archive {archive} has no OCI index")
+                index = json.load(index_file)
+                descriptors = index.get("manifests") if isinstance(index, dict) else None
+                if not isinstance(descriptors, list) or len(descriptors) != 1 or not isinstance(descriptors[0], dict):
+                    raise E2EError(f"image archive {archive} has an ambiguous OCI index")
+                annotations = descriptors[0].get("annotations")
+                if annotations is None:
+                    annotations = {}
+                if not isinstance(annotations, dict) or any(
+                    not isinstance(name, str) or not isinstance(value, str)
+                    for name, value in annotations.items()
+                ):
+                    raise E2EError(f"image archive {archive} has invalid OCI index annotations")
+                annotations.update(
+                    {
+                        "io.containerd.image.name": tagged_reference,
+                        "org.opencontainers.image.ref.name": tag,
+                    }
+                )
+                descriptors[0]["annotations"] = annotations
+                replacements["index.json"] = json.dumps(index, separators=(",", ":")).encode("utf-8")
+
+            with tarfile.open(tagged_archive, "w") as target:
+                for member in members:
+                    replacement = replacements.get(member.name)
+                    if replacement is not None:
+                        member.size = len(replacement)
+                        target.addfile(member, io.BytesIO(replacement))
+                        continue
+                    member_file = source.extractfile(member) if member.isfile() else None
+                    target.addfile(member, member_file)
+        tagged_archive.replace(archive)
+    finally:
+        tagged_archive.unlink(missing_ok=True)
 
 
 def load_image_archive(metadata: dict[str, Any], directory: Path, expected: dict[str, Any]) -> tuple[str, str, str, str, Path]:
@@ -863,19 +948,45 @@ def load_image_archive(metadata: dict[str, Any], directory: Path, expected: dict
 
 
 def pull_image(reference: str, expected_digest: str | None = None) -> tuple[str, str, str, str, Path]:
+    qualified_digest = image_reference_digest(reference)
+    if expected_digest is not None and not IMMUTABLE_SHA256.fullmatch(expected_digest):
+        raise E2EError(f"image {reference} has an invalid expected digest {expected_digest!r}")
+    if qualified_digest is not None and expected_digest is not None and qualified_digest != expected_digest:
+        raise E2EError(f"image reference digest {qualified_digest} does not match expected digest {expected_digest}")
+
     repository, tag = split_image(reference)
     tagged_reference = reference.split("@", 1)[0]
-    run(["docker", "pull", reference])
-    digests = run(["docker", "image", "inspect", "--format={{join .RepoDigests \"\\n\"}}", tagged_reference], capture=True).splitlines()
-    matching = [value.split("@", 1)[1] for value in digests if value.startswith(repository + "@") and "@" in value]
-    if len(set(matching)) != 1 or not SHA256.fullmatch(matching[0]):
+    pull_reference = reference if qualified_digest is not None else (
+        f"{tagged_reference}@{expected_digest}" if expected_digest is not None else tagged_reference
+    )
+    run(["docker", "pull", pull_reference])
+    digests = run(
+        ["docker", "image", "inspect", "--format={{join .RepoDigests \"\\n\"}}", pull_reference],
+        capture=True,
+    ).splitlines()
+    matching = [
+        value.rsplit("@", 1)[1]
+        for value in digests
+        if "@" in value and value.rsplit("@", 1)[0] == repository
+    ]
+    if len(set(matching)) != 1 or not IMMUTABLE_SHA256.fullmatch(matching[0]):
         raise E2EError(f"image {reference} has ambiguous immutable identity: {digests}")
     digest = matching[0]
-    if expected_digest and digest != expected_digest:
-        raise E2EError(f"image {reference} digest {digest} != {expected_digest}")
+    wanted_digest = qualified_digest or expected_digest
+    if wanted_digest is not None and digest != wanted_digest:
+        raise E2EError(f"image {reference} digest {digest} != {wanted_digest}")
+
+    exact_reference = f"{tagged_reference}@{digest}"
     temporary = Path(tempfile.mkdtemp(prefix="iterabase-e2e-image-")) / "image.tar"
-    run(["docker", "save", "-o", str(temporary), tagged_reference])
-    config_digest, _ = archive_image_config(temporary, tagged_reference)
+    run(["docker", "save", "-o", str(temporary), exact_reference])
+    config_digest, _ = archive_image_config(temporary, exact_reference)
+    # Runtime execution remains no-pull and uses the planned repository:tag.
+    # Bind that tag inside the exact archive without creating or resolving a
+    # mutable local daemon tag, then verify the config identity is unchanged.
+    bind_image_archive_tag(temporary, tagged_reference)
+    tagged_config_digest, _ = archive_image_config(temporary, tagged_reference)
+    if tagged_config_digest != config_digest:
+        raise E2EError(f"image {reference} archive changed its config digest")
     return repository, tag, digest, config_digest, temporary
 
 
