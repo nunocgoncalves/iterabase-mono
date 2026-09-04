@@ -1166,6 +1166,9 @@ func assertLifecycleHealth(t *testing.T, state *chartState) {
 	requireHTTP(t, client, http.MethodGet, controlPlane.URL+"/healthz", nil, http.StatusOK)
 	state.stopForward(t, controlPlane)
 	gateway := state.forward(t, "svc/"+testRelease+"-gateway", 8080, "http")
+	if err := waitHTTPReady(state.ctx, client, gateway.URL+"/readyz", 2*time.Minute); err != nil {
+		t.Fatalf("gateway snapshot did not recover after the database rollout: %v", err)
+	}
 	body := requireHTTP(t, client, http.MethodGet, gateway.URL+"/readyz", nil, http.StatusOK)
 	if !strings.Contains(string(body), `"fresh":true`) {
 		t.Fatalf("gateway snapshot is not fresh: %s", stateSafeBody(body))
