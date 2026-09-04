@@ -45,12 +45,18 @@ branches="$(gh api "repos/$repository/environments/release/deployment-branch-pol
 jq -e '.branch_policies | length == 1 and .[0].name == "master" and .[0].type == "branch"' \
   <<<"$branches" >/dev/null || fail "release environment must allow only the master branch"
 
-rulesets="$(gh api "repos/$repository/rulesets" --paginate)"
-ruleset_id="$(jq -r '.[] | select(.name == "protected release tags" and .target == "tag" and .enforcement == "active") | .id' <<<"$rulesets")"
-[[ -n "$ruleset_id" ]] || fail "active protected release tags ruleset not found"
+rulesets="$(gh api "repos/$repository/rulesets" --paginate | jq -s 'add')"
+ruleset_id="$(jq -r '
+  [.[] | select(.name == "protected release tags" and .target == "tag" and .enforcement == "active")] |
+  if length == 1 then (.[0].id | tostring) else empty end
+' <<<"$rulesets")"
+[[ "$ruleset_id" =~ ^[0-9]+$ ]] || fail "expected exactly one active protected release tags ruleset"
 ruleset="$(gh api "repos/$repository/rulesets/$ruleset_id")"
-jq -e '
-  ([.bypass_actors[] | select(.actor_type == "DeployKey" and .bypass_mode == "always")] | length) == 1 and
+jq -e --arg ruleset_id "$ruleset_id" '
+  (.id | tostring) == $ruleset_id and
+  .name == "protected release tags" and
+  .target == "tag" and
+  .enforcement == "active" and
   ([.rules[].type] | sort) == (["creation", "deletion", "non_fast_forward", "update"] | sort) and
   ([.conditions.ref_name.include[]] | sort) == ([
     "refs/tags/control-plane-v*",
@@ -61,9 +67,16 @@ jq -e '
     "refs/tags/iterabase-platform-*",
     "refs/tags/dry-run/**"
   ] | sort)
-' <<<"$ruleset" >/dev/null || fail "release tag ruleset does not match the approved contract"
+' <<<"$ruleset" >/dev/null || fail "release tag ruleset common contract does not match the approved authority"
 
 if [[ "${AUDIT_ADMIN_ENDPOINTS:-true}" == true ]]; then
+  jq -e '
+    (.bypass_actors | type == "array") and
+    (.bypass_actors | length == 1) and
+    .bypass_actors[0].actor_type == "DeployKey" and
+    .bypass_actors[0].bypass_mode == "always"
+  ' <<<"$ruleset" >/dev/null || fail "release tag ruleset bypass authority does not match the approved admin contract"
+
   permissions="$(gh api "repos/$repository/actions/permissions/workflow")"
   jq -e '.default_workflow_permissions == "read" and .can_approve_pull_request_reviews == false' \
     <<<"$permissions" >/dev/null || fail "default workflow token permissions are not read-only"
