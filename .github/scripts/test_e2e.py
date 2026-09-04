@@ -421,6 +421,36 @@ class RuntimeCompositionContractTests(unittest.TestCase):
         self.assertTrue(image_references)
         self.assertEqual({reference}, set(image_references))
 
+    def test_unqualified_candidate_alias_is_verified_before_exact_save(self) -> None:
+        repository = "ghcr.io/nunocgoncalves/control-plane"
+        tag = "candidate-run"
+        digest = "sha256:" + "1" * 64
+        reference = f"{repository}:{tag}"
+        exact_reference = f"{reference}@{digest}"
+        config = json.dumps({"config": {"Labels": {}}}).encode()
+        commands: list[list[str]] = []
+
+        with tempfile.TemporaryDirectory() as value:
+            def fake_run(command: list[str], *, cwd: Path | None = None, capture: bool = False) -> str:
+                commands.append(command)
+                if command[:3] == ["docker", "image", "inspect"]:
+                    return f"{repository}@{digest}"
+                if command[:2] == ["docker", "save"]:
+                    archive = Path(command[command.index("-o") + 1])
+                    self.write_image_archive(archive, config, None)
+                return ""
+
+            with (
+                patch("e2e.run", side_effect=fake_run),
+                patch("e2e.tempfile.mkdtemp", return_value=value),
+            ):
+                actual = pull_image(reference, digest)
+
+        self.assertEqual((repository, tag, digest), actual[:3])
+        self.assertEqual(reference, commands[0][-1])
+        self.assertEqual(reference, commands[1][-1])
+        self.assertEqual(exact_reference, commands[2][-1])
+
     def test_pull_image_rejects_malformed_or_conflicting_exact_digest(self) -> None:
         repository = "ghcr.io/nunocgoncalves/inference-gateway:0.2.7"
         digest = "sha256:" + "1" * 64
@@ -449,9 +479,9 @@ class RuntimeCompositionContractTests(unittest.TestCase):
                 pull_image(reference, digest)
 
     def test_pull_image_rejects_resolved_digest_different_from_plan(self) -> None:
-        repository = "ghcr.io/nunocgoncalves/inference-gateway"
+        repository = "ghcr.io/nunocgoncalves/control-plane"
         digest = "sha256:" + "1" * 64
-        reference = f"{repository}:0.2.7@{digest}"
+        reference = f"{repository}:candidate-run"
 
         def fake_run(command: list[str], *, cwd: Path | None = None, capture: bool = False) -> str:
             if command[:3] == ["docker", "image", "inspect"]:
@@ -488,9 +518,23 @@ class RuntimeCompositionContractTests(unittest.TestCase):
                 with self.assertRaisesRegex(E2EError, "config path does not match its bytes"):
                     pull_image(reference, digest)
 
-        with patch("e2e.run", side_effect=E2EError("command failed: docker pull")):
-            with self.assertRaisesRegex(E2EError, "command failed: docker pull"):
-                pull_image(reference, digest)
+        candidate_reference = f"{repository}:candidate-run"
+        with patch("e2e.run", side_effect=E2EError(f"No such image: {candidate_reference}")):
+            with self.assertRaisesRegex(E2EError, "No such image: .*candidate-run"):
+                pull_image(candidate_reference, digest)
+
+    def test_exact_archive_rejects_foreign_repository_tag(self) -> None:
+        digest = "sha256:" + "1" * 64
+        reference = f"ghcr.io/nunocgoncalves/inference-gateway:0.2.7@{digest}"
+        with tempfile.TemporaryDirectory() as value:
+            archive = Path(value) / "image.tar"
+            self.write_image_archive(
+                archive,
+                json.dumps({"config": {}}).encode(),
+                ["ghcr.io/other/inference-gateway:0.2.7"],
+            )
+            with self.assertRaisesRegex(E2EError, "does not bind .* exactly once"):
+                archive_image_config(archive, reference)
 
     def test_downloaded_image_archive_retains_config_identity_distinct_from_runtime_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as value:

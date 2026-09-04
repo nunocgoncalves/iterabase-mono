@@ -826,6 +826,7 @@ def archive_image_config(archive: Path, reference: str) -> tuple[str, dict[str, 
         if not isinstance(manifest, list) or not manifest or any(not isinstance(entry, dict) for entry in manifest):
             raise E2EError(f"image archive {archive} has an invalid manifest")
         matches = []
+        untagged = []
         for entry in manifest:
             repo_tags = entry.get("RepoTags")
             if repo_tags is None:
@@ -834,11 +835,13 @@ def archive_image_config(archive: Path, reference: str) -> tuple[str, dict[str, 
                 raise E2EError(f"image archive {archive} has invalid repository tags")
             if tagged_reference in repo_tags:
                 matches.append(entry)
-        # Docker archives an image selected by repository:tag@digest without a
-        # RepoTags entry. The exact save still identifies one platform image;
-        # accept only that unambiguous shape before adding the runtime tag.
-        if not matches and qualified_digest is not None and len(manifest) == 1:
-            matches = manifest
+            elif not repo_tags:
+                untagged.append(entry)
+        # Docker archives an image selected by repository:tag@digest with an
+        # absent or empty RepoTags value. Accept only that unambiguous shape;
+        # a non-empty mismatched tag is foreign repository evidence.
+        if not matches and qualified_digest is not None and len(manifest) == 1 and len(untagged) == 1:
+            matches = untagged
         if len(matches) != 1:
             raise E2EError(f"image archive {archive} does not bind {tagged_reference} exactly once")
         config_path = matches[0].get("Config")
@@ -956,9 +959,10 @@ def pull_image(reference: str, expected_digest: str | None = None) -> tuple[str,
 
     repository, tag = split_image(reference)
     tagged_reference = reference.split("@", 1)[0]
-    pull_reference = reference if qualified_digest is not None else (
-        f"{tagged_reference}@{expected_digest}" if expected_digest is not None else tagged_reference
-    )
+    # Qualified baselines remain exact. Unqualified selected-candidate aliases
+    # must instead be pulled and inspected as aliases so their run-scoped
+    # repository binding is proven before the exact object is archived.
+    pull_reference = reference
     run(["docker", "pull", pull_reference])
     digests = run(
         ["docker", "image", "inspect", "--format={{join .RepoDigests \"\\n\"}}", pull_reference],
