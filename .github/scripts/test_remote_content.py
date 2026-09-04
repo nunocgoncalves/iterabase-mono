@@ -158,6 +158,8 @@ class RemoteContentTests(unittest.TestCase):
             manifest["forge_helm_charts"],
             remote_content.forge_chart_records(ROOT / "forge/internal/config/config.go"),
         )
+        control_makefile = (ROOT / "control-plane/Makefile").read_text(encoding="utf-8")
+        self.assertIn("GOLANGCI_LINT ?= $(LOCALBIN)/golangci-lint", control_makefile)
 
     def test_missing_action_installed_tool_checksum_fails_inventory(self) -> None:
         manifest = remote_content.load_manifest()

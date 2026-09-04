@@ -141,17 +141,12 @@ func (fixture *permanentFixture) reset(t *testing.T, forgeBin, forgeHome string)
 	client.Close()
 	// SSH can become available before cloud-final has completed after a reboot.
 	// Preserve the lifecycle's readiness boundary so Forge preflight never races
-	// provider boot configuration on a permanent fixture.
-	if err := waitForHostReady(context.Background(), fixture.address, fixture.sshKeyPath); err != nil {
-		return fmt.Errorf("wait for post-reboot host readiness: %w", err)
-	}
-	// The readiness probe closes its connection. Leave the same bounded quiet
-	// window before opening the clean-baseline verification session; some public
-	// SSH frontends reset an otherwise valid immediate follow-up handshake.
-	time.Sleep(5 * time.Second)
-	client, err = sshDial(fixture.address, fixture.sshKeyPath)
+	// provider boot configuration on a permanent fixture. Continue on the exact
+	// connection that proved readiness instead of opening a race-prone follow-up
+	// handshake while the public SSH frontend is still converging.
+	client, err = waitForHostReady(context.Background(), fixture.address, fixture.sshKeyPath)
 	if err != nil {
-		return fmt.Errorf("reconnect after post-reboot host readiness: %w", err)
+		return fmt.Errorf("wait for post-reboot host readiness: %w", err)
 	}
 	defer client.Close()
 	if err := fixture.waitForWorkspaceDevice(client); err != nil {

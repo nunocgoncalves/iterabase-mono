@@ -482,7 +482,7 @@ func (state *digitalOceanCPUState) cleanup(t *testing.T) {
 // required" before the sudoers rule is applied, or curl being absent before
 // `packages: [curl]` completes. The forge user is created by cloud-init, so SSH
 // can only succeed once cloud-init has at least started.
-func waitForHostReady(ctx context.Context, ip, keyPath string) error {
+func waitForHostReady(ctx context.Context, ip, keyPath string) (*ssh.Client, error) {
 	const deadline = 5 * time.Minute
 	end := time.Now().Add(deadline)
 	var lastStatus string
@@ -491,24 +491,26 @@ func waitForHostReady(ctx context.Context, ip, keyPath string) error {
 		client, err := sshDial(ip, keyPath)
 		if err == nil {
 			out, statusErr := sshOutput(client, "cloud-init status")
-			client.Close()
 			lastStatus, lastErr = strings.TrimSpace(out), statusErr
 			switch {
 			case strings.Contains(out, "status: done"):
-				return nil
+				return client, nil
 			case strings.Contains(out, "status: error"):
-				return fmt.Errorf("cloud-init failed on %s: %s", ip, lastStatus)
+				client.Close()
+				return nil, fmt.Errorf("cloud-init failed on %s: %s", ip, lastStatus)
+			default:
+				client.Close()
 			}
 		} else {
 			lastErr = err
 		}
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return nil, ctx.Err()
 		case <-time.After(5 * time.Second):
 		}
 	}
-	return fmt.Errorf("host %s never became ready (SSH up + cloud-init done) within %s (last status %q, last error %v)", ip, deadline, lastStatus, lastErr)
+	return nil, fmt.Errorf("host %s never became ready (SSH up + cloud-init done) within %s (last status %q, last error %v)", ip, deadline, lastStatus, lastErr)
 }
 
 // sshOutput runs a command over an SSH client and returns its combined output.
