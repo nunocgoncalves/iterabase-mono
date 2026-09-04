@@ -98,7 +98,14 @@ test-e2e-execution: $(E2E_BUILD_DEPS)
 
 playwright-browser-deps:
 	cd test/e2e/playwright && npm ci && npm run lint
-	cd test/e2e/playwright && npx --no-install playwright install $(PLAYWRIGHT_INSTALL_ARGS)
+	@if [ "$(E2E_SKIP_BUILD_DEPS)" = true ]; then \
+		test -n "$$PLAYWRIGHT_BROWSERS_PATH"; \
+		test -f "$$PLAYWRIGHT_BROWSERS_PATH/chromium-1234/INSTALLATION_COMPLETE"; \
+		test -f "$$PLAYWRIGHT_BROWSERS_PATH/chromium_headless_shell-1234/INSTALLATION_COMPLETE"; \
+		test -f "$$PLAYWRIGHT_BROWSERS_PATH/ffmpeg-1011/INSTALLATION_COMPLETE"; \
+	else \
+		cd test/e2e/playwright && npx --no-install playwright install $(PLAYWRIGHT_INSTALL_ARGS); \
+	fi
 
 test-e2e-browser: $(E2E_BUILD_DEPS) playwright-browser-deps
 	cd test/e2e && $(E2E_ENV) go test -v -race -count=1 -timeout 45m -run '^TestE2E$$/^deployed-browser-journeys$$' .

@@ -45,7 +45,7 @@ spec:
   kind: vLLM
   # Upstream B12X (native SM120) vLLM build. Pinned to a specific commit; the
   # patch overlays below are version-coupled to this tag.
-  image: voipmonitor/vllm:chthonic-consecration-f1190eab-b12x0ff2847-pr20-cu132
+  image: voipmonitor/vllm:chthonic-consecration-f1190eab-b12x0ff2847-pr20-cu132@sha256:c64b0a145de10f3a2a59584ea46aebb1bac595e6151f4aca025af3f5cb73a8f4
   # spec.model is unset: with spec.args overridden, the model is the positional
   # arg to `vllm ... serve` (downloaded from HF into hf-cache).
   replicas: 1

@@ -41,7 +41,7 @@ func TestServer_EndToEnd(t *testing.T) {
 	logger := slog.Default()
 
 	// --- Postgres with the control-plane contract fixture ---
-	pgC, err := postgres.Run(ctx, "postgres:16-alpine",
+	pgC, err := postgres.Run(ctx, "postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685",
 		postgres.WithDatabase("gw"), postgres.WithUsername("t"), postgres.WithPassword("t"),
 		testcontainers.WithWaitStrategy(wait.ForLog("database system is ready to accept connections").
 			WithOccurrence(2).WithStartupTimeout(30*time.Second)))
@@ -89,7 +89,7 @@ func TestServer_EndToEnd(t *testing.T) {
 	require.NoError(t, err)
 
 	// --- Redis ---
-	rC, err := tcredis.Run(ctx, "redis:7-alpine")
+	rC, err := tcredis.Run(ctx, "redis:7-alpine@sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = rC.Terminate(ctx) })
 	redisURL, err := rC.ConnectionString(ctx)

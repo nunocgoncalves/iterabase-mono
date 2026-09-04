@@ -30,29 +30,30 @@ jobs:
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
-      - name: Reverify live release authority after founder approval
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REQUIRE_IMMUTABLE_RELEASES: "true"
-          AUDIT_REPOSITORY_SECRETS: "false"
-          AUDIT_ADMIN_ENDPOINTS: "false"
-        run: |
-          test "$(git rev-parse HEAD)" = '${{ github.sha }}'
-          .github/scripts/audit_release_security.sh '${{ github.repository }}'
-      - name: Configure protected-tag credential
+      - name: Configure the reviewed protected-tag deploy key
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG_SSH_KEY: ${{ secrets.RELEASE_TAG_SSH_KEY }}
         run: |
           test -n "$RELEASE_TAG_SSH_KEY"
           install -m 700 -d ~/.ssh
-          printf '%s\n' "$RELEASE_TAG_SSH_KEY" > ~/.ssh/release-tag
-          chmod 600 ~/.ssh/release-tag
+          printf '%s\n' "$RELEASE_TAG_SSH_KEY" > "$RUNNER_TEMP/release-tag"
+          chmod 600 "$RUNNER_TEMP/release-tag"
           gh api meta --jq '.ssh_keys[] | "github.com " + .' > ~/.ssh/known_hosts
           git remote set-url origin 'git@github.com:${{ github.repository }}.git'
-          git config core.sshCommand 'ssh -i ~/.ssh/release-tag -o IdentitiesOnly=yes'
+          git config core.sshCommand "ssh -i $RUNNER_TEMP/release-tag -o IdentitiesOnly=yes"
           git config user.name iterabase-release
           git config user.email release@iterabase.com
+      - name: Reverify live release and deploy-key authority after founder approval
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REQUIRE_IMMUTABLE_RELEASES: "true"
+          AUDIT_REPOSITORY_SECRETS: "false"
+          AUDIT_ADMIN_ENDPOINTS: "false"
+          RELEASE_TAG_KEY_FILE: ${{ runner.temp }}/release-tag
+        run: |
+          test "$(git rev-parse HEAD)" = '${{ github.sha }}'
+          .github/scripts/audit_release_security.sh '${{ github.repository }}'
       - name: Publish or verify the retained non-semantic release once
         id: release
         env:
@@ -85,7 +86,7 @@ jobs:
             git -c tag.gpgSign=false tag -a "$GATE_TAG" '${{ github.sha }}' -m "Retained immutable release gate"
             git push origin "refs/tags/$GATE_TAG"
             gh release create "$GATE_TAG" gate/probe.txt gate/release-manifest.json \
-              --repo '${{ github.repository }}' --verify-tag --draft --prerelease \
+              --repo '${{ github.repository }}' --verify-tag --draft --prerelease --target '${{ github.sha }}' \
               --title "$GATE_TAG" --notes 'Retained non-semantic immutable-release validation evidence.'
             test "$(gh release view "$GATE_TAG" --repo '${{ github.repository }}' --json isDraft --jq '.isDraft')" = true
             gh release download "$GATE_TAG" --repo '${{ github.repository }}' \
@@ -96,7 +97,11 @@ jobs:
           fi
 
           release=$(gh api "repos/${{ github.repository }}/releases/tags/$GATE_TAG")
+          test "$(jq -r '.tag_name' <<<"$release")" = "$GATE_TAG"
+          test "$(jq -r '.name' <<<"$release")" = "$GATE_TAG"
+          test "$(jq -r '.body' <<<"$release")" = 'Retained non-semantic immutable-release validation evidence.'
           test "$(jq -r '.draft' <<<"$release")" = false
+          test "$(jq -r '.prerelease' <<<"$release")" = true
           test "$(jq -r '.immutable' <<<"$release")" = true
           test "$(jq -r '[.assets[].name] | sort | join(",")' <<<"$release")" = 'probe.txt,release-manifest.json'
           retained_manifest=downloaded/release-manifest.json
@@ -107,27 +112,56 @@ jobs:
           test "$(jq -r '.assets[0].size' "$retained_manifest")" = "$(wc -c < "$retained_probe" | tr -d ' ')"
           test "$(jq -r '.assets[0].sha256' "$retained_manifest")" = "$(sha256sum "$retained_probe" | awk '{print $1}')"
           retained_source=$(jq -r '.source_sha' "$retained_manifest")
+          test "$(jq -r '.target_commitish' <<<"$release")" = "$retained_source"
           direct=$(git ls-remote --tags origin "refs/tags/$GATE_TAG" | awk '{print $1}')
           peeled=$(git ls-remote --tags origin "refs/tags/$GATE_TAG^{}" | awk '{print $1}')
           test "${peeled:-$direct}" = "$retained_source"
+          git fetch --force origin "refs/tags/$GATE_TAG:refs/tags/$GATE_TAG"
+          git push origin "refs/tags/$GATE_TAG"
           echo "release_id=$(jq -r '.id' <<<"$release")" >> "$GITHUB_OUTPUT"
           echo "asset_id=$(jq -r '.assets[] | select(.name == "probe.txt") | .id' <<<"$release")" >> "$GITHUB_OUTPUT"
-      - name: Prove immutable asset and tag mutation is denied
+      - name: Prove immutable release, asset, and tag mutation denial and unchanged post-state
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GATE_TAG: dry-run/immutable-release-gate-v1
           RELEASE_ID: ${{ steps.release.outputs.release_id }}
           ASSET_ID: ${{ steps.release.outputs.asset_id }}
+          REQUIRE_IMMUTABLE_RELEASES: "true"
+          AUDIT_REPOSITORY_SECRETS: "false"
+          AUDIT_ADMIN_ENDPOINTS: "false"
+          RELEASE_TAG_KEY_FILE: ${{ runner.temp }}/release-tag
         run: |
           set -euo pipefail
+          require_immutable_denial() {
+            local status=$1 output=$2 operation=$3
+            test "$status" -ne 0 || { echo "$operation unexpectedly succeeded" >&2; exit 1; }
+            grep -Eiq 'immutable release|release is immutable|immutable_release|cannot .*immutable|immutable.*cannot' "$output" || {
+              echo "$operation failed without an immutable-release denial" >&2
+              cat "$output" >&2
+              exit 1
+            }
+          }
+          release_before=$(gh api "repos/${{ github.repository }}/releases/tags/$GATE_TAG")
+          before_state=$(jq -cS '{id,tag_name,target_commitish,name,body,draft,prerelease,immutable,assets:([.assets[]|{id,name,size,digest}]|sort_by(.name))}' <<<"$release_before")
+          before_sha=$(printf '%s' "$before_state" | sha256sum | awk '{print $1}')
+          test "$(gh api "repos/${{ github.repository }}/immutable-releases" --jq '.enabled')" = true
+
           printf 'forbidden late member\n' > forbidden.txt
           upload_status=0
           gh release upload "$GATE_TAG" forbidden.txt --repo '${{ github.repository }}' >/tmp/upload.out 2>&1 || upload_status=$?
-          test "$upload_status" -ne 0
+          require_immutable_denial "$upload_status" /tmp/upload.out 'asset upload'
 
           delete_asset_status=0
           gh api --method DELETE "repos/${{ github.repository }}/releases/assets/$ASSET_ID" >/tmp/delete-asset.out 2>&1 || delete_asset_status=$?
-          test "$delete_asset_status" -ne 0
+          require_immutable_denial "$delete_asset_status" /tmp/delete-asset.out 'asset deletion'
+
+          edit_release_status=0
+          gh release edit "$GATE_TAG" --repo '${{ github.repository }}' --title forbidden >/tmp/edit-release.out 2>&1 || edit_release_status=$?
+          require_immutable_denial "$edit_release_status" /tmp/edit-release.out 'release metadata edit'
+
+          delete_release_status=0
+          gh api --method DELETE "repos/${{ github.repository }}/releases/$RELEASE_ID" >/tmp/delete-release.out 2>&1 || delete_release_status=$?
+          require_immutable_denial "$delete_release_status" /tmp/delete-release.out 'release deletion'
 
           retained_source=$(jq -r '.source_sha' downloaded/release-manifest.json)
           mutation_sha=$(git rev-list --max-parents=0 HEAD | head -1)
@@ -135,7 +169,24 @@ jobs:
           git tag -f "$GATE_TAG" "$mutation_sha"
           update_tag_status=0
           git push --force origin "refs/tags/$GATE_TAG" >/tmp/update-tag.out 2>&1 || update_tag_status=$?
-          test "$update_tag_status" -ne 0
+          require_immutable_denial "$update_tag_status" /tmp/update-tag.out 'release tag update'
+
+          test "$(gh api "repos/${{ github.repository }}/immutable-releases" --jq '.enabled')" = true
+          release_after=$(gh api "repos/${{ github.repository }}/releases/tags/$GATE_TAG")
+          test "$(jq -r '.immutable' <<<"$release_after")" = true
+          after_state=$(jq -cS '{id,tag_name,target_commitish,name,body,draft,prerelease,immutable,assets:([.assets[]|{id,name,size,digest}]|sort_by(.name))}' <<<"$release_after")
+          after_sha=$(printf '%s' "$after_state" | sha256sum | awk '{print $1}')
+          test "$after_state" = "$before_state"
+          test "$(jq -r '[.assets[].name] | sort | join(",")' <<<"$release_after")" = 'probe.txt,release-manifest.json'
+          rm -rf post-state
+          gh release download "$GATE_TAG" --repo '${{ github.repository }}' \
+            --pattern probe.txt --pattern release-manifest.json --dir post-state
+          cmp downloaded/probe.txt post-state/probe.txt
+          cmp downloaded/release-manifest.json post-state/release-manifest.json
+          direct=$(git ls-remote --tags origin "refs/tags/$GATE_TAG" | awk '{print $1}')
+          peeled=$(git ls-remote --tags origin "refs/tags/$GATE_TAG^{}" | awk '{print $1}')
+          test "${peeled:-$direct}" = "$retained_source"
+          .github/scripts/audit_release_security.sh '${{ github.repository }}'
 
           jq -n -cS \
             --arg repository '${{ github.repository }}' \
@@ -143,10 +194,14 @@ jobs:
             --arg run_id '${{ github.run_id }}' \
             --arg release_id "$RELEASE_ID" \
             --arg tag "$GATE_TAG" \
+            --arg before_state_sha256 "$before_sha" \
+            --arg after_state_sha256 "$after_sha" \
             --argjson upload_status "$upload_status" \
             --argjson delete_asset_status "$delete_asset_status" \
+            --argjson edit_release_status "$edit_release_status" \
+            --argjson delete_release_status "$delete_release_status" \
             --argjson update_tag_status "$update_tag_status" \
-            '{schema_version:1,repository:$repository,control_sha:$control_sha,run_id:$run_id,release_id:$release_id,tag:$tag,immutable_releases:true,denied:{asset_upload:$upload_status,asset_delete:$delete_asset_status,tag_update:$update_tag_status}}' \
+            '{schema_version:2,repository:$repository,control_sha:$control_sha,run_id:$run_id,release_id:$release_id,tag:$tag,immutable_releases:true,post_state_unchanged:($before_state_sha256 == $after_state_sha256),before_state_sha256:$before_state_sha256,after_state_sha256:$after_state_sha256,denied:{asset_upload:$upload_status,asset_delete:$delete_asset_status,release_edit:$edit_release_status,release_delete:$delete_release_status,tag_update:$update_tag_status}}' \
             > immutable-release-gate-evidence.json
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

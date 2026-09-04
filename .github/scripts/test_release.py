@@ -59,6 +59,11 @@ class ReleaseContractTests(unittest.TestCase):
             self.catalogue,
             run_attempt="2",
         )
+        self.assertEqual(4, plan["schema_version"])
+        self.assertEqual(release.CANDIDATE_REPOSITORY, plan["candidate_repository"])
+        self.assertEqual(release.CANDIDATE_WORKFLOW, plan["candidate_workflow"])
+        self.assertEqual(release.CANDIDATE_EVENT, plan["candidate_event"])
+        self.assertEqual(SOURCE_SHA, plan["candidate_control_sha"])
         self.assertEqual("source-run-attempt-v1", plan["candidate_alias_scheme"])
         self.assertEqual(f"{SOURCE_SHA}-123-2", plan["image_matrix"][0]["candidate_tag"])
         self.assertEqual(
@@ -121,6 +126,85 @@ class ReleaseContractTests(unittest.TestCase):
                                 for item in selected
                             )
                         )
+
+    def test_candidate_run_authority_rejects_repository_workflow_event_and_control_drift(self) -> None:
+        mutations = {
+            "repository": "other/repository",
+            "workflow": ".github/workflows/other.yml",
+            "event": "push",
+            "control_sha": "short",
+        }
+        for field, value in mutations.items():
+            with self.subTest(field=field), self.assertRaises(release.ReleaseError):
+                release.make_plan(
+                    self.contract,
+                    ["forge"],
+                    SOURCE_SHA,
+                    "123",
+                    ROOT,
+                    self.catalogue,
+                    **{field: value},
+                )
+
+    def test_live_candidate_run_must_match_every_retained_authority_field(self) -> None:
+        plan = {
+            "candidate_repository": release.CANDIDATE_REPOSITORY,
+            "candidate_workflow": release.CANDIDATE_WORKFLOW,
+            "candidate_event": release.CANDIDATE_EVENT,
+            "candidate_control_sha": SOURCE_SHA,
+            "run_id": "123",
+            "run_attempt": "2",
+        }
+        run = {
+            "name": "Release candidate",
+            "repository": {"full_name": release.CANDIDATE_REPOSITORY},
+            "head_repository": {"full_name": release.CANDIDATE_REPOSITORY},
+            "path": release.CANDIDATE_WORKFLOW,
+            "event": release.CANDIDATE_EVENT,
+            "head_sha": SOURCE_SHA,
+            "id": 123,
+            "run_attempt": 2,
+            "head_branch": "master",
+            "conclusion": "success",
+        }
+        with tempfile.TemporaryDirectory() as value:
+            directory = Path(value)
+            plan_path = directory / "plan.json"
+            plan_path.write_text(json.dumps(plan))
+            fake_gh = directory / "gh"
+            fake_gh.write_text("#!/bin/sh\nprintf '%s' \"$RUN_JSON\"\n")
+            fake_gh.chmod(0o755)
+            env = {**os.environ, "PATH": f"{directory}:{os.environ['PATH']}"}
+
+            def verify(candidate_run: dict) -> subprocess.CompletedProcess:
+                return subprocess.run(
+                    [str(ROOT / ".github/scripts/verify_candidate_run.sh"), "123", str(plan_path), release.CANDIDATE_REPOSITORY],
+                    env={**env, "RUN_JSON": json.dumps(candidate_run)},
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+
+            self.assertEqual(0, verify(run).returncode)
+            mutations = (
+                ("name", None),
+                ("repository", "full_name"),
+                ("head_repository", "full_name"),
+                ("path", None),
+                ("event", None),
+                ("head_sha", None),
+                ("run_attempt", None),
+                ("head_branch", None),
+                ("conclusion", None),
+            )
+            for field, nested in mutations:
+                changed = copy.deepcopy(run)
+                if nested:
+                    changed[field][nested] = "changed"
+                else:
+                    changed[field] = "changed"
+                with self.subTest(field=field):
+                    self.assertNotEqual(0, verify(changed).returncode)
 
     def test_candidate_alias_is_run_attempt_scoped_and_immutable(self) -> None:
         first = release.candidate_image_alias(SOURCE_SHA, "10", "1")
@@ -326,8 +410,13 @@ class ReleaseManifestTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as value:
             plan, candidate = self.fixture(Path(value))
             manifest = release.release_manifest(plan, candidate, "control-plane")
+            self.assertEqual(2, manifest["schema_version"])
             self.assertEqual("123", manifest["candidate_run_id"])
             self.assertEqual(SOURCE_SHA, manifest["source_sha"])
+            self.assertEqual("control-plane-v1.2.3", manifest["release_metadata"]["title"])
+            self.assertIn("candidate run `123`", manifest["release_metadata"]["notes"])
+            self.assertEqual(SOURCE_SHA, manifest["release_metadata"]["target_commitish"])
+            self.assertFalse(manifest["release_metadata"]["prerelease"])
             self.assertEqual(
                 {"candidate-plan.json", "candidate-evidence.json", "candidate-control-plane.json", "candidate-control-plane.spdx.json"},
                 {item["name"] for item in manifest["assets"]},
@@ -335,7 +424,7 @@ class ReleaseManifestTests(unittest.TestCase):
             release.validate_release_manifest(manifest, candidate, plan)
 
     def test_missing_extra_duplicate_and_conflicting_manifest_members_fail(self) -> None:
-        for mutation in ("missing", "extra", "duplicate", "conflicting"):
+        for mutation in ("missing", "extra", "duplicate", "conflicting", "metadata"):
             with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as value:
                 plan, candidate = self.fixture(Path(value))
                 manifest = release.release_manifest(plan, candidate, "control-plane")
@@ -345,8 +434,10 @@ class ReleaseManifestTests(unittest.TestCase):
                     manifest["assets"].append({"name": "extra", "path": "extra", "size": 1, "sha256": "a" * 64})
                 elif mutation == "duplicate":
                     manifest["assets"].append(copy.deepcopy(manifest["assets"][0]))
-                else:
+                elif mutation == "conflicting":
                     (candidate / "assets/images/candidate-control-plane.json").write_text("changed\n")
+                else:
+                    manifest["release_metadata"]["title"] = "substituted"
                 with self.assertRaises(release.ReleaseError):
                     release.validate_release_manifest(manifest, candidate, plan)
 
@@ -398,7 +489,10 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertIn("matrix.labels_text", workflow)
         self.assertIn("matrix.build_args_text", workflow)
         self.assertIn("recipe_sha256", workflow)
-        self.assertIn("goreleaser/goreleaser-action", workflow)
+        self.assertIn("with: {name: goreleaser, version: 2.12.7}", workflow)
+        self.assertIn("with: {name: syft, version: 1.51.0}", workflow)
+        self.assertNotIn("goreleaser/goreleaser-action", workflow)
+        self.assertNotIn("anchore/sbom-action", workflow)
         self.assertIn("bash charts/scripts/build-chart-dependency.sh", workflow)
 
     def test_promotion_remains_protected_pinned_reverified_and_never_rebuilds(self) -> None:
@@ -411,7 +505,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         for value in (
             "github.workflow_sha",
             "Re-verify every privileged-boundary invariant after approval",
-            "gh api \"repos/${{ github.repository }}/actions/runs/$RUN_ID\"",
+            "verify_candidate_run.sh",
             "git merge-base --is-ancestor \"$SOURCE_SHA\" origin/master",
             "audit_release_security.sh",
             "verify-release-manifests",
@@ -424,6 +518,9 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertNotIn("docker build -", workflow)
         self.assertNotIn("goreleaser/goreleaser-action", workflow.lower())
         self.assertNotIn("helm package", workflow)
+        run_verifier = (ROOT / ".github/scripts/verify_candidate_run.sh").read_text()
+        for value in ("candidate_repository", "candidate_workflow", "candidate_event", "candidate_control_sha", "run_attempt", ".head_repository.full_name"):
+            self.assertIn(value, run_verifier)
 
     def test_fixture_callers_gate_actor_writer_set_and_secretless_forks(self) -> None:
         for name in ("e2e.yml", "release-candidate.yml"):
@@ -437,12 +534,14 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertIn("pull_request:", e2e)
         self.assertNotIn("pull_request_target:", e2e)
         audit = (ROOT / ".github/scripts/audit_release_security.sh").read_text()
-        for value in ("collaborators?affiliation=all", "FORGE_E2E_CPU_SSH_KEY", "FORGE_E2E_GPU_SSH_KEY", "immutable-releases"):
+        for value in ("collaborators?affiliation=all", "FORGE_E2E_CPU_SSH_KEY", "FORGE_E2E_GPU_SSH_KEY", "immutable-releases", "expected_write_key_public", "ssh-keygen -y"):
             self.assertIn(value, audit)
 
     def test_release_publication_is_complete_draft_first_and_published_verification_only(self) -> None:
         script = (ROOT / ".github/scripts/publish_github_releases.sh").read_text()
         self.assertNotIn("gh release upload", script)
+        for field in ("targetCommitish", ".name == $title", ".body == $notes", ".isPrerelease == $prerelease", ".immutable"):
+            self.assertIn(field, script)
         self.assertIn("published release $tag already matches exactly; verification-only", script)
         create = script.index("gh release create")
         verify_draft = script.index("verify_release \"$tag\" \"$manifest\" \"$stage\"", create)
@@ -462,9 +561,14 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             "gh release upload",
             "releases/assets/$ASSET_ID",
             "git push --force",
+            "release metadata edit",
+            "release deletion",
+            "post_state_unchanged",
+            "RELEASE_TAG_KEY_FILE",
             "immutable-release-gate-evidence",
         ):
             self.assertIn(value, workflow)
+        self.assertLess(workflow.index("Configure the reviewed protected-tag deploy key"), workflow.index("Reverify live release and deploy-key authority"))
         self.assertNotIn("gh release delete", workflow)
         self.assertNotIn("Disposable", workflow)
 

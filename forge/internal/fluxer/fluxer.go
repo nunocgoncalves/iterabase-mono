@@ -20,12 +20,10 @@ type GitRepositoryArtifact struct {
 // bound to the same host as the Provisioner/Deployer/Overlayer; the flux CLI
 // runs there over SSH against the k3s kubeconfig.
 type Fluxer interface {
-	// EnsureFlux installs the flux CLI on the host if absent (the official
-	// version-pinned install script, mirroring ensureHelm/EnsureGit), then runs
-	// `flux install` to apply the Flux components (source-controller,
-	// kustomize-controller, helm-controller, notification-controller) + their
-	// CRDs into the cluster. Idempotent: re-running reconciles to the version.
-	// version is the flux2 release tag (e.g. "v2.4.0").
+	// EnsureFlux installs the exact repository-reviewed Flux archive, renders its
+	// components, substitutes every runtime image with a reviewed digest, and
+	// applies that closed manifest to the cluster. Idempotent: re-running
+	// reconciles to the reviewed version. version is the flux2 release tag.
 	EnsureFlux(ctx context.Context, version string) error
 	// UninstallFlux runs `flux uninstall` (non-interactive) to remove the Flux
 	// components + CRDs + flux-system resources. Best-effort (destroy): a missing

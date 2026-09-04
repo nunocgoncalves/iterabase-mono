@@ -293,22 +293,34 @@ func TestPreflightRequiresReadableOperatingSystemIdentity(t *testing.T) {
 func TestInstall_CommandShape(t *testing.T) {
 	const installerPath = "/tmp/forge-k3s-installer.test"
 	var got string
-	sawChecksum := false
+	var downloads []string
+	var checksums []string
 	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
 		switch {
-		case cmd == "mktemp /tmp/forge-k3s-installer.XXXXXX":
-			return installerPath + "\n", 0
+		case cmd == "uname -m":
+			return "x86_64\n", 0
+		case strings.HasPrefix(cmd, "mktemp /tmp/forge-"):
+			prefix := strings.TrimSuffix(strings.TrimPrefix(cmd, "mktemp /tmp/forge-"), ".XXXXXX")
+			if prefix == "k3s-installer" {
+				return installerPath + "\n", 0
+			}
+			return "/tmp/forge-" + prefix + ".test\n", 0
 		case strings.HasPrefix(cmd, "curl -fsSL"):
-			assert.Contains(t, cmd, shellQuote(k3sInstallScriptURL))
+			downloads = append(downloads, cmd)
 			return "", 0
 		case strings.Contains(cmd, "sha256sum --check --status"):
-			sawChecksum = true
-			assert.Contains(t, cmd, k3sInstallScriptSHA256)
+			checksums = append(checksums, cmd)
+			return "", 0
+		case strings.HasPrefix(cmd, "sudo install -d"):
 			return "", 0
 		case strings.HasPrefix(cmd, "sudo env INSTALL_K3S_VERSION="):
 			got = cmd
 			return "", 0
-		case cmd == "rm -f "+shellQuote(installerPath):
+		case cmd == "sudo test -f '/usr/local/bin/k3s'":
+			return "", 0
+		case cmd == "sudo sha256sum '/usr/local/bin/k3s' | awk '{print $1}'":
+			return "399b87b432ce55013fa81adad572a8e4ecf56e0df97369cf02d4b8a41f039091\n", 0
+		case strings.HasPrefix(cmd, "rm -f "):
 			return "", 0
 		default:
 			return "", 1
@@ -321,8 +333,12 @@ func TestInstall_CommandShape(t *testing.T) {
 	args := []string{"server", "--cluster-cidr", "10.42.0.0/16,fd42::/48", "--disable", "traefik"}
 	err := p.Install(context.Background(), "v1.31.5", args)
 	require.NoError(t, err)
-	assert.True(t, sawChecksum)
+	require.Len(t, downloads, 3)
+	assert.Contains(t, strings.Join(downloads, "\n"), k3sInstallScriptURL)
+	assert.Contains(t, strings.Join(downloads, "\n"), "k3s-airgap-images-amd64.tar.zst")
+	assert.Contains(t, strings.Join(checksums, "\n"), k3sInstallScriptSHA256)
 	assert.Contains(t, got, "INSTALL_K3S_VERSION='v1.31.5+k3s1'")
+	assert.Contains(t, got, "INSTALL_K3S_SKIP_DOWNLOAD=true")
 	assert.Contains(t, got, "sh '"+installerPath+"'")
 	assert.Contains(t, got, "'server'")
 	assert.Contains(t, got, "'--cluster-cidr'")
@@ -349,9 +365,13 @@ func TestFetchKubeconfig(t *testing.T) {
 func TestReadState_Installed(t *testing.T) {
 	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
 		switch cmd {
-		case "command -v k3s":
-			return "/usr/local/bin/k3s\n", 0
-		case "sudo k3s --version":
+		case "sudo test -f '/usr/local/bin/k3s'":
+			return "", 0
+		case "uname -m":
+			return "x86_64\n", 0
+		case "sudo sha256sum '/usr/local/bin/k3s' | awk '{print $1}'":
+			return "399b87b432ce55013fa81adad572a8e4ecf56e0df97369cf02d4b8a41f039091\n", 0
+		case "sudo /usr/local/bin/k3s --version":
 			return "k3s version v1.31.5+k3s1 (abcdef)\n", 0
 		case "sudo cat /etc/systemd/system/k3s.service":
 			// Mirrors the exact unit the k3s install script (get.k3s.io) writes:
@@ -373,6 +393,31 @@ func TestReadState_Installed(t *testing.T) {
 	assert.Equal(t, "10.42.0.0/16,fd42::/48", st.ClusterCIDR)
 	assert.Equal(t, "10.43.0.0/16,fd43::/112", st.ServiceCIDR)
 	assert.True(t, st.DualStack)
+}
+
+func TestReadState_RejectsUnreviewedK3sBeforeExecution(t *testing.T) {
+	executed := false
+	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
+		switch cmd {
+		case "sudo test -f '/usr/local/bin/k3s'":
+			return "", 0
+		case "uname -m":
+			return "x86_64\n", 0
+		case "sudo sha256sum '/usr/local/bin/k3s' | awk '{print $1}'":
+			return strings.Repeat("f", 64) + "\n", 0
+		case "sudo /usr/local/bin/k3s --version":
+			executed = true
+			return "k3s version v1.31.5+k3s1\n", 0
+		default:
+			return "", 1
+		}
+	})
+	defer cleanup()
+	p := newProvisioner(t, addr, cfg)
+	defer p.Close()
+	_, err := p.ReadState(context.Background())
+	require.ErrorContains(t, err, "does not match a repository-reviewed executable")
+	assert.False(t, executed)
 }
 
 func TestReadState_NotInstalled(t *testing.T) {
@@ -1034,115 +1079,49 @@ func TestDeployer_Apply_CRDFailuresStopBeforeUpgrade(t *testing.T) {
 	}
 }
 
-func TestDeployer_Apply_HelmBootstrapFailuresStopBeforeChart(t *testing.T) {
-	const installerPath = "/tmp/forge-helm-installer.test"
-	tests := []struct {
-		name    string
-		failAt  string
-		wantErr string
-	}{
-		{name: "download failure", failAt: "download", wantErr: "download helm-installer: ssh run"},
-		{name: "checksum mismatch", failAt: "checksum", wantErr: "verify helm-installer content checksum"},
-		{name: "installer failure", failAt: "installer", wantErr: "execute helm installer: ssh run"},
-		{name: "privileged PATH mismatch", failAt: "verify", wantErr: "verify helm installation through privileged PATH"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			var chartCalled, installerCalled bool
-			addr, cfg, cleanup := startFakeSSHWithResult(t, func(cmd string) sshCommandResult {
-				switch {
-				case cmd == helmVerifyCommand:
-					return sshCommandResult{stderr: "sudo: helm: command not found\n", code: 1}
-				case cmd == helmInstallerTempCmd:
-					return sshCommandResult{stdout: installerPath + "\n"}
-				case strings.HasPrefix(cmd, "curl -fsSL"):
-					if tt.failAt == "download" {
-						return sshCommandResult{stderr: "curl: (22) The requested URL returned error: 503\n", code: 22}
-					}
-					return sshCommandResult{}
-				case strings.Contains(cmd, "sha256sum --check --status"):
-					if tt.failAt == "checksum" {
-						return sshCommandResult{code: 1}
-					}
-					return sshCommandResult{}
-				case cmd == "sudo env DESIRED_VERSION="+shellQuote(helmInstallVersion)+" bash "+shellQuote(installerPath):
-					installerCalled = true
-					if tt.failAt == "installer" {
-						return sshCommandResult{stdout: "get_helm.sh: unsupported architecture\n", code: 1}
-					}
-					return sshCommandResult{}
-				case cmd == "rm -f "+shellQuote(installerPath):
-					return sshCommandResult{}
-				case strings.Contains(cmd, "'show' 'crds'"), strings.Contains(cmd, "'template'"), strings.Contains(cmd, "'upgrade' '--install'"):
-					chartCalled = true
-					return sshCommandResult{}
-				default:
-					return sshCommandResult{code: 1}
-				}
-			})
-			defer cleanup()
-			p := newProvisioner(t, addr, cfg)
-			defer p.Close()
-			err := p.Apply(context.Background(), deployer.ApplyOpts{
-				Release: "opo1", Repository: "oci://ghcr.io/nunocgoncalves/iterabase-platform",
-				Version: "0.1.0", Namespace: "iterabase-system",
-			})
-			require.ErrorContains(t, err, tt.wantErr)
-			switch tt.failAt {
-			case "download":
-				require.ErrorContains(t, err, "curl: (22) The requested URL returned error: 503")
-			case "installer":
-				require.ErrorContains(t, err, "get_helm.sh: unsupported architecture")
-			case "verify":
-				require.ErrorContains(t, err, "sudo: helm: command not found")
-			}
-			if tt.failAt == "download" || tt.failAt == "checksum" {
-				assert.False(t, installerCalled)
-			}
-			assert.False(t, chartCalled, "chart discovery/apply must not run after Helm bootstrap fails")
-		})
-	}
-}
-
-func TestEnsureHelmRetriesRecognizedInstallerTransportFailure(t *testing.T) {
-	const installerPath = "/tmp/forge-helm-installer.test"
-	originalInterval := helmInstallerRetryInterval
-	helmInstallerRetryInterval = time.Millisecond
-	defer func() { helmInstallerRetryInterval = originalInterval }()
-
-	installed := false
-	installerCalls := 0
-	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
+func TestDeployer_Apply_HelmArchiveSubstitutionStopsBeforeExtraction(t *testing.T) {
+	var extracted, installed, chartCalled bool
+	addr, cfg, cleanup := startFakeSSHWithResult(t, func(cmd string) sshCommandResult {
 		switch {
 		case cmd == helmVerifyCommand:
-			if installed {
-				return "v4.0.0\n", 0
-			}
-			return "", 1
-		case cmd == helmInstallerTempCmd:
-			return installerPath + "\n", 0
-		case strings.HasPrefix(cmd, "curl -fsSL"), strings.Contains(cmd, "sha256sum --check --status"), cmd == "rm -f "+shellQuote(installerPath):
-			return "", 0
-		case cmd == "sudo env DESIRED_VERSION="+shellQuote(helmInstallVersion)+" bash "+shellQuote(installerPath):
-			installerCalls++
-			if installerCalls == 1 {
-				return "Failed to install helm\n", 1
-			}
+			return sshCommandResult{code: 1}
+		case cmd == "uname -m":
+			return sshCommandResult{stdout: "x86_64\n"}
+		case cmd == "mktemp /tmp/forge-helm.XXXXXX":
+			return sshCommandResult{stdout: "/tmp/forge-helm.archive\n"}
+		case strings.HasPrefix(cmd, "curl -fsSL"):
+			return sshCommandResult{}
+		case strings.Contains(cmd, "sha256sum --check --status"):
+			return sshCommandResult{code: 1}
+		case strings.HasPrefix(cmd, "tar -xzf"):
+			extracted = true
+			return sshCommandResult{}
+		case strings.HasPrefix(cmd, "sudo install"):
 			installed = true
-			return "", 0
+			return sshCommandResult{}
+		case strings.Contains(cmd, "'show' 'crds'"), strings.Contains(cmd, "'template'"), strings.Contains(cmd, "'upgrade' '--install'"):
+			chartCalled = true
+			return sshCommandResult{}
+		case strings.HasPrefix(cmd, "rm -f "):
+			return sshCommandResult{}
 		default:
-			return "", 1
+			return sshCommandResult{code: 1}
 		}
 	})
 	defer cleanup()
 	p := newProvisioner(t, addr, cfg)
 	defer p.Close()
-	require.NoError(t, p.ensureHelm(context.Background()))
-	assert.Equal(t, 2, installerCalls)
+	err := p.Apply(context.Background(), deployer.ApplyOpts{
+		Release: "opo1", Repository: "oci://ghcr.io/nunocgoncalves/iterabase-platform",
+		Version: "0.1.0", Namespace: "iterabase-system",
+	})
+	require.ErrorContains(t, err, "verify helm content checksum")
+	assert.False(t, extracted)
+	assert.False(t, installed)
+	assert.False(t, chartCalled)
 }
 
-func TestDeployer_Apply_EnsuresHelm(t *testing.T) {
-	const installerPath = "/tmp/forge-helm-installer.test"
+func TestDeployer_Apply_InstallsHelmOnlyAfterArchiveAndExecutableVerification(t *testing.T) {
 	var commands []string
 	helmChecks := 0
 	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
@@ -1153,19 +1132,21 @@ func TestDeployer_Apply_EnsuresHelm(t *testing.T) {
 			if helmChecks == 1 {
 				return "", 1
 			}
-			return "v4.0.0+gabcdef\n", 0
-		case cmd == helmInstallerTempCmd:
-			return installerPath + "\n", 0
+			return "", 0
+		case cmd == "uname -m":
+			return "x86_64\n", 0
+		case cmd == "mktemp /tmp/forge-helm.XXXXXX":
+			return "/tmp/forge-helm.archive\n", 0
+		case cmd == "mktemp -d /tmp/forge-helm.XXXXXX":
+			return "/tmp/forge-helm.extract\n", 0
 		case strings.HasPrefix(cmd, "curl -fsSL"),
 			strings.Contains(cmd, "sha256sum --check --status"),
-			cmd == "sudo env DESIRED_VERSION="+shellQuote(helmInstallVersion)+" bash "+shellQuote(installerPath),
-			cmd == "rm -f "+shellQuote(installerPath):
+			strings.HasPrefix(cmd, "tar -xzf"),
+			strings.HasPrefix(cmd, "sudo install -d"),
+			strings.HasPrefix(cmd, "rm -rf "),
+			strings.HasPrefix(cmd, "rm -f "):
 			return "", 0
-		case strings.Contains(cmd, "'show' 'crds'"):
-			return "", 0
-		case strings.Contains(cmd, "'template'"):
-			return "", 0
-		case strings.Contains(cmd, "'upgrade' '--install'"):
+		case strings.Contains(cmd, "'show' 'crds'"), strings.Contains(cmd, "'template'"), strings.Contains(cmd, "'upgrade' '--install'"):
 			return "", 0
 		default:
 			return "", 1
@@ -1179,20 +1160,24 @@ func TestDeployer_Apply_EnsuresHelm(t *testing.T) {
 		Version: "0.1.0", Namespace: "iterabase-system",
 	}))
 
-	require.Len(t, commands, 10)
-	assert.Equal(t, helmVerifyCommand, commands[0])
-	assert.Equal(t, helmInstallerTempCmd, commands[1])
-	assert.Contains(t, commands[2], "curl -fsSL --retry 4 --retry-delay 2 --retry-all-errors --connect-timeout 10 -o '"+installerPath+"'")
-	assert.Contains(t, commands[2], shellQuote(helmInstallScript))
-	assert.NotContains(t, commands[2], "|")
-	assert.Contains(t, commands[3], "sha256sum --check --status")
-	assert.Contains(t, commands[3], helmInstallScriptSHA256)
-	assert.Equal(t, "sudo env DESIRED_VERSION="+shellQuote(helmInstallVersion)+" bash "+shellQuote(installerPath), commands[4])
-	assert.Equal(t, helmVerifyCommand, commands[5])
-	assert.Equal(t, "rm -f "+shellQuote(installerPath), commands[6])
-	assert.Contains(t, commands[7], "'show' 'crds'")
-	assert.Contains(t, commands[8], "'template'")
-	assert.Contains(t, commands[9], "'upgrade' '--install'")
+	index := func(after int, contains string) int {
+		for i := after + 1; i < len(commands); i++ {
+			if strings.Contains(commands[i], contains) {
+				return i
+			}
+		}
+		return -1
+	}
+	archiveVerify := index(-1, "e9b88b4ee95b18c706839c28d3a0220e5bc470e9cd9262410c90793c45ff8b7c")
+	extract := index(archiveVerify, "tar -xzf")
+	extractedVerify := index(extract, "aeb4645b9e6658948efa290e28dd23ae75a16fb73f137942f2294fd5c7fcb573")
+	install := index(extractedVerify, "sudo install -d '/usr/local/bin'")
+	chart := index(install, "'upgrade' '--install'")
+	assert.GreaterOrEqual(t, archiveVerify, 0)
+	assert.Greater(t, extract, archiveVerify)
+	assert.Greater(t, extractedVerify, extract)
+	assert.Greater(t, install, extractedVerify)
+	assert.Greater(t, chart, install)
 }
 
 func TestDeployer_Status(t *testing.T) {
@@ -2424,27 +2409,26 @@ func TestOverlayer_ReadFile(t *testing.T) {
 	})
 }
 
-func TestFluxer_EnsureFlux_InstallsCLI(t *testing.T) {
-	const installerPath = "/tmp/forge-flux-installer.test"
-	var gotDownload, gotInstall, gotFluxInstall string
+func TestFluxer_EnsureFlux_InstallsReviewedCLIAndDigestPinnedRuntime(t *testing.T) {
+	var gotDownload, gotFluxInstall string
 	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
 		switch {
-		case cmd == "command -v flux":
-			return "", 1 // absent
-		case cmd == "mktemp /tmp/forge-flux-installer.XXXXXX":
-			return installerPath + "\n", 0
+		case cmd == "sudo test -f '/usr/local/bin/flux'":
+			return "", 1
+		case cmd == "uname -m":
+			return "x86_64\n", 0
+		case cmd == "mktemp /tmp/forge-flux.XXXXXX":
+			return "/tmp/forge-flux.archive\n", 0
+		case cmd == "mktemp -d /tmp/forge-flux.XXXXXX":
+			return "/tmp/forge-flux.extract\n", 0
+		case cmd == "mktemp /tmp/forge-flux-runtime.XXXXXX":
+			return "/tmp/forge-flux-runtime.test\n", 0
 		case strings.HasPrefix(cmd, "curl -fsSL"):
 			gotDownload = cmd
 			return "", 0
-		case strings.Contains(cmd, "sha256sum --check --status"):
-			assert.Contains(t, cmd, fluxInstallScriptSHA256)
+		case strings.Contains(cmd, "sha256sum --check --status"), strings.HasPrefix(cmd, "tar -xzf"), strings.HasPrefix(cmd, "sudo install -d"), strings.HasPrefix(cmd, "rm -f "), strings.HasPrefix(cmd, "rm -rf "):
 			return "", 0
-		case strings.HasPrefix(cmd, "sudo env FLUX_VERSION="):
-			gotInstall = cmd
-			return "", 0
-		case cmd == "rm -f "+shellQuote(installerPath):
-			return "", 0
-		case strings.Contains(cmd, "flux") && strings.Contains(cmd, "install") && strings.Contains(cmd, "--version="):
+		case strings.Contains(cmd, "bash -o pipefail") && strings.Contains(cmd, "flux install --export"):
 			gotFluxInstall = cmd
 			return "", 0
 		default:
@@ -2455,28 +2439,36 @@ func TestFluxer_EnsureFlux_InstallsCLI(t *testing.T) {
 	p := newProvisioner(t, addr, cfg)
 	defer p.Close()
 	require.NoError(t, p.EnsureFlux(context.Background(), "v2.4.0"))
-	// CLI install script is version-pinned via FLUX_VERSION; the version never
-	// appears bare in a way that could mismatch a tag filter.
-	assert.Contains(t, gotDownload, shellQuote(fluxInstallScriptURL))
-	assert.Contains(t, gotInstall, "FLUX_VERSION='2.4.0'", "install script takes the version without the leading v (it prepends v internally)")
-	assert.Contains(t, gotInstall, shellQuote(installerPath))
-	// flux install runs against the k3s kubeconfig via KUBECONFIG env (sudo root
-	// reads the root-owned 0600 kubeconfig); version pinned.
-	assert.Contains(t, gotFluxInstall, "KUBECONFIG=/etc/rancher/k3s/k3s.yaml")
-	assert.Contains(t, gotFluxInstall, "--version=v2.4.0")
+	assert.Contains(t, gotDownload, "flux_2.4.0_linux_amd64.tar.gz")
+	assert.Contains(t, gotFluxInstall, "--version=")
+	assert.Contains(t, gotFluxInstall, "v2.4.0")
+	for _, image := range []string{fluxHelmControllerImage, fluxKustomizeControllerImage, fluxNotificationControllerImage, fluxSourceControllerImage} {
+		assert.Contains(t, gotFluxInstall, image)
+	}
+	assert.Contains(t, gotFluxInstall, "grep -v")
+	assert.Contains(t, gotFluxInstall, "@sha256:")
+	assert.Contains(t, gotFluxInstall, "sudo /usr/local/bin/k3s kubectl apply -f")
 }
 
-func TestFluxer_EnsureFlux_CLIPresent(t *testing.T) {
+func TestFluxer_EnsureFlux_ReviewedCLIPresent(t *testing.T) {
 	var gotFluxInstall string
-	sawInstallScript := false
+	sawDownload := false
 	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
 		switch {
-		case cmd == "command -v flux":
-			return "/usr/local/bin/flux\n", 0 // present
-		case strings.Contains(cmd, "fluxcd.io/install.sh"):
-			sawInstallScript = true
+		case cmd == "sudo test -f '/usr/local/bin/flux'":
 			return "", 0
-		case strings.Contains(cmd, "flux") && strings.Contains(cmd, "install") && strings.Contains(cmd, "--version="):
+		case cmd == "uname -m":
+			return "x86_64\n", 0
+		case cmd == "sudo sha256sum '/usr/local/bin/flux' | awk '{print $1}'":
+			return "11462ee3dd85d8d9fb584659ea6a838a1ca3414f3700ae432bebbcca9132f410\n", 0
+		case cmd == "mktemp /tmp/forge-flux-runtime.XXXXXX":
+			return "/tmp/forge-flux-runtime.test\n", 0
+		case strings.HasPrefix(cmd, "rm -f "):
+			return "", 0
+		case strings.HasPrefix(cmd, "curl -fsSL"):
+			sawDownload = true
+			return "", 0
+		case strings.Contains(cmd, "bash -o pipefail") && strings.Contains(cmd, "flux install --export"):
 			gotFluxInstall = cmd
 			return "", 0
 		default:
@@ -2487,22 +2479,28 @@ func TestFluxer_EnsureFlux_CLIPresent(t *testing.T) {
 	p := newProvisioner(t, addr, cfg)
 	defer p.Close()
 	require.NoError(t, p.EnsureFlux(context.Background(), "v2.4.0"))
-	assert.False(t, sawInstallScript, "CLI already present => install script skipped")
-	assert.Contains(t, gotFluxInstall, "--version=v2.4.0")
+	assert.False(t, sawDownload)
+	assert.Contains(t, gotFluxInstall, "--version=")
+	assert.Contains(t, gotFluxInstall, "v2.4.0")
 }
 
-func TestFluxer_EnsureFlux_InstallFails(t *testing.T) {
-	const installerPath = "/tmp/forge-flux-installer.test"
+func TestFluxer_EnsureFlux_ArchiveSubstitutionFailsBeforeExtraction(t *testing.T) {
+	extracted := false
 	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
 		switch {
-		case cmd == "command -v flux":
+		case cmd == "sudo test -f '/usr/local/bin/flux'":
 			return "", 1
-		case cmd == "mktemp /tmp/forge-flux-installer.XXXXXX":
-			return installerPath + "\n", 0
-		case strings.HasPrefix(cmd, "curl -fsSL"), strings.Contains(cmd, "sha256sum --check --status"), cmd == "rm -f "+shellQuote(installerPath):
+		case cmd == "uname -m":
+			return "x86_64\n", 0
+		case cmd == "mktemp /tmp/forge-flux.XXXXXX":
+			return "/tmp/forge-flux.archive\n", 0
+		case strings.HasPrefix(cmd, "curl -fsSL"), strings.HasPrefix(cmd, "rm -f "):
 			return "", 0
-		case strings.HasPrefix(cmd, "sudo env FLUX_VERSION="):
-			return "", 1 // CLI installer fails
+		case strings.Contains(cmd, "sha256sum --check --status"):
+			return "", 1
+		case strings.HasPrefix(cmd, "tar -xzf"):
+			extracted = true
+			return "", 0
 		default:
 			return "", 1
 		}
@@ -2511,16 +2509,20 @@ func TestFluxer_EnsureFlux_InstallFails(t *testing.T) {
 	p := newProvisioner(t, addr, cfg)
 	defer p.Close()
 	err := p.EnsureFlux(context.Background(), "v2.4.0")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "install flux cli")
+	require.ErrorContains(t, err, "verify flux content checksum")
+	assert.False(t, extracted)
 }
 
 func TestFluxer_UninstallFlux(t *testing.T) {
 	var got string
 	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
 		switch {
-		case cmd == "command -v flux":
-			return "/usr/local/bin/flux\n", 0
+		case cmd == "sudo test -f '/usr/local/bin/flux'":
+			return "", 0
+		case cmd == "uname -m":
+			return "x86_64\n", 0
+		case cmd == "sudo sha256sum '/usr/local/bin/flux' | awk '{print $1}'":
+			return "11462ee3dd85d8d9fb584659ea6a838a1ca3414f3700ae432bebbcca9132f410\n", 0
 		case strings.Contains(cmd, "flux") && strings.Contains(cmd, "uninstall"):
 			got = cmd
 			return "", 0
@@ -2539,7 +2541,7 @@ func TestFluxer_UninstallFlux(t *testing.T) {
 
 func TestFluxer_UninstallFlux_FluxAbsent(t *testing.T) {
 	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
-		if cmd == "command -v flux" {
+		if cmd == "sudo test -f '/usr/local/bin/flux'" {
 			return "", 1 // CLI absent
 		}
 		return "", 1

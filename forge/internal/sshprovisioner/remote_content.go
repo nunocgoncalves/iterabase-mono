@@ -8,17 +8,37 @@ import (
 )
 
 const (
-	k3sInstallScriptURL     = "https://raw.githubusercontent.com/k3s-io/k3s/2977c525a2e7a487886107ce4df43630ae9b03b2/install.sh"
-	k3sInstallScriptSHA256  = "e5cc3b3d9dfc1662c2d9be6da5abc9a4cd317d6abc3a5ffc02e3dd3248207fee"
-	fluxInstallScriptURL    = "https://raw.githubusercontent.com/fluxcd/flux2/602d14817c2cd3d6124ec948cd8c0348e2bf2b0a/install/flux.sh"
-	fluxInstallScriptSHA256 = "bd7765225b731a1df952456eced0abb5dbbf5e11bc70cf6ab5fddd1476088b7e"
-	helmInstallScriptURL    = "https://raw.githubusercontent.com/helm/helm/bc0114c70841e2a05c95e53e20358fb761dbfb2e/scripts/get-helm-4"
-	helmInstallScriptSHA256 = "aa9943145fbc13c10ea271735cc8fdf538cebbdaeefc7ae5b021ed86ac01f30f"
-	helmInstallVersion      = "v4.2.3"
-	// Stable command aliases keep the fake-SSH contract readable.
-	helmInstallerTempCmd = "mktemp /tmp/forge-helm-installer.XXXXXX"
-	helmInstallScript    = helmInstallScriptURL
+	k3sInstallScriptURL    = "https://raw.githubusercontent.com/k3s-io/k3s/2977c525a2e7a487886107ce4df43630ae9b03b2/install.sh"
+	k3sInstallScriptSHA256 = "e5cc3b3d9dfc1662c2d9be6da5abc9a4cd317d6abc3a5ffc02e3dd3248207fee"
+	helmInstallVersion     = "v4.2.3"
 )
+
+type reviewedRemoteTool struct {
+	name            string
+	version         string
+	platform        string
+	url             string
+	sha256          string
+	archiveMember   string
+	installedSHA256 string
+	installPath     string
+	installMode     string
+}
+
+var reviewedRemoteTools = []reviewedRemoteTool{
+	{name: "k3s", version: "v1.31.5+k3s1", platform: "linux-amd64", url: "https://github.com/k3s-io/k3s/releases/download/v1.31.5%2Bk3s1/k3s", sha256: "399b87b432ce55013fa81adad572a8e4ecf56e0df97369cf02d4b8a41f039091", installedSHA256: "399b87b432ce55013fa81adad572a8e4ecf56e0df97369cf02d4b8a41f039091", installPath: "/usr/local/bin/k3s", installMode: "0755"},
+	{name: "k3s", version: "v1.31.5+k3s1", platform: "linux-arm64", url: "https://github.com/k3s-io/k3s/releases/download/v1.31.5%2Bk3s1/k3s-arm64", sha256: "b719566c43ab1379fe2a7ce477e02bc1c79ea106bdaa7223fa9f6e19a735b477", installedSHA256: "b719566c43ab1379fe2a7ce477e02bc1c79ea106bdaa7223fa9f6e19a735b477", installPath: "/usr/local/bin/k3s", installMode: "0755"},
+	{name: "k3s", version: "v1.34.10+k3s1", platform: "linux-amd64", url: "https://github.com/k3s-io/k3s/releases/download/v1.34.10%2Bk3s1/k3s", sha256: "e63a3511b2603fd1436a1ea8d228348a3b47334b45024801d41a8c0e2d22e8c4", installedSHA256: "e63a3511b2603fd1436a1ea8d228348a3b47334b45024801d41a8c0e2d22e8c4", installPath: "/usr/local/bin/k3s", installMode: "0755"},
+	{name: "k3s", version: "v1.34.10+k3s1", platform: "linux-arm64", url: "https://github.com/k3s-io/k3s/releases/download/v1.34.10%2Bk3s1/k3s-arm64", sha256: "e96eb8b095600cb790f776ae3c619d266ad83a3c3d7b56166f8f2605ca898d65", installedSHA256: "e96eb8b095600cb790f776ae3c619d266ad83a3c3d7b56166f8f2605ca898d65", installPath: "/usr/local/bin/k3s", installMode: "0755"},
+	{name: "k3s-images", version: "v1.31.5+k3s1", platform: "linux-amd64", url: "https://github.com/k3s-io/k3s/releases/download/v1.31.5%2Bk3s1/k3s-airgap-images-amd64.tar.zst", sha256: "94f127423c8dd3fe5834559d2c88f1afde7681ce36f139c82b5e46d0c2b33ba3", installedSHA256: "94f127423c8dd3fe5834559d2c88f1afde7681ce36f139c82b5e46d0c2b33ba3", installPath: "/var/lib/rancher/k3s/agent/images/iterabase-reviewed-k3s-images.tar.zst", installMode: "0644"},
+	{name: "k3s-images", version: "v1.31.5+k3s1", platform: "linux-arm64", url: "https://github.com/k3s-io/k3s/releases/download/v1.31.5%2Bk3s1/k3s-airgap-images-arm64.tar.zst", sha256: "f848ede8c5e945312412efb46e1e02bf2bcbf5c190afcf7eb599c9ce11ede587", installedSHA256: "f848ede8c5e945312412efb46e1e02bf2bcbf5c190afcf7eb599c9ce11ede587", installPath: "/var/lib/rancher/k3s/agent/images/iterabase-reviewed-k3s-images.tar.zst", installMode: "0644"},
+	{name: "k3s-images", version: "v1.34.10+k3s1", platform: "linux-amd64", url: "https://github.com/k3s-io/k3s/releases/download/v1.34.10%2Bk3s1/k3s-airgap-images-amd64.tar.zst", sha256: "7e59087b6a72e00db45a3bcb4f144114b13eb72dc8947c2b7908a0e1482b42b3", installedSHA256: "7e59087b6a72e00db45a3bcb4f144114b13eb72dc8947c2b7908a0e1482b42b3", installPath: "/var/lib/rancher/k3s/agent/images/iterabase-reviewed-k3s-images.tar.zst", installMode: "0644"},
+	{name: "k3s-images", version: "v1.34.10+k3s1", platform: "linux-arm64", url: "https://github.com/k3s-io/k3s/releases/download/v1.34.10%2Bk3s1/k3s-airgap-images-arm64.tar.zst", sha256: "dc1a8c0d10a40f2d0dc1d53c5c42f2b4e00a996b1573227bcbf2855c644d3025", installedSHA256: "dc1a8c0d10a40f2d0dc1d53c5c42f2b4e00a996b1573227bcbf2855c644d3025", installPath: "/var/lib/rancher/k3s/agent/images/iterabase-reviewed-k3s-images.tar.zst", installMode: "0644"},
+	{name: "flux", version: "v2.4.0", platform: "linux-amd64", url: "https://github.com/fluxcd/flux2/releases/download/v2.4.0/flux_2.4.0_linux_amd64.tar.gz", sha256: "7b70b75af20e28fc30ee66cf5372ec8d51dd466fd2ee21aa42690984de70b09b", archiveMember: "flux", installedSHA256: "11462ee3dd85d8d9fb584659ea6a838a1ca3414f3700ae432bebbcca9132f410", installPath: "/usr/local/bin/flux", installMode: "0755"},
+	{name: "flux", version: "v2.4.0", platform: "linux-arm64", url: "https://github.com/fluxcd/flux2/releases/download/v2.4.0/flux_2.4.0_linux_arm64.tar.gz", sha256: "4b8c95a1e8ad262dd33a67d28e22979cf3e022a9283d4676763b6728247d92a0", archiveMember: "flux", installedSHA256: "8ee2e8d18fd9027674b622b6e315c70266d134abca6d65f7901e586be3d25846", installPath: "/usr/local/bin/flux", installMode: "0755"},
+	{name: "helm", version: "v4.2.3", platform: "linux-amd64", url: "https://get.helm.sh/helm-v4.2.3-linux-amd64.tar.gz", sha256: "e9b88b4ee95b18c706839c28d3a0220e5bc470e9cd9262410c90793c45ff8b7c", archiveMember: "linux-amd64/helm", installedSHA256: "aeb4645b9e6658948efa290e28dd23ae75a16fb73f137942f2294fd5c7fcb573", installPath: "/usr/local/bin/helm", installMode: "0755"},
+	{name: "helm", version: "v4.2.3", platform: "linux-arm64", url: "https://get.helm.sh/helm-v4.2.3-linux-arm64.tar.gz", sha256: "21abd9354d39b2cd79a8d76be6912cd137a983cbf997193503fb8a6a6e2f2785", archiveMember: "linux-arm64/helm", installedSHA256: "01bdd0c90f371968326162daaa427cdd14da2641ded094131afc44fb7a538b62", installPath: "/usr/local/bin/helm", installMode: "0755"},
+}
 
 var canonicalSHA256 = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
@@ -55,6 +75,99 @@ func (p *SSHProvisioner) downloadVerifiedRemoteContent(ctx context.Context, pref
 
 func (p *SSHProvisioner) removeRemoteContent(ctx context.Context, path string) {
 	_, _ = p.run(ctx, "rm -f "+shellQuote(path))
+}
+
+func (p *SSHProvisioner) remoteToolPlatform(ctx context.Context) (string, error) {
+	out, err := p.run(ctx, "uname -m")
+	if err != nil {
+		return "", fmt.Errorf("detect remote tool platform: %w", err)
+	}
+	switch strings.TrimSpace(out) {
+	case "x86_64", "amd64":
+		return "linux-amd64", nil
+	case "aarch64", "arm64":
+		return "linux-arm64", nil
+	default:
+		return "", fmt.Errorf("unsupported remote tool architecture %q", strings.TrimSpace(out))
+	}
+}
+
+func reviewedTool(name, version, platform string) (reviewedRemoteTool, error) {
+	for _, tool := range reviewedRemoteTools {
+		if tool.name == name && tool.version == version && tool.platform == platform {
+			return tool, nil
+		}
+	}
+	return reviewedRemoteTool{}, fmt.Errorf("%s %s has no repository-reviewed %s content identity", name, version, platform)
+}
+
+// installReviewedRemoteTool verifies the downloaded archive or executable before
+// extracting or placing any bytes in the privileged executable/runtime path.
+func (p *SSHProvisioner) installReviewedRemoteTool(ctx context.Context, name, version string) (reviewedRemoteTool, error) {
+	platform, err := p.remoteToolPlatform(ctx)
+	if err != nil {
+		return reviewedRemoteTool{}, err
+	}
+	tool, err := reviewedTool(name, version, platform)
+	if err != nil {
+		return reviewedRemoteTool{}, err
+	}
+	artifact, err := p.downloadVerifiedRemoteContent(ctx, name, tool.url, tool.sha256)
+	if err != nil {
+		return reviewedRemoteTool{}, err
+	}
+	defer p.removeRemoteContent(ctx, artifact)
+	source := artifact
+	if tool.archiveMember != "" {
+		directory, err := p.run(ctx, "mktemp -d /tmp/forge-"+name+".XXXXXX")
+		if err != nil {
+			return reviewedRemoteTool{}, fmt.Errorf("prepare %s extraction: %w", name, err)
+		}
+		directory = strings.TrimSpace(directory)
+		if directory == "" {
+			return reviewedRemoteTool{}, fmt.Errorf("prepare %s extraction: mktemp returned an empty path", name)
+		}
+		defer func() { _, _ = p.run(ctx, "rm -rf "+shellQuote(directory)) }()
+		if _, err := p.run(ctx, fmt.Sprintf("tar -xzf %s -C %s %s", shellQuote(artifact), shellQuote(directory), shellQuote(tool.archiveMember))); err != nil {
+			return reviewedRemoteTool{}, fmt.Errorf("extract reviewed %s archive: %w", name, err)
+		}
+		source = directory + "/" + tool.archiveMember
+		verify := fmt.Sprintf("printf '%%s  %%s\\n' %s %s | sha256sum --check --status", shellQuote(tool.installedSHA256), shellQuote(source))
+		if _, err := p.run(ctx, verify); err != nil {
+			return reviewedRemoteTool{}, fmt.Errorf("verify extracted %s executable: %w", name, err)
+		}
+	}
+	parent := tool.installPath[:strings.LastIndex(tool.installPath, "/")]
+	command := fmt.Sprintf("sudo install -d %s && sudo install -m %s %s %s", shellQuote(parent), shellQuote(tool.installMode), shellQuote(source), shellQuote(tool.installPath))
+	if _, err := p.run(ctx, command); err != nil {
+		return reviewedRemoteTool{}, fmt.Errorf("install reviewed %s: %w", name, err)
+	}
+	verify := fmt.Sprintf("printf '%%s  %%s\\n' %s %s | sudo sha256sum --check --status", shellQuote(tool.installedSHA256), shellQuote(tool.installPath))
+	if _, err := p.run(ctx, verify); err != nil {
+		return reviewedRemoteTool{}, fmt.Errorf("verify installed %s executable: %w", name, err)
+	}
+	return tool, nil
+}
+
+func (p *SSHProvisioner) installedReviewedTool(ctx context.Context, name, path string) (reviewedRemoteTool, bool, error) {
+	if _, err := p.run(ctx, "sudo test -f "+shellQuote(path)); err != nil {
+		return reviewedRemoteTool{}, false, nil
+	}
+	platform, err := p.remoteToolPlatform(ctx)
+	if err != nil {
+		return reviewedRemoteTool{}, false, err
+	}
+	out, err := p.run(ctx, "sudo sha256sum "+shellQuote(path)+" | awk '{print $1}'")
+	if err != nil {
+		return reviewedRemoteTool{}, false, fmt.Errorf("hash installed %s: %w", name, err)
+	}
+	checksum := strings.TrimSpace(out)
+	for _, tool := range reviewedRemoteTools {
+		if tool.name == name && tool.platform == platform && tool.installedSHA256 == checksum {
+			return tool, true, nil
+		}
+	}
+	return reviewedRemoteTool{}, false, fmt.Errorf("installed %s does not match a repository-reviewed executable", name)
 }
 
 // downloadVerifiedHelmChart resolves a repo-index chart into a local archive,
