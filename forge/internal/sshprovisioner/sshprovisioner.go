@@ -245,15 +245,31 @@ func (p *SSHProvisioner) Preflight(ctx context.Context) (*provisioner.PreflightR
 
 // Install implements provisioner.Provisioner.
 func (p *SSHProvisioner) Install(ctx context.Context, version string, serverArgs []string) error {
+	resolvedVersion := k3s.ResolveVersion(version)
+	if _, err := p.installReviewedRemoteTool(ctx, "k3s", resolvedVersion); err != nil {
+		return fmt.Errorf("install reviewed k3s executable: %w", err)
+	}
+	if _, err := p.installReviewedRemoteTool(ctx, "k3s-images", resolvedVersion); err != nil {
+		return fmt.Errorf("install reviewed k3s runtime images: %w", err)
+	}
 	installer, err := p.downloadVerifiedRemoteContent(ctx, "k3s-installer", k3sInstallScriptURL, k3sInstallScriptSHA256)
 	if err != nil {
 		return err
 	}
 	defer p.removeRemoteContent(ctx, installer)
-	cmd := fmt.Sprintf("sudo env INSTALL_K3S_VERSION=%s sh %s %s",
-		shellQuote(k3s.ResolveVersion(version)), shellQuote(installer), joinArgs(serverArgs))
-	_, err = p.run(ctx, cmd)
-	return err
+	cmd := fmt.Sprintf("sudo env INSTALL_K3S_VERSION=%s INSTALL_K3S_SKIP_DOWNLOAD=true sh %s %s",
+		shellQuote(resolvedVersion), shellQuote(installer), joinArgs(serverArgs))
+	if _, err = p.run(ctx, cmd); err != nil {
+		return err
+	}
+	tool, installed, err := p.installedReviewedTool(ctx, "k3s", "/usr/local/bin/k3s")
+	if err != nil {
+		return fmt.Errorf("verify installed k3s content identity: %w", err)
+	}
+	if !installed || tool.version != resolvedVersion {
+		return fmt.Errorf("installed k3s does not match reviewed version %s", resolvedVersion)
+	}
+	return nil
 }
 
 // Upgrade implements provisioner.Provisioner. k3s supports in-place upgrade by
@@ -287,12 +303,21 @@ func (p *SSHProvisioner) FetchKubeconfig(ctx context.Context) ([]byte, error) {
 // ReadState implements provisioner.Provisioner.
 func (p *SSHProvisioner) ReadState(ctx context.Context) (*provisioner.HostState, error) {
 	st := &provisioner.HostState{}
-	if _, err := p.run(ctx, "command -v k3s"); err != nil {
-		return st, nil // not installed
+	tool, installed, err := p.installedReviewedTool(ctx, "k3s", "/usr/local/bin/k3s")
+	if err != nil {
+		return nil, err
+	}
+	if !installed {
+		return st, nil
 	}
 	st.Installed = true
-	if out, err := p.run(ctx, "sudo k3s --version"); err == nil {
-		st.Version = parseK3sVersion(out)
+	out, err := p.run(ctx, "sudo /usr/local/bin/k3s --version")
+	if err != nil {
+		return nil, fmt.Errorf("read reviewed k3s version: %w", err)
+	}
+	st.Version = parseK3sVersion(out)
+	if st.Version != tool.version {
+		return nil, fmt.Errorf("reviewed k3s bytes report version %q, expected %q", st.Version, tool.version)
 	}
 	if out, err := p.run(ctx, "sudo cat /etc/systemd/system/k3s.service"); err == nil {
 		st.ClusterCIDR, st.ServiceCIDR, st.DualStack = parseSystemdUnit(out)
@@ -598,8 +623,7 @@ func joinArgs(args []string) string {
 }
 
 const (
-	helmVerifyCommand      = "sudo helm version --short"
-	helmInstallerAttempts  = 3
+	helmVerifyCommand      = "case $(uname -m) in x86_64|amd64) expected=aeb4645b9e6658948efa290e28dd23ae75a16fb73f137942f2294fd5c7fcb573 ;; aarch64|arm64) expected=01bdd0c90f371968326162daaa427cdd14da2641ded094131afc44fb7a538b62 ;; *) exit 1 ;; esac; actual=$(sudo sha256sum /usr/local/bin/helm 2>/dev/null | awk '{print $1}') && test \"$actual\" = \"$expected\""
 	k3sKubeconfigPath      = "/etc/rancher/k3s/k3s.yaml"
 	helmRegistryConfigPath = "/etc/forge/helm-registry.json"
 )
@@ -612,63 +636,20 @@ func helmCmd(args ...string) string {
 	return joinArgs(append(base, args...))
 }
 
-var helmInstallerRetryInterval = 2 * time.Second
-
-// ensureHelm installs Helm on the host when it is not usable through the same
-// privileged PATH used by all subsequent chart operations. The installer is
-// downloaded and validated before execution so curl, empty-input, and installer
-// failures cannot be hidden by a successful shell at the end of a pipeline.
-// Its own release download is retried only for bounded, recognized transport
-// failures; deterministic installer rejection still fails on the first attempt.
+// ensureHelm installs the repository-reviewed Helm archive after verifying its
+// exact bytes. Existing host binaries are never executed as installation
+// authority; each reconciliation replaces them before the first Helm command.
 func (p *SSHProvisioner) ensureHelm(ctx context.Context) error {
 	if _, err := p.run(ctx, helmVerifyCommand); err == nil {
 		return nil
 	}
-
-	installerPath, err := p.downloadVerifiedRemoteContent(ctx, "helm-installer", helmInstallScriptURL, helmInstallScriptSHA256)
-	if err != nil {
-		return err
-	}
-	defer p.removeRemoteContent(ctx, installerPath)
-
-	installCommand := "sudo env DESIRED_VERSION=" + shellQuote(helmInstallVersion) + " bash " + shellQuote(installerPath)
-	for attempt := 1; ; attempt++ {
-		out, installErr := p.run(ctx, installCommand)
-		if installErr == nil {
-			break
-		}
-		// A lost response may hide a completed idempotent install. Verify before
-		// deciding whether the recognized transport failure needs another run.
-		if _, verifyErr := p.run(ctx, helmVerifyCommand); verifyErr == nil {
-			return nil
-		}
-		if attempt >= helmInstallerAttempts || !transientHelmInstallerFailure(out, installErr) {
-			out = strings.TrimSpace(out)
-			if out != "" {
-				return fmt.Errorf("execute helm installer: %w; stdout: %s", installErr, out)
-			}
-			return fmt.Errorf("execute helm installer: %w", installErr)
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(helmInstallerRetryInterval):
-		}
+	if _, err := p.installReviewedRemoteTool(ctx, "helm", helmInstallVersion); err != nil {
+		return fmt.Errorf("install reviewed Helm executable: %w", err)
 	}
 	if _, err := p.run(ctx, helmVerifyCommand); err != nil {
-		return fmt.Errorf("verify helm installation through privileged PATH: %w", err)
+		return fmt.Errorf("verify reviewed Helm installation: %w", err)
 	}
 	return nil
-}
-
-func transientHelmInstallerFailure(out string, err error) bool {
-	text := strings.ToLower(out + " " + err.Error())
-	for _, marker := range []string{"failed to install helm", "connection reset", "connection timed out", "temporary failure", "unexpected eof", "curl: ("} {
-		if strings.Contains(text, marker) {
-			return true
-		}
-	}
-	return false
 }
 
 const prometheusOperatorVersionAnnotation = "operator.prometheus.io/version"

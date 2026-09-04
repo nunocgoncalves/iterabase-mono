@@ -34,15 +34,21 @@ JOB_GRACE_MINUTES = 5
 CAPACITY_JOB_GRACE_MINUTES = 30
 SHARED_PR_PATHS = (
     ".github/actions/**",
+    ".github/ci/path-selection-fixtures.json",
     ".github/inputs/remote-content.json",
     ".github/scripts/add_helm_repositories.sh",
     ".github/scripts/collect_changed_paths.py",
+    ".github/scripts/install_ci_tool.sh",
     ".github/scripts/install_go_tool.sh",
     ".github/scripts/install_kubernetes_tools.sh",
+    ".github/scripts/install_playwright.sh",
     ".github/scripts/remote_content.py",
+    ".github/scripts/select_ci.py",
     ".github/scripts/test_remote_content.py",
+    ".github/scripts/test_select_ci.py",
     ".github/scripts/e2e.py",
     ".github/scripts/test_e2e.py",
+    ".github/workflows/ci.yml",
     ".github/workflows/e2e.yml",
     ".github/workflows/release-candidate.yml",
     "testkit/e2e/**",
@@ -703,11 +709,14 @@ def build_artifact(root: Path, plan: dict[str, Any], contract: dict[str, Any], a
             }
         )
     elif kind == "forge":
+        goreleaser = shutil.which("goreleaser")
+        if goreleaser is None:
+            raise E2EError("reviewed GoReleaser binary is not installed")
+        tool_version = run([goreleaser, "--version"], capture=True)
+        if recipe["goreleaser_version"].removeprefix("v") not in tool_version.split():
+            raise E2EError("installed GoReleaser does not match the reviewed recipe version")
         run(
-            [
-                "go", "run", f"github.com/goreleaser/goreleaser/v2@{recipe['goreleaser_version']}",
-                "build", "--snapshot", "--clean", "--single-target",
-            ],
+            [goreleaser, "build", "--snapshot", "--clean", "--single-target"],
             cwd=root / "forge",
         )
         built = [path for path in (root / "forge" / "dist").rglob("forge") if path.is_file()]

@@ -86,6 +86,59 @@ class RemoteContentTests(unittest.TestCase):
         with self.assertRaisesRegex(remote_content.ContentError, "non-canonical"):
             remote_content.validate_manifest(manifest, ROOT)
 
+    def test_runtime_discovery_rejects_unreviewed_and_unused_identities(self) -> None:
+        reviewed = "a" * 64
+        unreviewed = "b" * 64
+        manifest = {
+            "schema_version": 1,
+            "runtime_images": [
+                {"reference": "example/runtime:v1", "digest": f"sha256:{reviewed}"}
+            ],
+        }
+        with tempfile.TemporaryDirectory() as value:
+            root = Path(value)
+            runtime = root / "charts/charts/service/runtime.yaml"
+            runtime.parent.mkdir(parents=True)
+            runtime.write_text(f"image: example/other:v1@sha256:{unreviewed}\n")
+            with self.assertRaisesRegex(remote_content.ContentError, "unreviewed"):
+                remote_content.validate_runtime_authority(manifest, root)
+            runtime.write_text(f"image: example/substitute:v1@sha256:{reviewed}\n")
+            with self.assertRaisesRegex(remote_content.ContentError, "unreviewed runtime image identity"):
+                remote_content.validate_runtime_authority(manifest, root)
+            runtime.write_text("kind: ConfigMap\n")
+            with self.assertRaisesRegex(remote_content.ContentError, "unused"):
+                remote_content.validate_runtime_authority(manifest, root)
+            runtime.write_text("image: example/runtime:v1\n")
+            with self.assertRaisesRegex(remote_content.ContentError, "tag-only"):
+                remote_content.validate_runtime_authority(manifest, root)
+
+    def test_ci_tool_archives_and_buildkit_image_are_content_authoritative(self) -> None:
+        manifest = remote_content.load_manifest()
+        identities = {(item["name"], item["version"], item["platform"]) for item in manifest["ci_tools"]}
+        for platform in ("linux-amd64", "linux-arm64"):
+            for name, version in (("go", "1.26.5"), ("go", "1.25.12"), ("node", "24.19.0"), ("node", "22.23.2"), ("buildx", "0.36.1"), ("goreleaser", "2.12.7"), ("syft", "1.51.0")):
+                self.assertIn((name, version, platform), identities)
+        self.assertEqual(1, len(manifest["ci_images"]))
+        self.assertIn("@sha256:", manifest["ci_images"][0]["reference"] + "@" + manifest["ci_images"][0]["digest"])
+        self.assertEqual(
+            {"chromium", "chromium-headless-shell", "ffmpeg"},
+            {item["name"] for item in manifest["playwright_archives"]},
+        )
+        forge_identities = {(item["name"], item["version"], item["platform"]) for item in manifest["forge_tools"]}
+        for platform in ("linux-amd64", "linux-arm64"):
+            self.assertIn(("k3s", "v1.34.10+k3s1", platform), forge_identities)
+            self.assertIn(("k3s-images", "v1.34.10+k3s1", platform), forge_identities)
+
+    def test_missing_action_installed_tool_checksum_fails_inventory(self) -> None:
+        manifest = remote_content.load_manifest()
+        manifest["ci_tools"] = [
+            item
+            for item in manifest["ci_tools"]
+            if not (item["name"] == "syft" and item["platform"] == "linux-arm64")
+        ]
+        with self.assertRaisesRegex(remote_content.ContentError, "lacks linux-arm64 checksum authority"):
+            remote_content.validate_manifest(manifest, ROOT)
+
     def test_remote_action_requires_full_commit_pin(self) -> None:
         with tempfile.TemporaryDirectory() as value:
             root = Path(value)

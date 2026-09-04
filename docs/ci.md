@@ -76,10 +76,13 @@ PR builders create each affected image, chart, companion, Forge binary,
 and source-only runtime fixture once. Candidate builders use the same recipe
 fields and add immutable candidate custody. `.github/inputs/remote-content.json`
 inventories covered remote content: digest-pinned base and third-party runtime
-images (including vLLM, NFD, and GPU Operator operands), exact CI tools,
-SHA-256-pinned external Helm archives, and the checksummed Forge installer
-scripts, while naming repository Go/npm/model lock authorities. Chart builders do
-not trust mutable repository indexes: they download an exact archive, fail
+images (including vLLM, Flux, NFD, and GPU Operator operands), checksummed
+Go/Node/Buildx/GoReleaser/Syft and Kubernetes CI tools, Playwright's
+browser/headless/FFmpeg archives, immutable BuildKit, SHA-256-pinned external
+Helm archives, and the Forge K3s/Helm/Flux executable archives plus the K3s
+airgap image set and service installer. It also names repository Go/npm/model
+lock authorities. Chart builders do not trust mutable repository indexes: they
+download an exact archive, fail
 immediately on changed bytes, and only retry transport. Dockerfiles require
 reviewed tag-plus-digest identities; Go tools install from the checked-in tools
 module; third-party Actions use full commits. Product chart composition consumes
@@ -203,9 +206,11 @@ baseline.
 ## Cache and setup contract
 
 All third-party actions use immutable commit SHAs. Go/npm dependency locks,
-repository Go-tool module sums, exact download checksums, base-image digests,
-external chart archive checksums, and Forge installer-script checksums are
-validated through the remote-content inventory. Caches contain only verified
+repository Go-tool module sums, exact executable/archive checksums, base and
+runtime image digests, external chart archive checksums, and Forge tool/runtime
+checksums are validated bidirectionally through the remote-content inventory.
+Tool-installing Actions are not delegated download authority: repository scripts
+verify Go, Node, Buildx, GoReleaser, Syft, and Playwright runtime bytes before use. Caches contain only verified
 dependency or build inputs and use content-addressed keys without broad fallback
 keys.
 

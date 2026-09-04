@@ -3,19 +3,28 @@ set -euo pipefail
 
 repository="${1:-nunocgoncalves/iterabase-mono}"
 expected_reviewer="${RELEASE_REVIEWER:-nunocgoncalves}"
+expected_write_key_title='iterabase protected release tags (validated)'
+expected_write_key_public='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKPWzA/gQRvM0gH98qpDENCHOupPrGT4oEjR84Iq4nzg'
 
 fail() {
   printf 'release security audit failed: %s\n' "$*" >&2
   exit 1
 }
 
-write_key_title="environment-scoped key; admin endpoint audited out-of-band"
+write_key_title="not verified in this invocation"
 if [[ "${AUDIT_ADMIN_ENDPOINTS:-true}" == true ]]; then
   keys="$(gh api "repos/$repository/keys")"
   write_key_count="$(jq '[.[] | select(.read_only == false)] | length' <<<"$keys")"
   [[ "$write_key_count" == 1 ]] || fail "expected exactly one write deploy key, found $write_key_count"
   write_key_title="$(jq -r '.[] | select(.read_only == false) | .title' <<<"$keys")"
-  [[ "$write_key_title" == 'iterabase protected release tags (validated)' ]] || fail "unexpected write deploy key: $write_key_title"
+  write_key_public="$(jq -r '.[] | select(.read_only == false) | .key' <<<"$keys")"
+  [[ "$write_key_title" == "$expected_write_key_title" ]] || fail "unexpected write deploy key: $write_key_title"
+  [[ "$write_key_public" == "$expected_write_key_public" ]] || fail "write deploy key public identity changed"
+elif [[ -n "${RELEASE_TAG_KEY_FILE:-}" ]]; then
+  [[ -f "$RELEASE_TAG_KEY_FILE" ]] || fail "release tag key file is missing"
+  write_key_public="$(ssh-keygen -y -f "$RELEASE_TAG_KEY_FILE")"
+  [[ "$write_key_public" == "$expected_write_key_public" ]] || fail "environment release credential is not the reviewed deploy key"
+  write_key_title="$expected_write_key_title (environment credential public identity verified)"
 fi
 
 environment="$(gh api "repos/$repository/environments/release")"

@@ -46,6 +46,22 @@
       "digest": "sha256:ec714df3813b5405292860f8a1c55c5727bf8c33c88992f1e981efad8065547f"
     },
     {
+      "reference": "ghcr.io/fluxcd/helm-controller:v1.1.0",
+      "digest": "sha256:4c75ca6c24ceb1f1bd7e935d9287a93e4f925c512f206763ec5a47de3ef3ff48"
+    },
+    {
+      "reference": "ghcr.io/fluxcd/kustomize-controller:v1.4.0",
+      "digest": "sha256:e3b0cf847e9cdf47b19af0fbcfe22786b80b598e0caeea8b6d2a5f9c26a48a24"
+    },
+    {
+      "reference": "ghcr.io/fluxcd/notification-controller:v1.4.0",
+      "digest": "sha256:425309a159b15e07f7d97622effc79bc432a37ed55289dd465d37fa217a92a7d"
+    },
+    {
+      "reference": "ghcr.io/fluxcd/source-controller:v1.4.1",
+      "digest": "sha256:3c5f0f022f990ffc0daf00e5b199548fc0fa6e7119e972318f0267081a332963"
+    },
+    {
       "reference": "docker.io/grafana/grafana:13.1.1",
       "digest": "sha256:7cb8c64c4d57a57e734073f3cc94620adb24a0acb929bd80ba9f14017e3a975b"
     },
@@ -210,6 +226,10 @@
       "digest": "sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf"
     },
     {
+      "reference": "testcontainers/ryuk:0.14.0",
+      "digest": "sha256:7c1a8a9a47c780ed0f983770a662f80deb115d95cce3e2daa3d12115b8cd28f0"
+    },
+    {
       "reference": "registry.k8s.io/external-dns/external-dns:v0.21.0",
       "digest": "sha256:f53faaf71cb270d1ca9dce6ea0c94bfebf1a18696263487f0fbc74b9bf2bd7ff"
     },
@@ -236,6 +256,10 @@
     {
       "reference": "vllm/vllm-openai:v0.28.0",
       "digest": "sha256:61fc8a896b0a4fbbbdc063bc4b0dbc25ce98e02b5050c24aeb7830ac02039b14"
+    },
+    {
+      "reference": "voipmonitor/vllm:chthonic-consecration-f1190eab-b12x0ff2847-pr20-cu132",
+      "digest": "sha256:c64b0a145de10f3a2a59584ea46aebb1bac595e6151f4aca025af3f5cb73a8f4"
     }
   ],
   "helm_charts": [
@@ -313,22 +337,108 @@
   ],
   "installers": [
     {
-      "name": "flux",
-      "version": "v2.4.0",
-      "url": "https://raw.githubusercontent.com/fluxcd/flux2/602d14817c2cd3d6124ec948cd8c0348e2bf2b0a/install/flux.sh",
-      "sha256": "bd7765225b731a1df952456eced0abb5dbbf5e11bc70cf6ab5fddd1476088b7e"
-    },
-    {
-      "name": "helm",
-      "version": "v4.2.3",
-      "url": "https://raw.githubusercontent.com/helm/helm/bc0114c70841e2a05c95e53e20358fb761dbfb2e/scripts/get-helm-4",
-      "sha256": "aa9943145fbc13c10ea271735cc8fdf538cebbdaeefc7ae5b021ed86ac01f30f"
-    },
-    {
       "name": "k3s",
       "version": "installer",
       "url": "https://raw.githubusercontent.com/k3s-io/k3s/2977c525a2e7a487886107ce4df43630ae9b03b2/install.sh",
       "sha256": "e5cc3b3d9dfc1662c2d9be6da5abc9a4cd317d6abc3a5ffc02e3dd3248207fee"
+    }
+  ],
+  "forge_tools": [
+    {
+      "name": "k3s",
+      "version": "v1.31.5+k3s1",
+      "platform": "linux-amd64",
+      "url": "https://github.com/k3s-io/k3s/releases/download/v1.31.5%2Bk3s1/k3s",
+      "sha256": "399b87b432ce55013fa81adad572a8e4ecf56e0df97369cf02d4b8a41f039091",
+      "installed_sha256": "399b87b432ce55013fa81adad572a8e4ecf56e0df97369cf02d4b8a41f039091"
+    },
+    {
+      "name": "k3s",
+      "version": "v1.31.5+k3s1",
+      "platform": "linux-arm64",
+      "url": "https://github.com/k3s-io/k3s/releases/download/v1.31.5%2Bk3s1/k3s-arm64",
+      "sha256": "b719566c43ab1379fe2a7ce477e02bc1c79ea106bdaa7223fa9f6e19a735b477",
+      "installed_sha256": "b719566c43ab1379fe2a7ce477e02bc1c79ea106bdaa7223fa9f6e19a735b477"
+    },
+    {
+      "name": "k3s",
+      "version": "v1.34.10+k3s1",
+      "platform": "linux-amd64",
+      "url": "https://github.com/k3s-io/k3s/releases/download/v1.34.10%2Bk3s1/k3s",
+      "sha256": "e63a3511b2603fd1436a1ea8d228348a3b47334b45024801d41a8c0e2d22e8c4",
+      "installed_sha256": "e63a3511b2603fd1436a1ea8d228348a3b47334b45024801d41a8c0e2d22e8c4"
+    },
+    {
+      "name": "k3s",
+      "version": "v1.34.10+k3s1",
+      "platform": "linux-arm64",
+      "url": "https://github.com/k3s-io/k3s/releases/download/v1.34.10%2Bk3s1/k3s-arm64",
+      "sha256": "e96eb8b095600cb790f776ae3c619d266ad83a3c3d7b56166f8f2605ca898d65",
+      "installed_sha256": "e96eb8b095600cb790f776ae3c619d266ad83a3c3d7b56166f8f2605ca898d65"
+    },
+    {
+      "name": "k3s-images",
+      "version": "v1.31.5+k3s1",
+      "platform": "linux-amd64",
+      "url": "https://github.com/k3s-io/k3s/releases/download/v1.31.5%2Bk3s1/k3s-airgap-images-amd64.tar.zst",
+      "sha256": "94f127423c8dd3fe5834559d2c88f1afde7681ce36f139c82b5e46d0c2b33ba3",
+      "installed_sha256": "94f127423c8dd3fe5834559d2c88f1afde7681ce36f139c82b5e46d0c2b33ba3"
+    },
+    {
+      "name": "k3s-images",
+      "version": "v1.31.5+k3s1",
+      "platform": "linux-arm64",
+      "url": "https://github.com/k3s-io/k3s/releases/download/v1.31.5%2Bk3s1/k3s-airgap-images-arm64.tar.zst",
+      "sha256": "f848ede8c5e945312412efb46e1e02bf2bcbf5c190afcf7eb599c9ce11ede587",
+      "installed_sha256": "f848ede8c5e945312412efb46e1e02bf2bcbf5c190afcf7eb599c9ce11ede587"
+    },
+    {
+      "name": "k3s-images",
+      "version": "v1.34.10+k3s1",
+      "platform": "linux-amd64",
+      "url": "https://github.com/k3s-io/k3s/releases/download/v1.34.10%2Bk3s1/k3s-airgap-images-amd64.tar.zst",
+      "sha256": "7e59087b6a72e00db45a3bcb4f144114b13eb72dc8947c2b7908a0e1482b42b3",
+      "installed_sha256": "7e59087b6a72e00db45a3bcb4f144114b13eb72dc8947c2b7908a0e1482b42b3"
+    },
+    {
+      "name": "k3s-images",
+      "version": "v1.34.10+k3s1",
+      "platform": "linux-arm64",
+      "url": "https://github.com/k3s-io/k3s/releases/download/v1.34.10%2Bk3s1/k3s-airgap-images-arm64.tar.zst",
+      "sha256": "dc1a8c0d10a40f2d0dc1d53c5c42f2b4e00a996b1573227bcbf2855c644d3025",
+      "installed_sha256": "dc1a8c0d10a40f2d0dc1d53c5c42f2b4e00a996b1573227bcbf2855c644d3025"
+    },
+    {
+      "name": "flux",
+      "version": "v2.4.0",
+      "platform": "linux-amd64",
+      "url": "https://github.com/fluxcd/flux2/releases/download/v2.4.0/flux_2.4.0_linux_amd64.tar.gz",
+      "sha256": "7b70b75af20e28fc30ee66cf5372ec8d51dd466fd2ee21aa42690984de70b09b",
+      "installed_sha256": "11462ee3dd85d8d9fb584659ea6a838a1ca3414f3700ae432bebbcca9132f410"
+    },
+    {
+      "name": "flux",
+      "version": "v2.4.0",
+      "platform": "linux-arm64",
+      "url": "https://github.com/fluxcd/flux2/releases/download/v2.4.0/flux_2.4.0_linux_arm64.tar.gz",
+      "sha256": "4b8c95a1e8ad262dd33a67d28e22979cf3e022a9283d4676763b6728247d92a0",
+      "installed_sha256": "8ee2e8d18fd9027674b622b6e315c70266d134abca6d65f7901e586be3d25846"
+    },
+    {
+      "name": "helm",
+      "version": "v4.2.3",
+      "platform": "linux-amd64",
+      "url": "https://get.helm.sh/helm-v4.2.3-linux-amd64.tar.gz",
+      "sha256": "e9b88b4ee95b18c706839c28d3a0220e5bc470e9cd9262410c90793c45ff8b7c",
+      "installed_sha256": "aeb4645b9e6658948efa290e28dd23ae75a16fb73f137942f2294fd5c7fcb573"
+    },
+    {
+      "name": "helm",
+      "version": "v4.2.3",
+      "platform": "linux-arm64",
+      "url": "https://get.helm.sh/helm-v4.2.3-linux-arm64.tar.gz",
+      "sha256": "21abd9354d39b2cd79a8d76be6912cd137a983cbf997193503fb8a6a6e2f2785",
+      "installed_sha256": "01bdd0c90f371968326162daaa427cdd14da2641ded094131afc44fb7a538b62"
     }
   ],
   "tools": [
@@ -387,6 +497,147 @@
       "platform": "linux-arm64",
       "sha256": "cc907ccf9e3c34523f0f32b69745265e0a6908ca85b92f41931d4537860eb83c",
       "url": "https://github.com/yannh/kubeconform/releases/download/v0.7.0/kubeconform-linux-arm64.tar.gz"
+    }
+  ],
+  "playwright_archives": [
+    {
+      "name": "chromium",
+      "version": "1.62.1",
+      "revision": "1234",
+      "platform": "linux-amd64",
+      "url": "https://cdn.playwright.dev/builds/cft/151.0.7922.34/linux64/chrome-linux64.zip",
+      "sha256": "ae8736ac28bc69278551500f219fc749575648263c43ec5990749eff43b9fcf8",
+      "directory": "chromium-1234",
+      "executable": "chrome-linux64/chrome",
+      "installed_sha256": "0b20b130e7edd9dd51873be867761295fe0cfad490c2b9a64f95bd3cfc08fa71"
+    },
+    {
+      "name": "chromium-headless-shell",
+      "version": "1.62.1",
+      "revision": "1234",
+      "platform": "linux-amd64",
+      "url": "https://cdn.playwright.dev/builds/cft/151.0.7922.34/linux64/chrome-headless-shell-linux64.zip",
+      "sha256": "3cfc2bd00d1bafcf8a68dc74c9c92bb7150ddc8d26ade948a776316e1cec4f14",
+      "directory": "chromium_headless_shell-1234",
+      "executable": "chrome-headless-shell-linux64/chrome-headless-shell",
+      "installed_sha256": "e11fc9ce65c96313476f7ee9844b6fb6a9220fb048693cfe9eee00acf4170a9f"
+    },
+    {
+      "name": "ffmpeg",
+      "version": "1.62.1",
+      "revision": "1011",
+      "platform": "linux-amd64",
+      "url": "https://cdn.playwright.dev/dbazure/download/playwright/builds/ffmpeg/1011/ffmpeg-linux.zip",
+      "sha256": "ebc74fc5b94830176a3c2914ae96bd8bc7f6a91f4f33890230f84a172ee61ccc",
+      "directory": "ffmpeg-1011",
+      "executable": "ffmpeg-linux",
+      "installed_sha256": "460d44f3416005662f528d4b92e7b94ace924e8a0288106d3803b73c56eaadc8"
+    }
+  ],
+  "ci_tools": [
+    {
+      "name": "go",
+      "version": "1.25.12",
+      "platform": "linux-amd64",
+      "url": "https://go.dev/dl/go1.25.12.linux-amd64.tar.gz",
+      "sha256": "234828b7a89e0e303d2556310ee549fbcf253d28de937bac3da13d6294262ac1"
+    },
+    {
+      "name": "go",
+      "version": "1.25.12",
+      "platform": "linux-arm64",
+      "url": "https://go.dev/dl/go1.25.12.linux-arm64.tar.gz",
+      "sha256": "8b5884aef89600aef5b0b051fb971f11f49bb996521e911f30f02a66884f7bd2"
+    },
+    {
+      "name": "go",
+      "version": "1.26.5",
+      "platform": "linux-amd64",
+      "url": "https://go.dev/dl/go1.26.5.linux-amd64.tar.gz",
+      "sha256": "5c2c3b16caefa1d968a94c1daca04a7ca301a496d9b086e17ad77bb81393f053"
+    },
+    {
+      "name": "go",
+      "version": "1.26.5",
+      "platform": "linux-arm64",
+      "url": "https://go.dev/dl/go1.26.5.linux-arm64.tar.gz",
+      "sha256": "fe4789e92b1f33358680864bbe8704289e7bb5fc207d80623c308935bd696d49"
+    },
+    {
+      "name": "node",
+      "version": "22.23.2",
+      "platform": "linux-amd64",
+      "url": "https://nodejs.org/dist/v22.23.2/node-v22.23.2-linux-x64.tar.xz",
+      "sha256": "d60acfe00a2932254bb0ad20e01b0d74397a0875595de719654b214f4b03f307"
+    },
+    {
+      "name": "node",
+      "version": "22.23.2",
+      "platform": "linux-arm64",
+      "url": "https://nodejs.org/dist/v22.23.2/node-v22.23.2-linux-arm64.tar.xz",
+      "sha256": "fff4078c5def658577f92c88db7db3bc0072924bfb93fe52c1e744a54e94abb8"
+    },
+    {
+      "name": "node",
+      "version": "24.19.0",
+      "platform": "linux-amd64",
+      "url": "https://nodejs.org/dist/v24.19.0/node-v24.19.0-linux-x64.tar.xz",
+      "sha256": "14b342e71204f811bde6153be8e04b62aef63c236fef92b55f9c83154b409647"
+    },
+    {
+      "name": "node",
+      "version": "24.19.0",
+      "platform": "linux-arm64",
+      "url": "https://nodejs.org/dist/v24.19.0/node-v24.19.0-linux-arm64.tar.xz",
+      "sha256": "01443c1e1a29e531ccad5a46fefa6df490d2189c49f7955904aecdbb0fe86fdc"
+    },
+    {
+      "name": "buildx",
+      "version": "0.36.1",
+      "platform": "linux-amd64",
+      "url": "https://github.com/docker/buildx/releases/download/v0.36.1/buildx-v0.36.1.linux-amd64",
+      "sha256": "48af8a397ebd60178778bf63611dbcebe5f5e7a9be90eb9147b24b9587455778"
+    },
+    {
+      "name": "buildx",
+      "version": "0.36.1",
+      "platform": "linux-arm64",
+      "url": "https://github.com/docker/buildx/releases/download/v0.36.1/buildx-v0.36.1.linux-arm64",
+      "sha256": "5d0cafd9d16afe1a0f0d9529885344ace2cc99efdd531b6c783c5455a6001569"
+    },
+    {
+      "name": "goreleaser",
+      "version": "2.12.7",
+      "platform": "linux-amd64",
+      "url": "https://github.com/goreleaser/goreleaser/releases/download/v2.12.7/goreleaser_Linux_x86_64.tar.gz",
+      "sha256": "de95c5d1e728e18753c3ddcf02974d63d6432f0a7355a5afa6813971a95a01b8"
+    },
+    {
+      "name": "goreleaser",
+      "version": "2.12.7",
+      "platform": "linux-arm64",
+      "url": "https://github.com/goreleaser/goreleaser/releases/download/v2.12.7/goreleaser_Linux_arm64.tar.gz",
+      "sha256": "7948d8ce09cce3d3a2fff9202eae47d2223958e508f849b340345583bb2c0e1f"
+    },
+    {
+      "name": "syft",
+      "version": "1.51.0",
+      "platform": "linux-amd64",
+      "url": "https://github.com/anchore/syft/releases/download/v1.51.0/syft_1.51.0_linux_amd64.tar.gz",
+      "sha256": "2a2e837a2c8d59ec9af5472ee22d3b04ee463c4e44476ecf993fd1e5ab6ebc7f"
+    },
+    {
+      "name": "syft",
+      "version": "1.51.0",
+      "platform": "linux-arm64",
+      "url": "https://github.com/anchore/syft/releases/download/v1.51.0/syft_1.51.0_linux_arm64.tar.gz",
+      "sha256": "6c0466811541ea03add5213a60a1562f0851e4c0b0ecfdee1a694a9455285900"
+    }
+  ],
+  "ci_images": [
+    {
+      "reference": "moby/buildkit:buildx-stable-1",
+      "digest": "sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8"
     }
   ],
   "delegated_locks": [

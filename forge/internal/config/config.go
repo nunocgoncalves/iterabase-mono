@@ -175,6 +175,9 @@ func (f Flux) validate(overlay Overlay) error {
 	if !strings.HasPrefix(overlay.Repo, "https://") {
 		return fmt.Errorf("flux.enabled requires an https:// overlay.repo (Flux source-controller cannot watch %q; file:// is a forge-apply-only dev path)", overlay.Repo)
 	}
+	if f.Version != defaultFluxVersion {
+		return fmt.Errorf("flux.version %q has no repository-reviewed executable/runtime identity", f.Version)
+	}
 	return nil
 }
 
@@ -465,6 +468,11 @@ func (t Taint) validate() error {
 func (k K3s) validate() error {
 	if k.Version == "" {
 		return fmt.Errorf("k3s.version is required")
+	}
+	switch k.Version {
+	case "v1.31.5", "v1.31.5+k3s1", "v1.34.10", "v1.34.10+k3s1":
+	default:
+		return fmt.Errorf("k3s.version %q has no repository-reviewed executable/runtime identity", k.Version)
 	}
 	if err := validateCIDR(k.ClusterCIDR, false, "clusterCIDR"); err != nil {
 		return err

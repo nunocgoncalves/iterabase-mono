@@ -11,28 +11,48 @@ import (
 // Compile-time assertion: SSHProvisioner implements fluxer.Fluxer.
 var _ fluxer.Fluxer = (*SSHProvisioner)(nil)
 
-// EnsureFlux implements fluxer.Fluxer. Installs the flux CLI on the host if
-// absent (the official install script, version-pinned via FLUX_VERSION), then
-// runs `flux install` to apply the Flux components + CRDs into the cluster
-// against the k3s kubeconfig. Idempotent.
+const (
+	fluxHelmControllerImage         = "ghcr.io/fluxcd/helm-controller:v1.1.0@sha256:4c75ca6c24ceb1f1bd7e935d9287a93e4f925c512f206763ec5a47de3ef3ff48"
+	fluxKustomizeControllerImage    = "ghcr.io/fluxcd/kustomize-controller:v1.4.0@sha256:e3b0cf847e9cdf47b19af0fbcfe22786b80b598e0caeea8b6d2a5f9c26a48a24"
+	fluxNotificationControllerImage = "ghcr.io/fluxcd/notification-controller:v1.4.0@sha256:425309a159b15e07f7d97622effc79bc432a37ed55289dd465d37fa217a92a7d"
+	fluxSourceControllerImage       = "ghcr.io/fluxcd/source-controller:v1.4.1@sha256:3c5f0f022f990ffc0daf00e5b199548fc0fa6e7119e972318f0267081a332963"
+)
+
+// EnsureFlux installs only the repository-reviewed Flux executable, exports its
+// manifests without contacting the cluster, substitutes every controller image
+// with the reviewed digest, and applies that closed runtime set through k3s.
 func (p *SSHProvisioner) EnsureFlux(ctx context.Context, version string) error {
-	if _, err := p.run(ctx, "command -v flux"); err != nil {
-		// The official install script prepends "v" to FLUX_VERSION internally when
-		// building the release URL, so pass the version WITHOUT the leading "v"
-		// (the config stores the release tag "vX.Y.Z"). flux install --version
-		// below takes the tag verbatim (with "v").
-		fluxVer := strings.TrimPrefix(version, "v")
-		installer, err := p.downloadVerifiedRemoteContent(ctx, "flux-installer", fluxInstallScriptURL, fluxInstallScriptSHA256)
-		if err != nil {
-			return fmt.Errorf("install flux cli: %w", err)
-		}
-		defer p.removeRemoteContent(ctx, installer)
-		if _, err := p.run(ctx, fmt.Sprintf("sudo env FLUX_VERSION=%s bash %s", shellQuote(fluxVer), shellQuote(installer))); err != nil {
-			return fmt.Errorf("install flux cli: %w", err)
+	tool, installed, identityErr := p.installedReviewedTool(ctx, "flux", "/usr/local/bin/flux")
+	if identityErr != nil || !installed || tool.version != version {
+		if _, err := p.installReviewedRemoteTool(ctx, "flux", version); err != nil {
+			return fmt.Errorf("install reviewed Flux executable: %w", err)
 		}
 	}
-	if _, err := p.run(ctx, fluxCmd("install", "--version="+version)); err != nil {
-		return fmt.Errorf("flux install: %w", err)
+	replacements := [][2]string{
+		{strings.SplitN(fluxHelmControllerImage, "@", 2)[0], fluxHelmControllerImage},
+		{strings.SplitN(fluxKustomizeControllerImage, "@", 2)[0], fluxKustomizeControllerImage},
+		{strings.SplitN(fluxNotificationControllerImage, "@", 2)[0], fluxNotificationControllerImage},
+		{strings.SplitN(fluxSourceControllerImage, "@", 2)[0], fluxSourceControllerImage},
+	}
+	filter := "cat"
+	for _, replacement := range replacements {
+		filter += " | sed " + shellQuote("s#"+replacement[0]+"#"+replacement[1]+"#g")
+	}
+	manifest, err := p.run(ctx, "mktemp /tmp/forge-flux-runtime.XXXXXX")
+	if err != nil {
+		return fmt.Errorf("prepare reviewed Flux runtime: %w", err)
+	}
+	manifest = strings.TrimSpace(manifest)
+	defer p.removeRemoteContent(ctx, manifest)
+	pipeline := fmt.Sprintf(
+		"sudo /usr/local/bin/flux install --export --version=%s | %s > %s && "+
+			"test \"$(grep -Ec '^[[:space:]]+image:' %s)\" -eq %d && "+
+			"! grep -E '^[[:space:]]+image:' %s | grep -v '@sha256:' && "+
+			"sudo /usr/local/bin/k3s kubectl apply -f %s",
+		shellQuote(version), filter, shellQuote(manifest), shellQuote(manifest), len(replacements), shellQuote(manifest), shellQuote(manifest),
+	)
+	if _, err := p.run(ctx, "bash -o pipefail -c "+shellQuote(pipeline)); err != nil {
+		return fmt.Errorf("apply reviewed Flux runtime: %w", err)
 	}
 	return nil
 }
@@ -43,8 +63,9 @@ func (p *SSHProvisioner) EnsureFlux(ctx context.Context, version string) error {
 // Flux install (or absent flux CLI) is not an error so destroy always proceeds
 // to k3s removal (which wipes the cluster regardless).
 func (p *SSHProvisioner) UninstallFlux(ctx context.Context) error {
-	if _, err := p.run(ctx, "command -v flux"); err != nil {
-		return nil // flux CLI absent => nothing to remove
+	_, installed, err := p.installedReviewedTool(ctx, "flux", "/usr/local/bin/flux")
+	if err != nil || !installed {
+		return nil // never execute an absent or unreviewed root-level binary
 	}
 	_, _ = p.run(ctx, fluxCmd("uninstall", "--silent")) // best-effort
 	return nil
@@ -82,5 +103,5 @@ func (p *SSHProvisioner) GitRepositoryArtifact(ctx context.Context, name string)
 // root-owned 0600), and the in-process server URL (127.0.0.1:6443) is reachable
 // on the host — no rewrite needed (unlike off-host kubeconfig use).
 func fluxCmd(args ...string) string {
-	return joinArgs(append([]string{"sudo", "env", "KUBECONFIG=" + k3sKubeconfigPath, "flux"}, args...))
+	return joinArgs(append([]string{"sudo", "env", "KUBECONFIG=" + k3sKubeconfigPath, "/usr/local/bin/flux"}, args...))
 }

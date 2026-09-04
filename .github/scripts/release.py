@@ -28,6 +28,9 @@ TARGET_NAMES = (
 )
 RUNNABLE_E2E_TIERS = {"F2", "F3"}
 CANDIDATE_ALIAS_SCHEME = "source-run-attempt-v1"
+CANDIDATE_REPOSITORY = "nunocgoncalves/iterabase-mono"
+CANDIDATE_WORKFLOW = ".github/workflows/release-candidate.yml"
+CANDIDATE_EVENT = "workflow_dispatch"
 POSITIVE_INTEGER = re.compile(r"^[1-9][0-9]*$")
 
 
@@ -394,9 +397,22 @@ def make_plan(
     catalogue: dict[str, Any] | None = None,
     *,
     run_attempt: str = "1",
+    repository: str = CANDIDATE_REPOSITORY,
+    workflow: str = CANDIDATE_WORKFLOW,
+    event: str = CANDIDATE_EVENT,
+    control_sha: str | None = None,
 ) -> dict[str, Any]:
     selected = parse_targets(selected_targets)
     candidate_tag = candidate_image_alias(master_sha, run_id, run_attempt)
+    control_sha = control_sha or master_sha
+    if repository != CANDIDATE_REPOSITORY:
+        raise ReleaseError(f"candidate repository must be {CANDIDATE_REPOSITORY}")
+    if workflow != CANDIDATE_WORKFLOW:
+        raise ReleaseError(f"candidate workflow must be {CANDIDATE_WORKFLOW}")
+    if event != CANDIDATE_EVENT:
+        raise ReleaseError(f"candidate event must be {CANDIDATE_EVENT}")
+    if not SHA.fullmatch(control_sha):
+        raise ReleaseError("candidate control_sha must be a full lowercase commit SHA")
 
     versions = repository_versions(root, targets)
     metadata = {
@@ -668,8 +684,11 @@ def make_plan(
             )
 
     plan = {
-        "schema_version": 3,
-        "candidate_workflow": "release-candidate.yml",
+        "schema_version": 4,
+        "candidate_repository": repository,
+        "candidate_workflow": workflow,
+        "candidate_event": event,
+        "candidate_control_sha": control_sha,
         "candidate_alias_scheme": CANDIDATE_ALIAS_SCHEME,
         "run_id": run_id,
         "run_attempt": run_attempt,
@@ -839,13 +858,26 @@ def release_asset_paths(plan: dict[str, Any], candidate: Path, target: str) -> l
 def release_manifest(plan: dict[str, Any], candidate: Path, target: str) -> dict[str, Any]:
     release = next(item for item in plan["releases"] if item["target"] == target)
     paths = release_asset_paths(plan, candidate, target)
+    tag = release["production_tag"]
+    notes = (
+        f"Release of **{target} {release['version']}** from `{plan['source_sha']}` "
+        f"as part of candidate run `{plan['run_id']}`.\n\n"
+        "Built and validated once, staged as a complete draft, and published without rebuilding. "
+        "The attached release manifest binds every exact member."
+    )
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "target": target,
         "version": release["version"],
-        "tag": release["production_tag"],
+        "tag": tag,
         "source_sha": plan["source_sha"],
         "candidate_run_id": plan["run_id"],
+        "release_metadata": {
+            "title": tag,
+            "notes": notes,
+            "target_commitish": plan["source_sha"],
+            "prerelease": False,
+        },
         "assets": [
             {
                 "name": path.name,
@@ -986,17 +1018,22 @@ def assemble_evidence(plan: dict[str, Any], assets: Path) -> dict[str, Any]:
     if not records:
         raise ReleaseError("candidate has no recorded assets")
     candidate = {
-        "workflow": plan["candidate_workflow"],
-        "run_id": plan["run_id"],
-        "source_sha": plan["source_sha"],
-        "targets": plan["targets"],
-        "releases": plan["releases"],
+        field: plan[field]
+        for field in (
+            "candidate_repository",
+            "candidate_workflow",
+            "candidate_event",
+            "candidate_control_sha",
+            "candidate_alias_scheme",
+            "run_id",
+            "run_attempt",
+            "source_sha",
+            "targets",
+            "releases",
+        )
     }
-    for field in ("candidate_alias_scheme", "run_attempt"):
-        if field in plan:
-            candidate[field] = plan[field]
     return {
-        "schema_version": 3,
+        "schema_version": 4,
         "candidate": candidate,
         "tested_with": plan["tested_with"],
         "validation": {
@@ -1023,8 +1060,22 @@ def verify_candidate(directory: Path) -> dict[str, Any]:
     assets = directory / "assets"
     plan = load_json(plan_path)
     evidence = load_json(evidence_path)
-    if evidence.get("schema_version") != 3 or evidence.get("validation", {}).get("status") != "passed":
-        raise ReleaseError("candidate evidence is not a passed schema-v3 record")
+    required_authority = {
+        "schema_version": 4,
+        "candidate_repository": CANDIDATE_REPOSITORY,
+        "candidate_workflow": CANDIDATE_WORKFLOW,
+        "candidate_event": CANDIDATE_EVENT,
+        "candidate_alias_scheme": CANDIDATE_ALIAS_SCHEME,
+    }
+    for field, expected in required_authority.items():
+        if plan.get(field) != expected:
+            raise ReleaseError(f"candidate plan {field} does not match promotion authority")
+    if not SHA.fullmatch(str(plan.get("candidate_control_sha", ""))):
+        raise ReleaseError("candidate plan has no exact workflow control SHA")
+    if not POSITIVE_INTEGER.fullmatch(str(plan.get("run_id", ""))) or not POSITIVE_INTEGER.fullmatch(str(plan.get("run_attempt", ""))):
+        raise ReleaseError("candidate plan has no exact run ID and attempt")
+    if evidence.get("schema_version") != 4 or evidence.get("validation", {}).get("status") != "passed":
+        raise ReleaseError("candidate evidence is not a passed schema-v4 record")
     expected_plan_hash = hashlib.sha256((compact(plan) + "\n").encode()).hexdigest()
     if evidence.get("plan_sha256") != expected_plan_hash:
         raise ReleaseError("candidate plan does not match evidence")
@@ -1052,10 +1103,18 @@ def verify_candidate(directory: Path) -> dict[str, Any]:
     if recorded_results != actual_results:
         raise ReleaseError("candidate evidence does not retain the exact scenario/stage/runtime result records")
     candidate = evidence.get("candidate", {})
-    fields = ["run_id", "source_sha", "targets", "releases"]
-    fields.extend(
-        field for field in ("candidate_alias_scheme", "run_attempt") if field in plan
-    )
+    fields = [
+        "candidate_repository",
+        "candidate_workflow",
+        "candidate_event",
+        "candidate_control_sha",
+        "candidate_alias_scheme",
+        "run_id",
+        "run_attempt",
+        "source_sha",
+        "targets",
+        "releases",
+    ]
     for field in fields:
         if candidate.get(field) != plan.get(field):
             raise ReleaseError(f"candidate evidence {field} does not match plan")
@@ -1110,6 +1169,10 @@ def build_parser() -> argparse.ArgumentParser:
     plan.add_argument("--master-sha", required=True)
     plan.add_argument("--run-id", required=True)
     plan.add_argument("--run-attempt", required=True)
+    plan.add_argument("--repository", required=True)
+    plan.add_argument("--workflow", required=True)
+    plan.add_argument("--event", required=True)
+    plan.add_argument("--control-sha", required=True)
     plan.add_argument("--output", type=Path, required=True)
     plan.add_argument("--github-output", type=Path)
     evidence = sub.add_parser("evidence")
@@ -1153,6 +1216,10 @@ def main() -> int:
                 args.run_id,
                 root,
                 run_attempt=args.run_attempt,
+                repository=args.repository,
+                workflow=args.workflow,
+                event=args.event,
+                control_sha=args.control_sha,
             )
             args.output.write_text(compact(plan) + "\n", encoding="utf-8")
             print(compact(plan))

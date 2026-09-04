@@ -133,6 +133,10 @@ jobs:
           cache-dependency-path: ${{ env.GO_CACHE_DEPENDENCIES }}
           cache-scope: e2e-artifact-${{ matrix.artifact }}
       - uses: ./.github/actions/setup-kubernetes-tools
+      - name: Install checksummed GoReleaser
+        if: matrix.kind == 'forge'
+        uses: ./.github/actions/setup-ci-tool
+        with: {name: goreleaser, version: 2.12.7}
       - name: Add reviewed Helm repositories
         if: matrix.kind == 'chart' || matrix.kind == 'chart-companion'
         run: .github/scripts/add_helm_repositories.sh
@@ -195,6 +199,9 @@ jobs:
           node-version: 24.19.0
           cache-dependency-path: control-plane/test/e2e/playwright/package-lock.json
           cache-scope: e2e-browser
+      - uses: ./.github/actions/setup-playwright
+        if: matrix.target == 'test-e2e-browser'
+        with: {version: 1.62.1}
       - name: Compose and verify the exact runtime bundle
         run: >-
           python3 .github/scripts/e2e.py compose
@@ -213,7 +220,6 @@ jobs:
         env:
           ITERABASE_E2E_DIAGNOSTICS: ${{ runner.temp }}/diagnostics/${{ matrix.artifact }}
           E2E_SKIP_BUILD_DEPS: "true"
-          PLAYWRIGHT_INSTALL_ARGS: ${{ matrix.target == 'test-e2e-browser' && '--with-deps chromium' || 'chromium' }}
         run: make '${{ matrix.target }}'
       - name: Retain strict scenario result
         if: always()

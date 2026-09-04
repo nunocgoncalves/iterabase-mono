@@ -97,8 +97,14 @@ class E2EPlanTests(unittest.TestCase):
                     "forge-binary",
                 },
             ),
-            "path-collector": (
-                [".github/scripts/collect_changed_paths.py"],
+            "shared-selection-contract": (
+                [
+                    ".github/ci/path-selection-fixtures.json",
+                    ".github/scripts/collect_changed_paths.py",
+                    ".github/scripts/select_ci.py",
+                    ".github/scripts/test_select_ci.py",
+                    ".github/workflows/ci.yml",
+                ],
                 {
                     "control-plane-image",
                     "harness-image",
@@ -732,6 +738,12 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("git rev-parse HEAD", e2e)
         self.assertIn("--intent pr", e2e)
         self.assertIn("--selection-file /tmp/changed-path-selection.json", e2e)
+        self.assertIn("uses: ./.github/actions/setup-playwright", e2e)
+        self.assertNotIn("PLAYWRIGHT_INSTALL_ARGS:", e2e)
+        self.assertNotIn("--with-deps chromium", e2e)
+        control_make = (ROOT / "control-plane/Makefile").read_text()
+        self.assertIn("PLAYWRIGHT_BROWSERS_PATH/chromium-1234/INSTALLATION_COMPLETE", control_make)
+        self.assertIn('if [ "$(E2E_SKIP_BUILD_DEPS)" = true ]', control_make)
         self.assertIn("e2e.py resolve-baselines \\\n            --plan e2e-plan.json \\\n            --github-output \"$GITHUB_OUTPUT\"", e2e)
         self.assertNotIn("--output e2e-plan.json \\\n            --github-output", e2e)
         self.assertIn("group: iterabase-permanent-fixture-${{ matrix.capacity }}", e2e)

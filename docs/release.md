@@ -109,7 +109,9 @@ artifacts.
 6. **Retain promotion trust.** The 90-day `release-candidate` artifact contains
    the normalized plan, complete per-scenario/stage/runtime identity records,
    selected candidate files and metadata, checksums, SBOMs, and the generated
-   candidate evidence record.
+   candidate evidence record. Plan and evidence bind the repository, workflow
+   path, manual event, workflow-control SHA, run ID, and run attempt in addition
+   to the independently selected source SHA.
 
 Selected targets may never resolve to baselines. Unselected dependencies use
 only explicit published references whose image digests, chart checksums, or
@@ -128,7 +130,8 @@ Both jobs check out and assert the immutable workflow-dispatch control SHA;
 source remains independently allowed to be any explicit full SHA contained in
 `master`. Before approval the workflow verifies:
 
-- repository/workflow identity, manual event, master branch, and successful run;
+- repository and head-repository identity, exact workflow path, manual event,
+  workflow-control SHA, run ID/attempt, master branch, and successful run;
 - source SHA containment in `master`;
 - normalized plan and all retained asset checksums;
 - exact selected target/version/alias identities; and
@@ -145,13 +148,14 @@ GitHub Release destination before the first mutation. It then:
 - pushes unchanged chart/companion archives;
 - creates or verifies protected namespaced tags at the exact source SHA; and
 - stages each target's exact files plus a manifest binding target, version, tag,
-  source SHA, candidate run, filename, size, and SHA-256 as an unpublished draft,
-  verifies the complete draft, and publishes it exactly once.
+  source SHA, candidate run, release title/body/target/prerelease state, filename,
+  size, and SHA-256 as an unpublished draft, verifies all metadata and the complete
+  draft, and publishes it exactly once.
 
 Nothing is rebuilt. An unpublished draft may be replaced in full on retry. An
-existing published Release is verification-only: its complete member set and
-bytes must already match, and promotion never uploads a late member or changes a
-published asset. Other identical completed image/chart/tag members are verified
+existing published Release is verification-only: its governed metadata,
+immutable state, complete member set, sizes, and bytes must already match, and
+promotion never uploads a late member or changes a published asset. Other identical completed image/chart/tag members are verified
 and skipped; conflicts fail closed.
 
 ## Permanent fixtures and incomplete candidates
@@ -178,10 +182,14 @@ ruleset, and immutable control checkout are exact. It then creates or verifies
 the retained `dry-run/immutable-release-gate-v1` non-semantic release through the
 same recommended boundary: create draft, attach the complete manifest and probe,
 verify both, and publish once. It requires GitHub to report the release as
-immutable, proves a late asset upload, asset deletion, and tag movement are all
-denied, and retains the redacted run evidence for 90 days. It never deletes the
-release or tag. The first successful run is one-time publication evidence; later
-runs only verify that authority and repeat non-mutating refusal probes.
+immutable, proves a late asset upload, asset deletion, release metadata edit,
+release deletion, and tag movement are each denied specifically by immutability,
+then re-reads the setting and byte-for-byte release/tag state to prove nothing
+changed. The environment credential's derived public key must equal the reviewed
+sole write deploy key before those probes. The workflow retains redacted run
+evidence for 90 days and never deletes the release or tag. The first successful
+run is one-time publication evidence; later runs only verify that authority and
+repeat non-mutating refusal probes.
 
 ## Protection and operator audit
 

@@ -30,12 +30,12 @@ forge apply --dry-run    # preflight the target host and print the plan (read-on
 forge apply              # provision / reconcile the cluster
 forge kubeconfig         # fetch (or refresh) the kubeconfig
 forge status             # cluster health + drift
-forge upgrade --to v1.32.0   # upgrade k3s
+forge upgrade --to v1.34.10+k3s1 # upgrade to the current repository-reviewed k3s release
 forge destroy            # customer-safe: uninstall k3s; preserve workspace bytes
 forge destroy --purge-workspace --reboot --yes # explicit destructive fixture/decommission lifecycle
 ```
 
-`forge` SSHes to the host as a sudoer user (key auth) and installs k3s with flags derived from `forge.yaml`. `spec.hosts[].sshHostKey` optionally pins one OpenSSH host public key; permanent automation must set it and fails on replacement. Before executing the remote K3s, Helm, or Flux installer script, Forge downloads it to a temporary file and verifies the repository-reviewed SHA-256 recorded in `.github/inputs/remote-content.json`; changed bytes fail before privileged execution, and retries cover transport only. The kubeconfig is fetched, rewritten to the host address, and stored at `~/.forge/<install>/kubeconfig.yaml`.
+`forge` SSHes to the host as a sudoer user (key auth) and installs k3s with flags derived from `forge.yaml`. `spec.hosts[].sshHostKey` optionally pins one OpenSSH host public key; permanent automation must set it and fails on replacement. Forge verifies the repository-reviewed K3s executable and airgap image archive before placing either in a privileged path, then runs the pinned K3s service installer with downloads disabled. Helm and Flux are likewise installed only from reviewed archives after both archive and extracted-executable verification; Flux manifests are rejected unless every controller image is replaced by its reviewed digest before apply. Unsupported tool versions and changed bytes fail before execution or extraction, and retries cover transport only. These identities are recorded in `.github/inputs/remote-content.json`. The kubeconfig is fetched, rewritten to the host address, and stored at `~/.forge/<install>/kubeconfig.yaml`.
 
 `apply` is **idempotent**: it reconciles from the live system — installs if absent, skips if in sync, refuses immutable changes (`cluster-cidr`/`service-cidr`/`dualStack` → `destroy` + `apply`), and routes version changes to `upgrade`.
 

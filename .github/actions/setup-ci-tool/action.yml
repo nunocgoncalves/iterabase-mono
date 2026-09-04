@@ -1,0 +1,24 @@
+name: Set up one checksummed CI tool
+description: Restore only the exact reviewed archive and install one repository-authorized tool.
+inputs:
+  name:
+    description: Reviewed tool name.
+    required: true
+  version:
+    description: Exact reviewed tool version.
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Bind the reviewed tool manifest
+      id: authority
+      shell: bash
+      run: echo "sha256=$(sha256sum .github/inputs/remote-content.json | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+    - name: Restore exact reviewed tool archive
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.cache/iterabase/ci-tools
+        key: ${{ runner.os }}-${{ runner.arch }}-ci-tool-${{ inputs.name }}-${{ inputs.version }}-${{ steps.authority.outputs.sha256 }}
+    - name: Install checksummed ${{ inputs.name }} ${{ inputs.version }}
+      shell: bash
+      run: .github/scripts/install_ci_tool.sh '${{ inputs.name }}' '${{ inputs.version }}'

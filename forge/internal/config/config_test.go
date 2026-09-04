@@ -81,6 +81,11 @@ func TestParse_DualStackDisabledNoV6Required(t *testing.T) {
 	assert.False(t, c.Spec.K3s.DualStack)
 }
 
+func TestParse_RejectsUnreviewedK3sVersion(t *testing.T) {
+	_, err := Parse(yamlFor(t, func(c *Cluster) { c.Spec.K3s.Version = "v1.32.0" }))
+	require.ErrorContains(t, err, "no repository-reviewed executable/runtime identity")
+}
+
 func TestParse_BadAPIVersion(t *testing.T) {
 	_, err := Parse(yamlFor(t, func(c *Cluster) { c.APIVersion = "bad" }))
 	require.Error(t, err)
@@ -356,13 +361,12 @@ func TestParse_FluxDisabledNoDefaults(t *testing.T) {
 	assert.Empty(t, c.Spec.Flux.Version, "no default version when Flux disabled")
 }
 
-func TestParse_FluxKeepsExplicitVersion(t *testing.T) {
-	c, err := Parse(yamlFor(t, func(cc *Cluster) {
+func TestParse_FluxRejectsUnreviewedVersion(t *testing.T) {
+	_, err := Parse(yamlFor(t, func(cc *Cluster) {
 		cc.Spec.Overlay = Overlay{Repo: "https://github.com/example/iterabase-overlay.git"}
 		cc.Spec.Flux = Flux{Enabled: true, Version: "v9.9.9"}
 	}))
-	require.NoError(t, err)
-	assert.Equal(t, "v9.9.9", c.Spec.Flux.Version, "explicit version preserved")
+	require.ErrorContains(t, err, "no repository-reviewed executable/runtime identity")
 }
 
 func TestFluxValidate_RequiresOverlay(t *testing.T) {

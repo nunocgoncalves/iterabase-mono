@@ -134,7 +134,7 @@ func TestValidatePinnedNFDRender(t *testing.T) {
 	require.NoError(t, validatePinnedNFDRender(master, worker))
 
 	wrongImage := worker.DeepCopy()
-	wrongImage.Spec.Template.Spec.Containers[0].Image = "registry.k8s.io/nfd/node-feature-discovery:v0.18.3"
+	wrongImage.Spec.Template.Spec.Containers[0].Image = "registry.k8s.io/nfd/node-feature-discovery:" + "v0.18.3"
 	require.ErrorContains(t, validatePinnedNFDRender(master, wrongImage), "worker image")
 
 	missingResync := master.DeepCopy()

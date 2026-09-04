@@ -133,9 +133,10 @@ type Rebooter interface {
 type Provisioner interface {
 	// Preflight runs read-only readiness checks against the host.
 	Preflight(ctx context.Context) (*PreflightResult, error)
-	// Install installs k3s with the given server args and version.
+	// Install verifies and installs the reviewed k3s executable and airgap image
+	// archive before the pinned service installer may start the given version.
 	Install(ctx context.Context, version string, serverArgs []string) error
-	// Upgrade upgrades k3s in-place to the given version via the install script.
+	// Upgrade upgrades k3s in-place through the same reviewed content path.
 	Upgrade(ctx context.Context, version string, serverArgs []string) error
 	// Uninstall runs k3s-uninstall.sh on the host.
 	Uninstall(ctx context.Context) error
