@@ -806,21 +806,25 @@ class RetainedReleaseGateTests(unittest.TestCase):
                 "Cannot upload assets to an immutable release",
                 "gh: HTTP 422: Assets cannot be added to the immutable release",
                 "Immutable release prevents assets from being uploaded",
+                "Immutable release prevents asset uploads",
             ),
             "asset deletion": (
                 "Cannot delete an asset from the immutable release",
                 "Immutable release assets cannot be removed",
                 "The immutable release prohibits the asset from being deleted",
+                "Immutable release prohibits asset deletion",
             ),
             "release tag update": (
                 "Cannot force-update the tag on an immutable release",
                 "The immutable release prevents its ref from being moved",
                 "Tag may not be changed because the release is immutable",
+                "Immutable release prevents tag changes",
             ),
             "release tag deletion": (
                 "Cannot delete the ref from an immutable release",
                 "Immutable release tags cannot be removed",
                 "Release is immutable and its tag cannot be deleted",
+                "Immutable release prohibits tag deletion",
             ),
         }
         for operation, outputs in cases.items():
@@ -880,6 +884,23 @@ class RetainedReleaseGateTests(unittest.TestCase):
                 "Cannot upload assets because immutable release lookup failed",
                 "immutable lookup is not a cause",
             ),
+            (
+                1,
+                "Release is immutable and assets cannot be uploaded "
+                "because permission was denied",
+                "permission cause after cause-first prefix",
+            ),
+            (
+                1,
+                "Immutable release prevents assets from being uploaded "
+                "because permission was denied",
+                "unbounded cause-first suffix",
+            ),
+            (
+                1,
+                "No immutable release prevents assets from being uploaded",
+                "negated cause-first prefix",
+            ),
             (1, "Upload assets to an immutable release", "missing refusal"),
             (
                 1,
@@ -912,6 +933,43 @@ class RetainedReleaseGateTests(unittest.TestCase):
             message = str(raised.exception)
             self.assertIn(f"operation=asset upload status={status}", message)
             self.assertNotIn(output, message)
+
+    def test_denial_grammar_rejects_malformed_positional_inflections(self) -> None:
+        cases = (
+            (
+                "asset upload",
+                "Cannot addition assets to an immutable release",
+            ),
+            (
+                "asset upload",
+                "Cannot uploaded assets to an immutable release",
+            ),
+            (
+                "asset upload",
+                "Assets cannot be upload to an immutable release",
+            ),
+            (
+                "asset deletion",
+                "Cannot deletions asset from an immutable release",
+            ),
+            (
+                "release tag update",
+                "Cannot changes tag on an immutable release",
+            ),
+            (
+                "release tag update",
+                "Tag cannot be update on an immutable release",
+            ),
+            (
+                "release tag deletion",
+                "Immutable release prevents tag from being delete",
+            ),
+        )
+        for operation, output in cases:
+            with self.subTest(operation=operation, output=output), self.assertRaises(
+                retained_release.GateError
+            ):
+                retained_release.require_immutable_denial(1, output, operation)
 
     def test_denial_grammar_rejects_wrong_operation_or_unknown_context(self) -> None:
         cases = (
