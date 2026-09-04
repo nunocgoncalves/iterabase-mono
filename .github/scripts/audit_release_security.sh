@@ -4,7 +4,7 @@ set -euo pipefail
 repository="${1:-nunocgoncalves/iterabase-mono}"
 expected_reviewer="${RELEASE_REVIEWER:-nunocgoncalves}"
 expected_write_key_title='iterabase protected release tags (validated)'
-expected_write_key_public='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKPWzA/gQRvM0gH98qpDENCHOupPrGT4oEjR84Iq4nzg'
+expected_write_key_public='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBGpAToV5oV2LesN/Kqsim3Nn0OBUItH9TocZOzRd/rz'
 
 fail() {
   printf 'release security audit failed: %s\n' "$*" >&2
@@ -22,7 +22,10 @@ if [[ "${AUDIT_ADMIN_ENDPOINTS:-true}" == true ]]; then
   [[ "$write_key_public" == "$expected_write_key_public" ]] || fail "write deploy key public identity changed"
 elif [[ -n "${RELEASE_TAG_KEY_FILE:-}" ]]; then
   [[ -f "$RELEASE_TAG_KEY_FILE" ]] || fail "release tag key file is missing"
-  write_key_public="$(ssh-keygen -y -f "$RELEASE_TAG_KEY_FILE")"
+  # GitHub stores deploy keys as algorithm + key material, without comments.
+  # Newer ssh-keygen versions preserve the private key's comment in `-y`
+  # output, so compare only the two cryptographic identity fields.
+  write_key_public="$(ssh-keygen -y -f "$RELEASE_TAG_KEY_FILE" | awk '{print $1 " " $2}')"
   [[ "$write_key_public" == "$expected_write_key_public" ]] || fail "environment release credential is not the reviewed deploy key"
   write_key_title="$expected_write_key_title (environment credential public identity verified)"
 fi
