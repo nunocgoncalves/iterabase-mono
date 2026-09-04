@@ -190,365 +190,232 @@ def asset_identities(directory: Path) -> list[dict[str, Any]]:
     return sorted(identities, key=lambda item: item["name"])
 
 
-_HORIZONTAL = r"[ \t]+"
-_MODAL_REFUSAL = (
-    rf"(?:cannot|can't|may{_HORIZONTAL}not|must{_HORIZONTAL}not)"
-)
-_ACTIVE_REFUSAL = (
-    rf"(?:{_MODAL_REFUSAL}|not{_HORIZONTAL}allowed{_HORIZONTAL}to)"
-)
-_PREVENT_OR_PROHIBIT = r"(?:prevent|prevents|prohibit|prohibits)"
-_DO_OR_DOES_NOT_ALLOW = (
-    rf"(?:do|does){_HORIZONTAL}not{_HORIZONTAL}allow"
-)
-_ASSET_SINGULAR_DETERMINER = (
-    rf"(?:(?:an|the|this|that|its|their){_HORIZONTAL})?"
-)
-_REFERENCE_SINGULAR_DETERMINER = (
-    rf"(?:(?:a|the|this|that|its|their){_HORIZONTAL})?"
-)
-_PLURAL_DETERMINER = rf"(?:(?:the|these|those|its|their){_HORIZONTAL})?"
-
-_IMMUTABLE_NOUN_SINGULAR = (
-    rf"(?:(?:an|the){_HORIZONTAL})?immutable(?:[ _-]+)release"
-)
-_IMMUTABLE_NOUN_PLURAL = (
-    rf"(?:the{_HORIZONTAL})?immutable(?:[ _-]+)releases"
-)
-_IMMUTABLE_NOUN_CAUSE = (
-    rf"(?:{_IMMUTABLE_NOUN_SINGULAR}|{_IMMUTABLE_NOUN_PLURAL})"
-)
-_IMMUTABLE_PREDICATE_SINGULAR = (
-    rf"(?:the{_HORIZONTAL})?release{_HORIZONTAL}is{_HORIZONTAL}immutable"
-)
-_IMMUTABLE_PREDICATE_PLURAL = (
-    rf"(?:the{_HORIZONTAL})?releases{_HORIZONTAL}are{_HORIZONTAL}immutable"
-)
-_IMMUTABLE_PREDICATE_CAUSE = (
-    rf"(?:{_IMMUTABLE_PREDICATE_SINGULAR}|{_IMMUTABLE_PREDICATE_PLURAL})"
-)
-_IMMUTABLE_CAUSE = (
-    rf"(?:{_IMMUTABLE_NOUN_CAUSE}|{_IMMUTABLE_PREDICATE_CAUSE})"
-)
-_CAUSE_LINK = (
-    rf"(?:(?:to|from|on|for|by|because{_HORIZONTAL}of|"
-    rf"due{_HORIZONTAL}to){_HORIZONTAL}{_IMMUTABLE_NOUN_CAUSE}|"
-    rf"because{_HORIZONTAL}{_IMMUTABLE_PREDICATE_CAUSE})"
-)
-_CAUSE_FIRST_DIRECT = (
-    rf"(?:{_IMMUTABLE_NOUN_CAUSE}|{_IMMUTABLE_PREDICATE_CAUSE}"
-    rf"{_HORIZONTAL}(?:and|therefore|so))"
-)
-_AGREEING_PREVENTION = (
-    rf"(?:{_IMMUTABLE_NOUN_SINGULAR}{_HORIZONTAL}(?:prevents|prohibits)|"
-    rf"{_IMMUTABLE_NOUN_PLURAL}{_HORIZONTAL}(?:prevent|prohibit))"
-)
-_AGREEING_NOT_ALLOW = (
-    rf"(?:{_IMMUTABLE_NOUN_SINGULAR}{_HORIZONTAL}does{_HORIZONTAL}not"
-    rf"{_HORIZONTAL}allow|{_IMMUTABLE_NOUN_PLURAL}{_HORIZONTAL}do"
-    rf"{_HORIZONTAL}not{_HORIZONTAL}allow)"
-)
-
-_CLAUSE_START = (
-    rf"^[ \t]*(?:(?:gh|remote):{_HORIZONTAL})?"
-    rf"(?:(?:error|fatal):{_HORIZONTAL})?"
-    rf"(?:GH[0-9]{{3}}:{_HORIZONTAL})?"
-    rf"(?:(?:HTTP{_HORIZONTAL})?[45][0-9]{{2}}:{_HORIZONTAL})?"
-    rf"(?:-{_HORIZONTAL})?"
-)
-_HTTP_DIAGNOSTIC = rf"\((?:HTTP{_HORIZONTAL})?[45][0-9]{{2}}\)"
-_UPLOAD_DIAGNOSTIC_URL = (
-    rf"\(https://uploads\.github\.com/repos/{re.escape(EXPECTED_REPOSITORY)}/"
-    rf"releases/{EXPECTED_RELEASE_ID}/assets\?name=forbidden\.txt\)"
-)
-
-
-def _clause_end(operation_diagnostic: str | None = None) -> str:
-    diagnostics = _HTTP_DIAGNOSTIC
-    if operation_diagnostic is not None:
-        diagnostics = rf"(?:{diagnostics}|{operation_diagnostic})"
-    return rf"[ \t]*[.!?]?(?:[ \t]*{diagnostics})?[ \t]*\r?$"
-
-
-_CLAUSE_END = _clause_end()
-
-_DENIAL_OPERATIONS = {
-    "asset upload": {
-        "active": r"(?:upload|add)",
-        "passive": r"(?:uploaded|added)",
-        "nominal_singular": r"(?:upload|addition)",
-        "nominal_plural": r"(?:uploads|additions)",
-        "subject_singular": r"asset",
-        "subject_plural": r"assets",
-        "singular_determiner": _ASSET_SINGULAR_DETERMINER,
-        "diagnostic": _UPLOAD_DIAGNOSTIC_URL,
-    },
-    "asset deletion": {
-        "active": r"(?:delete|remove)",
-        "passive": r"(?:deleted|removed)",
-        "nominal_singular": r"(?:deletion|removal)",
-        "nominal_plural": r"(?:deletions|removals)",
-        "subject_singular": r"asset",
-        "subject_plural": r"assets",
-        "singular_determiner": _ASSET_SINGULAR_DETERMINER,
-    },
-    "release tag update": {
-        "active": r"(?:force(?:[ _-]+)update|update|move|change)",
-        "passive": r"(?:force(?:[ _-]+)updated|updated|moved|changed)",
-        "nominal_singular": r"(?:force(?:[ _-]+)update|update|move|change)",
-        "nominal_plural": r"(?:force(?:[ _-]+)updates|updates|moves|changes)",
-        "subject_singular": r"(?:tag|ref|reference)",
-        "subject_plural": r"(?:tags|refs|references)",
-        "singular_determiner": _REFERENCE_SINGULAR_DETERMINER,
-    },
-    "release tag deletion": {
-        "active": r"(?:delete|remove)",
-        "passive": r"(?:deleted|removed)",
-        "nominal_singular": r"(?:deletion|removal)",
-        "nominal_plural": r"(?:deletions|removals)",
-        "subject_singular": r"(?:tag|ref|reference)",
-        "subject_plural": r"(?:tags|refs|references)",
-        "singular_determiner": _REFERENCE_SINGULAR_DETERMINER,
-    },
+_HTTP_ENDPOINTS = {
+    "asset upload": (
+        f"https://uploads.github.com/repos/{EXPECTED_REPOSITORY}/"
+        f"releases/{EXPECTED_RELEASE_ID}/assets?name=forbidden.txt"
+    ),
+    "asset deletion": (
+        f"repos/{EXPECTED_REPOSITORY}/releases/assets/"
+        f"{EXPECTED_ASSETS['probe.txt']['id']}"
+    ),
 }
-
-_IMMUTABLE_MENTION = re.compile(
-    rf"\b(?:immutable(?:[ _-]+)releases?|releases?{_HORIZONTAL}"
-    rf"(?:is|are|was|were){_HORIZONTAL}(?:not{_HORIZONTAL})?immutable)\b",
-    re.IGNORECASE,
-)
-_NEGATED_IMMUTABILITY = re.compile(
-    rf"(?:\breleases?{_HORIZONTAL}(?:(?:is|are|was|were){_HORIZONTAL}"
-    rf"(?:not|never|no{_HORIZONTAL}longer)|isn't|aren't|wasn't|weren't)"
-    rf"{_HORIZONTAL}immutable\b|\b(?:not|no){_HORIZONTAL}"
-    rf"(?:(?:an|the){_HORIZONTAL})?immutable(?:[ _-]+)releases?\b|"
-    rf"\bnot{_HORIZONTAL}because{_HORIZONTAL}{_IMMUTABLE_CAUSE}\b|"
-    rf"\b{_IMMUTABLE_NOUN_CAUSE}\b{_HORIZONTAL}(?:does|do){_HORIZONTAL}not"
-    rf"{_HORIZONTAL}(?:prevent|prohibit)\b)",
-    re.IGNORECASE,
-)
-_AFFIRMATIVE_REFUSAL = re.compile(
-    rf"\b(?:{_ACTIVE_REFUSAL}|{_PREVENT_OR_PROHIBIT}|"
-    rf"{_DO_OR_DOES_NOT_ALLOW}|(?:is|are|was|were){_HORIZONTAL}not"
-    rf"{_HORIZONTAL}allowed{_HORIZONTAL}to|denied|rejected|refused|forbidden)\b",
-    re.IGNORECASE,
-)
-_CANONICAL_IMMUTABLE_API_PREDICATE = re.compile(
-    rf"{_CLAUSE_START}release{_HORIZONTAL}is{_HORIZONTAL}immutable"
-    rf"{_CLAUSE_END}",
-    re.IGNORECASE | re.MULTILINE,
-)
-
-
-def _passive_refusal(passive: str, copula: str) -> str:
-    return (
-        rf"(?:{_MODAL_REFUSAL}{_HORIZONTAL}be{_HORIZONTAL}{passive}|"
-        rf"{copula}{_HORIZONTAL}not{_HORIZONTAL}allowed{_HORIZONTAL}to"
-        rf"{_HORIZONTAL}be{_HORIZONTAL}{passive})"
-    )
-
-
-def _subject_forms(forms: dict[str, str]) -> tuple[str, str, str]:
-    singular = (
-        rf"{forms['singular_determiner']}{forms['subject_singular']}\b"
-    )
-    plural = rf"{_PLURAL_DETERMINER}{forms['subject_plural']}\b"
-    return singular, plural, rf"(?:{singular}|{plural})"
-
-
-def _subject_passive_refusal(forms: dict[str, str]) -> str:
-    singular, plural, _ = _subject_forms(forms)
-    passive = forms["passive"]
-    return (
-        rf"(?:{singular}{_HORIZONTAL}{_passive_refusal(passive, '(?:is|was)')}|"
-        rf"{plural}{_HORIZONTAL}{_passive_refusal(passive, '(?:are|were)')})"
-    )
-
-
-def _nominal_operation(forms: dict[str, str]) -> str:
-    return rf"(?:{forms['nominal_singular']}|{forms['nominal_plural']})"
-
-
-def _operation_patterns(forms: dict[str, str]) -> tuple[re.Pattern[str], ...]:
-    active = forms["active"]
-    passive = forms["passive"]
-    _, _, subject = _subject_forms(forms)
-    subject_refusal = _subject_passive_refusal(forms)
-    nominal = _nominal_operation(forms)
-    nominal_subject = forms["subject_singular"]
-    clause_end = _clause_end(forms.get("diagnostic"))
-    return tuple(
-        re.compile(pattern, re.IGNORECASE | re.MULTILINE)
-        for pattern in (
-            # GitHub's observed form: "Cannot upload assets to an immutable release".
-            rf"{_CLAUSE_START}{_ACTIVE_REFUSAL}{_HORIZONTAL}{active}\b"
-            rf"{_HORIZONTAL}{subject}{_HORIZONTAL}{_CAUSE_LINK}\b{clause_end}",
-            # The operation object may precede a grammatically passive refusal.
-            rf"{_CLAUSE_START}{subject_refusal}\b{_HORIZONTAL}{_CAUSE_LINK}\b"
-            rf"{clause_end}",
-            # The immutable cause may precede the operation and refusal.
-            rf"{_CLAUSE_START}{_CAUSE_FIRST_DIRECT}\b{_HORIZONTAL}"
-            rf"{subject_refusal}\b{clause_end}",
-            # A cause-first clause may explicitly prevent a passive operation.
-            rf"{_CLAUSE_START}{_AGREEING_PREVENTION}\b{_HORIZONTAL}{subject}"
-            rf"{_HORIZONTAL}from{_HORIZONTAL}being{_HORIZONTAL}{passive}\b"
-            rf"{clause_end}",
-            rf"{_CLAUSE_START}{_AGREEING_NOT_ALLOW}\b{_HORIZONTAL}{subject}"
-            rf"{_HORIZONTAL}to{_HORIZONTAL}be{_HORIZONTAL}{passive}\b"
-            rf"{clause_end}",
-            # Nominal forms use a singular attributive operation subject.
-            rf"{_CLAUSE_START}(?:{_AGREEING_PREVENTION}|{_AGREEING_NOT_ALLOW})"
-            rf"\b{_HORIZONTAL}{nominal_subject}\b{_HORIZONTAL}{nominal}\b"
-            rf"{clause_end}",
-        )
-    )
-
-
-_DENIAL_PATTERNS = {
-    operation: _operation_patterns(forms)
-    for operation, forms in _DENIAL_OPERATIONS.items()
+_HTTP_OPERATIONS = frozenset(_HTTP_ENDPOINTS)
+_GIT_REFSPECS = {
+    "release tag update": f"refs/tags/{EXPECTED_TAG}:refs/tags/{EXPECTED_TAG}",
+    "release tag deletion": f":refs/tags/{EXPECTED_TAG}",
 }
+_ALL_PROBE_OPERATIONS = _HTTP_OPERATIONS | frozenset(_GIT_REFSPECS)
+_HTTP_STATUS_LINE = re.compile(
+    r"HTTP/(?:1\.[01]|2(?:\.0)?|3) ([1-5][0-9]{2})(?: [^\r\n]{1,128})?"
+)
+_PORCELAIN_FLAGS = frozenset((" ", "!", "+", "-", "*", "=", "."))
 
 
-def _canonical_immutable_api_predicate(output: str) -> bool:
-    lines = [line.strip() for line in output.splitlines() if line.strip()]
-    return len(lines) == 1 and _CANONICAL_IMMUTABLE_API_PREDICATE.fullmatch(
-        lines[0]
-    ) is not None
+def _safe_operation(operation: str) -> str:
+    return operation if operation in _ALL_PROBE_OPERATIONS else "unknown"
 
 
-def _operation_pair(output: str, forms: dict[str, str]) -> bool:
-    active = forms["active"]
-    passive = forms["passive"]
-    _, _, subject = _subject_forms(forms)
-    subject_refusal = _subject_passive_refusal(forms)
-    nominal = _nominal_operation(forms)
-    nominal_subject = forms["subject_singular"]
-    patterns = (
-        rf"\b{active}\b{_HORIZONTAL}{subject}",
-        rf"\b{subject_refusal}\b",
-        rf"\b{subject}{_HORIZONTAL}from{_HORIZONTAL}being{_HORIZONTAL}"
-        rf"{passive}\b",
-        rf"\b{subject}{_HORIZONTAL}to{_HORIZONTAL}be{_HORIZONTAL}{passive}\b",
-        rf"\b{nominal_subject}\b{_HORIZONTAL}{nominal}\b",
-    )
-    return any(re.search(pattern, output, re.IGNORECASE) for pattern in patterns)
-
-
-def _denial_mismatch(
+def _http_mismatch(
     status: int,
-    output: str,
     operation: str,
     *,
-    reason: str,
-    canonical_predicate: bool = False,
-    bounded_causal_clause: bool = False,
-    wrong_operations: tuple[str, ...] = (),
+    endpoint: str,
+    http_status: str,
+    result: str,
 ) -> GateError:
-    if operation in _DENIAL_OPERATIONS:
-        forms = _DENIAL_OPERATIONS[operation]
-        expected_mutation = any(
-            re.search(rf"\b{forms[position]}\b", output, re.IGNORECASE)
-            is not None
-            for position in (
-                "active",
-                "passive",
-                "nominal_singular",
-                "nominal_plural",
-            )
-        )
-        expected_subject = re.search(
-            rf"\b(?:{forms['subject_singular']}|{forms['subject_plural']})\b",
-            output,
-            re.IGNORECASE,
-        ) is not None
-        expected_operation = _operation_pair(output, forms)
-        operation_label = operation
-    else:
-        expected_mutation = False
-        expected_subject = False
-        expected_operation = False
-        operation_label = "unknown"
-
-    conflicts = []
-    if _NEGATED_IMMUTABILITY.search(output):
-        conflicts.append("negated-immutability")
-    conflicts.extend(
-        f"wrong-operation:{value.replace(' ', '-')}" for value in wrong_operations
-    )
-    conflict_summary = ",".join(conflicts) if conflicts else "none"
-    recognition = (
-        f"affirmative_refusal={str(bool(_AFFIRMATIVE_REFUSAL.search(output))).lower()},"
-        f"expected_mutation={str(expected_mutation).lower()},"
-        f"expected_subject={str(expected_subject).lower()},"
-        f"expected_operation={str(expected_operation).lower()},"
-        f"immutable_release_cause={str(bool(_IMMUTABLE_MENTION.search(output))).lower()},"
-        f"canonical_predicate={str(canonical_predicate).lower()},"
-        f"bounded_causal_clause={str(bounded_causal_clause).lower()},"
-        f"conflicts={conflict_summary}"
-    )
-    # Never include remote output here: it may contain credentials or unbounded data.
     return GateError(
-        f"denial classification mismatch: operation={operation_label} status={status} "
-        f"reason={reason} redacted-recognition[{recognition}]"
+        f"probe protocol mismatch: operation={_safe_operation(operation)} "
+        f"status={status} protocol=http endpoint={endpoint} "
+        f"http_status={http_status} result={result}"
     )
 
 
-def require_immutable_denial(status: int, output: str, operation: str) -> None:
-    if operation not in _DENIAL_OPERATIONS:
-        raise _denial_mismatch(status, output, operation, reason="unknown-operation")
-
-    canonical_predicate = _canonical_immutable_api_predicate(output)
-    bounded_causal_clause = any(
-        pattern.search(output) for pattern in _DENIAL_PATTERNS[operation]
-    )
-    wrong_operations = tuple(
-        candidate
-        for candidate, patterns in _DENIAL_PATTERNS.items()
-        if candidate != operation and any(pattern.search(output) for pattern in patterns)
-    )
-    negated = _NEGATED_IMMUTABILITY.search(output) is not None
-
-    if status == 0:
-        raise _denial_mismatch(
-            status,
-            output,
-            operation,
-            reason="successful-result",
-            canonical_predicate=canonical_predicate,
-            bounded_causal_clause=bounded_causal_clause,
-            wrong_operations=wrong_operations,
-        )
-    if negated or wrong_operations:
-        raise _denial_mismatch(
-            status,
-            output,
-            operation,
-            reason="conflicting-evidence",
-            canonical_predicate=canonical_predicate,
-            bounded_causal_clause=bounded_causal_clause,
-            wrong_operations=wrong_operations,
-        )
-    if not canonical_predicate and not bounded_causal_clause:
-        raise _denial_mismatch(
-            status,
-            output,
-            operation,
-            reason="missing-bounded-causal-denial",
-            canonical_predicate=canonical_predicate,
-            bounded_causal_clause=bounded_causal_clause,
-            wrong_operations=wrong_operations,
-        )
-
-
-def make_state(
-    release: dict[str, Any],
-    attestation: dict[str, Any],
-    directory: Path,
-    tag_object: str,
-    tag_target: str,
+def require_http_result(
+    status: int, output: str, operation: str, endpoint: str
 ) -> dict[str, Any]:
-    validate_release(release)
+    expected_endpoint = _HTTP_ENDPOINTS.get(operation)
+    if expected_endpoint is None:
+        raise _http_mismatch(
+            status,
+            operation,
+            endpoint="not-evaluated",
+            http_status="not-evaluated",
+            result="wrong-operation",
+        )
+    if endpoint != expected_endpoint:
+        raise _http_mismatch(
+            status,
+            operation,
+            endpoint="wrong",
+            http_status="not-evaluated",
+            result="wrong-endpoint",
+        )
+
+    records = [
+        line.rstrip("\r")
+        for line in output.splitlines()
+        if line.startswith("HTTP/")
+    ]
+    if not records:
+        raise _http_mismatch(
+            status,
+            operation,
+            endpoint="matching",
+            http_status="missing",
+            result="missing-status",
+        )
+    if len(records) != 1:
+        raise _http_mismatch(
+            status,
+            operation,
+            endpoint="matching",
+            http_status="multiple",
+            result="multiple-status",
+        )
+    match = _HTTP_STATUS_LINE.fullmatch(records[0])
+    if match is None:
+        raise _http_mismatch(
+            status,
+            operation,
+            endpoint="matching",
+            http_status="malformed",
+            result="malformed-status",
+        )
+    response_status = int(match.group(1))
+    if status == 0:
+        raise _http_mismatch(
+            status,
+            operation,
+            endpoint="matching",
+            http_status=str(response_status),
+            result="successful-process",
+        )
+    if response_status != 422:
+        raise _http_mismatch(
+            status,
+            operation,
+            endpoint="matching",
+            http_status=str(response_status),
+            result="unexpected-status",
+        )
+    return {
+        "operation": operation,
+        "process_status": status,
+        "protocol": "http",
+        "endpoint": expected_endpoint,
+        "http_status": response_status,
+    }
+
+
+def _porcelain_status_records(output: str) -> list[str]:
+    return [
+        line.rstrip("\r")
+        for line in output.splitlines()
+        if len(line) >= 2
+        and line[0] in _PORCELAIN_FLAGS
+        and line[1] in ("\t", " ")
+    ]
+
+
+def _porcelain_classification(summary: str) -> str | None:
+    if not summary.startswith("["):
+        return None
+    close = summary.find("]")
+    if close < 2 or close > 33:
+        return None
+    classification = summary[1:close]
+    if not all(character.islower() or character == " " for character in classification):
+        return None
+    suffix = summary[close + 1 :]
+    if suffix and not (
+        suffix.startswith(" (") and suffix.endswith(")") and "\t" not in suffix
+    ):
+        return None
+    return classification
+
+
+def _classification_label(classification: str | None) -> str:
+    if classification == "remote rejected":
+        return "remote-rejected"
+    if classification == "rejected":
+        return "local-rejected"
+    if classification is None:
+        return "malformed"
+    return "other"
+
+
+def _git_mismatch(
+    status: int,
+    operation: str,
+    *,
+    record: str,
+    flag: str = "not-evaluated",
+    refspec: str = "not-evaluated",
+    classification: str = "not-evaluated",
+    result: str,
+) -> GateError:
+    return GateError(
+        f"probe protocol mismatch: operation={_safe_operation(operation)} "
+        f"status={status} protocol=git-porcelain record={record} flag={flag} "
+        f"refspec={refspec} classification={classification} result={result}"
+    )
+
+
+def require_git_result(status: int, output: str, operation: str) -> dict[str, Any]:
+    expected_refspec = _GIT_REFSPECS.get(operation)
+    if expected_refspec is None:
+        raise _git_mismatch(
+            status, operation, record="not-evaluated", result="wrong-operation"
+        )
+
+    records = _porcelain_status_records(output)
+    if not records:
+        raise _git_mismatch(status, operation, record="missing", result="missing-record")
+    if len(records) != 1:
+        raise _git_mismatch(
+            status, operation, record="multiple", result="multiple-records"
+        )
+    fields = records[0].split("\t", 2)
+    if len(fields) != 3 or len(fields[0]) != 1:
+        raise _git_mismatch(
+            status, operation, record="malformed", result="malformed-record"
+        )
+
+    flag, actual_refspec, summary = fields
+    classification = _porcelain_classification(summary)
+    classification_label = _classification_label(classification)
+    flag_label = flag if flag in _PORCELAIN_FLAGS else "malformed"
+    refspec_label = "matching" if actual_refspec == expected_refspec else "wrong"
+    details = {
+        "record": "parsed",
+        "flag": flag_label,
+        "refspec": refspec_label,
+        "classification": classification_label,
+    }
+    if status == 0:
+        raise _git_mismatch(
+            status, operation, **details, result="successful-process"
+        )
+    if flag != "!":
+        raise _git_mismatch(status, operation, **details, result="unexpected-flag")
+    if actual_refspec != expected_refspec:
+        raise _git_mismatch(status, operation, **details, result="wrong-refspec")
+    if classification != "remote rejected":
+        raise _git_mismatch(
+            status, operation, **details, result="unexpected-classification"
+        )
+    return {
+        "operation": operation,
+        "process_status": status,
+        "protocol": "git-porcelain",
+        "flag": flag,
+        "refspec": expected_refspec,
+        "classification": "remote-rejected",
+    }
+
+
+def canonical_attestation_statement(attestation: dict[str, Any]) -> dict[str, Any]:
     statement = copy.deepcopy(validate_attestation(attestation))
     statement["subject"] = sorted(
         statement["subject"],
@@ -556,6 +423,25 @@ def make_state(
             subject, sort_keys=True, separators=(",", ":")
         ),
     )
+    return statement
+
+
+def make_state(
+    release: dict[str, Any],
+    attestation: dict[str, Any],
+    asset_attestations: dict[str, dict[str, Any]],
+    directory: Path,
+    tag_object: str,
+    tag_target: str,
+) -> dict[str, Any]:
+    validate_release(release)
+    if set(asset_attestations) != set(EXPECTED_ASSETS):
+        raise GateError("per-asset attestations do not cover the exact retained assets")
+    statement = canonical_attestation_statement(attestation)
+    asset_statements = {
+        name: canonical_attestation_statement(asset_attestations[name])
+        for name in sorted(asset_attestations)
+    }
     identities = asset_identities(directory)
     require_exact(tag_object, EXPECTED_TAG_OBJECT, "tag.object")
     require_exact(tag_target, EXPECTED_TARGET, "tag.target")
@@ -577,7 +463,8 @@ def make_state(
                 for name in sorted(assets_by_name)
             ],
             "downloaded_assets": identities,
-            "attestation_statement": statement,
+            "release_attestation_statement": statement,
+            "asset_attestation_statements": asset_statements,
         },
         "governed_presentation": {
             "title": release["name"],
@@ -591,6 +478,48 @@ def make_state(
 def compare_states(before: dict[str, Any], after: dict[str, Any]) -> None:
     if before != after:
         raise GateError("retained release state changed during safe probes")
+
+
+def compare_probe_states(
+    before: dict[str, Any],
+    after: dict[str, Any],
+    operation: str,
+    process_status: int,
+    protocol_valid: bool,
+) -> dict[str, Any]:
+    if operation not in _ALL_PROBE_OPERATIONS:
+        raise GateError(
+            f"probe state mismatch: operation=unknown status={process_status} "
+            "protocol=not-evaluated state=not-evaluated result=wrong-operation"
+        )
+    if not protocol_valid:
+        protocol = "invalid"
+    elif operation in _HTTP_OPERATIONS:
+        protocol = "http http_status=422"
+    else:
+        protocol = "git-porcelain flag=! refspec=matching classification=remote-rejected"
+    if before != after:
+        raise GateError(
+            f"probe state mismatch: operation={operation} status={process_status} "
+            f"protocol={protocol} state=changed result=state-mismatch"
+        )
+    if process_status == 0:
+        raise GateError(
+            f"probe state mismatch: operation={operation} status={process_status} "
+            f"protocol={protocol} state=unchanged result=successful-process"
+        )
+    return {
+        "operation": operation,
+        "process_status": process_status,
+        "protocol_valid": protocol_valid,
+        "state": "unchanged",
+    }
+
+
+def _add_protocol_arguments(command: argparse.ArgumentParser) -> None:
+    command.add_argument("--status", type=int, required=True)
+    command.add_argument("--output", type=Path, required=True)
+    command.add_argument("--operation", required=True)
 
 
 def parser() -> argparse.ArgumentParser:
@@ -607,14 +536,18 @@ def parser() -> argparse.ArgumentParser:
     assets = commands.add_parser("validate-assets")
     assets.add_argument("--directory", type=Path, required=True)
 
-    denial = commands.add_parser("require-denial")
-    denial.add_argument("--status", type=int, required=True)
-    denial.add_argument("--output", type=Path, required=True)
-    denial.add_argument("--operation", required=True)
+    http_result = commands.add_parser("require-http-result")
+    _add_protocol_arguments(http_result)
+    http_result.add_argument("--endpoint", required=True)
+
+    git_result = commands.add_parser("require-git-result")
+    _add_protocol_arguments(git_result)
 
     state = commands.add_parser("state")
     state.add_argument("--release", type=Path, required=True)
     state.add_argument("--attestation", type=Path, required=True)
+    state.add_argument("--probe-attestation", type=Path, required=True)
+    state.add_argument("--manifest-attestation", type=Path, required=True)
     state.add_argument("--directory", type=Path, required=True)
     state.add_argument("--tag-object", required=True)
     state.add_argument("--tag-target", required=True)
@@ -622,7 +555,22 @@ def parser() -> argparse.ArgumentParser:
     compare = commands.add_parser("compare-state")
     compare.add_argument("--before", type=Path, required=True)
     compare.add_argument("--after", type=Path, required=True)
+    compare.add_argument("--operation", required=True)
+    compare.add_argument("--status", type=int, required=True)
+    compare.add_argument("--protocol-valid", choices=("true", "false"), required=True)
     return root
+
+
+def _load_protocol_output(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        raise GateError(f"could not read protocol output: {exc}") from exc
+
+
+def _dump_result(result: dict[str, Any]) -> None:
+    json.dump(result, sys.stdout, sort_keys=True, separators=(",", ":"))
+    sys.stdout.write("\n")
 
 
 def main() -> int:
@@ -636,24 +584,47 @@ def main() -> int:
             validate_attestation(load_json(args.attestation))
         elif args.command == "validate-assets":
             asset_identities(args.directory)
-        elif args.command == "require-denial":
-            try:
-                output = args.output.read_text(encoding="utf-8", errors="replace")
-            except OSError as exc:
-                raise GateError(f"could not read denial output: {exc}") from exc
-            require_immutable_denial(args.status, output, args.operation)
-        elif args.command == "state":
-            state = make_state(
-                load_json(args.release),
-                load_json(args.attestation),
-                args.directory,
-                args.tag_object,
-                args.tag_target,
+        elif args.command == "require-http-result":
+            _dump_result(
+                require_http_result(
+                    args.status,
+                    _load_protocol_output(args.output),
+                    args.operation,
+                    args.endpoint,
+                )
             )
-            json.dump(state, sys.stdout, sort_keys=True, separators=(",", ":"))
-            sys.stdout.write("\n")
+        elif args.command == "require-git-result":
+            _dump_result(
+                require_git_result(
+                    args.status, _load_protocol_output(args.output), args.operation
+                )
+            )
+        elif args.command == "state":
+            _dump_result(
+                make_state(
+                    load_json(args.release),
+                    load_json(args.attestation),
+                    {
+                        "probe.txt": load_json(args.probe_attestation),
+                        "release-manifest.json": load_json(
+                            args.manifest_attestation
+                        ),
+                    },
+                    args.directory,
+                    args.tag_object,
+                    args.tag_target,
+                )
+            )
         elif args.command == "compare-state":
-            compare_states(load_json(args.before), load_json(args.after))
+            _dump_result(
+                compare_probe_states(
+                    load_json(args.before),
+                    load_json(args.after),
+                    args.operation,
+                    args.status,
+                    args.protocol_valid == "true",
+                )
+            )
         else:  # pragma: no cover
             raise GateError(f"unknown command: {args.command}")
     except GateError as exc:
