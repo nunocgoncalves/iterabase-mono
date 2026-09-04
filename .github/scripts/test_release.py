@@ -866,10 +866,12 @@ class RetainedReleaseGateTests(unittest.TestCase):
             (1, f"!\t{target}\t[rejected] (local)"),
             (1, f"=\t{target}\t[up to date]"),
             (1, f"*\t{target}\t[new tag]"),
+            (1, f"?\t{target}\t[remote rejected] (unknown flag)"),
             (1, "!\trefs/tags/other:refs/tags/other\t[remote rejected] (reason)"),
             (1, "authentication or transport failure"),
             (1, "! malformed porcelain"),
             (1, valid + "\n" + valid),
+            (1, valid + f"\n?\t{target}\t[unknown]"),
             (1, f"!\t{target}\t[remote failure] (reason)"),
         )
         for status, output in cases:
@@ -911,9 +913,15 @@ class RetainedReleaseGateTests(unittest.TestCase):
                 name: self.attestation()
                 for name in retained_release.EXPECTED_ASSETS
             }
+            release_attestation = self.attestation()
+            secret = "untrusted-attestation-extension"
+            release_attestation["verificationResult"]["statement"]["extra"] = secret
+            asset_attestations["probe.txt"]["verificationResult"]["statement"][
+                "extra"
+            ] = secret
             state = retained_release.make_state(
                 self.release(),
-                self.attestation(),
+                release_attestation,
                 asset_attestations,
                 directory,
                 retained_release.EXPECTED_TAG_OBJECT,
@@ -925,6 +933,7 @@ class RetainedReleaseGateTests(unittest.TestCase):
                 set(retained_release.EXPECTED_ASSETS),
                 set(authority["asset_attestation_statements"]),
             )
+            self.assertNotIn(secret, json.dumps(state))
 
             missing = dict(asset_attestations)
             missing.pop("probe.txt")
@@ -1106,6 +1115,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         validator = (ROOT / ".github/scripts/retained_release.py").read_text()
         runbook = (ROOT / "docs/release.md").read_text()
         self.assertIn("run_retained_release_gate.sh", workflow)
+        self.assertTrue(script.startswith("#!/usr/bin/env bash\nset -euo pipefail\n"))
         for value in (
             "RELEASE_ID=382723775",
             "GATE_TAG=dry-run/immutable-release-gate-v1",
@@ -1166,6 +1176,11 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         probe_body = script[
             script.index("run_probe() {") : script.index("# Establish immutable identity")
         ]
+        self.assertIn(
+            'target=$(jq -er \'.target\' <<< "$spec")',
+            probe_body,
+        )
+        self.assertEqual(4, probe_body.count('"$target"'))
         self.assertLess(
             probe_body.index("require-probe-result"),
             probe_body.index('capture_state "$stem"'),
