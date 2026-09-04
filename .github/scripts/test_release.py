@@ -12,6 +12,7 @@ import tempfile
 import unittest
 
 import release
+import retained_release
 
 ROOT = Path(__file__).resolve().parents[2]
 SOURCE_SHA = "a" * 40
@@ -663,6 +664,176 @@ json.dump(responses[endpoint], sys.stdout)
                 self.assertIn("bypass authority", completed.stderr)
 
 
+class RetainedReleaseGateTests(unittest.TestCase):
+    def release(self) -> dict:
+        return {
+            "id": retained_release.EXPECTED_RELEASE_ID,
+            "tag_name": retained_release.EXPECTED_TAG,
+            "target_commitish": retained_release.EXPECTED_TARGET,
+            "name": retained_release.EXPECTED_TITLE,
+            "body": retained_release.EXPECTED_BODY,
+            "draft": False,
+            "prerelease": True,
+            "immutable": True,
+            "assets": [
+                {"name": name, **definition}
+                for name, definition in retained_release.EXPECTED_ASSETS.items()
+            ],
+        }
+
+    def attestation(self) -> dict:
+        return {
+            "attestation": {
+                "bundle": {"dsseEnvelope": {"signatures": [{"sig": "verified"}]}}
+            },
+            "verificationResult": {
+                "statement": {
+                    "_type": "https://in-toto.io/Statement/v1",
+                    "predicateType": "https://in-toto.io/attestation/release/v0.2",
+                    "predicate": {
+                        "databaseId": str(retained_release.EXPECTED_RELEASE_ID),
+                        "repository": retained_release.EXPECTED_REPOSITORY,
+                        "tag": retained_release.EXPECTED_TAG,
+                        "purl": retained_release.EXPECTED_PURL,
+                    },
+                    "subject": retained_release.expected_subjects(),
+                }
+            }
+        }
+
+    def write_assets(self, directory: Path) -> None:
+        (directory / "probe.txt").write_text(
+            "iterabase immutable release gate v1\n", encoding="utf-8"
+        )
+        (directory / "release-manifest.json").write_text(
+            '{"assets":[{"name":"probe.txt","sha256":"450a38bb5ae772469148be208a9c794dd5da78bc0a142d026fa3fbc2def354c6","size":36}],"purpose":"non-semantic immutable-release validation","run_id":"33874696044","schema_version":1,"source_sha":"42604a60764816a66d147a89d8d0772c9e0d2491","tag":"dry-run/immutable-release-gate-v1"}\n',
+            encoding="utf-8",
+        )
+
+    def test_release_requires_exact_retained_identity_and_guarded_title(self) -> None:
+        retained_release.validate_release(self.release())
+        repair = self.release()
+        repair["name"] = retained_release.REPAIR_TITLE
+        retained_release.validate_release(repair, allow_repair_title=True)
+        with self.assertRaises(retained_release.GateError):
+            retained_release.validate_release(repair)
+
+        for field, value in (
+            ("id", 1),
+            ("tag_name", "other"),
+            ("target_commitish", "a" * 40),
+            ("name", "unexpected"),
+            ("immutable", False),
+        ):
+            release_json = self.release()
+            release_json[field] = value
+            with self.subTest(field=field), self.assertRaises(
+                retained_release.GateError
+            ):
+                retained_release.validate_release(
+                    release_json, allow_repair_title=True
+                )
+
+    def test_release_rejects_missing_extra_duplicate_or_changed_asset(self) -> None:
+        variants = {}
+        variants["missing"] = self.release()
+        variants["missing"]["assets"].pop()
+        variants["extra"] = self.release()
+        variants["extra"]["assets"].append(
+            {"id": 1, "name": "extra", "size": 1, "digest": "sha256:bad"}
+        )
+        variants["duplicate"] = self.release()
+        variants["duplicate"]["assets"][1]["name"] = "probe.txt"
+        variants["changed"] = self.release()
+        variants["changed"]["assets"][0]["digest"] = "sha256:bad"
+        for case, release_json in variants.items():
+            with self.subTest(case=case), self.assertRaises(
+                retained_release.GateError
+            ):
+                retained_release.validate_release(release_json)
+
+    def test_downloaded_assets_require_exact_members_and_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as value:
+            directory = Path(value)
+            self.write_assets(directory)
+            retained_release.asset_identities(directory)
+            (directory / "probe.txt").write_text("changed", encoding="utf-8")
+            with self.assertRaises(retained_release.GateError):
+                retained_release.asset_identities(directory)
+            self.write_assets(directory)
+            (directory / "extra").write_text("extra", encoding="utf-8")
+            with self.assertRaises(retained_release.GateError):
+                retained_release.asset_identities(directory)
+            (directory / "extra").unlink()
+            (directory / "probe.txt").unlink()
+            with self.assertRaises(retained_release.GateError):
+                retained_release.asset_identities(directory)
+
+    def test_attestation_requires_exact_release_tag_object_and_subject_set(self) -> None:
+        retained_release.validate_attestation(self.attestation())
+        variants = {}
+        variants["unsigned"] = self.attestation()
+        variants["unsigned"].pop("attestation")
+        variants["wrong-release"] = self.attestation()
+        variants["wrong-release"]["verificationResult"]["statement"]["predicate"][
+            "databaseId"
+        ] = "1"
+        variants["wrong-tag-object"] = self.attestation()
+        variants["wrong-tag-object"]["verificationResult"]["statement"]["subject"][
+            0
+        ]["digest"]["sha1"] = "a" * 40
+        variants["wrong-asset"] = self.attestation()
+        variants["wrong-asset"]["verificationResult"]["statement"]["subject"][1][
+            "digest"
+        ]["sha256"] = "bad"
+        variants["missing-subject"] = self.attestation()
+        variants["missing-subject"]["verificationResult"]["statement"][
+            "subject"
+        ].pop()
+        variants["extra-subject"] = self.attestation()
+        variants["extra-subject"]["verificationResult"]["statement"][
+            "subject"
+        ].append({"name": "extra", "digest": {"sha256": "bad"}})
+        for case, attestation in variants.items():
+            with self.subTest(case=case), self.assertRaises(
+                retained_release.GateError
+            ):
+                retained_release.validate_attestation(attestation)
+
+    def test_mutation_must_fail_with_immutable_specific_evidence(self) -> None:
+        retained_release.require_immutable_denial(
+            1, "Cannot update an immutable release", "tag update"
+        )
+        for status, output in (
+            (0, ""),
+            (1, "permission denied"),
+            (1, "immutable setting is unavailable"),
+        ):
+            with self.subTest(status=status, output=output), self.assertRaises(
+                retained_release.GateError
+            ):
+                retained_release.require_immutable_denial(
+                    status, output, "asset mutation"
+                )
+
+    def test_post_state_must_match_exact_pre_state(self) -> None:
+        with tempfile.TemporaryDirectory() as value:
+            directory = Path(value)
+            self.write_assets(directory)
+            before = retained_release.make_state(
+                self.release(),
+                self.attestation(),
+                directory,
+                retained_release.EXPECTED_TAG_OBJECT,
+                retained_release.EXPECTED_TARGET,
+            )
+            retained_release.compare_states(before, copy.deepcopy(before))
+            changed = copy.deepcopy(before)
+            changed["immutable_authority"]["tag_target"] = "a" * 40
+            with self.assertRaises(retained_release.GateError):
+                retained_release.compare_states(before, changed)
+
+
 class ReleaseWorkflowContractTests(unittest.TestCase):
     def test_candidate_uses_unified_plan_composer_results_and_capacity_groups(self) -> None:
         workflow = (ROOT / ".github/workflows/release-candidate.yml").read_text(
@@ -804,36 +975,67 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
                     'repos/${{ github.repository }}/immutable-releases', workflow
                 )
 
-    def test_retained_immutability_gate_proves_asset_and_tag_refusal(self) -> None:
+    def test_retained_immutability_gate_uses_only_exact_retained_authority(self) -> None:
         workflow = (ROOT / ".github/workflows/release-rehearsal.yml").read_text()
+        script = (ROOT / ".github/scripts/run_retained_release_gate.sh").read_text()
+        validator = (ROOT / ".github/scripts/retained_release.py").read_text()
+        self.assertIn("run_retained_release_gate.sh", workflow)
         for value in (
-            "--draft",
-            "--draft=false",
-            "'.immutable'",
+            "RELEASE_ID=382723775",
+            "GATE_TAG=dry-run/immutable-release-gate-v1",
+            "EXPECTED_SOURCE=42604a60764816a66d147a89d8d0772c9e0d2491",
+            "EXPECTED_TAG_OBJECT=9f529662036d70348379c6c71a13c9242c7155a5",
+            'releases/$RELEASE_ID',
+            "--allow-repair-title",
+            'if [[ "$title" == forbidden ]]',
+            'gh release edit "$GATE_TAG" --repo "$repository" --title "$GATE_TAG"',
+            "gh release verify",
+            "gh release verify-asset",
             "gh release upload",
-            "releases/assets/$ASSET_ID",
-            "asset upload",
-            "asset deletion",
+            "releases/assets/$PROBE_ASSET_ID",
+            "git push --force",
+            "require-denial",
+            "compare-state",
+            "release_attestation_verified:true",
+            "per_asset_attestations_verified:true",
+            'classification:"immutable-release"',
+            "post_state_unchanged",
+        ):
+            self.assertIn(value, script)
+        for value in (
+            "EXPECTED_ASSETS",
+            "EXPECTED_TAG_OBJECT",
+            "attestation subjects do not bind the exact tag object and assets",
+            "downloaded asset bytes do not match retained authority",
+            "retained release state changed during safe probes",
+        ):
+            self.assertIn(value, validator)
+        self.assertEqual(1, script.count("gh release edit"))
+        self.assertLess(
+            script.index('verify_attestations "$work/pre"'),
+            script.index("gh release edit"),
+        )
+        self.assertLess(
+            script.index("gh release edit"),
+            script.index("gh release upload"),
+        )
+        for forbidden in (
+            "gh release create",
+            "gh release delete",
             "release metadata edit",
             "release deletion",
-            "git push --force",
-            "release tag update",
-            'test "$after_state" = "$before_state"',
-            "cmp downloaded/probe.txt post-state/probe.txt",
-            "cmp downloaded/release-manifest.json post-state/release-manifest.json",
-            'test "${peeled:-$direct}" = "$retained_source"',
-            "behavioral_immutability",
-            "release_reported_immutable",
-            'denial_class:"immutable-release"',
-            "post_state_unchanged",
-            "RELEASE_TAG_KEY_FILE",
-            "immutable-release-gate-evidence",
+            "--notes",
+            "--prerelease",
+            "--latest",
+            'DELETE "repos/$repository/releases/$RELEASE_ID"',
         ):
-            self.assertIn(value, workflow)
-        self.assertLess(workflow.index("Configure the reviewed protected-tag deploy key"), workflow.index("Reverify live release and deploy-key authority"))
+            self.assertNotIn(forbidden, script)
         self.assertNotIn("immutable_releases:true", workflow)
-        self.assertNotIn("gh release delete", workflow)
         self.assertNotIn("Disposable", workflow)
+        self.assertLess(
+            workflow.index("Configure the reviewed protected-tag deploy key"),
+            workflow.index("Reverify live release and deploy-key authority"),
+        )
 
     def test_release_only_manual_dispatch_and_no_push_publication(self) -> None:
         for workflow in ("release-candidate.yml", "release-promote.yml"):
