@@ -8,8 +8,8 @@ three manual workflows:
 - **Promote release** verifies a successful candidate run and publishes its
   unchanged members after one founder approval in the protected `release`
   environment.
-- **Release immutability gate** performs or re-verifies the one retained,
-  non-semantic draft-first publication after immutable releases are enabled.
+- **Release immutability gate** verifies the one retained, non-semantic
+  draft-first publication against its exact tag, assets, and release attestation.
 
 No push to `master`, tag push, merge, acceptance step, or rehearsal implicitly
 publishes a semantic artifact.
@@ -181,18 +181,31 @@ gate**. Its least-privilege protected `GITHUB_TOKEN` never calls the admin-only
 repository immutable-release setting endpoint. The workflow instead audits every
 accessible invariant, including the protected environment, environment deploy-key
 identity, common tag-ruleset shape, founder-only writer set, fixture callers,
-provider-authority absence, and immutable control checkout. It then creates or
-verifies the retained `dry-run/immutable-release-gate-v1` non-semantic release
-through the same recommended boundary: create draft, attach the complete manifest
-and probe, verify both, and publish once. It requires GitHub to report the release
-as immutable, proves a late asset upload, asset deletion, release metadata edit,
-release deletion, and tag movement are each denied specifically by immutability,
-then re-reads byte-for-byte release/tag state to prove nothing changed. Retained
-evidence describes the observed immutable release response, denial class, and
-unchanged post-state rather than claiming a repository-setting read. The workflow
-retains redacted run evidence for 90 days and never deletes the release or tag.
-The first successful run is one-time publication evidence; later runs only verify
-that authority and repeat non-mutating refusal probes.
+provider-authority absence, and immutable control checkout.
+
+The gate resolves only retained Release database ID `382723775` and tag
+`dry-run/immutable-release-gate-v1`; it has no Release-create, Release-delete,
+or replacement path. Before any presentation repair, it fails closed unless the
+Release reports immutable and matches the retained source commit, annotated
+tag object, exact two asset IDs/names/sizes/digests/downloaded bytes, governed
+body/prerelease state,
+and GitHub-generated release attestation. `gh release verify` must bind the exact
+tag object and complete asset digest set, and `gh release verify-asset` must
+validate each downloaded member. The title may be restored from only the known
+failed-probe value `forbidden` to its governed tag value after those checks; an
+already-restored title is accepted.
+
+GitHub immutable Releases cryptographically lock the associated tag and assets
+and attest that set. Presentation metadata such as title, notes, prerelease/latest
+state remains governed expected state but is mutable, and Release existence is
+not an immutability guarantee. The live gate therefore probes only late asset
+upload, retained-asset deletion, and tag movement. Every operation must fail with
+an immutable-release-specific denial. It then re-verifies the attestation and
+each asset, downloads and compares the exact bytes, and proves the release ID,
+immutable response, tag object/target, complete asset identities, attestation
+subjects, and governed presentation are unchanged. Redacted evidence retains
+those distinct immutable-authority and presentation fields for 90 days without
+claiming that presentation or Release deletion is cryptographically locked.
 
 After the behavioral gate succeeds, an authenticated administrator runs
 `make release-security-audit` from the resulting `master` authority. That audit
