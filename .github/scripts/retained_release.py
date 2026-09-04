@@ -191,30 +191,64 @@ def asset_identities(directory: Path) -> list[dict[str, Any]]:
 
 
 _HORIZONTAL = r"[ \t]+"
-_DETERMINER = rf"(?:(?:an?|the|this|that|its|their){_HORIZONTAL})?"
 _MODAL_REFUSAL = (
     rf"(?:cannot|can't|may{_HORIZONTAL}not|must{_HORIZONTAL}not)"
 )
 _ACTIVE_REFUSAL = (
     rf"(?:{_MODAL_REFUSAL}|not{_HORIZONTAL}allowed{_HORIZONTAL}to)"
 )
-_COPULAR_NOT_ALLOWED = (
-    rf"(?:is|are|was|were){_HORIZONTAL}not{_HORIZONTAL}allowed{_HORIZONTAL}to"
-)
 _PREVENT_OR_PROHIBIT = r"(?:prevent|prevents|prohibit|prohibits)"
-_DOES_NOT_ALLOW = rf"does{_HORIZONTAL}not{_HORIZONTAL}allow"
-_CONNECTOR = (
-    rf"(?:to|from|on|for|by|because(?:{_HORIZONTAL}of)?|"
-    rf"due{_HORIZONTAL}to)"
+_DO_OR_DOES_NOT_ALLOW = (
+    rf"(?:do|does){_HORIZONTAL}not{_HORIZONTAL}allow"
 )
-_IMMUTABLE_RELEASE = (
-    rf"(?:(?:an?|the){_HORIZONTAL})?immutable(?:[ _-]+)releases?"
+_ASSET_SINGULAR_DETERMINER = (
+    rf"(?:(?:an|the|this|that|its|their){_HORIZONTAL})?"
 )
-_RELEASE_IS_IMMUTABLE = (
-    rf"(?:the{_HORIZONTAL})?releases?{_HORIZONTAL}(?:is|are)"
-    rf"{_HORIZONTAL}immutable"
+_REFERENCE_SINGULAR_DETERMINER = (
+    rf"(?:(?:a|the|this|that|its|their){_HORIZONTAL})?"
 )
-_IMMUTABLE_CAUSE = rf"(?:{_IMMUTABLE_RELEASE}|{_RELEASE_IS_IMMUTABLE})"
+_PLURAL_DETERMINER = rf"(?:(?:the|these|those|its|their){_HORIZONTAL})?"
+
+_IMMUTABLE_NOUN_SINGULAR = (
+    rf"(?:(?:an|the){_HORIZONTAL})?immutable(?:[ _-]+)release"
+)
+_IMMUTABLE_NOUN_PLURAL = (
+    rf"(?:the{_HORIZONTAL})?immutable(?:[ _-]+)releases"
+)
+_IMMUTABLE_NOUN_CAUSE = (
+    rf"(?:{_IMMUTABLE_NOUN_SINGULAR}|{_IMMUTABLE_NOUN_PLURAL})"
+)
+_IMMUTABLE_PREDICATE_SINGULAR = (
+    rf"(?:the{_HORIZONTAL})?release{_HORIZONTAL}is{_HORIZONTAL}immutable"
+)
+_IMMUTABLE_PREDICATE_PLURAL = (
+    rf"(?:the{_HORIZONTAL})?releases{_HORIZONTAL}are{_HORIZONTAL}immutable"
+)
+_IMMUTABLE_PREDICATE_CAUSE = (
+    rf"(?:{_IMMUTABLE_PREDICATE_SINGULAR}|{_IMMUTABLE_PREDICATE_PLURAL})"
+)
+_IMMUTABLE_CAUSE = (
+    rf"(?:{_IMMUTABLE_NOUN_CAUSE}|{_IMMUTABLE_PREDICATE_CAUSE})"
+)
+_CAUSE_LINK = (
+    rf"(?:(?:to|from|on|for|by|because{_HORIZONTAL}of|"
+    rf"due{_HORIZONTAL}to){_HORIZONTAL}{_IMMUTABLE_NOUN_CAUSE}|"
+    rf"because{_HORIZONTAL}{_IMMUTABLE_PREDICATE_CAUSE})"
+)
+_CAUSE_FIRST_DIRECT = (
+    rf"(?:{_IMMUTABLE_NOUN_CAUSE}|{_IMMUTABLE_PREDICATE_CAUSE}"
+    rf"{_HORIZONTAL}(?:and|therefore|so))"
+)
+_AGREEING_PREVENTION = (
+    rf"(?:{_IMMUTABLE_NOUN_SINGULAR}{_HORIZONTAL}(?:prevents|prohibits)|"
+    rf"{_IMMUTABLE_NOUN_PLURAL}{_HORIZONTAL}(?:prevent|prohibit))"
+)
+_AGREEING_NOT_ALLOW = (
+    rf"(?:{_IMMUTABLE_NOUN_SINGULAR}{_HORIZONTAL}does{_HORIZONTAL}not"
+    rf"{_HORIZONTAL}allow|{_IMMUTABLE_NOUN_PLURAL}{_HORIZONTAL}do"
+    rf"{_HORIZONTAL}not{_HORIZONTAL}allow)"
+)
+
 _CLAUSE_START = (
     rf"^[ \t]*(?:(?:gh|remote):{_HORIZONTAL})?"
     rf"(?:(?:error|fatal):{_HORIZONTAL})?"
@@ -242,27 +276,39 @@ _DENIAL_OPERATIONS = {
     "asset upload": {
         "active": r"(?:upload|add)",
         "passive": r"(?:uploaded|added)",
-        "nominal": r"(?:uploads?|additions?)",
-        "subject": r"assets?",
+        "nominal_singular": r"(?:upload|addition)",
+        "nominal_plural": r"(?:uploads|additions)",
+        "subject_singular": r"asset",
+        "subject_plural": r"assets",
+        "singular_determiner": _ASSET_SINGULAR_DETERMINER,
         "diagnostic": _UPLOAD_DIAGNOSTIC_URL,
     },
     "asset deletion": {
         "active": r"(?:delete|remove)",
         "passive": r"(?:deleted|removed)",
-        "nominal": r"(?:deletions?|removals?)",
-        "subject": r"assets?",
+        "nominal_singular": r"(?:deletion|removal)",
+        "nominal_plural": r"(?:deletions|removals)",
+        "subject_singular": r"asset",
+        "subject_plural": r"assets",
+        "singular_determiner": _ASSET_SINGULAR_DETERMINER,
     },
     "release tag update": {
         "active": r"(?:force(?:[ _-]+)update|update|move|change)",
         "passive": r"(?:force(?:[ _-]+)updated|updated|moved|changed)",
-        "nominal": r"(?:force(?:[ _-]+)updates?|updates?|moves?|changes?)",
-        "subject": r"(?:tags?|refs?|references?)",
+        "nominal_singular": r"(?:force(?:[ _-]+)update|update|move|change)",
+        "nominal_plural": r"(?:force(?:[ _-]+)updates|updates|moves|changes)",
+        "subject_singular": r"(?:tag|ref|reference)",
+        "subject_plural": r"(?:tags|refs|references)",
+        "singular_determiner": _REFERENCE_SINGULAR_DETERMINER,
     },
     "release tag deletion": {
         "active": r"(?:delete|remove)",
         "passive": r"(?:deleted|removed)",
-        "nominal": r"(?:deletions?|removals?)",
-        "subject": r"(?:tags?|refs?|references?)",
+        "nominal_singular": r"(?:deletion|removal)",
+        "nominal_plural": r"(?:deletions|removals)",
+        "subject_singular": r"(?:tag|ref|reference)",
+        "subject_plural": r"(?:tags|refs|references)",
+        "singular_determiner": _REFERENCE_SINGULAR_DETERMINER,
     },
 }
 
@@ -275,16 +321,16 @@ _NEGATED_IMMUTABILITY = re.compile(
     rf"(?:\breleases?{_HORIZONTAL}(?:(?:is|are|was|were){_HORIZONTAL}"
     rf"(?:not|never|no{_HORIZONTAL}longer)|isn't|aren't|wasn't|weren't)"
     rf"{_HORIZONTAL}immutable\b|\b(?:not|no){_HORIZONTAL}"
-    rf"(?:(?:an?|the){_HORIZONTAL})?immutable(?:[ _-]+)releases?\b|"
+    rf"(?:(?:an|the){_HORIZONTAL})?immutable(?:[ _-]+)releases?\b|"
     rf"\bnot{_HORIZONTAL}because{_HORIZONTAL}{_IMMUTABLE_CAUSE}\b|"
-    rf"\b{_IMMUTABLE_RELEASE}\b{_HORIZONTAL}(?:does|do){_HORIZONTAL}not"
+    rf"\b{_IMMUTABLE_NOUN_CAUSE}\b{_HORIZONTAL}(?:does|do){_HORIZONTAL}not"
     rf"{_HORIZONTAL}(?:prevent|prohibit)\b)",
     re.IGNORECASE,
 )
 _AFFIRMATIVE_REFUSAL = re.compile(
-    rf"\b(?:{_ACTIVE_REFUSAL}|{_COPULAR_NOT_ALLOWED}|"
-    rf"{_PREVENT_OR_PROHIBIT}|{_DOES_NOT_ALLOW}|"
-    rf"denied|rejected|refused|forbidden)\b",
+    rf"\b(?:{_ACTIVE_REFUSAL}|{_PREVENT_OR_PROHIBIT}|"
+    rf"{_DO_OR_DOES_NOT_ALLOW}|(?:is|are|was|were){_HORIZONTAL}not"
+    rf"{_HORIZONTAL}allowed{_HORIZONTAL}to|denied|rejected|refused|forbidden)\b",
     re.IGNORECASE,
 )
 _CANONICAL_IMMUTABLE_API_PREDICATE = re.compile(
@@ -294,48 +340,66 @@ _CANONICAL_IMMUTABLE_API_PREDICATE = re.compile(
 )
 
 
-def _passive_refusal(passive: str) -> str:
+def _passive_refusal(passive: str, copula: str) -> str:
     return (
         rf"(?:{_MODAL_REFUSAL}{_HORIZONTAL}be{_HORIZONTAL}{passive}|"
-        rf"{_COPULAR_NOT_ALLOWED}{_HORIZONTAL}be{_HORIZONTAL}{passive})"
+        rf"{copula}{_HORIZONTAL}not{_HORIZONTAL}allowed{_HORIZONTAL}to"
+        rf"{_HORIZONTAL}be{_HORIZONTAL}{passive})"
     )
+
+
+def _subject_forms(forms: dict[str, str]) -> tuple[str, str, str]:
+    singular = (
+        rf"{forms['singular_determiner']}{forms['subject_singular']}\b"
+    )
+    plural = rf"{_PLURAL_DETERMINER}{forms['subject_plural']}\b"
+    return singular, plural, rf"(?:{singular}|{plural})"
+
+
+def _subject_passive_refusal(forms: dict[str, str]) -> str:
+    singular, plural, _ = _subject_forms(forms)
+    passive = forms["passive"]
+    return (
+        rf"(?:{singular}{_HORIZONTAL}{_passive_refusal(passive, '(?:is|was)')}|"
+        rf"{plural}{_HORIZONTAL}{_passive_refusal(passive, '(?:are|were)')})"
+    )
+
+
+def _nominal_operation(forms: dict[str, str]) -> str:
+    return rf"(?:{forms['nominal_singular']}|{forms['nominal_plural']})"
 
 
 def _operation_patterns(forms: dict[str, str]) -> tuple[re.Pattern[str], ...]:
     active = forms["active"]
     passive = forms["passive"]
-    nominal = forms["nominal"]
-    subject = forms["subject"]
-    passive_refusal = _passive_refusal(passive)
+    _, _, subject = _subject_forms(forms)
+    subject_refusal = _subject_passive_refusal(forms)
+    nominal = _nominal_operation(forms)
+    nominal_subject = forms["subject_singular"]
     clause_end = _clause_end(forms.get("diagnostic"))
     return tuple(
         re.compile(pattern, re.IGNORECASE | re.MULTILINE)
         for pattern in (
             # GitHub's observed form: "Cannot upload assets to an immutable release".
             rf"{_CLAUSE_START}{_ACTIVE_REFUSAL}{_HORIZONTAL}{active}\b"
-            rf"{_HORIZONTAL}{_DETERMINER}{subject}\b{_HORIZONTAL}{_CONNECTOR}"
-            rf"{_HORIZONTAL}{_IMMUTABLE_CAUSE}\b{clause_end}",
+            rf"{_HORIZONTAL}{subject}{_HORIZONTAL}{_CAUSE_LINK}\b{clause_end}",
             # The operation object may precede a grammatically passive refusal.
-            rf"{_CLAUSE_START}{_DETERMINER}{subject}\b{_HORIZONTAL}"
-            rf"{passive_refusal}\b{_HORIZONTAL}{_CONNECTOR}{_HORIZONTAL}"
-            rf"{_IMMUTABLE_CAUSE}\b{clause_end}",
+            rf"{_CLAUSE_START}{subject_refusal}\b{_HORIZONTAL}{_CAUSE_LINK}\b"
+            rf"{clause_end}",
             # The immutable cause may precede the operation and refusal.
-            rf"{_CLAUSE_START}{_IMMUTABLE_CAUSE}\b{_HORIZONTAL}"
-            rf"(?:(?:and|therefore|so){_HORIZONTAL})?{_DETERMINER}{subject}\b"
-            rf"{_HORIZONTAL}{passive_refusal}\b{clause_end}",
+            rf"{_CLAUSE_START}{_CAUSE_FIRST_DIRECT}\b{_HORIZONTAL}"
+            rf"{subject_refusal}\b{clause_end}",
             # A cause-first clause may explicitly prevent a passive operation.
-            rf"{_CLAUSE_START}{_IMMUTABLE_CAUSE}\b{_HORIZONTAL}"
-            rf"{_PREVENT_OR_PROHIBIT}{_HORIZONTAL}{_DETERMINER}{subject}\b"
+            rf"{_CLAUSE_START}{_AGREEING_PREVENTION}\b{_HORIZONTAL}{subject}"
             rf"{_HORIZONTAL}from{_HORIZONTAL}being{_HORIZONTAL}{passive}\b"
             rf"{clause_end}",
-            rf"{_CLAUSE_START}{_IMMUTABLE_CAUSE}\b{_HORIZONTAL}"
-            rf"{_DOES_NOT_ALLOW}{_HORIZONTAL}{_DETERMINER}{subject}\b"
+            rf"{_CLAUSE_START}{_AGREEING_NOT_ALLOW}\b{_HORIZONTAL}{subject}"
             rf"{_HORIZONTAL}to{_HORIZONTAL}be{_HORIZONTAL}{passive}\b"
             rf"{clause_end}",
-            # Nominal forms are accepted only as subject + operation nouns.
-            rf"{_CLAUSE_START}{_IMMUTABLE_CAUSE}\b{_HORIZONTAL}"
-            rf"(?:{_PREVENT_OR_PROHIBIT}|{_DOES_NOT_ALLOW}){_HORIZONTAL}"
-            rf"{_DETERMINER}{subject}\b{_HORIZONTAL}{nominal}\b{clause_end}",
+            # Nominal forms use a singular attributive operation subject.
+            rf"{_CLAUSE_START}(?:{_AGREEING_PREVENTION}|{_AGREEING_NOT_ALLOW})"
+            rf"\b{_HORIZONTAL}{nominal_subject}\b{_HORIZONTAL}{nominal}\b"
+            rf"{clause_end}",
         )
     )
 
@@ -356,15 +420,17 @@ def _canonical_immutable_api_predicate(output: str) -> bool:
 def _operation_pair(output: str, forms: dict[str, str]) -> bool:
     active = forms["active"]
     passive = forms["passive"]
-    nominal = forms["nominal"]
-    subject = forms["subject"]
+    _, _, subject = _subject_forms(forms)
+    subject_refusal = _subject_passive_refusal(forms)
+    nominal = _nominal_operation(forms)
+    nominal_subject = forms["subject_singular"]
     patterns = (
-        rf"\b{active}\b{_HORIZONTAL}{_DETERMINER}{subject}\b",
-        rf"\b{subject}\b{_HORIZONTAL}{_passive_refusal(passive)}\b",
-        rf"\b{subject}\b{_HORIZONTAL}from{_HORIZONTAL}being{_HORIZONTAL}"
+        rf"\b{active}\b{_HORIZONTAL}{subject}",
+        rf"\b{subject_refusal}\b",
+        rf"\b{subject}{_HORIZONTAL}from{_HORIZONTAL}being{_HORIZONTAL}"
         rf"{passive}\b",
-        rf"\b{subject}\b{_HORIZONTAL}to{_HORIZONTAL}be{_HORIZONTAL}{passive}\b",
-        rf"\b{subject}\b{_HORIZONTAL}{nominal}\b",
+        rf"\b{subject}{_HORIZONTAL}to{_HORIZONTAL}be{_HORIZONTAL}{passive}\b",
+        rf"\b{nominal_subject}\b{_HORIZONTAL}{nominal}\b",
     )
     return any(re.search(pattern, output, re.IGNORECASE) for pattern in patterns)
 
@@ -384,10 +450,17 @@ def _denial_mismatch(
         expected_mutation = any(
             re.search(rf"\b{forms[position]}\b", output, re.IGNORECASE)
             is not None
-            for position in ("active", "passive", "nominal")
+            for position in (
+                "active",
+                "passive",
+                "nominal_singular",
+                "nominal_plural",
+            )
         )
         expected_subject = re.search(
-            rf"\b{forms['subject']}\b", output, re.IGNORECASE
+            rf"\b(?:{forms['subject_singular']}|{forms['subject_plural']})\b",
+            output,
+            re.IGNORECASE,
         ) is not None
         expected_operation = _operation_pair(output, forms)
         operation_label = operation
