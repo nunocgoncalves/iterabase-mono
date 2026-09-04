@@ -27,10 +27,13 @@ The runtime bundle must bind the exact source, plan and catalogue hashes, and th
 scenario's exact artifact set. Selected temporary/candidate artifacts carry the
 planned source SHA and recipe hash. Published baselines carry an immutable
 reference plus verified digest/checksum and cannot claim selected-source
-custody. Registry-backed images are pulled, inspected, and saved by their exact
-digest-qualified reference; the composer binds the planned runtime tag into the
-saved archive metadata without looking up or materializing that mutable daemon
-tag. Every image artifact resolves to this archive/reference pair. F2 scenarios
+custody. Digest-qualified published baselines are pulled, inspected, and saved
+by their exact reference without looking up a mutable daemon tag. Unqualified
+selected-candidate aliases are pulled and inspected as aliases to prove their
+planned digest binding, then saved by the resulting exact reference. The
+composer binds the planned runtime tag into the saved archive metadata without
+materializing it in the daemon. Every image artifact resolves to this
+archive/reference pair. F2 scenarios
 with image requirements must declare `create-kind` followed by
 `import-runtime-images`; every later stage depends transitively on that import.
 The shared Kind helper restores the downloaded archive and transports the exact
