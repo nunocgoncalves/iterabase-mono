@@ -55,6 +55,7 @@ case "$name" in
     "$destination/go/bin/go" version | grep -F "go$version " >/dev/null
     echo "GOROOT=$destination/go" >> "$GITHUB_ENV"
     echo "$destination/go/bin" >> "$GITHUB_PATH"
+    echo "$HOME/go/bin" >> "$GITHUB_PATH"
     ;;
   node)
     destination="$install_root/node-$version"

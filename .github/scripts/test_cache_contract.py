@@ -48,6 +48,10 @@ class CacheContractTests(unittest.TestCase):
             with self.subTest(action=action):
                 self.assertNotIn("restore-keys:", action.read_text())
 
+    def test_checked_go_tool_bin_is_on_subsequent_step_path(self) -> None:
+        installer = (ROOT / ".github/scripts/install_ci_tool.sh").read_text()
+        self.assertIn('echo "$HOME/go/bin" >> "$GITHUB_PATH"', installer)
+
     def test_node_cache_accepts_multiple_lockfiles(self) -> None:
         action = (ROOT / ".github/actions/setup-node/action.yml").read_text()
         self.assertIn("DEPENDENCY_PATHS:", action)
