@@ -134,6 +134,12 @@ git push --force origin "refs/tags/$GATE_TAG" \
 python3 "$VALIDATOR" require-denial --status "$update_tag_status" \
   --output "$work/update-tag.out" --operation 'release tag update'
 
+delete_tag_status=0
+git push --delete origin "refs/tags/$GATE_TAG" \
+  > "$work/delete-tag.out" 2>&1 || delete_tag_status=$?
+python3 "$VALIDATOR" require-denial --status "$delete_tag_status" \
+  --output "$work/delete-tag.out" --operation 'release tag deletion'
+
 fetch_release "$work/post-release"
 verify_remote_tag
 gh release download "$GATE_TAG" --repo "$repository" \
@@ -161,6 +167,7 @@ jq -n -cS \
   --argjson upload_status "$upload_status" \
   --argjson delete_asset_status "$delete_asset_status" \
   --argjson update_tag_status "$update_tag_status" \
+  --argjson delete_tag_status "$delete_tag_status" \
   --slurpfile state "$work/post-state.json" \
-  '{schema_version:3,repository:$repository,control_sha:$control_sha,run_id:$run_id,immutable_authority:($state[0].immutable_authority + {release_attestation_verified:true,per_asset_attestations_verified:true,post_state_unchanged:($before_state_sha256 == $after_state_sha256),before_state_sha256:$before_state_sha256,after_state_sha256:$after_state_sha256,safe_denials:{classification:"immutable-release",asset_upload:$upload_status,asset_delete:$delete_asset_status,tag_update:$update_tag_status}}),governed_presentation:($state[0].governed_presentation + {title_restored:$title_restored})}' \
+  '{schema_version:3,repository:$repository,control_sha:$control_sha,run_id:$run_id,immutable_authority:($state[0].immutable_authority + {release_attestation_verified:true,per_asset_attestations_verified:true,post_state_unchanged:($before_state_sha256 == $after_state_sha256),before_state_sha256:$before_state_sha256,after_state_sha256:$after_state_sha256,safe_denials:{classification:"immutable-release",asset_upload:$upload_status,asset_delete:$delete_asset_status,tag_update:$update_tag_status,tag_delete:$delete_tag_status}}),governed_presentation:($state[0].governed_presentation + {title_restored:$title_restored})}' \
   > "$evidence"

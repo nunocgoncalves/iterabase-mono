@@ -816,6 +816,22 @@ class RetainedReleaseGateTests(unittest.TestCase):
                     status, output, "asset mutation"
                 )
 
+    def test_tag_deletion_requires_immutable_specific_denial(self) -> None:
+        retained_release.require_immutable_denial(
+            1, "Release is immutable and its tag cannot be deleted", "tag deletion"
+        )
+        for status, output in (
+            (0, ""),
+            (1, "protected tag rule rejected deletion"),
+            (1, "permission denied"),
+        ):
+            with self.subTest(status=status, output=output), self.assertRaises(
+                retained_release.GateError
+            ):
+                retained_release.require_immutable_denial(
+                    status, output, "tag deletion"
+                )
+
     def test_post_state_must_match_exact_pre_state(self) -> None:
         with tempfile.TemporaryDirectory() as value:
             directory = Path(value)
@@ -979,6 +995,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/release-rehearsal.yml").read_text()
         script = (ROOT / ".github/scripts/run_retained_release_gate.sh").read_text()
         validator = (ROOT / ".github/scripts/retained_release.py").read_text()
+        runbook = (ROOT / "docs/release.md").read_text()
         self.assertIn("run_retained_release_gate.sh", workflow)
         for value in (
             "RELEASE_ID=382723775",
@@ -994,6 +1011,10 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             "gh release upload",
             "releases/assets/$PROBE_ASSET_ID",
             "git push --force",
+            'git push --delete origin "refs/tags/$GATE_TAG"',
+            "release tag deletion",
+            "delete_tag_status",
+            "tag_delete:$delete_tag_status",
             "require-denial",
             "compare-state",
             "release_attestation_verified:true",
@@ -1011,6 +1032,16 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         ):
             self.assertIn(value, validator)
         self.assertEqual(1, script.count("gh release edit"))
+        self.assertEqual(1, script.count("git push --force"))
+        self.assertEqual(1, script.count("git push --delete"))
+        self.assertLess(
+            script.index("git push --force"),
+            script.index("git push --delete"),
+        )
+        self.assertLess(
+            script.index("git push --delete"),
+            script.index('fetch_release "$work/post-release"'),
+        )
         self.assertLess(
             script.index('verify_attestations "$work/pre"'),
             script.index("gh release edit"),
@@ -1030,6 +1061,8 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             'DELETE "repos/$repository/releases/$RELEASE_ID"',
         ):
             self.assertNotIn(forbidden, script)
+        self.assertIn("remote tag force-update", runbook)
+        self.assertIn("remote tag deletion", runbook)
         self.assertNotIn("immutable_releases:true", workflow)
         self.assertNotIn("Disposable", workflow)
         self.assertLess(
