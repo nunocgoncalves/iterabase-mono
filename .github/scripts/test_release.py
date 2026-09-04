@@ -835,7 +835,9 @@ class RetainedReleaseGateTests(unittest.TestCase):
     def test_exact_observed_and_canonical_api_denials_are_accepted(self) -> None:
         retained_release.require_immutable_denial(
             1,
-            "Cannot upload assets to an immutable release",
+            "HTTP 422: Cannot upload assets to an immutable release. "
+            "(https://uploads.github.com/repos/nunocgoncalves/iterabase-mono/"
+            "releases/382723775/assets?name=forbidden.txt)",
             "asset upload",
         )
         for operation in (
@@ -848,6 +850,54 @@ class RetainedReleaseGateTests(unittest.TestCase):
                 retained_release.require_immutable_denial(
                     1, "gh: Release is immutable. (HTTP 422)", operation
                 )
+
+    def test_api_diagnostic_url_suffix_is_exact_and_operation_scoped(self) -> None:
+        prefix = "HTTP 422: Cannot upload assets to an immutable release. "
+        cases = (
+            (
+                "asset upload",
+                prefix
+                + "(https://api.github.com/repos/nunocgoncalves/iterabase-mono/"
+                "releases/382723775/assets?name=forbidden.txt)",
+            ),
+            (
+                "asset upload",
+                prefix
+                + "(https://uploads.github.com/repos/other/iterabase-mono/"
+                "releases/382723775/assets?name=forbidden.txt)",
+            ),
+            (
+                "asset upload",
+                prefix
+                + "(https://uploads.github.com/repos/nunocgoncalves/iterabase-mono/"
+                "releases/1/assets?name=forbidden.txt)",
+            ),
+            (
+                "asset upload",
+                prefix
+                + "(https://uploads.github.com/repos/nunocgoncalves/iterabase-mono/"
+                "releases/382723775/assets?name=other.txt)",
+            ),
+            (
+                "asset upload",
+                prefix
+                + "(https://uploads.github.com/repos/nunocgoncalves/iterabase-mono/"
+                "releases/382723775/assets?name=forbidden.txt&token=secret)",
+            ),
+            (
+                "release tag update",
+                "HTTP 422: Cannot update tag on an immutable release. "
+                "(https://uploads.github.com/repos/nunocgoncalves/iterabase-mono/"
+                "releases/382723775/assets?name=forbidden.txt)",
+            ),
+        )
+        for operation, output in cases:
+            with self.subTest(operation=operation, output=output), self.assertRaises(
+                retained_release.GateError
+            ) as raised:
+                retained_release.require_immutable_denial(1, output, operation)
+            self.assertNotIn("https://", str(raised.exception))
+            self.assertLess(len(str(raised.exception)), 512)
 
     def test_denial_grammar_rejects_unrelated_or_incomplete_evidence(self) -> None:
         cases = (
