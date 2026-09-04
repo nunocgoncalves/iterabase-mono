@@ -473,7 +473,11 @@ class ReleaseSecurityAuditTests(unittest.TestCase):
         }
 
     def run_audit(
-        self, ruleset: dict, *, admin: bool
+        self,
+        ruleset: dict,
+        *,
+        admin: bool,
+        immutable_response: str | None = '{"enabled": true, "enforced_by_owner": false}',
     ) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory() as value:
             directory = Path(value)
@@ -487,6 +491,17 @@ import sys
 repository = "example/iterabase-mono"
 endpoint = next(value for value in sys.argv[2:] if not value.startswith("-"))
 ruleset = json.loads(os.environ["RULESET_JSON"])
+immutable_endpoint = f"repos/{repository}/immutable-releases"
+if endpoint == immutable_endpoint:
+    if os.environ["AUDIT_ADMIN_ENDPOINTS"] != "true":
+        print("non-admin audit requested the admin-only immutable release setting", file=sys.stderr)
+        sys.exit(3)
+    response = os.environ.get("IMMUTABLE_RESPONSE")
+    if response is None:
+        print("immutable release setting unavailable", file=sys.stderr)
+        sys.exit(4)
+    print(response, end="")
+    sys.exit(0)
 responses = {
     f"repos/{repository}/keys": [{
         "read_only": False,
@@ -526,7 +541,6 @@ responses = {
         "login": "nunocgoncalves",
         "permissions": {"admin": True, "maintain": True, "push": True},
     }],
-    f"repos/{repository}/immutable-releases": {"enabled": True},
 }
 if endpoint not in responses:
     print(f"unexpected endpoint: {endpoint}", file=sys.stderr)
@@ -545,6 +559,10 @@ json.dump(responses[endpoint], sys.stdout)
                 "RELEASE_REVIEWER": "nunocgoncalves",
             }
             env.pop("RELEASE_TAG_KEY_FILE", None)
+            if immutable_response is None:
+                env.pop("IMMUTABLE_RESPONSE", None)
+            else:
+                env["IMMUTABLE_RESPONSE"] = immutable_response
             return subprocess.run(
                 [
                     str(ROOT / ".github/scripts/audit_release_security.sh"),
@@ -567,6 +585,29 @@ json.dump(responses[endpoint], sys.stdout)
             with self.subTest(value=value):
                 completed = self.run_audit(ruleset, admin=False)
                 self.assertEqual(0, completed.returncode, completed.stderr)
+                self.assertIn(
+                    "immutable releases setting: not verified (admin-only)",
+                    completed.stdout,
+                )
+
+    def test_admin_audit_requires_enabled_immutable_release_setting(self) -> None:
+        completed = self.run_audit(self.ruleset(), admin=True)
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertIn("immutable releases setting: enabled", completed.stdout)
+
+        invalid = {
+            "disabled": '{"enabled": false}',
+            "missing": '{}',
+            "malformed": '{"enabled": "true"}',
+            "unavailable": None,
+        }
+        for case, response in invalid.items():
+            with self.subTest(case=case):
+                completed = self.run_audit(
+                    self.ruleset(), admin=True, immutable_response=response
+                )
+                self.assertNotEqual(0, completed.returncode)
+                self.assertIn("immutable release", completed.stderr)
 
     def test_audit_rejects_malformed_common_authority_in_both_modes(self) -> None:
         mutations = {
@@ -750,24 +791,45 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         ):
             self.assertIn(value, script)
 
+    def test_protected_release_callers_use_only_non_admin_audits(self) -> None:
+        for name in ("release-rehearsal.yml", "release-promote.yml"):
+            workflow = (ROOT / ".github/workflows" / name).read_text()
+            with self.subTest(workflow=name):
+                self.assertEqual(2, workflow.count("audit_release_security.sh"))
+                self.assertEqual(2, workflow.count('AUDIT_ADMIN_ENDPOINTS: "false"'))
+                self.assertNotIn("REQUIRE_IMMUTABLE_RELEASES", workflow)
+                self.assertNotIn(
+                    'repos/${{ github.repository }}/immutable-releases', workflow
+                )
+
     def test_retained_immutability_gate_proves_asset_and_tag_refusal(self) -> None:
         workflow = (ROOT / ".github/workflows/release-rehearsal.yml").read_text()
         for value in (
-            "REQUIRE_IMMUTABLE_RELEASES: \"true\"",
             "--draft",
             "--draft=false",
             "'.immutable'",
             "gh release upload",
             "releases/assets/$ASSET_ID",
-            "git push --force",
+            "asset upload",
+            "asset deletion",
             "release metadata edit",
             "release deletion",
+            "git push --force",
+            "release tag update",
+            'test "$after_state" = "$before_state"',
+            "cmp downloaded/probe.txt post-state/probe.txt",
+            "cmp downloaded/release-manifest.json post-state/release-manifest.json",
+            'test "${peeled:-$direct}" = "$retained_source"',
+            "behavioral_immutability",
+            "release_reported_immutable",
+            'denial_class:"immutable-release"',
             "post_state_unchanged",
             "RELEASE_TAG_KEY_FILE",
             "immutable-release-gate-evidence",
         ):
             self.assertIn(value, workflow)
         self.assertLess(workflow.index("Configure the reviewed protected-tag deploy key"), workflow.index("Reverify live release and deploy-key authority"))
+        self.assertNotIn("immutable_releases:true", workflow)
         self.assertNotIn("gh release delete", workflow)
         self.assertNotIn("Disposable", workflow)
 

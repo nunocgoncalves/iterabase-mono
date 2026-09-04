@@ -116,7 +116,6 @@ jobs:
           RUN_ID: ${{ inputs.candidate_run_id }}
           CONTROL_SHA: ${{ github.sha }}
           SOURCE_SHA: ${{ needs.verify-candidate.outputs.source_sha }}
-          REQUIRE_IMMUTABLE_RELEASES: "true"
           AUDIT_REPOSITORY_SECRETS: "false"
           AUDIT_ADMIN_ENDPOINTS: "false"
         run: |
@@ -166,7 +165,6 @@ jobs:
           RUN_ID: ${{ inputs.candidate_run_id }}
           CONTROL_SHA: ${{ github.sha }}
           SOURCE_SHA: ${{ needs.verify-candidate.outputs.source_sha }}
-          REQUIRE_IMMUTABLE_RELEASES: "true"
           AUDIT_REPOSITORY_SECRETS: "false"
           AUDIT_ADMIN_ENDPOINTS: "false"
           RELEASE_TAG_KEY_FILE: ${{ runner.temp }}/release-tag

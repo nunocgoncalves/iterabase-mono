@@ -11,8 +11,10 @@ fail() {
   exit 1
 }
 
+admin_endpoints="${AUDIT_ADMIN_ENDPOINTS:-true}"
 write_key_title="not verified in this invocation"
-if [[ "${AUDIT_ADMIN_ENDPOINTS:-true}" == true ]]; then
+immutable_release_setting="not verified (admin-only)"
+if [[ "$admin_endpoints" == true ]]; then
   keys="$(gh api "repos/$repository/keys")"
   write_key_count="$(jq '[.[] | select(.read_only == false)] | length' <<<"$keys")"
   [[ "$write_key_count" == 1 ]] || fail "expected exactly one write deploy key, found $write_key_count"
@@ -70,7 +72,7 @@ jq -e --arg ruleset_id "$ruleset_id" '
   .conditions.ref_name.exclude == []
 ' <<<"$ruleset" >/dev/null || fail "release tag ruleset common contract does not match the approved authority"
 
-if [[ "${AUDIT_ADMIN_ENDPOINTS:-true}" == true ]]; then
+if [[ "$admin_endpoints" == true ]]; then
   jq -e '
     (.bypass_actors | type == "array") and
     (.bypass_actors | length == 1) and
@@ -81,6 +83,13 @@ if [[ "${AUDIT_ADMIN_ENDPOINTS:-true}" == true ]]; then
   permissions="$(gh api "repos/$repository/actions/permissions/workflow")"
   jq -e '.default_workflow_permissions == "read" and .can_approve_pull_request_reviews == false' \
     <<<"$permissions" >/dev/null || fail "default workflow token permissions are not read-only"
+
+  if ! immutable="$(gh api "repos/$repository/immutable-releases")"; then
+    fail "immutable releases setting is unavailable to the authenticated admin audit"
+  fi
+  jq -e 'type == "object" and (.enabled | type == "boolean") and .enabled == true' \
+    <<<"$immutable" >/dev/null || fail "immutable releases setting is not exactly enabled"
+  immutable_release_setting="enabled"
 fi
 
 collaborators="$(gh api --paginate "repos/$repository/collaborators?affiliation=all&per_page=100" | jq -s 'add')"
@@ -112,13 +121,8 @@ if find "$repo_root/forge/cmd" "$repo_root/forge/internal" -type f -name '*.go' 
 fi
 ! grep -q 'pull_request_target:' "$repo_root/.github/workflows/e2e.yml" || fail "fork fixture workflow must remain secretless"
 
-immutable="$(gh api "repos/$repository/immutable-releases")"
-if [[ "${REQUIRE_IMMUTABLE_RELEASES:-false}" == true ]]; then
-  jq -e '.enabled == true' <<<"$immutable" >/dev/null || fail "immutable releases are not enabled"
-fi
-
 printf 'release security audit passed for %s\n' "$repository"
 printf 'write deploy key: %s\n' "$write_key_title"
 printf 'release ruleset id: %s\n' "$ruleset_id"
 printf 'fixture writers: %s\n' "$writers"
-printf 'immutable releases enabled: %s\n' "$(jq -r '.enabled' <<<"$immutable")"
+printf 'immutable releases setting: %s\n' "$immutable_release_setting"

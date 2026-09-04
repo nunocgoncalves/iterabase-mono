@@ -140,8 +140,8 @@ source remains independently allowed to be any explicit full SHA contained in
 The publication job then waits once for founder approval in the protected
 `release` environment. After approval it reasserts the control checkout and
 workflow SHA; re-queries candidate workflow/run/source authority; re-verifies
-candidate bytes, source containment, environment, collaborator, immutable-release,
-and protected-tag authority; and preflights every semantic image, chart, tag, and
+candidate bytes, source containment, environment, collaborator, and common
+protected-tag authority; and preflights every semantic image, chart, tag, and
 GitHub Release destination—including governed published metadata, complete bytes,
 and immutable state—before the first mutation. It then:
 
@@ -176,21 +176,29 @@ the runbook baseline before a new candidate dispatch.
 
 ## Post-merge immutable-release gate
 
-After the controlling change merges, the founder enables **release immutability**
-in repository settings before approving **Release immutability gate**. The
-workflow first audits that the setting, protected environment, deploy key, tag
-ruleset, and immutable control checkout are exact. It then creates or verifies
-the retained `dry-run/immutable-release-gate-v1` non-semantic release through the
-same recommended boundary: create draft, attach the complete manifest and probe,
-verify both, and publish once. It requires GitHub to report the release as
-immutable, proves a late asset upload, asset deletion, release metadata edit,
+After the controlling change merges, the founder approves **Release immutability
+gate**. Its least-privilege protected `GITHUB_TOKEN` never calls the admin-only
+repository immutable-release setting endpoint. The workflow instead audits every
+accessible invariant, including the protected environment, environment deploy-key
+identity, common tag-ruleset shape, founder-only writer set, fixture callers,
+provider-authority absence, and immutable control checkout. It then creates or
+verifies the retained `dry-run/immutable-release-gate-v1` non-semantic release
+through the same recommended boundary: create draft, attach the complete manifest
+and probe, verify both, and publish once. It requires GitHub to report the release
+as immutable, proves a late asset upload, asset deletion, release metadata edit,
 release deletion, and tag movement are each denied specifically by immutability,
-then re-reads the setting and byte-for-byte release/tag state to prove nothing
-changed. The environment credential's derived public key must equal the reviewed
-sole write deploy key before those probes. The workflow retains redacted run
-evidence for 90 days and never deletes the release or tag. The first successful
-run is one-time publication evidence; later runs only verify that authority and
-repeat non-mutating refusal probes.
+then re-reads byte-for-byte release/tag state to prove nothing changed. Retained
+evidence describes the observed immutable release response, denial class, and
+unchanged post-state rather than claiming a repository-setting read. The workflow
+retains redacted run evidence for 90 days and never deletes the release or tag.
+The first successful run is one-time publication evidence; later runs only verify
+that authority and repeat non-mutating refusal probes.
+
+After the behavioral gate succeeds, an authenticated administrator runs
+`make release-security-audit` from the resulting `master` authority. That audit
+is the sole direct proof that the repository immutable-release setting is exactly
+enabled and retains the admin-only deploy-key, bypass-actor, workflow-permission,
+secret, and variable checks.
 
 ## Protection and operator audit
 
@@ -199,7 +207,11 @@ hold `RELEASE_TAG_SSH_KEY`. The active ruleset protects production namespaces
 and `dry-run/**`. The release deploy key must remain the repository's only write
 deploy key. The complete push/maintain/admin collaborator set must remain exactly
 `nunocgoncalves`; repository secrets must remain exactly the CPU/GPU fixture keys;
-and immutable releases must be enabled after the one-time post-merge rollout.
+and immutable releases must remain enabled. Protected workflow invocations set
+`AUDIT_ADMIN_ENDPOINTS=false`; they preserve accessible checks but neither call
+nor claim direct evidence from the immutable-release setting or other admin-only
+endpoints. The authenticated admin invocation is fail-closed when the setting is
+disabled, malformed, or unavailable.
 
 ```bash
 make release-check
