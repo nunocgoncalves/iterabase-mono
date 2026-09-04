@@ -190,38 +190,225 @@ def asset_identities(directory: Path) -> list[dict[str, Any]]:
     return sorted(identities, key=lambda item: item["name"])
 
 
-def require_immutable_denial(status: int, output: str, operation: str) -> None:
-    if status == 0:
-        raise GateError(f"{operation} unexpectedly succeeded")
+_HORIZONTAL = r"[ \t]+"
+_DETERMINER = rf"(?:(?:an?|the|this|that|its|their){_HORIZONTAL})?"
+_REFUSAL = (
+    rf"(?:cannot|can't|may{_HORIZONTAL}not|must{_HORIZONTAL}not|"
+    rf"(?:is|are|was|were){_HORIZONTAL}not{_HORIZONTAL}allowed{_HORIZONTAL}to)"
+)
+_PREVENTION = (
+    rf"(?:does{_HORIZONTAL}not{_HORIZONTAL}allow|"
+    rf"prevents?|prohibits?)"
+)
+_CONNECTOR = (
+    rf"(?:to|from|on|for|by|because(?:{_HORIZONTAL}of)?|"
+    rf"due{_HORIZONTAL}to)"
+)
+_IMMUTABLE_RELEASE = (
+    rf"(?:(?:an?|the){_HORIZONTAL})?immutable(?:[ _-]+)releases?"
+)
+_RELEASE_IS_IMMUTABLE = (
+    rf"(?:the{_HORIZONTAL})?releases?{_HORIZONTAL}(?:is|are)"
+    rf"{_HORIZONTAL}immutable"
+)
+_IMMUTABLE_CAUSE = rf"(?:{_IMMUTABLE_RELEASE}|{_RELEASE_IS_IMMUTABLE})"
+_CAUSE_END = (
+    rf"(?=[ \t]*[.!]?(?:[ \t]*\((?:HTTP{_HORIZONTAL})?[45][0-9]{{2}}\))?"
+    rf"[ \t]*\r?$)"
+)
 
-    immutable_release = r"immutable(?:[ _-]+)releases?"
-    mutation = (
-        r"(?:upload(?:ed|ing)?|add(?:ed|ing)?|delet(?:e|ed|ing)|"
-        r"remov(?:e|ed|ing)|updat(?:e|ed|ing)|modif(?:y|ied|ying)|"
-        r"mov(?:e|ed|ing)|mutat(?:e|ed|ing)|chang(?:e|ed|ing)|"
-        r"overwrit(?:e|ten|ing)|force(?:[ _-]+)updat(?:e|ed|ing))"
+_DENIAL_OPERATIONS = {
+    "asset upload": (
+        r"(?:uploads?|uploaded|uploading|adds?|added|adding|additions?)",
+        r"assets?",
+    ),
+    "asset deletion": (
+        r"(?:deletes?|deleted|deleting|deletions?|"
+        r"removes?|removed|removing|removals?)",
+        r"assets?",
+    ),
+    "release tag update": (
+        r"(?:force(?:[ _-]+)updates?|force(?:[ _-]+)updated|"
+        r"force(?:[ _-]+)updating|updates?|updated|updating|"
+        r"moves?|moved|moving|changes?|changed|changing)",
+        r"(?:tags?|refs?|references?)",
+    ),
+    "release tag deletion": (
+        r"(?:deletes?|deleted|deleting|deletions?|"
+        r"removes?|removed|removing|removals?)",
+        r"(?:tags?|refs?|references?)",
+    ),
+}
+
+_IMMUTABLE_MENTION = re.compile(
+    rf"\b(?:immutable(?:[ _-]+)releases?|releases?{_HORIZONTAL}"
+    rf"(?:is|are|was|were){_HORIZONTAL}(?:not{_HORIZONTAL})?immutable)\b",
+    re.IGNORECASE,
+)
+_NEGATED_IMMUTABILITY = re.compile(
+    rf"\b(?:releases?{_HORIZONTAL}(?:(?:is|are|was|were){_HORIZONTAL}"
+    rf"(?:not|never|no{_HORIZONTAL}longer)|isn't|aren't|wasn't|weren't)"
+    rf"{_HORIZONTAL}immutable|not{_HORIZONTAL}"
+    rf"(?:(?:an?|the){_HORIZONTAL})?immutable(?:[ _-]+)releases?)\b",
+    re.IGNORECASE,
+)
+_AFFIRMATIVE_REFUSAL = re.compile(
+    rf"\b(?:{_REFUSAL}|{_PREVENTION}|denied|rejected|refused|forbidden)\b",
+    re.IGNORECASE,
+)
+_CANONICAL_IMMUTABLE_API_PREDICATE = re.compile(
+    rf"(?:gh:{_HORIZONTAL})?(?:(?:HTTP{_HORIZONTAL})?[45][0-9]{{2}}:"
+    rf"{_HORIZONTAL})?release{_HORIZONTAL}is{_HORIZONTAL}immutable[.!]?"
+    rf"(?:[ \t]*\((?:HTTP{_HORIZONTAL})?[45][0-9]{{2}}\))?",
+    re.IGNORECASE,
+)
+
+
+def _operation_patterns(mutation: str, subject: str) -> tuple[re.Pattern[str], ...]:
+    return tuple(
+        re.compile(pattern, re.IGNORECASE | re.MULTILINE)
+        for pattern in (
+            # GitHub's observed form: "Cannot upload assets to an immutable release".
+            rf"\b{_REFUSAL}{_HORIZONTAL}(?:be{_HORIZONTAL})?{mutation}\b"
+            rf"{_HORIZONTAL}{_DETERMINER}{subject}\b{_HORIZONTAL}{_CONNECTOR}"
+            rf"{_HORIZONTAL}{_IMMUTABLE_CAUSE}\b{_CAUSE_END}",
+            # The operation object may precede the refusal in a passive clause.
+            rf"\b{subject}\b{_HORIZONTAL}{_REFUSAL}{_HORIZONTAL}"
+            rf"(?:be{_HORIZONTAL})?{mutation}\b{_HORIZONTAL}{_CONNECTOR}"
+            rf"{_HORIZONTAL}{_IMMUTABLE_CAUSE}\b{_CAUSE_END}",
+            # The immutable cause may precede the operation and refusal.
+            rf"\b{_IMMUTABLE_CAUSE}\b{_HORIZONTAL}"
+            rf"(?:(?:and|therefore|so){_HORIZONTAL})?{_DETERMINER}{subject}\b"
+            rf"{_HORIZONTAL}{_REFUSAL}{_HORIZONTAL}(?:be{_HORIZONTAL})?"
+            rf"{mutation}\b",
+            # Or the immutable cause may explicitly prevent the operation.
+            rf"\b{_IMMUTABLE_CAUSE}\b{_HORIZONTAL}{_PREVENTION}{_HORIZONTAL}"
+            rf"{_DETERMINER}{subject}\b{_HORIZONTAL}"
+            rf"(?:(?:from|to){_HORIZONTAL})?(?:(?:be|being){_HORIZONTAL})?"
+            rf"{mutation}\b",
+        )
     )
-    affirmative_denials = (
-        # GitHub's API reports immutable asset mutations with this predicate.
-        re.compile(r"\brelease\s+is\s+immutable\b", re.IGNORECASE),
-        # Git transport can put the refusal before the immutable-release reason.
-        re.compile(
-            rf"\b(?:cannot|can't|may not|must not|not allowed to)\s+"
-            rf"(?:be\s+)?{mutation}\s+"
-            rf"(?:an?\s+|the\s+)?{immutable_release}\b",
-            re.IGNORECASE,
-        ),
-        # Accept the same causal statement when GitHub puts the reason first.
-        re.compile(
-            rf"\b{immutable_release}\b\s+(?:(?:assets?|tags?)\s+)?"
-            rf"(?:cannot|can't|may not|must not|does not allow|prevents?|prohibits?)\s+"
-            rf"(?:the\s+)?(?:release\s+)?(?:asset\s+|tag\s+)?(?:from\s+)?"
-            rf"(?:(?:be|being)\s+)?{mutation}\b",
-            re.IGNORECASE,
-        ),
+
+
+_DENIAL_PATTERNS = {
+    operation: _operation_patterns(mutation, subject)
+    for operation, (mutation, subject) in _DENIAL_OPERATIONS.items()
+}
+
+
+def _canonical_immutable_api_predicate(output: str) -> bool:
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    return len(lines) == 1 and _CANONICAL_IMMUTABLE_API_PREDICATE.fullmatch(
+        lines[0]
+    ) is not None
+
+
+def _operation_pair(output: str, mutation: str, subject: str) -> bool:
+    patterns = (
+        rf"\b{mutation}\b{_HORIZONTAL}{_DETERMINER}{subject}\b",
+        rf"\b{subject}\b{_HORIZONTAL}{_REFUSAL}{_HORIZONTAL}"
+        rf"(?:be{_HORIZONTAL})?{mutation}\b",
+        rf"\b{subject}\b{_HORIZONTAL}(?:(?:from|to){_HORIZONTAL})?"
+        rf"(?:(?:be|being){_HORIZONTAL})?{mutation}\b",
     )
-    if not any(denial.search(output) for denial in affirmative_denials):
-        raise GateError(f"{operation} failed without an immutable-release denial")
+    return any(re.search(pattern, output, re.IGNORECASE) for pattern in patterns)
+
+
+def _denial_mismatch(
+    status: int,
+    output: str,
+    operation: str,
+    *,
+    reason: str,
+    canonical_predicate: bool = False,
+    bounded_causal_clause: bool = False,
+    wrong_operations: tuple[str, ...] = (),
+) -> GateError:
+    if operation in _DENIAL_OPERATIONS:
+        mutation, subject = _DENIAL_OPERATIONS[operation]
+        expected_mutation = re.search(
+            rf"\b{mutation}\b", output, re.IGNORECASE
+        ) is not None
+        expected_subject = re.search(
+            rf"\b{subject}\b", output, re.IGNORECASE
+        ) is not None
+        expected_operation = _operation_pair(output, mutation, subject)
+        operation_label = operation
+    else:
+        expected_mutation = False
+        expected_subject = False
+        expected_operation = False
+        operation_label = "unknown"
+
+    conflicts = []
+    if _NEGATED_IMMUTABILITY.search(output):
+        conflicts.append("negated-immutability")
+    conflicts.extend(
+        f"wrong-operation:{value.replace(' ', '-')}" for value in wrong_operations
+    )
+    conflict_summary = ",".join(conflicts) if conflicts else "none"
+    recognition = (
+        f"affirmative_refusal={str(bool(_AFFIRMATIVE_REFUSAL.search(output))).lower()},"
+        f"expected_mutation={str(expected_mutation).lower()},"
+        f"expected_subject={str(expected_subject).lower()},"
+        f"expected_operation={str(expected_operation).lower()},"
+        f"immutable_release_cause={str(bool(_IMMUTABLE_MENTION.search(output))).lower()},"
+        f"canonical_predicate={str(canonical_predicate).lower()},"
+        f"bounded_causal_clause={str(bounded_causal_clause).lower()},"
+        f"conflicts={conflict_summary}"
+    )
+    # Never include remote output here: it may contain credentials or unbounded data.
+    return GateError(
+        f"denial classification mismatch: operation={operation_label} status={status} "
+        f"reason={reason} redacted-recognition[{recognition}]"
+    )
+
+
+def require_immutable_denial(status: int, output: str, operation: str) -> None:
+    if operation not in _DENIAL_OPERATIONS:
+        raise _denial_mismatch(status, output, operation, reason="unknown-operation")
+
+    canonical_predicate = _canonical_immutable_api_predicate(output)
+    bounded_causal_clause = any(
+        pattern.search(output) for pattern in _DENIAL_PATTERNS[operation]
+    )
+    wrong_operations = tuple(
+        candidate
+        for candidate, patterns in _DENIAL_PATTERNS.items()
+        if candidate != operation and any(pattern.search(output) for pattern in patterns)
+    )
+    negated = _NEGATED_IMMUTABILITY.search(output) is not None
+
+    if status == 0:
+        raise _denial_mismatch(
+            status,
+            output,
+            operation,
+            reason="successful-result",
+            canonical_predicate=canonical_predicate,
+            bounded_causal_clause=bounded_causal_clause,
+            wrong_operations=wrong_operations,
+        )
+    if negated or wrong_operations:
+        raise _denial_mismatch(
+            status,
+            output,
+            operation,
+            reason="conflicting-evidence",
+            canonical_predicate=canonical_predicate,
+            bounded_causal_clause=bounded_causal_clause,
+            wrong_operations=wrong_operations,
+        )
+    if not canonical_predicate and not bounded_causal_clause:
+        raise _denial_mismatch(
+            status,
+            output,
+            operation,
+            reason="missing-bounded-causal-denial",
+            canonical_predicate=canonical_predicate,
+            bounded_causal_clause=bounded_causal_clause,
+            wrong_operations=wrong_operations,
+        )
 
 
 def make_state(

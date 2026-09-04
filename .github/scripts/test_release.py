@@ -800,45 +800,210 @@ class RetainedReleaseGateTests(unittest.TestCase):
             ):
                 retained_release.validate_attestation(attestation)
 
-    def test_mutation_must_fail_with_immutable_specific_evidence(self) -> None:
-        for output in (
-            "Cannot update an immutable release",
-            "gh: Release is immutable. (HTTP 422)",
-            "Immutable release assets cannot be deleted",
-        ):
-            with self.subTest(output=output):
-                retained_release.require_immutable_denial(1, output, "tag update")
+    def test_denial_grammar_accepts_each_operation_and_causal_order(self) -> None:
+        cases = {
+            "asset upload": (
+                "Cannot upload assets to an immutable release",
+                "gh: HTTP 422: Assets cannot be added to the immutable release",
+                "Immutable release prevents assets from being uploaded",
+            ),
+            "asset deletion": (
+                "Cannot delete an asset from the immutable release",
+                "Immutable release assets cannot be removed",
+                "The immutable release prohibits the asset from being deleted",
+            ),
+            "release tag update": (
+                "Cannot force-update the tag on an immutable release",
+                "The immutable release prevents its ref from being moved",
+                "Tag may not be changed because the release is immutable",
+            ),
+            "release tag deletion": (
+                "Cannot delete the ref from an immutable release",
+                "Immutable release tags cannot be removed",
+                "Release is immutable and its tag cannot be deleted",
+            ),
+        }
+        for operation, outputs in cases.items():
+            for output in outputs:
+                with self.subTest(operation=operation, output=output):
+                    retained_release.require_immutable_denial(1, output, operation)
 
-        for status, output in (
-            (0, "Cannot update an immutable release"),
-            (1, "permission denied"),
-            (1, "immutable setting is unavailable"),
-            (1, "release is not immutable"),
-            (1, "immutable release lookup failed: permission denied"),
-            (1, "Cannot update release; immutable release lookup failed"),
-        ):
-            with self.subTest(status=status, output=output), self.assertRaises(
-                retained_release.GateError
-            ):
-                retained_release.require_immutable_denial(
-                    status, output, "asset mutation"
-                )
-
-    def test_tag_deletion_requires_immutable_specific_denial(self) -> None:
+    def test_exact_observed_and_canonical_api_denials_are_accepted(self) -> None:
         retained_release.require_immutable_denial(
-            1, "Release is immutable and its tag cannot be deleted", "tag deletion"
+            1,
+            "Cannot upload assets to an immutable release",
+            "asset upload",
         )
-        for status, output in (
-            (0, ""),
-            (1, "protected tag rule rejected deletion"),
-            (1, "permission denied"),
+        for operation in (
+            "asset upload",
+            "asset deletion",
+            "release tag update",
+            "release tag deletion",
         ):
-            with self.subTest(status=status, output=output), self.assertRaises(
+            with self.subTest(operation=operation):
+                retained_release.require_immutable_denial(
+                    1, "gh: Release is immutable. (HTTP 422)", operation
+                )
+
+    def test_denial_grammar_rejects_unrelated_or_incomplete_evidence(self) -> None:
+        cases = (
+            (0, "Cannot upload assets to an immutable release", "successful status"),
+            (1, "permission denied", "permission"),
+            (1, "authentication failed", "authentication"),
+            (1, "authorization failed", "authorization"),
+            (1, "repository ruleset rejected the push", "ruleset"),
+            (1, "network connection failed", "network"),
+            (1, "release lookup failed", "lookup"),
+            (
+                1,
+                "Assets cannot be uploaded because the release is not immutable",
+                "negated immutability",
+            ),
+            (
+                1,
+                "Assets cannot be uploaded because the release isn't immutable",
+                "contracted negated immutability",
+            ),
+            (
+                1,
+                "Cannot upload assets because permission was denied; "
+                "immutable release setting is enabled",
+                "detached immutable wording",
+            ),
+            (
+                1,
+                "Cannot upload assets because immutable release setting is unavailable",
+                "immutable setting is not a cause",
+            ),
+            (
+                1,
+                "Cannot upload assets because immutable release lookup failed",
+                "immutable lookup is not a cause",
+            ),
+            (1, "Upload assets to an immutable release", "missing refusal"),
+            (
+                1,
+                "Assets cannot be used on an immutable release",
+                "missing mutation",
+            ),
+            (1, "Cannot upload to an immutable release", "missing subject"),
+            (1, "Cannot upload assets because permission was denied", "missing cause"),
+            (1, "Cannot assets immutable release upload", "malformed partial clause"),
+            (
+                1,
+                "Cannot upload assets because "
+                + "unrelated context " * 32
+                + "immutable release",
+                "broad co-occurrence",
+            ),
+            (
+                1,
+                "gh: permission denied\nRelease is immutable",
+                "detached canonical predicate",
+            ),
+        )
+        for status, output, case in cases:
+            with self.subTest(case=case), self.assertRaises(
+                retained_release.GateError
+            ) as raised:
+                retained_release.require_immutable_denial(
+                    status, output, "asset upload"
+                )
+            message = str(raised.exception)
+            self.assertIn(f"operation=asset upload status={status}", message)
+            self.assertNotIn(output, message)
+
+    def test_denial_grammar_rejects_wrong_operation_or_unknown_context(self) -> None:
+        cases = (
+            (
+                "asset upload",
+                "Cannot delete an asset from an immutable release",
+            ),
+            (
+                "asset deletion",
+                "Cannot update the tag on an immutable release",
+            ),
+            (
+                "release tag update",
+                "Cannot delete the ref from an immutable release",
+            ),
+            (
+                "release tag deletion",
+                "Cannot upload assets to an immutable release",
+            ),
+        )
+        for operation, output in cases:
+            with self.subTest(operation=operation), self.assertRaises(
                 retained_release.GateError
             ):
-                retained_release.require_immutable_denial(
-                    status, output, "tag deletion"
-                )
+                retained_release.require_immutable_denial(1, output, operation)
+
+        with self.assertRaises(retained_release.GateError):
+            retained_release.require_immutable_denial(
+                1, "gh: Release is immutable. (HTTP 422)", "asset mutation"
+            )
+
+    def test_denial_mismatch_diagnostic_is_bounded_deterministic_and_redacted(
+        self,
+    ) -> None:
+        secret = "ghp_do-not-print-this"
+        output = (
+            f"authorization: bearer {secret}\n"
+            "Cannot delete an asset from an immutable release\n"
+            + secret * 10_000
+        )
+
+        messages = []
+        for _ in range(2):
+            with self.assertRaises(retained_release.GateError) as raised:
+                retained_release.require_immutable_denial(9, output, "asset upload")
+            messages.append(str(raised.exception))
+
+        self.assertEqual(messages[0], messages[1])
+        self.assertLess(len(messages[0]), 512)
+        self.assertNotIn(secret, messages[0])
+        for value in (
+            "operation=asset upload",
+            "status=9",
+            "reason=conflicting-evidence",
+            "affirmative_refusal=true",
+            "expected_mutation=false",
+            "expected_subject=true",
+            "expected_operation=false",
+            "immutable_release_cause=true",
+            "canonical_predicate=false",
+            "bounded_causal_clause=false",
+            "conflicts=wrong-operation:asset-deletion",
+        ):
+            self.assertIn(value, messages[0])
+
+    def test_denial_mismatch_diagnostic_distinguishes_missing_grammar(self) -> None:
+        cases = (
+            (
+                "Upload assets to an immutable release",
+                "affirmative_refusal=false",
+            ),
+            (
+                "Assets cannot be used on an immutable release",
+                "expected_mutation=false",
+            ),
+            (
+                "Cannot upload to an immutable release",
+                "expected_subject=false",
+            ),
+            (
+                "Cannot upload assets because permission was denied",
+                "immutable_release_cause=false",
+            ),
+        )
+        for output, detail in cases:
+            with self.subTest(detail=detail), self.assertRaises(
+                retained_release.GateError
+            ) as raised:
+                retained_release.require_immutable_denial(7, output, "asset upload")
+            message = str(raised.exception)
+            self.assertIn("operation=asset upload status=7", message)
+            self.assertIn(detail, message)
 
     def test_post_state_must_match_exact_pre_state(self) -> None:
         with tempfile.TemporaryDirectory() as value:
@@ -1024,6 +1189,10 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             "delete_tag_status",
             "tag_delete:$delete_tag_status",
             "require-denial",
+            "--operation 'asset upload'",
+            "--operation 'asset deletion'",
+            "--operation 'release tag update'",
+            "--operation 'release tag deletion'",
             "compare-state",
             "release_attestation_verified:true",
             "per_asset_attestations_verified:true",
@@ -1037,6 +1206,10 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             "attestation subjects do not bind the exact tag object and assets",
             "downloaded asset bytes do not match retained authority",
             "retained release state changed during safe probes",
+            "_DENIAL_OPERATIONS",
+            "_canonical_immutable_api_predicate",
+            "wrong-operation",
+            "redacted-recognition",
         ):
             self.assertIn(value, validator)
         self.assertEqual(1, script.count("gh release edit"))
