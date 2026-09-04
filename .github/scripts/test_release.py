@@ -466,7 +466,8 @@ class ReleaseSecurityAuditTests(unittest.TestCase):
                         "refs/tags/inference-gateway-*",
                         "refs/tags/iterabase-platform-*",
                         "refs/tags/dry-run/**",
-                    ]
+                    ],
+                    "exclude": [],
                 }
             },
         }
@@ -567,25 +568,27 @@ json.dump(responses[endpoint], sys.stdout)
                 completed = self.run_audit(ruleset, admin=False)
                 self.assertEqual(0, completed.returncode, completed.stderr)
 
-    def test_non_admin_audit_still_rejects_malformed_common_authority(self) -> None:
+    def test_audit_rejects_malformed_common_authority_in_both_modes(self) -> None:
         mutations = {
             "id": 456,
             "name": "other ruleset",
             "target": "branch",
             "enforcement": "disabled",
             "rules": [{"type": "creation"}],
-            "refs": ["refs/tags/other-*"],
+            "include": ["refs/tags/other-*"],
+            "exclude": ["refs/tags/control-plane-v*"],
         }
         for field, value in mutations.items():
-            ruleset = self.ruleset()
-            if field == "refs":
-                ruleset["conditions"]["ref_name"]["include"] = value
-            else:
-                ruleset[field] = value
-            with self.subTest(field=field):
-                completed = self.run_audit(ruleset, admin=False)
-                self.assertNotEqual(0, completed.returncode)
-                self.assertIn("common contract", completed.stderr)
+            for admin in (False, True):
+                ruleset = self.ruleset()
+                if field in ("include", "exclude"):
+                    ruleset["conditions"]["ref_name"][field] = value
+                else:
+                    ruleset[field] = value
+                with self.subTest(field=field, admin=admin):
+                    completed = self.run_audit(ruleset, admin=admin)
+                    self.assertNotEqual(0, completed.returncode)
+                    self.assertIn("common contract", completed.stderr)
 
     def test_admin_audit_requires_exact_bypass_authority(self) -> None:
         approved = {"actor_type": "DeployKey", "bypass_mode": "always"}

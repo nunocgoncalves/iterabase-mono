@@ -66,7 +66,8 @@ jq -e --arg ruleset_id "$ruleset_id" '
     "refs/tags/inference-gateway-*",
     "refs/tags/iterabase-platform-*",
     "refs/tags/dry-run/**"
-  ] | sort)
+  ] | sort) and
+  .conditions.ref_name.exclude == []
 ' <<<"$ruleset" >/dev/null || fail "release tag ruleset common contract does not match the approved authority"
 
 if [[ "${AUDIT_ADMIN_ENDPOINTS:-true}" == true ]]; then
