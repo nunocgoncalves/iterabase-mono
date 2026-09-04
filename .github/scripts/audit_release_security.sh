@@ -87,8 +87,12 @@ if [[ "$admin_endpoints" == true ]]; then
   if ! immutable="$(gh api "repos/$repository/immutable-releases")"; then
     fail "immutable releases setting is unavailable to the authenticated admin audit"
   fi
-  jq -e 'type == "object" and (.enabled | type == "boolean") and .enabled == true' \
-    <<<"$immutable" >/dev/null || fail "immutable releases setting is not exactly enabled"
+  jq -se '
+    length == 1 and
+    (.[0] | type == "object") and
+    (.[0].enabled | type == "boolean") and
+    .[0].enabled == true
+  ' <<<"$immutable" >/dev/null || fail "immutable releases setting is not exactly enabled"
   immutable_release_setting="enabled"
 fi
 
