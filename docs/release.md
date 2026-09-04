@@ -199,9 +199,10 @@ GitHub immutable Releases cryptographically lock the associated tag and assets
 and attest that set. Presentation metadata such as title, notes, prerelease/latest
 state remains governed expected state but is mutable, and Release existence is
 not an immutability guarantee. The live gate therefore probes only late asset
-upload, retained-asset deletion, and tag movement. Every operation must fail with
-an immutable-release-specific denial. It then re-verifies the attestation and
-each asset, downloads and compares the exact bytes, and proves the release ID,
+upload, retained-asset deletion, remote tag force-update, and remote tag deletion.
+Every operation must fail with an immutable-release-specific denial. It then
+re-verifies the attestation and each asset, downloads and compares the exact
+bytes, and proves the release ID,
 immutable response, tag object/target, complete asset identities, attestation
 subjects, and governed presentation are unchanged. Redacted evidence retains
 those distinct immutable-authority and presentation fields for 90 days without
