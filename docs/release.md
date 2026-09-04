@@ -200,9 +200,15 @@ and attest that set. Presentation metadata such as title, notes, prerelease/late
 state remains governed expected state but is mutable, and Release existence is
 not an immutability guarantee. The live gate therefore probes only late asset
 upload, retained-asset deletion, remote tag force-update, and remote tag deletion.
-Every operation must fail with an immutable-release-specific denial. It then
-re-verifies the attestation and each asset, downloads and compares the exact
-bytes, and proves the release ID,
+Every operation must return nonzero and match a bounded, affirmative denial for
+that exact asset/tag mutation and immutable-release cause. GitHub's exact
+`Release is immutable` API predicate is accepted only in one of those known
+operation contexts; permission, authentication, ruleset, network, lookup,
+negated, detached, malformed, and wrong-operation failures remain denials of the
+gate rather than proof of immutability. A mismatch reports only the operation,
+status, and fixed-size redacted grammar-recognition fields, never remote output.
+The gate then re-verifies the attestation and each asset, downloads and compares
+the exact bytes, and proves the release ID,
 immutable response, tag object/target, complete asset identities, attestation
 subjects, and governed presentation are unchanged. Redacted evidence retains
 those distinct immutable-authority and presentation fields for 90 days without
