@@ -200,19 +200,24 @@ and attest that set. Presentation metadata such as title, notes, prerelease/late
 state remains governed expected state but is mutable, and Release existence is
 not an immutability guarantee. The live gate therefore probes only late asset
 upload, retained-asset deletion, remote tag force-update, and remote tag deletion.
-Every operation must return nonzero and match a bounded, affirmative denial for
-that exact asset/tag mutation and immutable-release cause. GitHub's exact
-`Release is immutable` API predicate is accepted only in one of those known
-operation contexts; permission, authentication, ruleset, network, lookup,
-negated, detached, malformed, and wrong-operation failures remain denials of the
-gate rather than proof of immutability. A mismatch reports only the operation,
-status, and fixed-size redacted grammar-recognition fields, never remote output.
-The gate then re-verifies the attestation and each asset, downloads and compares
-the exact bytes, and proves the release ID,
-immutable response, tag object/target, complete asset identities, attestation
-subjects, and governed presentation are unchanged. Redacted evidence retains
-those distinct immutable-authority and presentation fields for 90 days without
-claiming that presentation or Release deletion is cryptographically locked.
+
+Each asset command is bound to its exact retained upload or asset-ID endpoint,
+must fail, and must expose exactly one HTTP 422 protocol status. Each tag command
+uses the exact update or deletion refspec with `git push --porcelain`, must fail,
+and must expose exactly one `!` record for that refspec classified as
+`[remote rejected]`. Response bodies and Git rejection reasons are not parsed or
+retained as authority. Success, authentication/authorization, wrong resource or
+ref, rate limiting, transport failure, local rejection, malformed or multiple
+records, and every non-422 HTTP result fail closed.
+
+After each probe, before the next mutation is attempted, the gate freshly
+re-fetches and compares the complete baseline: release identity and immutable
+response, governed presentation, annotated tag object/target, complete asset
+identities and downloaded bytes, the release attestation, and both per-asset
+attestations. A mismatch reports only bounded operation, process, protocol, and
+state fields. Redacted evidence retains all four protocol results and immediate
+state comparisons for 90 days without claiming that presentation or Release
+deletion is cryptographically locked.
 
 After the behavioral gate succeeds, an authenticated administrator runs
 `make release-security-audit` from the resulting `master` authority. That audit
