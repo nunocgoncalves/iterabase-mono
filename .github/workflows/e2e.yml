@@ -75,9 +75,10 @@ jobs:
             --intent pr \
             --source-sha "$SOURCE_SHA" \
             --selection-file /tmp/changed-path-selection.json \
-            --output e2e-plan.json \
+            --output e2e-plan.json
+          python3 .github/scripts/e2e.py resolve-baselines \
+            --plan e2e-plan.json \
             --github-output "$GITHUB_OUTPUT"
-          python3 .github/scripts/e2e.py resolve-baselines --plan e2e-plan.json
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: e2e-plan

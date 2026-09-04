@@ -1576,6 +1576,7 @@ def parser() -> argparse.ArgumentParser:
     plan.add_argument("--github-output", type=Path)
     resolve = commands.add_parser("resolve-baselines")
     resolve.add_argument("--plan", type=Path, required=True)
+    resolve.add_argument("--github-output", type=Path)
     build = commands.add_parser("build-artifact")
     build.add_argument("--plan", type=Path, required=True)
     build.add_argument("--artifact", required=True)
@@ -1619,12 +1620,17 @@ def main() -> int:
                 path_selection=path_selection,
             )
             args.output.write_text(compact(plan) + "\n", encoding="utf-8")
-            output = args.github_output or (Path(os.environ["GITHUB_OUTPUT"]) if os.environ.get("GITHUB_OUTPUT") else None)
-            if output:
-                write_outputs(output, plan)
+            if args.github_output:
+                write_outputs(args.github_output, plan)
             print(compact({"scenario_total": plan["scenario_total"], "owner_totals": plan["owner_totals"]}))
         elif args.command == "resolve-baselines":
             resolve_baselines(args.plan, contract)
+            if args.github_output:
+                resolved = read_object(args.plan)
+                execution = resolved.get("execution_plan", resolved)
+                if not isinstance(execution, dict):
+                    raise E2EError("resolved plan has no execution plan object")
+                write_outputs(args.github_output, execution)
         elif args.command == "build-artifact":
             build_artifact(root, read_object(args.plan), contract, args.artifact, args.output)
         elif args.command == "compose":
