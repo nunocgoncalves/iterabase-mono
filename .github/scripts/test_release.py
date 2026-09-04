@@ -536,6 +536,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         audit = (ROOT / ".github/scripts/audit_release_security.sh").read_text()
         for value in ("collaborators?affiliation=all", "FORGE_E2E_CPU_SSH_KEY", "FORGE_E2E_GPU_SSH_KEY", "immutable-releases", "expected_write_key_public", "ssh-keygen -y"):
             self.assertIn(value, audit)
+        self.assertIn("awk '{print $1 \" \" $2}'", audit)
 
     def test_release_publication_is_complete_draft_first_and_published_verification_only(self) -> None:
         script = (ROOT / ".github/scripts/publish_github_releases.sh").read_text()
