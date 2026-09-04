@@ -178,7 +178,7 @@ loki:
       digest: sha256:2ed6447bbdbcd23019c3fdb02bce6db3fbef296d5a8f77a68d3dbc386bfa43fb
   gateway:
     image:
-      digest: sha256:244cb405d38e102d9e6b165a8e956a6899617ba050b37d0100d0106cdf121232
+      digest: sha256:0c79d56aee561a1d81c63f00eee5fb5fe29279560cdc55e91425133104c7fbe6
     deploymentStrategy:
       type: Recreate
       rollingUpdate: null
