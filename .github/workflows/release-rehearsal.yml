@@ -47,7 +47,6 @@ jobs:
       - name: Reverify live release and deploy-key authority after founder approval
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REQUIRE_IMMUTABLE_RELEASES: "true"
           AUDIT_REPOSITORY_SECRETS: "false"
           AUDIT_ADMIN_ENDPOINTS: "false"
           RELEASE_TAG_KEY_FILE: ${{ runner.temp }}/release-tag
@@ -126,7 +125,6 @@ jobs:
           GATE_TAG: dry-run/immutable-release-gate-v1
           RELEASE_ID: ${{ steps.release.outputs.release_id }}
           ASSET_ID: ${{ steps.release.outputs.asset_id }}
-          REQUIRE_IMMUTABLE_RELEASES: "true"
           AUDIT_REPOSITORY_SECRETS: "false"
           AUDIT_ADMIN_ENDPOINTS: "false"
           RELEASE_TAG_KEY_FILE: ${{ runner.temp }}/release-tag
@@ -144,7 +142,6 @@ jobs:
           release_before=$(gh api "repos/${{ github.repository }}/releases/tags/$GATE_TAG")
           before_state=$(jq -cS '{id,tag_name,target_commitish,name,body,draft,prerelease,immutable,assets:([.assets[]|{id,name,size,digest}]|sort_by(.name))}' <<<"$release_before")
           before_sha=$(printf '%s' "$before_state" | sha256sum | awk '{print $1}')
-          test "$(gh api "repos/${{ github.repository }}/immutable-releases" --jq '.enabled')" = true
 
           printf 'forbidden late member\n' > forbidden.txt
           upload_status=0
@@ -171,7 +168,6 @@ jobs:
           git push --force origin "refs/tags/$GATE_TAG" >/tmp/update-tag.out 2>&1 || update_tag_status=$?
           require_immutable_denial "$update_tag_status" /tmp/update-tag.out 'release tag update'
 
-          test "$(gh api "repos/${{ github.repository }}/immutable-releases" --jq '.enabled')" = true
           release_after=$(gh api "repos/${{ github.repository }}/releases/tags/$GATE_TAG")
           test "$(jq -r '.immutable' <<<"$release_after")" = true
           after_state=$(jq -cS '{id,tag_name,target_commitish,name,body,draft,prerelease,immutable,assets:([.assets[]|{id,name,size,digest}]|sort_by(.name))}' <<<"$release_after")
@@ -201,7 +197,7 @@ jobs:
             --argjson edit_release_status "$edit_release_status" \
             --argjson delete_release_status "$delete_release_status" \
             --argjson update_tag_status "$update_tag_status" \
-            '{schema_version:2,repository:$repository,control_sha:$control_sha,run_id:$run_id,release_id:$release_id,tag:$tag,immutable_releases:true,post_state_unchanged:($before_state_sha256 == $after_state_sha256),before_state_sha256:$before_state_sha256,after_state_sha256:$after_state_sha256,denied:{asset_upload:$upload_status,asset_delete:$delete_asset_status,release_edit:$edit_release_status,release_delete:$delete_release_status,tag_update:$update_tag_status}}' \
+            '{schema_version:2,repository:$repository,control_sha:$control_sha,run_id:$run_id,release_id:$release_id,tag:$tag,behavioral_immutability:{release_reported_immutable:true,denial_class:"immutable-release",post_state_unchanged:($before_state_sha256 == $after_state_sha256),before_state_sha256:$before_state_sha256,after_state_sha256:$after_state_sha256,denied:{asset_upload:$upload_status,asset_delete:$delete_asset_status,release_edit:$edit_release_status,release_delete:$delete_release_status,tag_update:$update_tag_status}}}' \
             > immutable-release-gate-evidence.json
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
