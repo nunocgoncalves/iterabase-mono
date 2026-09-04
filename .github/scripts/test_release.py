@@ -599,6 +599,8 @@ json.dump(responses[endpoint], sys.stdout)
             "disabled": '{"enabled": false}',
             "missing": '{}',
             "malformed": '{"enabled": "true"}',
+            "multiple-documents": '{"enabled": false}\n{"enabled": true}',
+            "prefixed-document": '[]\n{"enabled": true}',
             "unavailable": None,
         }
         for case, response in invalid.items():
