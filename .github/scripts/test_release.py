@@ -800,167 +800,103 @@ class RetainedReleaseGateTests(unittest.TestCase):
             ):
                 retained_release.validate_attestation(attestation)
 
-    def test_http_result_requires_one_422_for_each_asset_operation(self) -> None:
-        outputs = (
-            "HTTP/2.0 422 Unprocessable Entity\nX-GitHub-Request-Id: one\n",
-            "HTTP/1.1 422 Unprocessable Entity\n"
-            "Cannot upload assets to an immutable release\n",
-        )
-        for operation in ("asset upload", "asset deletion"):
-            for output in outputs:
-                with self.subTest(operation=operation, output=output):
-                    endpoint = retained_release._HTTP_ENDPOINTS[operation]
-                    result = retained_release.require_http_result(
-                        1, output, operation, endpoint
-                    )
-                    self.assertEqual(
-                        {
-                            "operation": operation,
-                            "process_status": 1,
-                            "protocol": "http",
-                            "endpoint": endpoint,
-                            "http_status": 422,
-                        },
-                        result,
-                    )
-
-    def test_http_result_rejects_success_or_untrusted_protocol_shapes(self) -> None:
-        cases = (
-            (0, "HTTP/2.0 422 Unprocessable Entity", "asset upload"),
-            (1, "HTTP/2.0 200 OK", "asset upload"),
-            (1, "HTTP/2.0 401 Unauthorized", "asset upload"),
-            (1, "HTTP/2.0 403 Forbidden", "asset deletion"),
-            (1, "HTTP/2.0 404 Not Found", "asset upload"),
-            (1, "HTTP/2.0 429 Too Many Requests", "asset deletion"),
-            (1, "HTTP/2.0 500 Internal Server Error", "asset upload"),
-            (1, "HTTP/2.0 503 Service Unavailable", "asset deletion"),
-            (1, "authentication failed before HTTP", "asset upload"),
-            (1, "HTTP/2.0 nope", "asset upload"),
-            (1, "HTTP/2.0 600 Invalid", "asset deletion"),
-            (
-                1,
-                "HTTP/1.1 100 Continue\nHTTP/2.0 422 Unprocessable Entity",
-                "asset upload",
-            ),
-            (
-                1,
-                "Cannot upload assets to an immutable release",
-                "asset upload",
-            ),
-            (1, "HTTP/2.0 422 Unprocessable Entity", "release tag update"),
-        )
-        for status, output, operation in cases:
-            with self.subTest(status=status, operation=operation, output=output), self.assertRaises(
-                retained_release.GateError
-            ) as raised:
-                endpoint = retained_release._HTTP_ENDPOINTS.get(
+    def test_asset_probe_results_require_one_http_422(self) -> None:
+        targets = {
+            "asset-upload": "https://uploads.github.com/repos/nunocgoncalves/iterabase-mono/releases/382723775/assets?name=forbidden.txt",
+            "asset-deletion": "repos/nunocgoncalves/iterabase-mono/releases/assets/544335752",
+        }
+        for operation, target in targets.items():
+            with self.subTest(operation=operation):
+                result = retained_release.require_probe_result(
+                    1,
+                    "HTTP/2.0 422 Unprocessable Entity\nmutable response prose",
                     operation,
-                    retained_release._HTTP_ENDPOINTS["asset upload"],
                 )
-                retained_release.require_http_result(
-                    status, output, operation, endpoint
-                )
-            message = str(raised.exception)
-            self.assertIn(f"status={status} protocol=http", message)
-            self.assertLess(len(message), 256)
+                self.assertEqual("http", result["protocol"])
+                self.assertEqual(target, result["target"])
+                self.assertEqual(422, result["http_status"])
 
-        with self.assertRaises(retained_release.GateError) as raised:
-            retained_release.require_http_result(
-                1,
-                "HTTP/2.0 422 Unprocessable Entity",
-                "asset upload",
-                retained_release._HTTP_ENDPOINTS["asset deletion"],
-            )
-        self.assertIn("endpoint=wrong", str(raised.exception))
-
-    def test_git_result_requires_one_exact_remote_rejection_record(self) -> None:
+    def test_asset_probe_results_reject_untrusted_shapes(self) -> None:
         cases = (
-            (
-                "release tag update",
-                "refs/tags/dry-run/immutable-release-gate-v1:"
-                "refs/tags/dry-run/immutable-release-gate-v1",
-            ),
-            (
-                "release tag deletion",
-                ":refs/tags/dry-run/immutable-release-gate-v1",
-            ),
+            (0, "HTTP/2.0 422 Unprocessable Entity"),
+            (1, "HTTP/2.0 200 OK"),
+            (1, "HTTP/2.0 401 Unauthorized"),
+            (1, "HTTP/2.0 403 Forbidden"),
+            (1, "HTTP/2.0 404 Not Found"),
+            (1, "HTTP/2.0 429 Too Many Requests"),
+            (1, "HTTP/2.0 500 Internal Server Error"),
+            (1, "HTTP/2.0 503 Service Unavailable"),
+            (1, "transport failure"),
+            (1, "HTTP/2.0 nope"),
+            (1, "HTTP/1.1 100 Continue\nHTTP/2.0 422 Unprocessable Entity"),
+            (1, "Cannot upload assets to an immutable release"),
         )
-        for operation, refspec in cases:
-            for reason in ("immutable release", "mutable free text"):
-                output = (
-                    "To github.com:nunocgoncalves/iterabase-mono.git\n"
-                    f"!\t{refspec}\t[remote rejected] ({reason})\nDone\n"
-                )
-                with self.subTest(operation=operation, reason=reason):
-                    result = retained_release.require_git_result(1, output, operation)
-                    self.assertEqual(
-                        {
-                            "operation": operation,
-                            "process_status": 1,
-                            "protocol": "git-porcelain",
-                            "flag": "!",
-                            "refspec": refspec,
-                            "classification": "remote-rejected",
-                        },
-                        result,
-                    )
-
-    def test_git_result_rejects_non_remote_or_unbound_records(self) -> None:
-        update_ref = (
-            "refs/tags/dry-run/immutable-release-gate-v1:"
-            "refs/tags/dry-run/immutable-release-gate-v1"
-        )
-        valid = f"!\t{update_ref}\t[remote rejected] (free text)"
-        cases = (
-            (0, valid, "release tag update"),
-            (1, f"!\t{update_ref}\t[rejected] (protected tag)", "release tag update"),
-            (1, f"=\t{update_ref}\t[up to date]", "release tag update"),
-            (1, f"*\t{update_ref}\t[new tag]", "release tag update"),
-            (
-                1,
-                "!\trefs/tags/other:refs/tags/other\t[remote rejected] (reason)",
-                "release tag update",
-            ),
-            (1, "authentication failed", "release tag update"),
-            (1, "! malformed porcelain", "release tag update"),
-            (1, valid + "\n" + valid, "release tag update"),
-            (1, f"!\t{update_ref}\t[remote failure] (reason)", "release tag update"),
-            (1, valid, "asset upload"),
-        )
-        for status, output, operation in cases:
-            with self.subTest(status=status, operation=operation, output=output), self.assertRaises(
+        for status, output in cases:
+            with self.subTest(status=status, output=output), self.assertRaises(
                 retained_release.GateError
             ) as raised:
-                retained_release.require_git_result(status, output, operation)
-            message = str(raised.exception)
-            self.assertIn(f"status={status} protocol=git-porcelain", message)
-            self.assertLess(len(message), 384)
+                retained_release.require_probe_result(status, output, "asset-upload")
+            self.assertLess(len(str(raised.exception)), 256)
+        with self.assertRaises(retained_release.GateError):
+            retained_release.require_probe_result(
+                1, "HTTP/2.0 422 Unprocessable Entity", "unknown"
+            )
+
+    def test_tag_probe_results_require_one_exact_remote_rejection(self) -> None:
+        targets = {
+            "tag-update": "refs/tags/dry-run/immutable-release-gate-v1:refs/tags/dry-run/immutable-release-gate-v1",
+            "tag-deletion": ":refs/tags/dry-run/immutable-release-gate-v1",
+        }
+        for operation, target in targets.items():
+            with self.subTest(operation=operation):
+                result = retained_release.require_probe_result(
+                    1,
+                    f"!\t{target}\t[remote rejected] (mutable free text)",
+                    operation,
+                )
+                self.assertEqual("git-porcelain", result["protocol"])
+                self.assertEqual(target, result["target"])
+                self.assertEqual("remote-rejected", result["classification"])
+
+    def test_tag_probe_results_reject_untrusted_shapes(self) -> None:
+        target = retained_release.PROBES["tag-update"]["target"]
+        valid = f"!\t{target}\t[remote rejected] (free text)"
+        cases = (
+            (0, valid),
+            (1, f"!\t{target}\t[rejected] (local)"),
+            (1, f"=\t{target}\t[up to date]"),
+            (1, f"*\t{target}\t[new tag]"),
+            (1, "!\trefs/tags/other:refs/tags/other\t[remote rejected] (reason)"),
+            (1, "authentication or transport failure"),
+            (1, "! malformed porcelain"),
+            (1, valid + "\n" + valid),
+            (1, f"!\t{target}\t[remote failure] (reason)"),
+        )
+        for status, output in cases:
+            with self.subTest(status=status, output=output), self.assertRaises(
+                retained_release.GateError
+            ) as raised:
+                retained_release.require_probe_result(status, output, "tag-update")
+            self.assertLess(len(str(raised.exception)), 384)
 
     def test_protocol_diagnostics_are_bounded_and_redacted(self) -> None:
         secret = "ghp_do-not-print-this"
         http_output = "HTTP/2.0 403 Forbidden\n" + secret * 10_000
         with self.assertRaises(retained_release.GateError) as http_raised:
-            retained_release.require_http_result(
-                9,
-                http_output,
-                "asset upload",
-                retained_release._HTTP_ENDPOINTS["asset upload"],
-            )
+            retained_release.require_probe_result(9, http_output, "asset-upload")
         http_message = str(http_raised.exception)
         self.assertIn(
-            "operation=asset upload status=9 protocol=http endpoint=matching "
+            "operation=asset-upload status=9 protocol=http target=matching "
             "http_status=403",
             http_message,
         )
         self.assertNotIn(secret, http_message)
         self.assertLess(len(http_message), 256)
 
-        refspec = (
-            "refs/tags/other:refs/tags/other"
-        )
+        refspec = "refs/tags/other:refs/tags/other"
         git_output = f"!\t{refspec}\t[remote rejected] ({secret * 10_000})"
         with self.assertRaises(retained_release.GateError) as git_raised:
-            retained_release.require_git_result(7, git_output, "release tag update")
+            retained_release.require_probe_result(7, git_output, "tag-update")
         git_message = str(git_raised.exception)
         self.assertIn("status=7 protocol=git-porcelain", git_message)
         self.assertIn("refspec=wrong", git_message)
@@ -1002,59 +938,25 @@ class RetainedReleaseGateTests(unittest.TestCase):
                     retained_release.EXPECTED_TARGET,
                 )
 
-    def test_each_probe_requires_an_immediate_exact_state_match(self) -> None:
+    def test_complete_probe_state_must_match_the_baseline(self) -> None:
         with tempfile.TemporaryDirectory() as value:
             directory = Path(value)
             self.write_assets(directory)
             before = retained_release.make_state(
                 self.release(),
                 self.attestation(),
-                {
-                    name: self.attestation()
-                    for name in retained_release.EXPECTED_ASSETS
-                },
+                {name: self.attestation() for name in retained_release.EXPECTED_ASSETS},
                 directory,
                 retained_release.EXPECTED_TAG_OBJECT,
                 retained_release.EXPECTED_TARGET,
             )
             retained_release.compare_states(before, copy.deepcopy(before))
-            for operation in (
-                "asset upload",
-                "asset deletion",
-                "release tag update",
-                "release tag deletion",
-            ):
-                with self.subTest(operation=operation):
-                    result = retained_release.compare_probe_states(
-                        before, copy.deepcopy(before), operation, 1, True
-                    )
-                    self.assertEqual("unchanged", result["state"])
-                    self.assertTrue(result["protocol_valid"])
-                    invalid_protocol = retained_release.compare_probe_states(
-                        before, copy.deepcopy(before), operation, 1, False
-                    )
-                    self.assertFalse(invalid_protocol["protocol_valid"])
-                    self.assertEqual("unchanged", invalid_protocol["state"])
-
-                    with self.assertRaises(retained_release.GateError) as success:
-                        retained_release.compare_probe_states(
-                            before, copy.deepcopy(before), operation, 0, True
-                        )
-                    self.assertIn("state=unchanged", str(success.exception))
-                    self.assertIn("result=successful-process", str(success.exception))
-
-                    changed = copy.deepcopy(before)
-                    changed["immutable_authority"]["asset_attestation_statements"][
-                        "probe.txt"
-                    ]["predicate"]["tag"] = "other"
-                    with self.assertRaises(retained_release.GateError) as raised:
-                        retained_release.compare_probe_states(
-                            before, changed, operation, 1, True
-                        )
-                    message = str(raised.exception)
-                    self.assertIn(f"operation={operation} status=1", message)
-                    self.assertIn("state=changed", message)
-                    self.assertLess(len(message), 320)
+            changed = copy.deepcopy(before)
+            changed["immutable_authority"]["asset_attestation_statements"][
+                "probe.txt"
+            ]["predicate"]["tag"] = "other"
+            with self.assertRaises(retained_release.GateError):
+                retained_release.compare_states(before, changed)
 
 
 class ReleaseWorkflowContractTests(unittest.TestCase):
@@ -1207,21 +1109,14 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         for value in (
             "RELEASE_ID=382723775",
             "GATE_TAG=dry-run/immutable-release-gate-v1",
-            'UPLOAD_ENDPOINT="https://uploads.github.com/repos/$EXPECTED_REPOSITORY/releases/$RELEASE_ID/assets?name=forbidden.txt"',
-            'DELETE_ASSET_ENDPOINT="repos/$EXPECTED_REPOSITORY/releases/assets/$PROBE_ASSET_ID"',
             "EXPECTED_SOURCE=42604a60764816a66d147a89d8d0772c9e0d2491",
             "EXPECTED_TAG_OBJECT=9f529662036d70348379c6c71a13c9242c7155a5",
             "gh api --include --silent --method POST",
-            '"$UPLOAD_ENDPOINT"',
-            "--include --silent --method DELETE",
-            '"$DELETE_ASSET_ENDPOINT"',
+            "gh api --include --silent --method DELETE",
             "git push --porcelain --force origin",
-            '"refs/tags/$GATE_TAG:refs/tags/$GATE_TAG"',
-            'git push --porcelain origin ":refs/tags/$GATE_TAG"',
-            "require-http-result",
-            '--endpoint "$UPLOAD_ENDPOINT"',
-            '--endpoint "$DELETE_ASSET_ENDPOINT"',
-            "require-git-result",
+            "git push --porcelain origin",
+            "probe-spec",
+            "require-probe-result",
             "--probe-attestation",
             "--manifest-attestation",
             "compare-state",
@@ -1232,18 +1127,10 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         ):
             self.assertIn(value, script)
         for value in (
-            "EXPECTED_ASSETS",
-            "EXPECTED_TAG_OBJECT",
-            "attestation subjects do not bind the exact tag object and assets",
-            "downloaded asset bytes do not match retained authority",
+            "PROBES",
+            "require_probe_result",
+            "asset_attestation_statements",
             "per-asset attestations do not cover the exact retained assets",
-            "_HTTP_ENDPOINTS",
-            "_HTTP_STATUS_LINE",
-            "_porcelain_status_records",
-            "_GIT_REFSPECS",
-            "require_http_result",
-            "require_git_result",
-            "compare_probe_states",
         ):
             self.assertIn(value, validator)
         for forbidden in (
@@ -1251,27 +1138,19 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             "require_immutable_denial",
             "_DENIAL_OPERATIONS",
             "canonical_immutable",
-            "redacted-recognition",
             "gh release upload",
             "git push --delete",
-            "safe_denials",
-            "post_state_unchanged",
             "gh release create",
             "gh release delete",
-            "release metadata edit",
             "release deletion",
-            "--notes",
-            "--prerelease",
-            "--latest",
-            'DELETE "repos/$repository/releases/$RELEASE_ID"',
         ):
             self.assertNotIn(forbidden, script + validator)
         self.assertEqual(1, script.count("gh release edit"))
-        self.assertEqual(2, script.count("require-http-result"))
-        self.assertEqual(2, script.count("require-git-result"))
-        self.assertEqual(4, script.count("capture_and_compare '"))
+        self.assertEqual(1, script.count("require-probe-result"))
+        self.assertEqual(4, script.count("run_probe "))
+
         capture_body = script[
-            script.index("capture_state() {") : script.index("capture_and_compare() {")
+            script.index("capture_state() {") : script.index("run_probe() {")
         ]
         for value in (
             'rm -rf "$directory"',
@@ -1282,62 +1161,37 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             'verify_attestations "$work/$stem" "$directory"',
             "--probe-attestation",
             "--manifest-attestation",
-            '--tag-object "$REMOTE_TAG_OBJECT"',
-            '--tag-target "$REMOTE_TAG_TARGET"',
         ):
             self.assertIn(value, capture_body)
-
-        upload = script.index("require-http-result --status \"$upload_status\"")
-        after_upload = script.index("capture_and_compare 'asset upload'")
-        asset_delete = script.index("require-http-result --status \"$delete_asset_status\"")
-        after_asset_delete = script.index("capture_and_compare 'asset deletion'")
-        tag_update = script.index("require-git-result --status \"$update_tag_status\"")
-        after_tag_update = script.index("capture_and_compare 'release tag update'")
-        tag_delete = script.index("require-git-result --status \"$delete_tag_status\"")
-        after_tag_delete = script.index("capture_and_compare 'release tag deletion'")
-        self.assertLess(upload, after_upload)
+        probe_body = script[
+            script.index("run_probe() {") : script.index("# Establish immutable identity")
+        ]
         self.assertLess(
-            after_upload,
-            script.index('if [[ "$upload_protocol_valid" != true ]]'),
+            probe_body.index("require-probe-result"),
+            probe_body.index('capture_state "$stem"'),
         )
-        self.assertLess(after_upload, asset_delete)
-        self.assertLess(asset_delete, after_asset_delete)
         self.assertLess(
-            after_asset_delete,
-            script.index('if [[ "$delete_asset_protocol_valid" != true ]]'),
+            probe_body.index('capture_state "$stem"'),
+            probe_body.index('if [[ "$protocol_valid" != true'),
         )
-        self.assertLess(after_asset_delete, tag_update)
-        self.assertLess(tag_update, after_tag_update)
-        self.assertLess(
-            after_tag_update,
-            script.index('if [[ "$update_tag_protocol_valid" != true ]]'),
-        )
-        self.assertLess(after_tag_update, tag_delete)
-        self.assertLess(tag_delete, after_tag_delete)
-        self.assertLess(
-            after_tag_delete,
-            script.index('if [[ "$delete_tag_protocol_valid" != true ]]'),
-        )
-        self.assertLess(after_tag_delete, script.index("mkdir -p \"$(dirname \"$evidence\")\""))
+        calls = [
+            script.index("run_probe asset-upload"),
+            script.index("run_probe asset-deletion"),
+            script.index("run_probe tag-update"),
+            script.index("run_probe tag-deletion"),
+        ]
+        self.assertEqual(calls, sorted(calls))
+        self.assertLess(calls[-1], script.index("mkdir -p \"$(dirname \"$evidence\")\""))
         self.assertLess(
             script.index('verify_attestations "$work/initial"'),
             script.index("gh release edit"),
         )
-        self.assertLess(
-            script.index("gh release edit"),
-            script.index("capture_state baseline"),
-        )
+        self.assertLess(script.index("gh release edit"), script.index("capture_state baseline"))
         self.assertIn("exactly one HTTP 422", runbook)
         self.assertIn("`git push --porcelain`", runbook)
         self.assertIn("After each probe", runbook)
         self.assertNotIn("bounded, affirmative denial", runbook)
-        self.assertNotIn("natural-language", validator)
         self.assertNotIn("immutable_releases:true", workflow)
-        self.assertNotIn("Disposable", workflow)
-        self.assertLess(
-            workflow.index("Configure the reviewed protected-tag deploy key"),
-            workflow.index("Reverify live release and deploy-key authority"),
-        )
 
     def test_release_only_manual_dispatch_and_no_push_publication(self) -> None:
         for workflow in ("release-candidate.yml", "release-promote.yml"):

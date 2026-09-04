@@ -190,227 +190,122 @@ def asset_identities(directory: Path) -> list[dict[str, Any]]:
     return sorted(identities, key=lambda item: item["name"])
 
 
-_HTTP_ENDPOINTS = {
-    "asset upload": (
-        f"https://uploads.github.com/repos/{EXPECTED_REPOSITORY}/"
-        f"releases/{EXPECTED_RELEASE_ID}/assets?name=forbidden.txt"
-    ),
-    "asset deletion": (
-        f"repos/{EXPECTED_REPOSITORY}/releases/assets/"
-        f"{EXPECTED_ASSETS['probe.txt']['id']}"
-    ),
+PROBES = {
+    "asset-upload": {
+        "protocol": "http",
+        "target": (
+            f"https://uploads.github.com/repos/{EXPECTED_REPOSITORY}/"
+            f"releases/{EXPECTED_RELEASE_ID}/assets?name=forbidden.txt"
+        ),
+    },
+    "asset-deletion": {
+        "protocol": "http",
+        "target": (
+            f"repos/{EXPECTED_REPOSITORY}/releases/assets/"
+            f"{EXPECTED_ASSETS['probe.txt']['id']}"
+        ),
+    },
+    "tag-update": {
+        "protocol": "git-porcelain",
+        "target": f"refs/tags/{EXPECTED_TAG}:refs/tags/{EXPECTED_TAG}",
+    },
+    "tag-deletion": {
+        "protocol": "git-porcelain",
+        "target": f":refs/tags/{EXPECTED_TAG}",
+    },
 }
-_HTTP_OPERATIONS = frozenset(_HTTP_ENDPOINTS)
-_GIT_REFSPECS = {
-    "release tag update": f"refs/tags/{EXPECTED_TAG}:refs/tags/{EXPECTED_TAG}",
-    "release tag deletion": f":refs/tags/{EXPECTED_TAG}",
-}
-_ALL_PROBE_OPERATIONS = _HTTP_OPERATIONS | frozenset(_GIT_REFSPECS)
-_HTTP_STATUS_LINE = re.compile(
+_HTTP_STATUS = re.compile(
     r"HTTP/(?:1\.[01]|2(?:\.0)?|3) ([1-5][0-9]{2})(?: [^\r\n]{1,128})?"
 )
+_GIT_SUMMARY = re.compile(r"\[([a-z ]{1,32})\](?: \([^\t\r\n]*\))?")
 _PORCELAIN_FLAGS = frozenset((" ", "!", "+", "-", "*", "=", "."))
 
 
-def _safe_operation(operation: str) -> str:
-    return operation if operation in _ALL_PROBE_OPERATIONS else "unknown"
+def probe_spec(operation: str) -> dict[str, str]:
+    spec = PROBES.get(operation)
+    if spec is None:
+        raise GateError("probe protocol mismatch: operation=unknown result=wrong-operation")
+    return spec
 
 
-def _http_mismatch(
-    status: int,
-    operation: str,
-    *,
-    endpoint: str,
-    http_status: str,
-    result: str,
+def _probe_error(
+    operation: str, status: int, protocol: str, details: dict[str, str], result: str
 ) -> GateError:
+    fields = " ".join(f"{key}={value}" for key, value in details.items())
     return GateError(
-        f"probe protocol mismatch: operation={_safe_operation(operation)} "
-        f"status={status} protocol=http endpoint={endpoint} "
-        f"http_status={http_status} result={result}"
+        f"probe protocol mismatch: operation={operation} status={status} "
+        f"protocol={protocol} {fields} result={result}"
     )
 
 
-def require_http_result(
-    status: int, output: str, operation: str, endpoint: str
-) -> dict[str, Any]:
-    expected_endpoint = _HTTP_ENDPOINTS.get(operation)
-    if expected_endpoint is None:
-        raise _http_mismatch(
-            status,
-            operation,
-            endpoint="not-evaluated",
-            http_status="not-evaluated",
-            result="wrong-operation",
+def require_probe_result(status: int, output: str, operation: str) -> dict[str, Any]:
+    spec = probe_spec(operation)
+    if spec["protocol"] == "http":
+        records = [
+            line.rstrip("\r")
+            for line in output.splitlines()
+            if line.startswith("HTTP/")
+        ]
+        match = _HTTP_STATUS.fullmatch(records[0]) if len(records) == 1 else None
+        http_status = match.group(1) if match else (
+            "missing" if not records else "multiple" if len(records) > 1 else "malformed"
         )
-    if endpoint != expected_endpoint:
-        raise _http_mismatch(
-            status,
-            operation,
-            endpoint="wrong",
-            http_status="not-evaluated",
-            result="wrong-endpoint",
+        result = (
+            "successful-process"
+            if status == 0
+            else "unexpected-status"
+            if http_status != "422"
+            else "accepted"
         )
+        details = {"target": "matching", "http_status": http_status}
+        if result != "accepted":
+            raise _probe_error(operation, status, spec["protocol"], details, result)
+        return {
+            "operation": operation,
+            "process_status": status,
+            **spec,
+            "http_status": 422,
+        }
 
     records = [
-        line.rstrip("\r")
-        for line in output.splitlines()
-        if line.startswith("HTTP/")
-    ]
-    if not records:
-        raise _http_mismatch(
-            status,
-            operation,
-            endpoint="matching",
-            http_status="missing",
-            result="missing-status",
-        )
-    if len(records) != 1:
-        raise _http_mismatch(
-            status,
-            operation,
-            endpoint="matching",
-            http_status="multiple",
-            result="multiple-status",
-        )
-    match = _HTTP_STATUS_LINE.fullmatch(records[0])
-    if match is None:
-        raise _http_mismatch(
-            status,
-            operation,
-            endpoint="matching",
-            http_status="malformed",
-            result="malformed-status",
-        )
-    response_status = int(match.group(1))
-    if status == 0:
-        raise _http_mismatch(
-            status,
-            operation,
-            endpoint="matching",
-            http_status=str(response_status),
-            result="successful-process",
-        )
-    if response_status != 422:
-        raise _http_mismatch(
-            status,
-            operation,
-            endpoint="matching",
-            http_status=str(response_status),
-            result="unexpected-status",
-        )
-    return {
-        "operation": operation,
-        "process_status": status,
-        "protocol": "http",
-        "endpoint": expected_endpoint,
-        "http_status": response_status,
-    }
-
-
-def _porcelain_status_records(output: str) -> list[str]:
-    return [
         line.rstrip("\r")
         for line in output.splitlines()
         if len(line) >= 2
         and line[0] in _PORCELAIN_FLAGS
         and line[1] in ("\t", " ")
     ]
-
-
-def _porcelain_classification(summary: str) -> str | None:
-    if not summary.startswith("["):
-        return None
-    close = summary.find("]")
-    if close < 2 or close > 33:
-        return None
-    classification = summary[1:close]
-    if not all(character.islower() or character == " " for character in classification):
-        return None
-    suffix = summary[close + 1 :]
-    if suffix and not (
-        suffix.startswith(" (") and suffix.endswith(")") and "\t" not in suffix
-    ):
-        return None
-    return classification
-
-
-def _classification_label(classification: str | None) -> str:
-    if classification == "remote rejected":
-        return "remote-rejected"
-    if classification == "rejected":
-        return "local-rejected"
-    if classification is None:
-        return "malformed"
-    return "other"
-
-
-def _git_mismatch(
-    status: int,
-    operation: str,
-    *,
-    record: str,
-    flag: str = "not-evaluated",
-    refspec: str = "not-evaluated",
-    classification: str = "not-evaluated",
-    result: str,
-) -> GateError:
-    return GateError(
-        f"probe protocol mismatch: operation={_safe_operation(operation)} "
-        f"status={status} protocol=git-porcelain record={record} flag={flag} "
-        f"refspec={refspec} classification={classification} result={result}"
-    )
-
-
-def require_git_result(status: int, output: str, operation: str) -> dict[str, Any]:
-    expected_refspec = _GIT_REFSPECS.get(operation)
-    if expected_refspec is None:
-        raise _git_mismatch(
-            status, operation, record="not-evaluated", result="wrong-operation"
-        )
-
-    records = _porcelain_status_records(output)
-    if not records:
-        raise _git_mismatch(status, operation, record="missing", result="missing-record")
-    if len(records) != 1:
-        raise _git_mismatch(
-            status, operation, record="multiple", result="multiple-records"
-        )
-    fields = records[0].split("\t", 2)
-    if len(fields) != 3 or len(fields[0]) != 1:
-        raise _git_mismatch(
-            status, operation, record="malformed", result="malformed-record"
-        )
-
-    flag, actual_refspec, summary = fields
-    classification = _porcelain_classification(summary)
-    classification_label = _classification_label(classification)
-    flag_label = flag if flag in _PORCELAIN_FLAGS else "malformed"
-    refspec_label = "matching" if actual_refspec == expected_refspec else "wrong"
+    fields = records[0].split("\t", 2) if len(records) == 1 else []
+    parsed = len(fields) == 3 and len(fields[0]) == 1
+    flag, actual_refspec, summary = fields if parsed else ("malformed", "", "")
+    summary_match = _GIT_SUMMARY.fullmatch(summary) if parsed else None
+    classification = summary_match.group(1) if summary_match else None
     details = {
-        "record": "parsed",
-        "flag": flag_label,
-        "refspec": refspec_label,
-        "classification": classification_label,
+        "record": "missing" if not records else "multiple" if len(records) > 1 else "parsed" if parsed else "malformed",
+        "flag": flag if flag in _PORCELAIN_FLAGS else "malformed",
+        "refspec": "matching" if actual_refspec == spec["target"] else "wrong",
+        "classification": (
+            "remote-rejected" if classification == "remote rejected"
+            else "local-rejected" if classification == "rejected"
+            else "malformed" if classification is None else "other"
+        ),
     }
-    if status == 0:
-        raise _git_mismatch(
-            status, operation, **details, result="successful-process"
-        )
-    if flag != "!":
-        raise _git_mismatch(status, operation, **details, result="unexpected-flag")
-    if actual_refspec != expected_refspec:
-        raise _git_mismatch(status, operation, **details, result="wrong-refspec")
-    if classification != "remote rejected":
-        raise _git_mismatch(
-            status, operation, **details, result="unexpected-classification"
-        )
+    result = (
+        "successful-process" if status == 0
+        else "missing-record" if not records
+        else "multiple-records" if len(records) > 1
+        else "malformed-record" if not parsed
+        else "unexpected-flag" if flag != "!"
+        else "wrong-refspec" if actual_refspec != spec["target"]
+        else "unexpected-classification" if classification != "remote rejected"
+        else "accepted"
+    )
+    if result != "accepted":
+        raise _probe_error(operation, status, spec["protocol"], details, result)
     return {
         "operation": operation,
         "process_status": status,
-        "protocol": "git-porcelain",
-        "flag": flag,
-        "refspec": expected_refspec,
+        **spec,
+        "flag": "!",
         "classification": "remote-rejected",
     }
 
@@ -480,48 +375,6 @@ def compare_states(before: dict[str, Any], after: dict[str, Any]) -> None:
         raise GateError("retained release state changed during safe probes")
 
 
-def compare_probe_states(
-    before: dict[str, Any],
-    after: dict[str, Any],
-    operation: str,
-    process_status: int,
-    protocol_valid: bool,
-) -> dict[str, Any]:
-    if operation not in _ALL_PROBE_OPERATIONS:
-        raise GateError(
-            f"probe state mismatch: operation=unknown status={process_status} "
-            "protocol=not-evaluated state=not-evaluated result=wrong-operation"
-        )
-    if not protocol_valid:
-        protocol = "invalid"
-    elif operation in _HTTP_OPERATIONS:
-        protocol = "http http_status=422"
-    else:
-        protocol = "git-porcelain flag=! refspec=matching classification=remote-rejected"
-    if before != after:
-        raise GateError(
-            f"probe state mismatch: operation={operation} status={process_status} "
-            f"protocol={protocol} state=changed result=state-mismatch"
-        )
-    if process_status == 0:
-        raise GateError(
-            f"probe state mismatch: operation={operation} status={process_status} "
-            f"protocol={protocol} state=unchanged result=successful-process"
-        )
-    return {
-        "operation": operation,
-        "process_status": process_status,
-        "protocol_valid": protocol_valid,
-        "state": "unchanged",
-    }
-
-
-def _add_protocol_arguments(command: argparse.ArgumentParser) -> None:
-    command.add_argument("--status", type=int, required=True)
-    command.add_argument("--output", type=Path, required=True)
-    command.add_argument("--operation", required=True)
-
-
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser()
     commands = root.add_subparsers(dest="command", required=True)
@@ -536,12 +389,13 @@ def parser() -> argparse.ArgumentParser:
     assets = commands.add_parser("validate-assets")
     assets.add_argument("--directory", type=Path, required=True)
 
-    http_result = commands.add_parser("require-http-result")
-    _add_protocol_arguments(http_result)
-    http_result.add_argument("--endpoint", required=True)
+    spec = commands.add_parser("probe-spec")
+    spec.add_argument("--operation", required=True)
 
-    git_result = commands.add_parser("require-git-result")
-    _add_protocol_arguments(git_result)
+    probe = commands.add_parser("require-probe-result")
+    probe.add_argument("--operation", required=True)
+    probe.add_argument("--status", type=int, required=True)
+    probe.add_argument("--output", type=Path, required=True)
 
     state = commands.add_parser("state")
     state.add_argument("--release", type=Path, required=True)
@@ -555,9 +409,6 @@ def parser() -> argparse.ArgumentParser:
     compare = commands.add_parser("compare-state")
     compare.add_argument("--before", type=Path, required=True)
     compare.add_argument("--after", type=Path, required=True)
-    compare.add_argument("--operation", required=True)
-    compare.add_argument("--status", type=int, required=True)
-    compare.add_argument("--protocol-valid", choices=("true", "false"), required=True)
     return root
 
 
@@ -584,18 +435,11 @@ def main() -> int:
             validate_attestation(load_json(args.attestation))
         elif args.command == "validate-assets":
             asset_identities(args.directory)
-        elif args.command == "require-http-result":
+        elif args.command == "probe-spec":
+            _dump_result(probe_spec(args.operation))
+        elif args.command == "require-probe-result":
             _dump_result(
-                require_http_result(
-                    args.status,
-                    _load_protocol_output(args.output),
-                    args.operation,
-                    args.endpoint,
-                )
-            )
-        elif args.command == "require-git-result":
-            _dump_result(
-                require_git_result(
+                require_probe_result(
                     args.status, _load_protocol_output(args.output), args.operation
                 )
             )
@@ -616,15 +460,7 @@ def main() -> int:
                 )
             )
         elif args.command == "compare-state":
-            _dump_result(
-                compare_probe_states(
-                    load_json(args.before),
-                    load_json(args.after),
-                    args.operation,
-                    args.status,
-                    args.protocol_valid == "true",
-                )
-            )
+            compare_states(load_json(args.before), load_json(args.after))
         else:  # pragma: no cover
             raise GateError(f"unknown command: {args.command}")
     except GateError as exc:
