@@ -116,7 +116,7 @@ class RemoteContentTests(unittest.TestCase):
         manifest = remote_content.load_manifest()
         identities = {(item["name"], item["version"], item["platform"]) for item in manifest["ci_tools"]}
         for platform in ("linux-amd64", "linux-arm64"):
-            for name, version in (("go", "1.26.5"), ("go", "1.25.12"), ("node", "24.19.0"), ("node", "22.23.2"), ("buildx", "0.36.1"), ("goreleaser", "2.12.7"), ("syft", "1.51.0")):
+            for name, version in (("go", "1.26.5"), ("go", "1.25.12"), ("node", "24.19.0"), ("node", "22.23.2"), ("envtest", "1.36.2"), ("buildx", "0.36.1"), ("goreleaser", "2.12.7"), ("syft", "1.51.0")):
                 self.assertIn((name, version, platform), identities)
         self.assertEqual(1, len(manifest["ci_images"]))
         self.assertIn("@sha256:", manifest["ci_images"][0]["reference"] + "@" + manifest["ci_images"][0]["digest"])
@@ -128,6 +128,36 @@ class RemoteContentTests(unittest.TestCase):
         for platform in ("linux-amd64", "linux-arm64"):
             self.assertIn(("k3s", "v1.34.10+k3s1", platform), forge_identities)
             self.assertIn(("k3s-images", "v1.34.10+k3s1", platform), forge_identities)
+
+    def test_locked_control_plane_and_protobuf_tools_are_exact(self) -> None:
+        manifest = remote_content.load_manifest()
+        self.assertEqual(
+            {
+                "buf", "controller-gen", "golangci-lint", "goimports", "kustomize",
+                "protoc-gen-connect-go", "protoc-gen-es", "protoc-gen-go", "setup-envtest",
+            },
+            {item["name"] for item in manifest["locked_tools"]},
+        )
+        changed = json.loads(json.dumps(manifest))
+        next(item for item in changed["locked_tools"] if item["name"] == "buf")["version"] = "v1.71.0"
+        with self.assertRaisesRegex(remote_content.ContentError, "does not exactly match"):
+            remote_content.validate_manifest(changed, ROOT)
+
+    def test_forge_tool_inventory_is_bidirectional(self) -> None:
+        manifest = remote_content.load_manifest()
+        expected = [
+            {key: item[key] for key in ("name", "version", "platform", "url", "sha256", "installed_sha256")}
+            for item in manifest["forge_tools"]
+        ]
+        actual = remote_content.forge_tool_records(
+            ROOT / "forge/internal/sshprovisioner/remote_content.go"
+        )
+        self.assertEqual(expected, actual)
+        self.assertNotEqual(expected[:-1], actual, "an undeclared Forge source record must remain detectable")
+        self.assertEqual(
+            manifest["forge_helm_charts"],
+            remote_content.forge_chart_records(ROOT / "forge/internal/config/config.go"),
+        )
 
     def test_missing_action_installed_tool_checksum_fails_inventory(self) -> None:
         manifest = remote_content.load_manifest()

@@ -1,0 +1,8 @@
+{
+  "name": "iterabase-protobuf-ci-tools",
+  "private": true,
+  "version": "1.0.0",
+  "dependencies": {
+    "@bufbuild/protoc-gen-es": "2.13.0"
+  }
+}

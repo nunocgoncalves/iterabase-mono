@@ -142,7 +142,8 @@ The publication job then waits once for founder approval in the protected
 workflow SHA; re-queries candidate workflow/run/source authority; re-verifies
 candidate bytes, source containment, environment, collaborator, immutable-release,
 and protected-tag authority; and preflights every semantic image, chart, tag, and
-GitHub Release destination before the first mutation. It then:
+GitHub Release destination—including governed published metadata, complete bytes,
+and immutable state—before the first mutation. It then:
 
 - adds semantic image tags to the exact tested digests;
 - pushes unchanged chart/companion archives;

@@ -98,6 +98,123 @@ def require_records(manifest: dict[str, Any], field: str, keys: tuple[str, ...])
     return result
 
 
+def require_locked_tools(manifest: dict[str, Any]) -> list[dict[str, str]]:
+    records = manifest.get("locked_tools")
+    if not isinstance(records, list) or not records:
+        raise ContentError("content manifest locked_tools must be a non-empty list")
+    result: list[dict[str, str]] = []
+    names: set[str] = set()
+    for record in records:
+        if not isinstance(record, dict):
+            raise ContentError("content manifest locked_tools contains a non-object")
+        ecosystem = record.get("ecosystem")
+        required = {"name", "ecosystem", "package", "version", "lock"}
+        if ecosystem == "go":
+            required.add("module")
+        elif ecosystem != "npm":
+            raise ContentError(f"unsupported locked tool ecosystem {ecosystem!r}")
+        if set(record) != required or any(not isinstance(record[key], str) or not record[key] for key in required):
+            raise ContentError("content manifest locked_tools contains an incomplete or extra field")
+        if record["name"] in names:
+            raise ContentError(f"content manifest locked_tools duplicates {record['name']}")
+        names.add(record["name"])
+        result.append(record)
+    return result
+
+
+def go_mod_requirements(path: Path) -> dict[str, str]:
+    requirements: dict[str, str] = {}
+    in_block = False
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.split("//", 1)[0].strip()
+        if line == "require (":
+            in_block = True
+            continue
+        if in_block and line == ")":
+            in_block = False
+            continue
+        if line.startswith("require "):
+            parts = line.removeprefix("require ").split()
+        elif in_block:
+            parts = line.split()
+        else:
+            continue
+        if len(parts) == 2:
+            module, version = parts
+            if module in requirements:
+                raise ContentError(f"Go tool module duplicates {module} in {path}")
+            requirements[module] = version
+    return requirements
+
+
+def go_tool_installers(path: Path) -> dict[str, dict[str, str]]:
+    result: dict[str, dict[str, str]] = {}
+    pattern = re.compile(
+        r"^\s*([a-z0-9-]+)\) module_dir=([^;]+); package=([^;]+); variable=([A-Z0-9_]+) ;;$"
+    )
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        match = pattern.match(raw)
+        if match is None:
+            continue
+        name, module_dir, package, variable = match.groups()
+        if name in result:
+            raise ContentError(f"Go tool installer duplicates {name}")
+        result[name] = {
+            "module_dir": module_dir,
+            "package": package,
+            "variable": variable,
+        }
+    return result
+
+
+def forge_chart_records(path: Path) -> list[dict[str, str]]:
+    source = path.read_text(encoding="utf-8")
+    constants = dict(
+        re.findall(
+            r'^\s*(defaultGPUOperator(?:Chart|Version|Repository|SHA256))\s*=\s*"([^"]+)"',
+            source,
+            re.MULTILINE,
+        )
+    )
+    expected_names = {
+        "defaultGPUOperatorChart",
+        "defaultGPUOperatorVersion",
+        "defaultGPUOperatorRepository",
+        "defaultGPUOperatorSHA256",
+    }
+    if set(constants) != expected_names:
+        raise ContentError("Forge GPU chart source contains incomplete content authority")
+    return [
+        {
+            "name": constants["defaultGPUOperatorChart"],
+            "version": constants["defaultGPUOperatorVersion"],
+            "repository": constants["defaultGPUOperatorRepository"],
+            "sha256": constants["defaultGPUOperatorSHA256"],
+        }
+    ]
+
+
+def forge_tool_records(path: Path) -> list[dict[str, str]]:
+    records: list[dict[str, str]] = []
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        if not raw.lstrip().startswith('{name: "'):
+            continue
+        fields = dict(re.findall(r'(name|version|platform|url|sha256|installedSHA256): "([^"]+)"', raw))
+        if set(fields) != {"name", "version", "platform", "url", "sha256", "installedSHA256"}:
+            raise ContentError("Forge source contains an incomplete reviewed remote tool")
+        records.append(
+            {
+                "name": fields["name"],
+                "version": fields["version"],
+                "platform": fields["platform"],
+                "url": fields["url"],
+                "sha256": fields["sha256"],
+                "installed_sha256": fields["installedSHA256"],
+            }
+        )
+    return records
+
+
 def chart_dependencies(chart_yaml: Path) -> list[dict[str, str]]:
     dependencies: list[dict[str, str]] = []
     current: dict[str, str] | None = None
@@ -316,13 +433,10 @@ def validate_manifest(manifest: dict[str, Any], root: Path = ROOT) -> None:
         raise ContentError(f"Helm chart authority has unused or missing entries: {sorted(chart_authority ^ discovered_charts)}")
 
     forge_charts = require_records(manifest, "forge_helm_charts", ("name", "version", "repository", "sha256"))
-    forge_config = (root / "forge/internal/config/config.go").read_text(encoding="utf-8")
-    for item in forge_charts:
-        for value in item.values():
-            if value not in forge_config:
-                raise ContentError(f"Forge chart authority does not bind {item['name']} {value}")
+    if forge_chart_records(root / "forge/internal/config/config.go") != forge_charts:
+        raise ContentError("Forge chart source does not exactly match manifest authority")
 
-    require_records(manifest, "installers", ("name", "version", "url", "sha256"))
+    installers = require_records(manifest, "installers", ("name", "version", "url", "sha256"))
     forge_tools = require_records(manifest, "forge_tools", ("name", "version", "platform", "url", "sha256", "installed_sha256"))
     require_records(manifest, "tools", ("name", "version", "platform", "url", "sha256"))
     playwright_archives = require_records(
@@ -331,6 +445,7 @@ def validate_manifest(manifest: dict[str, Any], root: Path = ROOT) -> None:
         ("name", "version", "revision", "platform", "url", "sha256", "directory", "executable", "installed_sha256"),
     )
     ci_tools = require_records(manifest, "ci_tools", ("name", "version", "platform", "url", "sha256"))
+    locked_tools = require_locked_tools(manifest)
     ci_images = require_records(manifest, "ci_images", ("reference", "digest"))
     locks = manifest.get("delegated_locks")
     if not isinstance(locks, list) or not locks or len(locks) != len(set(locks)):
@@ -340,6 +455,54 @@ def validate_manifest(manifest: dict[str, Any], root: Path = ROOT) -> None:
             raise ContentError(f"invalid delegated lock path {value!r}")
         if not (root / value).is_file():
             raise ContentError(f"delegated lock is missing: {value}")
+    lock_set = set(locks)
+    for item in locked_tools:
+        if item["lock"] not in lock_set:
+            raise ContentError(f"locked tool {item['name']} references an undeclared lock")
+
+    go_locked = [item for item in locked_tools if item["ecosystem"] == "go"]
+    for lock in sorted({item["lock"] for item in go_locked}):
+        expected = {
+            item["module"]: item["version"]
+            for item in go_locked
+            if item["lock"] == lock
+        }
+        actual = go_mod_requirements((root / lock).with_name("go.mod"))
+        if actual != expected:
+            raise ContentError(f"Go tool lock {lock} does not exactly match reviewed tool authority")
+    installer_path = root / ".github/scripts/install_go_tool.sh"
+    actual_go_installers = go_tool_installers(installer_path)
+    expected_go_installers = {
+        item["name"]: {
+            "module_dir": str(PurePosixPath(item["lock"]).parent),
+            "package": item["package"],
+        }
+        for item in go_locked
+    }
+    if set(actual_go_installers) != set(expected_go_installers):
+        raise ContentError("Go tool installer inventory does not exactly match reviewed authority")
+    for name, expected in expected_go_installers.items():
+        actual = actual_go_installers[name]
+        if actual["module_dir"] != expected["module_dir"] or actual["package"] != expected["package"]:
+            raise ContentError(f"Go tool installer for {name} does not match reviewed authority")
+
+    npm_locked = [item for item in locked_tools if item["ecosystem"] == "npm"]
+    package_json_path = root / ".github/tools/protobuf/package.json"
+    package_lock_path = root / ".github/tools/protobuf/package-lock.json"
+    package_json = json.loads(package_json_path.read_text(encoding="utf-8"))
+    package_lock = json.loads(package_lock_path.read_text(encoding="utf-8"))
+    expected_npm = {item["package"]: item["version"] for item in npm_locked}
+    if package_json.get("dependencies") != expected_npm:
+        raise ContentError("Node tool package.json does not exactly match reviewed authority")
+    for package, version in expected_npm.items():
+        locked = package_lock.get("packages", {}).get(f"node_modules/{package}", {})
+        if locked.get("version") != version or not str(locked.get("resolved", "")).startswith("https://") or not str(locked.get("integrity", "")).startswith("sha512-"):
+            raise ContentError(f"Node tool {package} lacks exact package-lock content authority")
+    node_installer = (root / ".github/scripts/install_node_tool.sh").read_text(encoding="utf-8")
+    if set(re.findall(r"^\s*([a-z0-9-]+)\) tool_dir=", node_installer, re.MULTILINE)) != {item["name"] for item in npm_locked}:
+        raise ContentError("Node tool installer inventory does not exactly match reviewed authority")
+    if "npm ci --ignore-scripts" not in node_installer:
+        raise ContentError("Node tools must install from package-lock without running package scripts")
 
     automation_files = [
         *sorted((root / ".github/workflows").glob("*.yml")),
@@ -349,8 +512,16 @@ def validate_manifest(manifest: dict[str, Any], root: Path = ROOT) -> None:
 
     automation_text = "\n".join(path.read_text(encoding="utf-8") for path in automation_files)
     workflow_text = "\n".join(path.read_text(encoding="utf-8") for path in (root / ".github/workflows").glob("*.yml"))
-    if re.search(r"go install\s+\S+@", workflow_text):
-        raise ContentError("workflow Go tools must install from the repository tools module")
+    control_makefile = (root / "control-plane/Makefile").read_text(encoding="utf-8")
+    if re.search(r"go install\s+\S+@", workflow_text) or re.search(r"go\s+install[^\n]*@", control_makefile):
+        raise ContentError("Go tools must install from a repository tool module")
+    if re.search(r"npm\s+install", control_makefile):
+        raise ContentError("Node tools must install from a repository package lock")
+    for name in ("golangci-lint", "controller-gen", "buf", "protoc-gen-go", "protoc-gen-connect-go"):
+        if f"install_go_tool.sh {name}" not in workflow_text:
+            raise ContentError(f"exact-head workflows do not install repository-locked {name}")
+    if "install_node_tool.sh protoc-gen-es" not in workflow_text:
+        raise ContentError("exact-head workflows do not install repository-locked protoc-gen-es")
     forbidden_installers = (
         "actions/setup-go@",
         "actions/setup-node@",
@@ -370,13 +541,13 @@ def validate_manifest(manifest: dict[str, Any], root: Path = ROOT) -> None:
                     raise ContentError(f"workflow {name} {version} lacks {platform} checksum authority")
     literal_installs = set(
         re.findall(
-            r"uses:\s+\./\.github/actions/setup-ci-tool\s*\n\s+with:\s+\{name:\s*(buildx|goreleaser|syft),\s*version:\s*([0-9.]+)\}",
+            r"uses:\s+\./\.github/actions/setup-ci-tool\s*\n\s+with:\s+\{name:\s*(buildx|envtest|goreleaser|syft),\s*version:\s*([0-9.]+)\}",
             automation_text,
         )
     )
     literal_installs.update(
         re.findall(
-            r"uses:\s+\./\.github/actions/setup-ci-tool\s*\n\s+with:\s*\n\s+name:\s*(buildx|goreleaser|syft)\s*\n\s+version:\s*([0-9.]+)",
+            r"uses:\s+\./\.github/actions/setup-ci-tool\s*\n\s+with:\s*\n\s+name:\s*(buildx|envtest|goreleaser|syft)\s*\n\s+version:\s*([0-9.]+)",
             automation_text,
         )
     )
@@ -384,7 +555,7 @@ def validate_manifest(manifest: dict[str, Any], root: Path = ROOT) -> None:
         for platform in ("linux-amd64", "linux-arm64"):
             if (name, version, platform) not in ci_authority:
                 raise ContentError(f"CI tool {name} {version} lacks {platform} checksum authority")
-    expected_ci_tools = {(item["name"], item["version"]) for item in ci_tools if item["name"] in {"buildx", "goreleaser", "syft"}}
+    expected_ci_tools = {(item["name"], item["version"]) for item in ci_tools if item["name"] in {"buildx", "envtest", "goreleaser", "syft"}}
     if literal_installs != expected_ci_tools:
         raise ContentError(f"CI tool authority has unused or unreviewed installers: {sorted(literal_installs ^ expected_ci_tools)}")
     package_lock = json.loads((root / "control-plane/test/e2e/playwright/package-lock.json").read_text(encoding="utf-8"))
@@ -405,13 +576,30 @@ def validate_manifest(manifest: dict[str, Any], root: Path = ROOT) -> None:
     if (root / ".github/tools/checksums.txt").exists():
         raise ContentError("legacy split tool checksum authority must be removed")
 
-    installer_text = (root / "forge/internal/sshprovisioner/remote_content.go").read_text(encoding="utf-8")
-    for item in [*manifest["installers"], *forge_tools]:
-        for value in (item["url"], item["sha256"], item.get("installed_sha256")):
-            if value is None:
-                continue
-            if value not in installer_text:
-                raise ContentError(f"Forge tool authority does not bind {item['name']} {value}")
+    forge_source_path = root / "forge/internal/sshprovisioner/remote_content.go"
+    installer_text = forge_source_path.read_text(encoding="utf-8")
+    expected_forge_tools = [
+        {
+            key: item[key]
+            for key in ("name", "version", "platform", "url", "sha256", "installed_sha256")
+        }
+        for item in forge_tools
+    ]
+    actual_forge_tools = forge_tool_records(forge_source_path)
+    if actual_forge_tools != expected_forge_tools:
+        raise ContentError("Forge remote tool source does not exactly match manifest authority")
+    installer_constants = dict(
+        re.findall(
+            r'^\s*(k3sInstallScriptURL|k3sInstallScriptSHA256)\s*=\s*"([^"]+)"',
+            installer_text,
+            re.MULTILINE,
+        )
+    )
+    if len(installers) != 1 or installers[0]["name"] != "k3s" or installers[0]["version"] != "installer" or installer_constants != {
+        "k3sInstallScriptURL": installers[0]["url"],
+        "k3sInstallScriptSHA256": installers[0]["sha256"],
+    }:
+        raise ContentError("Forge installer source does not exactly match manifest authority")
 
 
 def verified_download(

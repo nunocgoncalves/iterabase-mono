@@ -70,6 +70,8 @@ class CacheContractTests(unittest.TestCase):
             "control-plane/test/e2e/go.mod",
             "charts/test/e2e/go.mod",
             "charts/test/e2e/go.sum",
+            ".github/tools/go.sum",
+            ".github/tools/control-plane/go.sum",
         ):
             self.assertIn(dependency, workflow)
 

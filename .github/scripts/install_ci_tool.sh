@@ -66,6 +66,16 @@ case "$name" in
     [[ $("$destination/bin/node" --version) == "v$version" ]]
     echo "$destination/bin" >> "$GITHUB_PATH"
     ;;
+  envtest)
+    destination="$install_root/envtest-$version"
+    rm -rf "$destination"
+    mkdir -p "$destination"
+    tar -xzf "$artifact" -C "$destination" --strip-components=2
+    for executable in kube-apiserver etcd kubectl; do
+      test -x "$destination/$executable"
+    done
+    echo "KUBEBUILDER_ASSETS=$destination" >> "$GITHUB_ENV"
+    ;;
   buildx)
     destination="$HOME/.docker/cli-plugins/docker-buildx"
     mkdir -p "$(dirname "$destination")"

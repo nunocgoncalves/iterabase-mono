@@ -72,7 +72,7 @@ python3 "$(git rev-parse --show-toplevel)/.github/scripts/release.py" verify-rel
 while IFS= read -r manifest; do
   tag=$(jq -r '.tag' "$manifest")
   set +e
-  release_json=$($gh_bin release view "$tag" --repo "$github_repository" --json tagName,isDraft,assets 2>&1)
+  release_json=$($gh_bin release view "$tag" --repo "$github_repository" --json tagName,targetCommitish,name,body,isDraft,isPrerelease,assets 2>&1)
   status=$?
   set -e
   if [[ $status -ne 0 ]]; then
@@ -88,6 +88,20 @@ while IFS= read -r manifest; do
     exit 1
   }
   [[ $(jq -r '.isDraft' <<<"$release_json") == false ]] || continue
+  jq -e --slurpfile expected "$manifest" '
+    .tagName == $expected[0].tag and
+    .targetCommitish == $expected[0].release_metadata.target_commitish and
+    .name == $expected[0].release_metadata.title and
+    .body == $expected[0].release_metadata.notes and
+    .isPrerelease == $expected[0].release_metadata.prerelease
+  ' <<<"$release_json" >/dev/null || {
+    echo "published GitHub Release $tag metadata conflicts with the governed manifest" >&2
+    exit 1
+  }
+  [[ $($gh_bin api "repos/$github_repository/releases/tags/$tag" --jq '.immutable') == true ]] || {
+    echo "published GitHub Release $tag is not immutable" >&2
+    exit 1
+  }
 
   mapfile -t expected_names < <(jq -r '.assets[].name' "$manifest"; basename "$manifest")
   mapfile -t actual_names < <(jq -r '.assets[].name' <<<"$release_json" | sort)
@@ -106,6 +120,12 @@ while IFS= read -r manifest; do
     $gh_bin release download "$tag" --repo "$github_repository" --pattern "$name" --dir "$destination"
     cmp "$expected_path" "$destination/$name" || {
       echo "published GitHub Release $tag asset $name conflicts with the complete manifest" >&2
+      exit 1
+    }
+    actual_size=$(jq -r --arg name "$name" '.assets[] | select(.name == $name) | .size' <<<"$release_json")
+    expected_size=$(wc -c < "$expected_path" | tr -d ' ')
+    [[ "$actual_size" == "$expected_size" ]] || {
+      echo "published GitHub Release $tag asset $name has a conflicting size" >&2
       exit 1
     }
   done

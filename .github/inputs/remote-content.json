@@ -592,6 +592,20 @@
       "sha256": "01443c1e1a29e531ccad5a46fefa6df490d2189c49f7955904aecdbb0fe86fdc"
     },
     {
+      "name": "envtest",
+      "version": "1.36.2",
+      "platform": "linux-amd64",
+      "url": "https://github.com/kubernetes-sigs/controller-tools/releases/download/envtest-v1.36.2/envtest-v1.36.2-linux-amd64.tar.gz",
+      "sha256": "5e99f4eef3d6f9d4dd063730299f708c98da8801f2f14d8fc762cb354f30c332"
+    },
+    {
+      "name": "envtest",
+      "version": "1.36.2",
+      "platform": "linux-arm64",
+      "url": "https://github.com/kubernetes-sigs/controller-tools/releases/download/envtest-v1.36.2/envtest-v1.36.2-linux-arm64.tar.gz",
+      "sha256": "d5eebb129f149a68f8b7bbd7b4c8e51a19f280b3bda1743c94de27f82da78d2e"
+    },
+    {
       "name": "buildx",
       "version": "0.36.1",
       "platform": "linux-amd64",
@@ -634,6 +648,79 @@
       "sha256": "6c0466811541ea03add5213a60a1562f0851e4c0b0ecfdee1a694a9455285900"
     }
   ],
+  "locked_tools": [
+    {
+      "name": "goimports",
+      "ecosystem": "go",
+      "package": "golang.org/x/tools/cmd/goimports",
+      "module": "golang.org/x/tools",
+      "version": "v0.48.0",
+      "lock": ".github/tools/go.sum"
+    },
+    {
+      "name": "golangci-lint",
+      "ecosystem": "go",
+      "package": "github.com/golangci/golangci-lint/v2/cmd/golangci-lint",
+      "module": "github.com/golangci/golangci-lint/v2",
+      "version": "v2.12.2",
+      "lock": ".github/tools/go.sum"
+    },
+    {
+      "name": "buf",
+      "ecosystem": "go",
+      "package": "github.com/bufbuild/buf/cmd/buf",
+      "module": "github.com/bufbuild/buf",
+      "version": "v1.72.0",
+      "lock": ".github/tools/control-plane/go.sum"
+    },
+    {
+      "name": "protoc-gen-go",
+      "ecosystem": "go",
+      "package": "google.golang.org/protobuf/cmd/protoc-gen-go",
+      "module": "google.golang.org/protobuf",
+      "version": "v1.36.12",
+      "lock": ".github/tools/control-plane/go.sum"
+    },
+    {
+      "name": "protoc-gen-connect-go",
+      "ecosystem": "go",
+      "package": "connectrpc.com/connect/cmd/protoc-gen-connect-go",
+      "module": "connectrpc.com/connect",
+      "version": "v1.20.0",
+      "lock": ".github/tools/control-plane/go.sum"
+    },
+    {
+      "name": "controller-gen",
+      "ecosystem": "go",
+      "package": "sigs.k8s.io/controller-tools/cmd/controller-gen",
+      "module": "sigs.k8s.io/controller-tools",
+      "version": "v0.21.0",
+      "lock": ".github/tools/control-plane/go.sum"
+    },
+    {
+      "name": "setup-envtest",
+      "ecosystem": "go",
+      "package": "sigs.k8s.io/controller-runtime/tools/setup-envtest",
+      "module": "sigs.k8s.io/controller-runtime/tools/setup-envtest",
+      "version": "v0.24.1",
+      "lock": ".github/tools/control-plane/go.sum"
+    },
+    {
+      "name": "kustomize",
+      "ecosystem": "go",
+      "package": "sigs.k8s.io/kustomize/kustomize/v5",
+      "module": "sigs.k8s.io/kustomize/kustomize/v5",
+      "version": "v5.8.1",
+      "lock": ".github/tools/control-plane/go.sum"
+    },
+    {
+      "name": "protoc-gen-es",
+      "ecosystem": "npm",
+      "package": "@bufbuild/protoc-gen-es",
+      "version": "2.13.0",
+      "lock": ".github/tools/protobuf/package-lock.json"
+    }
+  ],
   "ci_images": [
     {
       "reference": "moby/buildkit:buildx-stable-1",
@@ -654,6 +741,10 @@
     "control-plane/test/e2e/playwright/package-lock.json",
     ".github/tools/go.mod",
     ".github/tools/go.sum",
+    ".github/tools/control-plane/go.mod",
+    ".github/tools/control-plane/go.sum",
+    ".github/tools/protobuf/package.json",
+    ".github/tools/protobuf/package-lock.json",
     "forge/test/e2e/model-cache.json"
   ]
 }

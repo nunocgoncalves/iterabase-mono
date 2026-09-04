@@ -77,15 +77,17 @@ and source-only runtime fixture once. Candidate builders use the same recipe
 fields and add immutable candidate custody. `.github/inputs/remote-content.json`
 inventories covered remote content: digest-pinned base and third-party runtime
 images (including vLLM, Flux, NFD, and GPU Operator operands), checksummed
-Go/Node/Buildx/GoReleaser/Syft and Kubernetes CI tools, Playwright's
-browser/headless/FFmpeg archives, immutable BuildKit, SHA-256-pinned external
-Helm archives, and the Forge K3s/Helm/Flux executable archives plus the K3s
-airgap image set and service installer. It also names repository Go/npm/model
-lock authorities. Chart builders do not trust mutable repository indexes: they
+Go/Node/Buildx/GoReleaser/Syft and Kubernetes CI tools, the exact envtest
+runtime, Playwright's browser/headless/FFmpeg archives, immutable BuildKit,
+SHA-256-pinned external Helm archives, and the Forge K3s/Helm/Flux executable
+archives plus the K3s airgap image set and service installer. It also names the
+repository Go modules and npm package lock that govern controller/code-generation
+tools, plus the product dependency and model locks. Chart builders do not trust mutable repository indexes: they
 download an exact archive, fail
 immediately on changed bytes, and only retry transport. Dockerfiles require
-reviewed tag-plus-digest identities; Go tools install from the checked-in tools
-module; third-party Actions use full commits. Product chart composition consumes
+reviewed tag-plus-digest identities; control-plane and protobuf Go tools install
+from checked-in tool modules, `protoc-gen-es` installs from its exact npm lock,
+and third-party Actions use full commits. Product chart composition consumes
 the already verified packages. Contract tests substitute bytes behind the same
 URL and prove verification fails before materialization, extraction, packaging,
 or execution.
@@ -206,11 +208,12 @@ baseline.
 ## Cache and setup contract
 
 All third-party actions use immutable commit SHAs. Go/npm dependency locks,
-repository Go-tool module sums, exact executable/archive checksums, base and
-runtime image digests, external chart archive checksums, and Forge tool/runtime
-checksums are validated bidirectionally through the remote-content inventory.
-Tool-installing Actions are not delegated download authority: repository scripts
-verify Go, Node, Buildx, GoReleaser, Syft, and Playwright runtime bytes before use. Caches contain only verified
+repository Go-tool module sums and npm tool lock, exact executable/archive
+checksums, base and runtime image digests, external chart archive checksums, and
+Forge tool/runtime checksums are validated bidirectionally through the
+remote-content inventory. Tool-installing Actions are not delegated download
+authority: repository scripts verify Go, Node, envtest, Buildx, GoReleaser, Syft,
+and Playwright runtime bytes before use. Caches contain only verified
 dependency or build inputs and use content-addressed keys without broad fallback
 keys.
 

@@ -540,8 +540,15 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
     def test_release_publication_is_complete_draft_first_and_published_verification_only(self) -> None:
         script = (ROOT / ".github/scripts/publish_github_releases.sh").read_text()
         self.assertNotIn("gh release upload", script)
-        for field in ("targetCommitish", ".name == $title", ".body == $notes", ".isPrerelease == $prerelease", ".immutable"):
+        for field in (
+            "targetCommitish",
+            ".name == $expected[0].release_metadata.title",
+            ".body == $expected[0].release_metadata.notes",
+            ".isPrerelease == $expected[0].release_metadata.prerelease",
+            ".immutable",
+        ):
             self.assertIn(field, script)
+        self.assertIn("jq -j '.release_metadata.notes'", script)
         self.assertIn("published release $tag already matches exactly; verification-only", script)
         create = script.index("gh release create")
         verify_draft = script.index("verify_release \"$tag\" \"$manifest\" \"$stage\"", create)
@@ -550,6 +557,19 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertLess(create, verify_draft)
         self.assertLess(verify_draft, publish)
         self.assertLess(publish, verify_published)
+
+    def test_destination_preflight_verifies_governed_release_metadata_and_immutability(self) -> None:
+        script = (ROOT / ".github/scripts/check_promotion_destinations.sh").read_text()
+        for value in (
+            "targetCommitish,name,body,isDraft,isPrerelease,assets",
+            ".targetCommitish == $expected[0].release_metadata.target_commitish",
+            ".name == $expected[0].release_metadata.title",
+            ".body == $expected[0].release_metadata.notes",
+            ".isPrerelease == $expected[0].release_metadata.prerelease",
+            "releases/tags/$tag\" --jq '.immutable'",
+            "actual_size=",
+        ):
+            self.assertIn(value, script)
 
     def test_retained_immutability_gate_proves_asset_and_tag_refusal(self) -> None:
         workflow = (ROOT / ".github/workflows/release-rehearsal.yml").read_text()
