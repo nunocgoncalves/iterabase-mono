@@ -442,6 +442,181 @@ class ReleaseManifestTests(unittest.TestCase):
                     release.validate_release_manifest(manifest, candidate, plan)
 
 
+class ReleaseSecurityAuditTests(unittest.TestCase):
+    def ruleset(self) -> dict:
+        return {
+            "id": 123,
+            "name": "protected release tags",
+            "target": "tag",
+            "enforcement": "active",
+            "bypass_actors": [
+                {"actor_type": "DeployKey", "bypass_mode": "always"}
+            ],
+            "rules": [
+                {"type": value}
+                for value in ("creation", "deletion", "non_fast_forward", "update")
+            ],
+            "conditions": {
+                "ref_name": {
+                    "include": [
+                        "refs/tags/control-plane-v*",
+                        "refs/tags/inference-gateway-v*",
+                        "refs/tags/forge-v*",
+                        "refs/tags/control-plane-*",
+                        "refs/tags/inference-gateway-*",
+                        "refs/tags/iterabase-platform-*",
+                        "refs/tags/dry-run/**",
+                    ]
+                }
+            },
+        }
+
+    def run_audit(
+        self, ruleset: dict, *, admin: bool
+    ) -> subprocess.CompletedProcess[str]:
+        with tempfile.TemporaryDirectory() as value:
+            directory = Path(value)
+            fake_gh = directory / "gh"
+            fake_gh.write_text(
+                """#!/usr/bin/env python3
+import json
+import os
+import sys
+
+repository = "example/iterabase-mono"
+endpoint = next(value for value in sys.argv[2:] if not value.startswith("-"))
+ruleset = json.loads(os.environ["RULESET_JSON"])
+responses = {
+    f"repos/{repository}/keys": [{
+        "read_only": False,
+        "title": "iterabase protected release tags (validated)",
+        "key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBGpAToV5oV2LesN/Kqsim3Nn0OBUItH9TocZOzRd/rz",
+    }],
+    f"repos/{repository}/environments/release": {
+        "name": "release",
+        "deployment_branch_policy": {
+            "protected_branches": False,
+            "custom_branch_policies": True,
+        },
+        "protection_rules": [{
+            "type": "required_reviewers",
+            "prevent_self_review": False,
+            "reviewers": [{
+                "type": "User",
+                "reviewer": {"login": "nunocgoncalves"},
+            }],
+        }],
+    },
+    f"repos/{repository}/environments/release/deployment-branch-policies": {
+        "branch_policies": [{"name": "master", "type": "branch"}],
+    },
+    f"repos/{repository}/rulesets": [{
+        "id": 123,
+        "name": "protected release tags",
+        "target": "tag",
+        "enforcement": "active",
+    }],
+    f"repos/{repository}/rulesets/123": ruleset,
+    f"repos/{repository}/actions/permissions/workflow": {
+        "default_workflow_permissions": "read",
+        "can_approve_pull_request_reviews": False,
+    },
+    f"repos/{repository}/collaborators?affiliation=all&per_page=100": [{
+        "login": "nunocgoncalves",
+        "permissions": {"admin": True, "maintain": True, "push": True},
+    }],
+    f"repos/{repository}/immutable-releases": {"enabled": True},
+}
+if endpoint not in responses:
+    print(f"unexpected endpoint: {endpoint}", file=sys.stderr)
+    sys.exit(2)
+json.dump(responses[endpoint], sys.stdout)
+""",
+                encoding="utf-8",
+            )
+            fake_gh.chmod(0o755)
+            env = {
+                **os.environ,
+                "PATH": f"{directory}:{os.environ['PATH']}",
+                "RULESET_JSON": json.dumps(ruleset),
+                "AUDIT_ADMIN_ENDPOINTS": str(admin).lower(),
+                "AUDIT_REPOSITORY_SECRETS": "false",
+                "RELEASE_REVIEWER": "nunocgoncalves",
+            }
+            env.pop("RELEASE_TAG_KEY_FILE", None)
+            return subprocess.run(
+                [
+                    str(ROOT / ".github/scripts/audit_release_security.sh"),
+                    "example/iterabase-mono",
+                ],
+                cwd=ROOT,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+    def test_non_admin_audit_accepts_absent_or_null_bypass_data(self) -> None:
+        for value in ("absent", "null"):
+            ruleset = self.ruleset()
+            if value == "absent":
+                ruleset.pop("bypass_actors")
+            else:
+                ruleset["bypass_actors"] = None
+            with self.subTest(value=value):
+                completed = self.run_audit(ruleset, admin=False)
+                self.assertEqual(0, completed.returncode, completed.stderr)
+
+    def test_non_admin_audit_still_rejects_malformed_common_authority(self) -> None:
+        mutations = {
+            "id": 456,
+            "name": "other ruleset",
+            "target": "branch",
+            "enforcement": "disabled",
+            "rules": [{"type": "creation"}],
+            "refs": ["refs/tags/other-*"],
+        }
+        for field, value in mutations.items():
+            ruleset = self.ruleset()
+            if field == "refs":
+                ruleset["conditions"]["ref_name"]["include"] = value
+            else:
+                ruleset[field] = value
+            with self.subTest(field=field):
+                completed = self.run_audit(ruleset, admin=False)
+                self.assertNotEqual(0, completed.returncode)
+                self.assertIn("common contract", completed.stderr)
+
+    def test_admin_audit_requires_exact_bypass_authority(self) -> None:
+        approved = {"actor_type": "DeployKey", "bypass_mode": "always"}
+        invalid = {
+            "absent": "absent",
+            "null": None,
+            "wrong-type": [
+                {"actor_type": "RepositoryRole", "bypass_mode": "always"}
+            ],
+            "wrong-mode": [
+                {"actor_type": "DeployKey", "bypass_mode": "pull_request"}
+            ],
+            "duplicate": [approved, approved],
+            "extra": [
+                approved,
+                {"actor_type": "RepositoryRole", "bypass_mode": "always"},
+            ],
+        }
+        self.assertEqual(0, self.run_audit(self.ruleset(), admin=True).returncode)
+        for case, actors in invalid.items():
+            ruleset = self.ruleset()
+            if actors == "absent":
+                ruleset.pop("bypass_actors")
+            else:
+                ruleset["bypass_actors"] = actors
+            with self.subTest(case=case):
+                completed = self.run_audit(ruleset, admin=True)
+                self.assertNotEqual(0, completed.returncode)
+                self.assertIn("bypass authority", completed.stderr)
+
+
 class ReleaseWorkflowContractTests(unittest.TestCase):
     def test_candidate_uses_unified_plan_composer_results_and_capacity_groups(self) -> None:
         workflow = (ROOT / ".github/workflows/release-candidate.yml").read_text(
