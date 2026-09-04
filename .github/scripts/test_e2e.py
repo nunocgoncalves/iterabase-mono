@@ -732,6 +732,8 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("git rev-parse HEAD", e2e)
         self.assertIn("--intent pr", e2e)
         self.assertIn("--selection-file /tmp/changed-path-selection.json", e2e)
+        self.assertIn("e2e.py resolve-baselines \\\n            --plan e2e-plan.json \\\n            --github-output \"$GITHUB_OUTPUT\"", e2e)
+        self.assertNotIn("--output e2e-plan.json \\\n            --github-output", e2e)
         self.assertIn("group: iterabase-permanent-fixture-${{ matrix.capacity }}", e2e)
         self.assertIn("cancel-in-progress: false", e2e)
         self.assertNotIn("schedule:", e2e)
