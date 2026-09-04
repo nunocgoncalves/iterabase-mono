@@ -222,10 +222,21 @@ _CLAUSE_START = (
     rf"(?:(?:HTTP{_HORIZONTAL})?[45][0-9]{{2}}:{_HORIZONTAL})?"
     rf"(?:-{_HORIZONTAL})?"
 )
-_CLAUSE_END = (
-    rf"[ \t]*[.!?]?(?:[ \t]*\((?:HTTP{_HORIZONTAL})?[45][0-9]{{2}}\))?"
-    rf"[ \t]*\r?$"
+_HTTP_DIAGNOSTIC = rf"\((?:HTTP{_HORIZONTAL})?[45][0-9]{{2}}\)"
+_UPLOAD_DIAGNOSTIC_URL = (
+    rf"\(https://uploads\.github\.com/repos/{re.escape(EXPECTED_REPOSITORY)}/"
+    rf"releases/{EXPECTED_RELEASE_ID}/assets\?name=forbidden\.txt\)"
 )
+
+
+def _clause_end(operation_diagnostic: str | None = None) -> str:
+    diagnostics = _HTTP_DIAGNOSTIC
+    if operation_diagnostic is not None:
+        diagnostics = rf"(?:{diagnostics}|{operation_diagnostic})"
+    return rf"[ \t]*[.!?]?(?:[ \t]*{diagnostics})?[ \t]*\r?$"
+
+
+_CLAUSE_END = _clause_end()
 
 _DENIAL_OPERATIONS = {
     "asset upload": {
@@ -233,6 +244,7 @@ _DENIAL_OPERATIONS = {
         "passive": r"(?:uploaded|added)",
         "nominal": r"(?:uploads?|additions?)",
         "subject": r"assets?",
+        "diagnostic": _UPLOAD_DIAGNOSTIC_URL,
     },
     "asset deletion": {
         "active": r"(?:delete|remove)",
@@ -295,34 +307,35 @@ def _operation_patterns(forms: dict[str, str]) -> tuple[re.Pattern[str], ...]:
     nominal = forms["nominal"]
     subject = forms["subject"]
     passive_refusal = _passive_refusal(passive)
+    clause_end = _clause_end(forms.get("diagnostic"))
     return tuple(
         re.compile(pattern, re.IGNORECASE | re.MULTILINE)
         for pattern in (
             # GitHub's observed form: "Cannot upload assets to an immutable release".
             rf"{_CLAUSE_START}{_ACTIVE_REFUSAL}{_HORIZONTAL}{active}\b"
             rf"{_HORIZONTAL}{_DETERMINER}{subject}\b{_HORIZONTAL}{_CONNECTOR}"
-            rf"{_HORIZONTAL}{_IMMUTABLE_CAUSE}\b{_CLAUSE_END}",
+            rf"{_HORIZONTAL}{_IMMUTABLE_CAUSE}\b{clause_end}",
             # The operation object may precede a grammatically passive refusal.
             rf"{_CLAUSE_START}{_DETERMINER}{subject}\b{_HORIZONTAL}"
             rf"{passive_refusal}\b{_HORIZONTAL}{_CONNECTOR}{_HORIZONTAL}"
-            rf"{_IMMUTABLE_CAUSE}\b{_CLAUSE_END}",
+            rf"{_IMMUTABLE_CAUSE}\b{clause_end}",
             # The immutable cause may precede the operation and refusal.
             rf"{_CLAUSE_START}{_IMMUTABLE_CAUSE}\b{_HORIZONTAL}"
             rf"(?:(?:and|therefore|so){_HORIZONTAL})?{_DETERMINER}{subject}\b"
-            rf"{_HORIZONTAL}{passive_refusal}\b{_CLAUSE_END}",
+            rf"{_HORIZONTAL}{passive_refusal}\b{clause_end}",
             # A cause-first clause may explicitly prevent a passive operation.
             rf"{_CLAUSE_START}{_IMMUTABLE_CAUSE}\b{_HORIZONTAL}"
             rf"{_PREVENT_OR_PROHIBIT}{_HORIZONTAL}{_DETERMINER}{subject}\b"
             rf"{_HORIZONTAL}from{_HORIZONTAL}being{_HORIZONTAL}{passive}\b"
-            rf"{_CLAUSE_END}",
+            rf"{clause_end}",
             rf"{_CLAUSE_START}{_IMMUTABLE_CAUSE}\b{_HORIZONTAL}"
             rf"{_DOES_NOT_ALLOW}{_HORIZONTAL}{_DETERMINER}{subject}\b"
             rf"{_HORIZONTAL}to{_HORIZONTAL}be{_HORIZONTAL}{passive}\b"
-            rf"{_CLAUSE_END}",
+            rf"{clause_end}",
             # Nominal forms are accepted only as subject + operation nouns.
             rf"{_CLAUSE_START}{_IMMUTABLE_CAUSE}\b{_HORIZONTAL}"
             rf"(?:{_PREVENT_OR_PROHIBIT}|{_DOES_NOT_ALLOW}){_HORIZONTAL}"
-            rf"{_DETERMINER}{subject}\b{_HORIZONTAL}{nominal}\b{_CLAUSE_END}",
+            rf"{_DETERMINER}{subject}\b{_HORIZONTAL}{nominal}\b{clause_end}",
         )
     )
 
