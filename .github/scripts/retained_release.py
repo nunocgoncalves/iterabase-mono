@@ -193,11 +193,34 @@ def asset_identities(directory: Path) -> list[dict[str, Any]]:
 def require_immutable_denial(status: int, output: str, operation: str) -> None:
     if status == 0:
         raise GateError(f"{operation} unexpectedly succeeded")
-    denial = re.compile(
-        r"\bimmutable(?:[ _-]+)release\b|\brelease\b[^\n]*\bimmutable\b",
-        re.IGNORECASE,
+
+    immutable_release = r"immutable(?:[ _-]+)releases?"
+    mutation = (
+        r"(?:upload(?:ed|ing)?|add(?:ed|ing)?|delet(?:e|ed|ing)|"
+        r"remov(?:e|ed|ing)|updat(?:e|ed|ing)|modif(?:y|ied|ying)|"
+        r"mov(?:e|ed|ing)|mutat(?:e|ed|ing)|chang(?:e|ed|ing)|"
+        r"overwrit(?:e|ten|ing)|force(?:[ _-]+)updat(?:e|ed|ing))"
     )
-    if denial.search(output) is None:
+    affirmative_denials = (
+        # GitHub's API reports immutable asset mutations with this predicate.
+        re.compile(r"\brelease\s+is\s+immutable\b", re.IGNORECASE),
+        # Git transport can put the refusal before the immutable-release reason.
+        re.compile(
+            rf"\b(?:cannot|can't|may not|must not|not allowed to)\s+"
+            rf"(?:be\s+)?{mutation}\s+"
+            rf"(?:an?\s+|the\s+)?{immutable_release}\b",
+            re.IGNORECASE,
+        ),
+        # Accept the same causal statement when GitHub puts the reason first.
+        re.compile(
+            rf"\b{immutable_release}\b\s+(?:(?:assets?|tags?)\s+)?"
+            rf"(?:cannot|can't|may not|must not|does not allow|prevents?|prohibits?)\s+"
+            rf"(?:the\s+)?(?:release\s+)?(?:asset\s+|tag\s+)?(?:from\s+)?"
+            rf"(?:(?:be|being)\s+)?{mutation}\b",
+            re.IGNORECASE,
+        ),
+    )
+    if not any(denial.search(output) for denial in affirmative_denials):
         raise GateError(f"{operation} failed without an immutable-release denial")
 
 

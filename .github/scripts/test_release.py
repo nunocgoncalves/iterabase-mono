@@ -801,13 +801,21 @@ class RetainedReleaseGateTests(unittest.TestCase):
                 retained_release.validate_attestation(attestation)
 
     def test_mutation_must_fail_with_immutable_specific_evidence(self) -> None:
-        retained_release.require_immutable_denial(
-            1, "Cannot update an immutable release", "tag update"
-        )
+        for output in (
+            "Cannot update an immutable release",
+            "gh: Release is immutable. (HTTP 422)",
+            "Immutable release assets cannot be deleted",
+        ):
+            with self.subTest(output=output):
+                retained_release.require_immutable_denial(1, output, "tag update")
+
         for status, output in (
-            (0, ""),
+            (0, "Cannot update an immutable release"),
             (1, "permission denied"),
             (1, "immutable setting is unavailable"),
+            (1, "release is not immutable"),
+            (1, "immutable release lookup failed: permission denied"),
+            (1, "Cannot update release; immutable release lookup failed"),
         ):
             with self.subTest(status=status, output=output), self.assertRaises(
                 retained_release.GateError
