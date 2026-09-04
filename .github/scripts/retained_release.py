@@ -270,9 +270,7 @@ def require_probe_result(status: int, output: str, operation: str) -> dict[str, 
     records = [
         line.rstrip("\r")
         for line in output.splitlines()
-        if len(line) >= 2
-        and line[0] in _PORCELAIN_FLAGS
-        and line[1] in ("\t", " ")
+        if len(line) >= 2 and line[1] in ("\t", " ")
     ]
     fields = records[0].split("\t", 2) if len(records) == 1 else []
     parsed = len(fields) == 3 and len(fields[0]) == 1
@@ -311,14 +309,22 @@ def require_probe_result(status: int, output: str, operation: str) -> dict[str, 
 
 
 def canonical_attestation_statement(attestation: dict[str, Any]) -> dict[str, Any]:
-    statement = copy.deepcopy(validate_attestation(attestation))
-    statement["subject"] = sorted(
-        statement["subject"],
-        key=lambda subject: json.dumps(
-            subject, sort_keys=True, separators=(",", ":")
+    statement = validate_attestation(attestation)
+    predicate = statement["predicate"]
+    return {
+        "_type": statement["_type"],
+        "predicateType": statement["predicateType"],
+        "predicate": {
+            field: predicate[field]
+            for field in ("databaseId", "repository", "tag", "purl")
+        },
+        "subject": sorted(
+            copy.deepcopy(statement["subject"]),
+            key=lambda subject: json.dumps(
+                subject, sort_keys=True, separators=(",", ":")
+            ),
         ),
-    )
-    return statement
+    }
 
 
 def make_state(
