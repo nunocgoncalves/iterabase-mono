@@ -192,14 +192,17 @@ def asset_identities(directory: Path) -> list[dict[str, Any]]:
 
 _HORIZONTAL = r"[ \t]+"
 _DETERMINER = rf"(?:(?:an?|the|this|that|its|their){_HORIZONTAL})?"
-_REFUSAL = (
-    rf"(?:cannot|can't|may{_HORIZONTAL}not|must{_HORIZONTAL}not|"
-    rf"(?:is|are|was|were){_HORIZONTAL}not{_HORIZONTAL}allowed{_HORIZONTAL}to)"
+_MODAL_REFUSAL = (
+    rf"(?:cannot|can't|may{_HORIZONTAL}not|must{_HORIZONTAL}not)"
 )
-_PREVENTION = (
-    rf"(?:does{_HORIZONTAL}not{_HORIZONTAL}allow|"
-    rf"prevents?|prohibits?)"
+_ACTIVE_REFUSAL = (
+    rf"(?:{_MODAL_REFUSAL}|not{_HORIZONTAL}allowed{_HORIZONTAL}to)"
 )
+_COPULAR_NOT_ALLOWED = (
+    rf"(?:is|are|was|were){_HORIZONTAL}not{_HORIZONTAL}allowed{_HORIZONTAL}to"
+)
+_PREVENT_OR_PROHIBIT = r"(?:prevent|prevents|prohibit|prohibits)"
+_DOES_NOT_ALLOW = rf"does{_HORIZONTAL}not{_HORIZONTAL}allow"
 _CONNECTOR = (
     rf"(?:to|from|on|for|by|because(?:{_HORIZONTAL}of)?|"
     rf"due{_HORIZONTAL}to)"
@@ -212,32 +215,43 @@ _RELEASE_IS_IMMUTABLE = (
     rf"{_HORIZONTAL}immutable"
 )
 _IMMUTABLE_CAUSE = rf"(?:{_IMMUTABLE_RELEASE}|{_RELEASE_IS_IMMUTABLE})"
-_CAUSE_END = (
-    rf"(?=[ \t]*[.!]?(?:[ \t]*\((?:HTTP{_HORIZONTAL})?[45][0-9]{{2}}\))?"
-    rf"[ \t]*\r?$)"
+_CLAUSE_START = (
+    rf"^[ \t]*(?:(?:gh|remote):{_HORIZONTAL})?"
+    rf"(?:(?:error|fatal):{_HORIZONTAL})?"
+    rf"(?:GH[0-9]{{3}}:{_HORIZONTAL})?"
+    rf"(?:(?:HTTP{_HORIZONTAL})?[45][0-9]{{2}}:{_HORIZONTAL})?"
+    rf"(?:-{_HORIZONTAL})?"
+)
+_CLAUSE_END = (
+    rf"[ \t]*[.!?]?(?:[ \t]*\((?:HTTP{_HORIZONTAL})?[45][0-9]{{2}}\))?"
+    rf"[ \t]*\r?$"
 )
 
 _DENIAL_OPERATIONS = {
-    "asset upload": (
-        r"(?:uploads?|uploaded|uploading|adds?|added|adding|additions?)",
-        r"assets?",
-    ),
-    "asset deletion": (
-        r"(?:deletes?|deleted|deleting|deletions?|"
-        r"removes?|removed|removing|removals?)",
-        r"assets?",
-    ),
-    "release tag update": (
-        r"(?:force(?:[ _-]+)updates?|force(?:[ _-]+)updated|"
-        r"force(?:[ _-]+)updating|updates?|updated|updating|"
-        r"moves?|moved|moving|changes?|changed|changing)",
-        r"(?:tags?|refs?|references?)",
-    ),
-    "release tag deletion": (
-        r"(?:deletes?|deleted|deleting|deletions?|"
-        r"removes?|removed|removing|removals?)",
-        r"(?:tags?|refs?|references?)",
-    ),
+    "asset upload": {
+        "active": r"(?:upload|add)",
+        "passive": r"(?:uploaded|added)",
+        "nominal": r"(?:uploads?|additions?)",
+        "subject": r"assets?",
+    },
+    "asset deletion": {
+        "active": r"(?:delete|remove)",
+        "passive": r"(?:deleted|removed)",
+        "nominal": r"(?:deletions?|removals?)",
+        "subject": r"assets?",
+    },
+    "release tag update": {
+        "active": r"(?:force(?:[ _-]+)update|update|move|change)",
+        "passive": r"(?:force(?:[ _-]+)updated|updated|moved|changed)",
+        "nominal": r"(?:force(?:[ _-]+)updates?|updates?|moves?|changes?)",
+        "subject": r"(?:tags?|refs?|references?)",
+    },
+    "release tag deletion": {
+        "active": r"(?:delete|remove)",
+        "passive": r"(?:deleted|removed)",
+        "nominal": r"(?:deletions?|removals?)",
+        "subject": r"(?:tags?|refs?|references?)",
+    },
 }
 
 _IMMUTABLE_MENTION = re.compile(
@@ -246,53 +260,76 @@ _IMMUTABLE_MENTION = re.compile(
     re.IGNORECASE,
 )
 _NEGATED_IMMUTABILITY = re.compile(
-    rf"\b(?:releases?{_HORIZONTAL}(?:(?:is|are|was|were){_HORIZONTAL}"
+    rf"(?:\breleases?{_HORIZONTAL}(?:(?:is|are|was|were){_HORIZONTAL}"
     rf"(?:not|never|no{_HORIZONTAL}longer)|isn't|aren't|wasn't|weren't)"
-    rf"{_HORIZONTAL}immutable|not{_HORIZONTAL}"
-    rf"(?:(?:an?|the){_HORIZONTAL})?immutable(?:[ _-]+)releases?)\b",
+    rf"{_HORIZONTAL}immutable\b|\b(?:not|no){_HORIZONTAL}"
+    rf"(?:(?:an?|the){_HORIZONTAL})?immutable(?:[ _-]+)releases?\b|"
+    rf"\bnot{_HORIZONTAL}because{_HORIZONTAL}{_IMMUTABLE_CAUSE}\b|"
+    rf"\b{_IMMUTABLE_RELEASE}\b{_HORIZONTAL}(?:does|do){_HORIZONTAL}not"
+    rf"{_HORIZONTAL}(?:prevent|prohibit)\b)",
     re.IGNORECASE,
 )
 _AFFIRMATIVE_REFUSAL = re.compile(
-    rf"\b(?:{_REFUSAL}|{_PREVENTION}|denied|rejected|refused|forbidden)\b",
+    rf"\b(?:{_ACTIVE_REFUSAL}|{_COPULAR_NOT_ALLOWED}|"
+    rf"{_PREVENT_OR_PROHIBIT}|{_DOES_NOT_ALLOW}|"
+    rf"denied|rejected|refused|forbidden)\b",
     re.IGNORECASE,
 )
 _CANONICAL_IMMUTABLE_API_PREDICATE = re.compile(
-    rf"(?:gh:{_HORIZONTAL})?(?:(?:HTTP{_HORIZONTAL})?[45][0-9]{{2}}:"
-    rf"{_HORIZONTAL})?release{_HORIZONTAL}is{_HORIZONTAL}immutable[.!]?"
-    rf"(?:[ \t]*\((?:HTTP{_HORIZONTAL})?[45][0-9]{{2}}\))?",
-    re.IGNORECASE,
+    rf"{_CLAUSE_START}release{_HORIZONTAL}is{_HORIZONTAL}immutable"
+    rf"{_CLAUSE_END}",
+    re.IGNORECASE | re.MULTILINE,
 )
 
 
-def _operation_patterns(mutation: str, subject: str) -> tuple[re.Pattern[str], ...]:
+def _passive_refusal(passive: str) -> str:
+    return (
+        rf"(?:{_MODAL_REFUSAL}{_HORIZONTAL}be{_HORIZONTAL}{passive}|"
+        rf"{_COPULAR_NOT_ALLOWED}{_HORIZONTAL}be{_HORIZONTAL}{passive})"
+    )
+
+
+def _operation_patterns(forms: dict[str, str]) -> tuple[re.Pattern[str], ...]:
+    active = forms["active"]
+    passive = forms["passive"]
+    nominal = forms["nominal"]
+    subject = forms["subject"]
+    passive_refusal = _passive_refusal(passive)
     return tuple(
         re.compile(pattern, re.IGNORECASE | re.MULTILINE)
         for pattern in (
             # GitHub's observed form: "Cannot upload assets to an immutable release".
-            rf"\b{_REFUSAL}{_HORIZONTAL}(?:be{_HORIZONTAL})?{mutation}\b"
+            rf"{_CLAUSE_START}{_ACTIVE_REFUSAL}{_HORIZONTAL}{active}\b"
             rf"{_HORIZONTAL}{_DETERMINER}{subject}\b{_HORIZONTAL}{_CONNECTOR}"
-            rf"{_HORIZONTAL}{_IMMUTABLE_CAUSE}\b{_CAUSE_END}",
-            # The operation object may precede the refusal in a passive clause.
-            rf"\b{subject}\b{_HORIZONTAL}{_REFUSAL}{_HORIZONTAL}"
-            rf"(?:be{_HORIZONTAL})?{mutation}\b{_HORIZONTAL}{_CONNECTOR}"
-            rf"{_HORIZONTAL}{_IMMUTABLE_CAUSE}\b{_CAUSE_END}",
+            rf"{_HORIZONTAL}{_IMMUTABLE_CAUSE}\b{_CLAUSE_END}",
+            # The operation object may precede a grammatically passive refusal.
+            rf"{_CLAUSE_START}{_DETERMINER}{subject}\b{_HORIZONTAL}"
+            rf"{passive_refusal}\b{_HORIZONTAL}{_CONNECTOR}{_HORIZONTAL}"
+            rf"{_IMMUTABLE_CAUSE}\b{_CLAUSE_END}",
             # The immutable cause may precede the operation and refusal.
-            rf"\b{_IMMUTABLE_CAUSE}\b{_HORIZONTAL}"
+            rf"{_CLAUSE_START}{_IMMUTABLE_CAUSE}\b{_HORIZONTAL}"
             rf"(?:(?:and|therefore|so){_HORIZONTAL})?{_DETERMINER}{subject}\b"
-            rf"{_HORIZONTAL}{_REFUSAL}{_HORIZONTAL}(?:be{_HORIZONTAL})?"
-            rf"{mutation}\b",
-            # Or the immutable cause may explicitly prevent the operation.
-            rf"\b{_IMMUTABLE_CAUSE}\b{_HORIZONTAL}{_PREVENTION}{_HORIZONTAL}"
-            rf"{_DETERMINER}{subject}\b{_HORIZONTAL}"
-            rf"(?:(?:from|to){_HORIZONTAL})?(?:(?:be|being){_HORIZONTAL})?"
-            rf"{mutation}\b",
+            rf"{_HORIZONTAL}{passive_refusal}\b{_CLAUSE_END}",
+            # A cause-first clause may explicitly prevent a passive operation.
+            rf"{_CLAUSE_START}{_IMMUTABLE_CAUSE}\b{_HORIZONTAL}"
+            rf"{_PREVENT_OR_PROHIBIT}{_HORIZONTAL}{_DETERMINER}{subject}\b"
+            rf"{_HORIZONTAL}from{_HORIZONTAL}being{_HORIZONTAL}{passive}\b"
+            rf"{_CLAUSE_END}",
+            rf"{_CLAUSE_START}{_IMMUTABLE_CAUSE}\b{_HORIZONTAL}"
+            rf"{_DOES_NOT_ALLOW}{_HORIZONTAL}{_DETERMINER}{subject}\b"
+            rf"{_HORIZONTAL}to{_HORIZONTAL}be{_HORIZONTAL}{passive}\b"
+            rf"{_CLAUSE_END}",
+            # Nominal forms are accepted only as subject + operation nouns.
+            rf"{_CLAUSE_START}{_IMMUTABLE_CAUSE}\b{_HORIZONTAL}"
+            rf"(?:{_PREVENT_OR_PROHIBIT}|{_DOES_NOT_ALLOW}){_HORIZONTAL}"
+            rf"{_DETERMINER}{subject}\b{_HORIZONTAL}{nominal}\b{_CLAUSE_END}",
         )
     )
 
 
 _DENIAL_PATTERNS = {
-    operation: _operation_patterns(mutation, subject)
-    for operation, (mutation, subject) in _DENIAL_OPERATIONS.items()
+    operation: _operation_patterns(forms)
+    for operation, forms in _DENIAL_OPERATIONS.items()
 }
 
 
@@ -303,13 +340,18 @@ def _canonical_immutable_api_predicate(output: str) -> bool:
     ) is not None
 
 
-def _operation_pair(output: str, mutation: str, subject: str) -> bool:
+def _operation_pair(output: str, forms: dict[str, str]) -> bool:
+    active = forms["active"]
+    passive = forms["passive"]
+    nominal = forms["nominal"]
+    subject = forms["subject"]
     patterns = (
-        rf"\b{mutation}\b{_HORIZONTAL}{_DETERMINER}{subject}\b",
-        rf"\b{subject}\b{_HORIZONTAL}{_REFUSAL}{_HORIZONTAL}"
-        rf"(?:be{_HORIZONTAL})?{mutation}\b",
-        rf"\b{subject}\b{_HORIZONTAL}(?:(?:from|to){_HORIZONTAL})?"
-        rf"(?:(?:be|being){_HORIZONTAL})?{mutation}\b",
+        rf"\b{active}\b{_HORIZONTAL}{_DETERMINER}{subject}\b",
+        rf"\b{subject}\b{_HORIZONTAL}{_passive_refusal(passive)}\b",
+        rf"\b{subject}\b{_HORIZONTAL}from{_HORIZONTAL}being{_HORIZONTAL}"
+        rf"{passive}\b",
+        rf"\b{subject}\b{_HORIZONTAL}to{_HORIZONTAL}be{_HORIZONTAL}{passive}\b",
+        rf"\b{subject}\b{_HORIZONTAL}{nominal}\b",
     )
     return any(re.search(pattern, output, re.IGNORECASE) for pattern in patterns)
 
@@ -325,14 +367,16 @@ def _denial_mismatch(
     wrong_operations: tuple[str, ...] = (),
 ) -> GateError:
     if operation in _DENIAL_OPERATIONS:
-        mutation, subject = _DENIAL_OPERATIONS[operation]
-        expected_mutation = re.search(
-            rf"\b{mutation}\b", output, re.IGNORECASE
-        ) is not None
+        forms = _DENIAL_OPERATIONS[operation]
+        expected_mutation = any(
+            re.search(rf"\b{forms[position]}\b", output, re.IGNORECASE)
+            is not None
+            for position in ("active", "passive", "nominal")
+        )
         expected_subject = re.search(
-            rf"\b{subject}\b", output, re.IGNORECASE
+            rf"\b{forms['subject']}\b", output, re.IGNORECASE
         ) is not None
-        expected_operation = _operation_pair(output, mutation, subject)
+        expected_operation = _operation_pair(output, forms)
         operation_label = operation
     else:
         expected_mutation = False
