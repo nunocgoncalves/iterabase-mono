@@ -806,7 +806,11 @@ class RetainedReleaseGateTests(unittest.TestCase):
                 "Cannot upload assets to an immutable release",
                 "gh: HTTP 422: Assets cannot be added to the immutable release",
                 "Immutable release prevents assets from being uploaded",
+                "Immutable releases prevent assets from being uploaded",
+                "Releases are immutable and assets cannot be uploaded",
+                "Immutable release prevents asset upload",
                 "Immutable release prevents asset uploads",
+                "Immutable releases do not allow asset uploads",
             ),
             "asset deletion": (
                 "Cannot delete an asset from the immutable release",
@@ -1013,6 +1017,34 @@ class RetainedReleaseGateTests(unittest.TestCase):
             (
                 "release tag deletion",
                 "Immutable release prevents tag from being delete",
+            ),
+            (
+                "asset upload",
+                "Immutable release prevent assets from being uploaded",
+            ),
+            (
+                "asset upload",
+                "Immutable releases prevents assets from being uploaded",
+            ),
+            (
+                "asset upload",
+                "Release are immutable and assets cannot be uploaded",
+            ),
+            (
+                "asset upload",
+                "Immutable release prevents assets addition",
+            ),
+            (
+                "asset upload",
+                "Immutable release prevents assets additions",
+            ),
+            (
+                "asset upload",
+                "Asset are not allowed to be uploaded to an immutable release",
+            ),
+            (
+                "asset upload",
+                "Cannot upload an assets to an immutable release",
             ),
         )
         for operation, output in cases:
