@@ -15,18 +15,14 @@ verify_release() {
   local release_json actual_dir name expected_sha actual_sha expected_size actual_size
   release_json=$(gh release view "$tag" --repo "$repository" --json tagName,targetCommitish,name,body,isDraft,isPrerelease,assets)
   jq -e \
-    --arg tag "$tag" \
-    --arg target "$(jq -r '.release_metadata.target_commitish' "$manifest")" \
-    --arg title "$(jq -r '.release_metadata.title' "$manifest")" \
-    --arg notes "$(jq -r '.release_metadata.notes' "$manifest")" \
-    --argjson draft "$expected_draft" \
-    --argjson prerelease "$(jq -r '.release_metadata.prerelease' "$manifest")" '
-      .tagName == $tag and
-      .targetCommitish == $target and
-      .name == $title and
-      .body == $notes and
+    --slurpfile expected "$manifest" \
+    --argjson draft "$expected_draft" '
+      .tagName == $expected[0].tag and
+      .targetCommitish == $expected[0].release_metadata.target_commitish and
+      .name == $expected[0].release_metadata.title and
+      .body == $expected[0].release_metadata.notes and
       .isDraft == $draft and
-      .isPrerelease == $prerelease
+      .isPrerelease == $expected[0].release_metadata.prerelease
     ' <<<"$release_json" >/dev/null || {
       echo "release $tag metadata does not match its governed manifest" >&2
       return 1
@@ -70,7 +66,9 @@ while IFS= read -r manifest; do
   done < <(jq -r '.assets[] | [.name,.path] | @tsv' "$manifest")
   cp "$manifest" "$stage/$(basename "$manifest")"
   notes=$(mktemp)
-  jq -r '.release_metadata.notes' "$manifest" > "$notes"
+  # Preserve the governed body byte-for-byte; jq -r would append a newline that
+  # is not present in the manifest and make a fresh draft fail verification.
+  jq -j '.release_metadata.notes' "$manifest" > "$notes"
 
   if gh release view "$tag" --repo "$repository" >/dev/null 2>&1; then
     release_json=$(gh release view "$tag" --repo "$repository" --json isDraft)

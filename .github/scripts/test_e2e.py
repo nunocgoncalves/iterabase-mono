@@ -139,6 +139,24 @@ class E2EPlanTests(unittest.TestCase):
                 else:
                     self.assertGreater(plan["scenario_total"], 0)
 
+    def test_each_remote_tool_authority_path_fans_out_completely(self) -> None:
+        expected = len(
+            [
+                scenario
+                for suite in self.catalogue["suites"]
+                for scenario in suite["scenarios"]
+                if scenario["metadata"]["tier"] in {"F2", "F3"}
+            ]
+        )
+        for path in (
+            ".github/scripts/install_go_tool.sh",
+            ".github/scripts/install_node_tool.sh",
+            ".github/tools/control-plane/go.mod",
+            ".github/tools/protobuf/package-lock.json",
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(expected, self.plan([path])["scenario_total"])
+
     def test_ambiguous_unknown_and_noncanonical_paths_fail_closed(self) -> None:
         for paths in ([], ["unknown/runtime.input"], ["../outside"], ["./docs/ci.md"]):
             with self.subTest(paths=paths), self.assertRaises(E2EError):
