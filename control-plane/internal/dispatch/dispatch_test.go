@@ -392,11 +392,14 @@ func TestDispatch_FencesDurablePriorGenOnRestart(t *testing.T) {
 	// Seed a running run + running step + running turn and bind it to worker-1
 	// via a durable active assignment (generation 5) with NO connected worker —
 	// exactly the durable state left behind by a CP restart.
-	runID, _, turnID := seedRunTurn(t, env.rt, env.pgpool, dispatchSID())
+	sessionID := dispatchSID()
+	runID, _, turnID := seedRunTurn(t, env.rt, env.pgpool, sessionID)
 	identID := insertIdentity(t, env.pgpool, "ident-restart")
+	uid := mustSessionUID(t, env, sessionID)
 	_, err := env.store.CreateAssignment(ctx, dispatch.AssignmentInput{
 		TurnID: turnID, RunID: runID, PoolID: env.poolID, WorkerID: "worker-1",
 		FencingGeneration: 5, AttemptID: runID, ScopeIdentityID: identID, AgentPoolKey: "ns/pool-1",
+		SessionID: sessionID, SandboxUID: uid, SandboxGID: uid,
 		ModelPermission: json.RawMessage(`{"id":"gpt-4o"}`),
 	})
 	require.NoError(t, err)
@@ -447,11 +450,14 @@ func TestDispatch_FencesDurablePriorGenOnReconnectOldPath(t *testing.T) {
 	// Inject a durable active assignment (generation 5) for worker-1, as a
 	// prior CP would have left behind — a generation the in-memory w1 (gen 1)
 	// does not own.
-	runID, _, turnID := seedRunTurn(t, env.rt, env.pgpool, dispatchSID())
+	sessionID := dispatchSID()
+	runID, _, turnID := seedRunTurn(t, env.rt, env.pgpool, sessionID)
 	identID := insertIdentity(t, env.pgpool, "ident-oldpath")
+	uid := mustSessionUID(t, env, sessionID)
 	_, err := env.store.CreateAssignment(ctx, dispatch.AssignmentInput{
 		TurnID: turnID, RunID: runID, PoolID: env.poolID, WorkerID: "worker-1",
 		FencingGeneration: 5, AttemptID: runID, ScopeIdentityID: identID, AgentPoolKey: "ns/pool-1",
+		SessionID: sessionID, SandboxUID: uid, SandboxGID: uid,
 		ModelPermission: json.RawMessage(`{"id":"gpt-4o"}`),
 	})
 	require.NoError(t, err)

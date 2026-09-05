@@ -1055,8 +1055,8 @@ func (s *Service) assignGraph(ctx context.Context, turn runtime.Turn, run runtim
 	in := AssignmentInput{
 		TurnID: turn.ID, RunID: run.ID, PoolID: poolID, WorkerID: w.workerID,
 		FencingGeneration: w.gen, AttemptID: run.ID, ScopeIdentityID: run.ScopeIdentityID,
-		AgentPoolKey: assignment.AgentPoolKey, ModelPermission: node.ModelSnapshot,
-		CapabilityRequest: node.CapabilitiesSnapshot, ToolVersionSnapshot: assignment.ToolPins,
+		AgentPoolKey: assignment.AgentPoolKey, SessionID: run.SessionID, SandboxUID: uid, SandboxGID: uid,
+		ModelPermission: node.ModelSnapshot, CapabilityRequest: node.CapabilitiesSnapshot, ToolVersionSnapshot: assignment.ToolPins,
 		WorkItemID: assignment.WorkItemID, NodeExecutionID: node.ID,
 	}
 	if _, err := s.store.CreateAssignment(ctx, in); err != nil {
@@ -1229,6 +1229,9 @@ func (s *Service) assign(ctx context.Context, turn runtime.Turn, run runtime.Run
 		AttemptID:           run.ID, // v1: attempt identity = run id (HOR-254 may add a first-class attempts table)
 		ScopeIdentityID:     run.ScopeIdentityID,
 		AgentPoolKey:        poolID, // pool UID; the CR "<ns>/<name>" is resolved by HOR-252
+		SessionID:           run.SessionID,
+		SandboxUID:          uid,
+		SandboxGID:          gid,
 		ModelPermission:     mustJSON(model),
 		CapabilityRequest:   []byte("[]"),
 		ToolVersionSnapshot: []byte("[]"),

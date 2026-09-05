@@ -82,6 +82,7 @@ PLAYWRIGHT_INSTALL_ARGS ?= chromium
 test-e2e-unit: ## Compile the owner E2E entrypoint and run hermetic helper tests.
 	cd test/e2e && $(E2E_ENV) go test -race -count=1 -run '^TestE2E$$/^hermetic-example$$' .
 	cd test/e2e && $(E2E_ENV) go test -race -count=1 -skip '^TestE2E$$' .
+	cd test/e2e && go test -race -count=1 ./fixtures/runtime
 
 # Each product contract gets a fresh isolated Kind cluster and consumes the
 # same exact composer-produced runtime bundle in source and candidate modes.

@@ -38,7 +38,6 @@ type workspaceBlocker struct {
 }
 
 type workspaceModelStats struct {
-	BarrierArrivals int64 `json:"barrier_arrivals"`
 	CapacityWaiting int64 `json:"capacity_waiting"`
 }
 
@@ -215,30 +214,30 @@ func exerciseConcurrentWorkspaceWorkStage(t *testing.T, state *digitalOceanCPUSt
 
 	first := startWorkspaceWork(t, baseURL, state.workspaceWorkKey, "e2e/forge-workspace-a", "Concurrent workspace session A", "hor-538-workspace-a")
 	second := startWorkspaceWork(t, baseURL, state.workspaceWorkKey, "e2e/forge-workspace-b", "Concurrent workspace session B", "hor-538-workspace-b")
-	waitWorkspaceModelStats(t, modelURL, 2, -1, 2*time.Minute)
 
-	// Both real model requests are now simultaneously held. Resolve their actual
-	// durable sessions/workers, then let one trusted root supervisor create a
-	// known sibling target for each child on the pool-wide PVC. This is fixture
-	// setup, not permission repair: the production child itself must attempt the
-	// other real session path and discriminate EACCES before the model is released.
-	waitWorkspaceDatabaseValue(t, cluster, state, fmt.Sprintf(`SELECT count(*) FROM runtime.turn_assignments WHERE attempt_id IN ('%s','%s') AND state='active'`, first.CurrentAttemptID, second.CurrentAttemptID), "2", time.Minute)
-	assignments := workspaceDatabaseQuery(t, cluster, state, fmt.Sprintf(`SELECT count(DISTINCT worker_id)::text || '|' || count(*)::text FROM runtime.turn_assignments WHERE attempt_id IN ('%s','%s')`, first.CurrentAttemptID, second.CurrentAttemptID))
-	if assignments != "2|2" {
-		t.Fatalf("real-machine synchronization barrier did not consume two simultaneous worker credits: %q", assignments)
+	// Initial model requests wait for an identity configuration rather than
+	// incrementing an anonymous aggregate counter. Resolve both production
+	// assignments and supervisor-observed sandbox identities before allowing
+	// either child command to run.
+	initialRows := waitWorkspaceConcurrencyRows(t, cluster, state, first.ID, second.ID, false, time.Minute)
+	expected := expectedWorkspaceParticipants(t, first, second, initialRows)
+	if err := validateInitialWorkspaceConcurrency(expected, initialRows); err != nil {
+		t.Fatalf("initial concurrent workspace identity is invalid: %v", err)
 	}
-	sessionA := workspaceDatabaseQuery(t, cluster, state, fmt.Sprintf(`SELECT session_id FROM runtime.workflow_runs WHERE id='%s'`, first.CurrentAttemptID))
-	sessionB := workspaceDatabaseQuery(t, cluster, state, fmt.Sprintf(`SELECT session_id FROM runtime.workflow_runs WHERE id='%s'`, second.CurrentAttemptID))
-	if sessionA == "" || sessionB == "" || sessionA == sessionB {
-		t.Fatalf("concurrent work did not retain two isolated sessions: %q/%q", sessionA, sessionB)
+	workerA := initialRows[0].WorkerID
+	configureConcurrentSiblingTargets(t, cluster, workerA, expected[0].SessionID, expected[1].SessionID)
+	configureWorkspaceModelBarrier(t, modelURL, expected)
+
+	// Each real child now executes the production bash path, emits its numeric
+	// identity and direct denial proof, and reaches the keyed barrier on its next
+	// model request. The barrier is successful only while one first arrival from
+	// each exact expected participant remains simultaneously held.
+	barrier := waitWorkspaceModelBarrier(t, modelURL, 2*time.Minute)
+	rows := waitWorkspaceConcurrencyRows(t, cluster, state, first.ID, second.ID, true, time.Minute)
+	if err := validateWorkspaceConcurrencyProof(expected, rows, barrier); err != nil {
+		t.Fatalf("correlated concurrent workspace proof failed: %v", err)
 	}
-	allocated := workspaceDatabaseQuery(t, cluster, state, fmt.Sprintf(`SELECT count(*)::text || '|' || count(DISTINCT uid)::text FROM runtime.session_uid_allocations WHERE session_id IN ('%s','%s') AND state='in_use'`, sessionA, sessionB))
-	if allocated != "2|2" {
-		t.Fatalf("concurrent sessions did not retain two stable distinct UID=GID allocations: %q", allocated)
-	}
-	workerA := workspaceDatabaseQuery(t, cluster, state, fmt.Sprintf(`SELECT worker_id FROM runtime.turn_assignments WHERE attempt_id='%s' AND state='active'`, first.CurrentAttemptID))
-	configureConcurrentSiblingTargets(t, cluster, workerA, sessionA, sessionB)
-	status, _ := workspaceAPIRequest(t, modelURL, "", http.MethodPost, "/release/workspace", nil, nil)
+	status, _ := workspaceAPIRequest(t, modelURL, "", http.MethodPost, "/workspace/barrier/release", nil, nil)
 	requireWorkspaceStatus(t, status, http.StatusNoContent)
 	first = waitWorkspaceWorkState(t, baseURL, state.workspaceWorkKey, first.ID, "blocked", 4*time.Minute)
 	second = waitWorkspaceWorkState(t, baseURL, state.workspaceWorkKey, second.ID, "blocked", 4*time.Minute)
@@ -247,11 +246,7 @@ func exerciseConcurrentWorkspaceWorkStage(t *testing.T, state *digitalOceanCPUSt
 	if bashCalls != "2" {
 		t.Fatalf("concurrent workspace work did not execute exactly one isolated bash command per session: %s", bashCalls)
 	}
-	childProofs := workspaceDatabaseQuery(t, cluster, state, fmt.Sprintf(`SELECT count(*) FROM runtime.events WHERE run_id IN ('%s','%s') AND kind='tool_result' AND payload::text LIKE '%%child-isolation=pass%%' AND payload::text LIKE '%%sibling-eacces=pass%%' AND payload::text LIKE '%%tls-key-eacces=pass%%'`, first.CurrentAttemptID, second.CurrentAttemptID))
-	if childProofs != "2" {
-		t.Fatalf("real children did not return two direct sibling/tls.key EACCES proofs: %s", childProofs)
-	}
-	assertConcurrentWorkspaceMarkers(t, cluster, workerA, sessionA, sessionB)
+	assertConcurrentWorkspaceMarkers(t, cluster, workerA, expected[0].SessionID, expected[1].SessionID)
 	respondWorkspaceBlocker(t, baseURL, state.workspaceWorkKey, first.ID)
 	respondWorkspaceBlocker(t, baseURL, state.workspaceWorkKey, second.ID)
 	_ = waitWorkspaceWorkState(t, baseURL, state.workspaceWorkKey, first.ID, "done", 2*time.Minute)
@@ -275,7 +270,7 @@ func exerciseActiveWorkspaceCapacityStage(t *testing.T, state *digitalOceanCPUSt
 	defer removeFiller()
 
 	active := startWorkspaceWork(t, baseURL, state.workspaceWorkKey, "e2e/forge-workspace-capacity", "Active turn across capacity floor", "hor-538-capacity-active")
-	waitWorkspaceModelStats(t, modelURL, -1, 1, 2*time.Minute)
+	waitWorkspaceModelCapacity(t, modelURL, 1, 2*time.Minute)
 	waitWorkspaceDatabaseValue(t, cluster, state, fmt.Sprintf(`SELECT count(*) FROM runtime.turn_assignments WHERE attempt_id='%s' AND state='active'`, active.CurrentAttemptID), "1", time.Minute)
 	setWorkspaceFreeTarget(t, client, filler, 19)
 	waitWorkspaceGate(t, client, true, storageReasonWorkspaceCapacityGatedE2E, 3*time.Minute)
@@ -519,6 +514,152 @@ func workspaceDatabaseQuery(t *testing.T, cluster *remotecluster.Cluster, state 
 		"psql", "-U", "controlplane", "-d", "controlplane", "-Atc", query))
 }
 
+func waitWorkspaceConcurrencyRows(t *testing.T, cluster *remotecluster.Cluster, state *digitalOceanCPUState, firstWorkID, secondWorkID string, requireChild bool, timeout time.Duration) []workspaceConcurrencyRow {
+	t.Helper()
+	query := fmt.Sprintf(`
+SELECT json_build_object(
+  'work_item_id', wi.id::text,
+  'attempt_id', wr.id::text,
+  'session_id', wr.session_id,
+  'assignment_state', COALESCE(ta.state,''),
+  'turn_id', COALESCE(ta.turn_id::text,''),
+  'worker_id', COALESCE(ta.worker_id,''),
+  'allocation_state', COALESCE(alloc.state,''),
+  'allocation_uid', COALESCE(alloc.uid,0),
+  'assigned_session', COALESCE(started.payload->>'session_id',''),
+  'assigned_uid', COALESCE((started.payload->'sandbox'->>'uid')::int,0),
+  'assigned_gid', COALESCE((started.payload->'sandbox'->>'gid')::int,0),
+  'child_result', COALESCE(child.payload::text,'')
+)::text
+FROM work.work_items wi
+JOIN runtime.workflow_runs wr ON wr.id=wi.current_attempt_id
+LEFT JOIN LATERAL (
+  SELECT turn_id, state, worker_id
+  FROM runtime.turn_assignments
+  WHERE attempt_id=wr.id::text
+  ORDER BY assigned_at DESC LIMIT 1
+) ta ON true
+LEFT JOIN runtime.session_uid_allocations alloc ON alloc.session_id=wr.session_id
+LEFT JOIN LATERAL (
+  SELECT payload FROM runtime.events
+  WHERE run_id=wr.id AND turn_id=ta.turn_id AND kind='turn_started' AND payload ? 'sandbox'
+  ORDER BY seq DESC LIMIT 1
+) started ON true
+LEFT JOIN LATERAL (
+  SELECT payload FROM runtime.events
+  WHERE run_id=wr.id AND turn_id=ta.turn_id AND kind='tool_result' AND payload::text LIKE '%%workspace-child-proof%%'
+  ORDER BY seq DESC LIMIT 1
+) child ON true
+WHERE wi.id IN ('%s'::uuid,'%s'::uuid)
+ORDER BY wi.id`, firstWorkID, secondWorkID)
+	deadline := time.Now().Add(timeout)
+	var last []workspaceConcurrencyRow
+	var lastRaw string
+	for time.Now().Before(deadline) {
+		lastRaw = workspaceDatabaseQuery(t, cluster, state, query)
+		last = last[:0]
+		valid := lastRaw != ""
+		for _, line := range strings.Split(lastRaw, "\n") {
+			if strings.TrimSpace(line) == "" {
+				continue
+			}
+			var row workspaceConcurrencyRow
+			if err := json.Unmarshal([]byte(line), &row); err != nil {
+				valid = false
+				break
+			}
+			last = append(last, row)
+			if row.AssignmentState == "" || row.TurnID == "" || row.WorkerID == "" || row.AssignedSession == "" || (requireChild && row.ChildResult == "") {
+				valid = false
+			}
+		}
+		if valid && len(last) == 2 {
+			return append([]workspaceConcurrencyRow(nil), last...)
+		}
+		time.Sleep(time.Second)
+	}
+	t.Fatalf("workspace concurrency authorities did not become observable (require_child=%t raw=%q)", requireChild, lastRaw)
+	return nil
+}
+
+func expectedWorkspaceParticipants(t *testing.T, first, second workspaceWorkItem, rows []workspaceConcurrencyRow) []workspaceExpectedParticipant {
+	t.Helper()
+	byWork := map[string]workspaceConcurrencyRow{}
+	for _, row := range rows {
+		byWork[row.WorkItemID] = row
+	}
+	firstRow, firstOK := byWork[first.ID]
+	secondRow, secondOK := byWork[second.ID]
+	if !firstOK || !secondOK || firstRow.AttemptID != first.CurrentAttemptID || secondRow.AttemptID != second.CurrentAttemptID ||
+		firstRow.SessionID == "" || secondRow.SessionID == "" || firstRow.SessionID == secondRow.SessionID {
+		t.Fatalf("could not bind expected work/attempt/session identities: first=%+v second=%+v rows=%+v", first, second, rows)
+	}
+	return []workspaceExpectedParticipant{
+		{Participant: workspaceParticipantA, WorkItemID: first.ID, AttemptID: first.CurrentAttemptID, SessionID: firstRow.SessionID, MarkerSHA256: workspaceMarkerDigest(workspaceParticipantA)},
+		{Participant: workspaceParticipantB, WorkItemID: second.ID, AttemptID: second.CurrentAttemptID, SessionID: secondRow.SessionID, MarkerSHA256: workspaceMarkerDigest(workspaceParticipantB)},
+	}
+}
+
+func validateInitialWorkspaceConcurrency(expected []workspaceExpectedParticipant, rows []workspaceConcurrencyRow) error {
+	if len(expected) != 2 || len(rows) != 2 {
+		return fmt.Errorf("expected two participants and two authority rows")
+	}
+	byWork := map[string]workspaceExpectedParticipant{}
+	turns := map[string]bool{}
+	workers := map[string]bool{}
+	uids := map[uint32]bool{}
+	for _, participant := range expected {
+		byWork[participant.WorkItemID] = participant
+	}
+	for _, row := range rows {
+		participant, ok := byWork[row.WorkItemID]
+		if !ok || row.AttemptID != participant.AttemptID || row.SessionID != participant.SessionID {
+			return fmt.Errorf("work/attempt/session mismatch for row %+v", row)
+		}
+		if row.AssignmentState != "active" || row.TurnID == "" || turns[row.TurnID] || row.WorkerID == "" || workers[row.WorkerID] {
+			return fmt.Errorf("expected two distinct active assignments and workers (row=%+v)", row)
+		}
+		turns[row.TurnID] = true
+		workers[row.WorkerID] = true
+		if row.AllocationState != "in_use" || row.AllocationUID < 10000 || row.AllocationUID >= 60000 || uids[row.AllocationUID] {
+			return fmt.Errorf("expected two distinct in-use in-range allocations (row=%+v)", row)
+		}
+		uids[row.AllocationUID] = true
+		if row.AssignedSession != row.SessionID || row.AssignedUID != row.AllocationUID || row.AssignedGID != row.AllocationUID {
+			return fmt.Errorf("supervisor-observed sandbox identity mismatch (row=%+v)", row)
+		}
+	}
+	return nil
+}
+
+func configureWorkspaceModelBarrier(t *testing.T, baseURL string, expected []workspaceExpectedParticipant) {
+	t.Helper()
+	status, body := workspaceAPIRequest(t, baseURL, "", http.MethodPost, "/workspace/barrier/configure", map[string]any{"participants": expected}, nil)
+	if status != http.StatusNoContent {
+		t.Fatalf("configure keyed workspace barrier: status=%d body=%s", status, body)
+	}
+}
+
+func waitWorkspaceModelBarrier(t *testing.T, baseURL string, timeout time.Duration) workspaceBarrierStatus {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var last workspaceBarrierStatus
+	for time.Now().Before(deadline) {
+		status, body := workspaceAPIRequest(t, baseURL, "", http.MethodGet, "/workspace/barrier", nil, nil)
+		if status == http.StatusOK && json.Unmarshal(body, &last) == nil {
+			if last.State == "failed" {
+				t.Fatalf("keyed workspace barrier failed causally: %s", last.Failure)
+			}
+			if last.State == "ready" && last.Ready && len(last.Arrivals) == 2 {
+				return last
+			}
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	t.Fatalf("keyed workspace barrier did not hold both expected participants (last=%+v)", last)
+	return workspaceBarrierStatus{}
+}
+
 func waitWorkspaceDatabaseValue(t *testing.T, cluster *remotecluster.Cluster, state *digitalOceanCPUState, query, wanted string, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -533,20 +674,18 @@ func waitWorkspaceDatabaseValue(t *testing.T, cluster *remotecluster.Cluster, st
 	t.Fatalf("database query did not reach %q (last=%q): %s", wanted, last, query)
 }
 
-func waitWorkspaceModelStats(t *testing.T, baseURL string, barrierArrivals, capacityWaiting int64, timeout time.Duration) {
+func waitWorkspaceModelCapacity(t *testing.T, baseURL string, capacityWaiting int64, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	var last workspaceModelStats
 	for time.Now().Before(deadline) {
 		status, body := workspaceAPIRequest(t, baseURL, "", http.MethodGet, "/stats", nil, nil)
-		if status == http.StatusOK && json.Unmarshal(body, &last) == nil &&
-			(barrierArrivals < 0 || last.BarrierArrivals >= barrierArrivals) &&
-			(capacityWaiting < 0 || last.CapacityWaiting >= capacityWaiting) {
+		if status == http.StatusOK && json.Unmarshal(body, &last) == nil && last.CapacityWaiting >= capacityWaiting {
 			return
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
-	t.Fatalf("deterministic model stats did not reach barrier=%d capacity=%d (last=%+v)", barrierArrivals, capacityWaiting, last)
+	t.Fatalf("deterministic model stats did not reach capacity=%d (last=%+v)", capacityWaiting, last)
 }
 
 func setWorkspaceFreeTarget(t *testing.T, client *ssh.Client, filler string, targetPercent int) {
@@ -943,12 +1082,15 @@ const expectEACCES = (target, label) => {
 const sibling = fs.readFileSync(".sibling-target", "utf8").trim();
 expectEACCES(sibling, "known sibling path");
 expectEACCES("/etc/harness/tls/tls.key", "supervisor tls.key");
-console.log("child-isolation=pass sibling-eacces=pass tls-key-eacces=pass");
 NODE
 printf %s > marker.txt
-test "$(/usr/bin/sha256sum marker.txt | /usr/bin/cut -d" " -f1)" = %s
-printf ' workspace-marker=%s'`, marker, workspaceMarkerDigest(marker), workspaceMarkerDigest(marker))
-	return "E2E_MODE:workspace-barrier E2E_BASH:" + base64.StdEncoding.EncodeToString([]byte(command))
+marker_sha=$(/usr/bin/sha256sum marker.txt | /usr/bin/cut -d" " -f1)
+test "$marker_sha" = %s
+session=${HARNESS_SANDBOX_ROOT##*/}
+uid=$(/usr/bin/id -u)
+gid=$(/usr/bin/id -g)
+printf 'workspace-child-proof participant=%s session=%%s uid=%%s gid=%%s marker_sha256=%%s invariants=groups-cleared,caps-cleared,no-new-privs,umask-0077,pool-root-0:0:0711,session-tree-0700,sibling-EACCES,tls-key-EACCES' "$session" "$uid" "$gid" "$marker_sha"`, marker, workspaceMarkerDigest(marker), marker)
+	return "E2E_MODE:workspace-barrier E2E_WORKSPACE_PARTICIPANT:" + marker + " E2E_BASH:" + base64.StdEncoding.EncodeToString([]byte(command))
 }
 
 func workspaceCapacityPrompt() string {
