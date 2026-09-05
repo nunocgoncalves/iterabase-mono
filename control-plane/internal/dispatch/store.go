@@ -45,6 +45,15 @@ var (
 	// ErrAssignmentNotActive is returned when an assignment exists but is not
 	// active (fenced/terminal) — gateways treat this as denial.
 	ErrAssignmentNotActive = errors.New("dispatch: assignment not active")
+	// ErrSessionUIDUnavailable is returned when assignment cannot bind the run's
+	// session to an in-use durable UID allocation.
+	ErrSessionUIDUnavailable = errors.New("dispatch: session UID allocation is not in use")
+	// ErrSessionIdentityMismatch is returned when the assigned sandbox identity
+	// disagrees with the run session or its durable UID allocation.
+	ErrSessionIdentityMismatch = errors.New("dispatch: assigned sandbox identity mismatch")
+	// ErrSessionUIDActive is returned when lifecycle cleanup attempts to release
+	// a UID while any turn for that session remains actively assigned.
+	ErrSessionUIDActive = errors.New("dispatch: session UID has an active assignment")
 	// ErrOutOfOrderSequence is returned when a worker presents a TurnEvent
 	// sequence with a gap (greater than highest+1). The HOR-381 source-order
 	// contract is strictly monotonic, one-based and gapless; a gap is a sender
@@ -93,6 +102,9 @@ type AssignmentInput struct {
 	AttemptID           string
 	ScopeIdentityID     string
 	AgentPoolKey        string
+	SessionID           string
+	SandboxUID          uint32
+	SandboxGID          uint32
 	ModelPermission     json.RawMessage
 	CapabilityRequest   json.RawMessage
 	ToolVersionSnapshot json.RawMessage
@@ -135,10 +147,48 @@ func (s *Store) MaxFencingGeneration(ctx context.Context) (uint64, error) {
 
 // CreateAssignment records the active assignment for a turn (state=active). A
 // turn may have at most one active assignment; a conflict (the turn is already
-// actively assigned) returns ErrAlreadyAssigned. Called by dispatch on
-// AssignTurn, atomically with consuming the worker's dispatch credit.
+// actively assigned) returns ErrAlreadyAssigned. The allocation row is locked
+// through the insert so a concurrent SessionEnd cannot free the UID between
+// allocation and assignment. Missing, freed, or mismatched session identities
+// fail closed before AssignTurn can enter the worker stream.
 func (s *Store) CreateAssignment(ctx context.Context, in AssignmentInput) (Assignment, error) {
-	row := s.pool.QueryRow(ctx, `
+	if in.SessionID == "" || in.SandboxUID == 0 || in.SandboxUID != in.SandboxGID {
+		return Assignment{}, ErrSessionIdentityMismatch
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Assignment{}, fmt.Errorf("create assignment begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var runSessionID string
+	if err := tx.QueryRow(ctx, `SELECT session_id FROM runtime.workflow_runs WHERE id=$1`, in.RunID).Scan(&runSessionID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Assignment{}, ErrNotFound
+		}
+		return Assignment{}, fmt.Errorf("resolve assignment session: %w", err)
+	}
+	if runSessionID != in.SessionID {
+		return Assignment{}, ErrSessionIdentityMismatch
+	}
+	var allocatedUID uint32
+	var allocationState string
+	if err := tx.QueryRow(ctx, `
+		SELECT uid, state FROM runtime.session_uid_allocations
+		WHERE session_id=$1 FOR UPDATE`, in.SessionID).Scan(&allocatedUID, &allocationState); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Assignment{}, ErrSessionUIDUnavailable
+		}
+		return Assignment{}, fmt.Errorf("lock assignment session uid: %w", err)
+	}
+	if allocationState != "in_use" {
+		return Assignment{}, ErrSessionUIDUnavailable
+	}
+	if allocatedUID != in.SandboxUID {
+		return Assignment{}, ErrSessionIdentityMismatch
+	}
+
+	row := tx.QueryRow(ctx, `
 		INSERT INTO runtime.turn_assignments
 			(turn_id, run_id, pool_id, worker_id, fencing_generation, attempt_id,
 			 scope_identity_id, agent_pool_key, model_permission, capability_request,
@@ -156,6 +206,9 @@ func (s *Store) CreateAssignment(ctx context.Context, in AssignmentInput) (Assig
 			return Assignment{}, ErrAlreadyAssigned
 		}
 		return Assignment{}, fmt.Errorf("create assignment: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Assignment{}, fmt.Errorf("create assignment commit: %w", err)
 	}
 	return a, nil
 }
@@ -625,14 +678,48 @@ func (s *Store) SessionUID(ctx context.Context, sessionID string) (uint32, error
 
 // ReleaseSessionUID marks a session's UID freed (non-recyclable until grace
 // elapses), so the allocator does not recycle it while the supervisor reaps the
-// sandbox. Called after dispatch sends SessionEnd. Idempotent.
+// sandbox. Called after dispatch sends SessionEnd. It serializes with assignment
+// creation and refuses to release while any turn for the session remains active.
+// Missing or already-freed rows remain idempotent no-ops.
 func (s *Store) ReleaseSessionUID(ctx context.Context, sessionID string) error {
-	_, err := s.pool.Exec(ctx, `
-		UPDATE runtime.session_uid_allocations
-		   SET state = 'freed', freed_at = now()
-		 WHERE session_id = $1 AND state = 'in_use'`, sessionID)
+	tx, err := s.pool.Begin(ctx)
 	if err != nil {
+		return fmt.Errorf("release session uid begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var state string
+	if err := tx.QueryRow(ctx, `
+		SELECT state FROM runtime.session_uid_allocations
+		WHERE session_id=$1 FOR UPDATE`, sessionID).Scan(&state); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		return fmt.Errorf("lock released session uid: %w", err)
+	}
+	if state == "freed" {
+		return nil
+	}
+	var active bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM runtime.turn_assignments ta
+			JOIN runtime.workflow_runs wr ON wr.id=ta.run_id
+			WHERE wr.session_id=$1 AND ta.state='active'
+		)`, sessionID).Scan(&active); err != nil {
+		return fmt.Errorf("check active session assignment: %w", err)
+	}
+	if active {
+		return ErrSessionUIDActive
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE runtime.session_uid_allocations
+		   SET state='freed', freed_at=now()
+		 WHERE session_id=$1 AND state='in_use'`, sessionID); err != nil {
 		return fmt.Errorf("release session uid: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("release session uid commit: %w", err)
 	}
 	return nil
 }

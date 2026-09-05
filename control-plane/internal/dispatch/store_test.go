@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
@@ -64,6 +66,13 @@ func requireLen1[T any](s []T) error {
 		return errors.New("expected exactly 1 element")
 	}
 	return nil
+}
+
+func mustAllocateTestSessionUID(t *testing.T, store *dispatch.Store, sessionID string) uint32 {
+	t.Helper()
+	uid, err := store.AllocateSessionUID(context.Background(), sessionID, 10000, 50000, 5*time.Minute)
+	require.NoError(t, err)
+	return uid
 }
 
 func TestStore_WorkspaceCapacityHysteresisIsDurable(t *testing.T) {
@@ -141,11 +150,13 @@ func TestStore_CreateAssignmentAndResolve(t *testing.T) {
 		VALUES ('ns/pool-1', 'pool-1', 'spiffe://iterabase.local/pools/pool-1/') RETURNING id::text`).Scan(&poolID))
 	identID := insertIdentity(t, pool, "ident-a")
 	runID, _, turnID := seedRunTurn(t, rt, pool, "sess-a")
+	uid := mustAllocateTestSessionUID(t, store, "sess-a")
 
 	in := dispatch.AssignmentInput{
 		TurnID: turnID, RunID: runID, PoolID: poolID, WorkerID: "worker-1",
 		FencingGeneration: 7, AttemptID: runID, ScopeIdentityID: identID,
-		AgentPoolKey: "ns/pool-1", ModelPermission: json.RawMessage(`{"id":"m1"}`),
+		AgentPoolKey: "ns/pool-1", SessionID: "sess-a", SandboxUID: uid, SandboxGID: uid,
+		ModelPermission: json.RawMessage(`{"id":"m1"}`),
 	}
 	a, err := store.CreateAssignment(ctx, in)
 	require.NoError(t, err)
@@ -173,6 +184,130 @@ func TestStore_CreateAssignmentAndResolve(t *testing.T) {
 	assert.ErrorIs(t, err, dispatch.ErrNotFound)
 }
 
+func TestStore_CreateAssignmentFailsClosedOnSessionUIDDrift(t *testing.T) {
+	store, rt, pool := newTestStore(t)
+	ctx := context.Background()
+	var poolID string
+	require.NoError(t, pool.QueryRow(ctx, `
+		INSERT INTO toolgateway.pools (key, name, spiffe_id_prefix)
+		VALUES ('ns/pool-1', 'pool-1', 'spiffe://iterabase.local/pools/pool-1/') RETURNING id::text`).Scan(&poolID))
+	identID := insertIdentity(t, pool, "ident-session-uid-drift")
+
+	inputFor := func(runID, turnID, sessionID string, uid, gid uint32) dispatch.AssignmentInput {
+		return dispatch.AssignmentInput{
+			TurnID: turnID, RunID: runID, PoolID: poolID, WorkerID: "worker-1",
+			FencingGeneration: 1, AttemptID: runID, ScopeIdentityID: identID, AgentPoolKey: "ns/pool-1",
+			SessionID: sessionID, SandboxUID: uid, SandboxGID: gid,
+		}
+	}
+
+	runMissing, _, turnMissing := seedRunTurn(t, rt, pool, "sess-missing")
+	_, err := store.CreateAssignment(ctx, inputFor(runMissing, turnMissing, "sess-missing", 10000, 10000))
+	assert.ErrorIs(t, err, dispatch.ErrSessionUIDUnavailable, "a missing durable allocation must not produce an assignment")
+
+	runMismatch, _, turnMismatch := seedRunTurn(t, rt, pool, "sess-mismatch")
+	uidMismatch := mustAllocateTestSessionUID(t, store, "sess-mismatch")
+	_, err = store.CreateAssignment(ctx, inputFor(runMismatch, turnMismatch, "wrong-session", uidMismatch, uidMismatch))
+	assert.ErrorIs(t, err, dispatch.ErrSessionIdentityMismatch, "the run and assigned session must agree")
+	_, err = store.CreateAssignment(ctx, inputFor(runMismatch, turnMismatch, "sess-mismatch", uidMismatch, uidMismatch+1))
+	assert.ErrorIs(t, err, dispatch.ErrSessionIdentityMismatch, "assigned UID and GID must be equal")
+	_, err = store.CreateAssignment(ctx, inputFor(runMismatch, turnMismatch, "sess-mismatch", uidMismatch+1, uidMismatch+1))
+	assert.ErrorIs(t, err, dispatch.ErrSessionIdentityMismatch, "the assigned UID must equal durable allocator authority")
+
+	runFreed, _, turnFreed := seedRunTurn(t, rt, pool, "sess-freed")
+	uidFreed := mustAllocateTestSessionUID(t, store, "sess-freed")
+	require.NoError(t, store.ReleaseSessionUID(ctx, "sess-freed"))
+	_, err = store.CreateAssignment(ctx, inputFor(runFreed, turnFreed, "sess-freed", uidFreed, uidFreed))
+	assert.ErrorIs(t, err, dispatch.ErrSessionUIDUnavailable, "a prematurely freed allocation must not produce an assignment")
+}
+
+func TestStore_ReleaseSessionUIDRefusesActiveAssignment(t *testing.T) {
+	store, rt, pool := newTestStore(t)
+	ctx := context.Background()
+	var poolID string
+	require.NoError(t, pool.QueryRow(ctx, `
+		INSERT INTO toolgateway.pools (key, name, spiffe_id_prefix)
+		VALUES ('ns/pool-1', 'pool-1', 'spiffe://iterabase.local/pools/pool-1/') RETURNING id::text`).Scan(&poolID))
+	identID := insertIdentity(t, pool, "ident-active-session")
+	runID, _, turnID := seedRunTurn(t, rt, pool, "sess-active")
+	uid := mustAllocateTestSessionUID(t, store, "sess-active")
+	_, err := store.CreateAssignment(ctx, dispatch.AssignmentInput{
+		TurnID: turnID, RunID: runID, PoolID: poolID, WorkerID: "worker-1",
+		FencingGeneration: 1, AttemptID: runID, ScopeIdentityID: identID, AgentPoolKey: "ns/pool-1",
+		SessionID: "sess-active", SandboxUID: uid, SandboxGID: uid,
+	})
+	require.NoError(t, err)
+
+	assert.ErrorIs(t, store.ReleaseSessionUID(ctx, "sess-active"), dispatch.ErrSessionUIDActive)
+	retained, err := store.SessionUID(ctx, "sess-active")
+	require.NoError(t, err)
+	assert.Equal(t, uid, retained, "an active assignment keeps its UID in use")
+
+	require.NoError(t, store.TerminalizeAssignment(ctx, turnID))
+	require.NoError(t, store.ReleaseSessionUID(ctx, "sess-active"))
+	_, err = store.SessionUID(ctx, "sess-active")
+	assert.ErrorIs(t, err, dispatch.ErrNotFound)
+}
+
+func TestStore_ConcurrentAssignmentsRetainDistinctSessionUIDs(t *testing.T) {
+	store, rt, pool := newTestStore(t)
+	ctx := context.Background()
+	var poolID string
+	require.NoError(t, pool.QueryRow(ctx, `
+		INSERT INTO toolgateway.pools (key, name, spiffe_id_prefix)
+		VALUES ('ns/pool-1', 'pool-1', 'spiffe://iterabase.local/pools/pool-1/') RETURNING id::text`).Scan(&poolID))
+	identID := insertIdentity(t, pool, "ident-concurrent-session")
+	type participant struct {
+		sessionID string
+		runID     string
+		turnID    string
+		workerID  string
+		uid       uint32
+		err       error
+	}
+	participants := []participant{{sessionID: "sess-concurrent-a", workerID: "worker-a"}, {sessionID: "sess-concurrent-b", workerID: "worker-b"}}
+	for index := range participants {
+		participants[index].runID, _, participants[index].turnID = seedRunTurn(t, rt, pool, participants[index].sessionID)
+	}
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for index := range participants {
+		wg.Add(1)
+		go func(p *participant) {
+			defer wg.Done()
+			<-start
+			p.uid, p.err = store.AllocateSessionUID(ctx, p.sessionID, 10000, 2, 5*time.Minute)
+			if p.err != nil {
+				return
+			}
+			_, p.err = store.CreateAssignment(ctx, dispatch.AssignmentInput{
+				TurnID: p.turnID, RunID: p.runID, PoolID: poolID, WorkerID: p.workerID,
+				FencingGeneration: 1, AttemptID: p.runID, ScopeIdentityID: identID, AgentPoolKey: "ns/pool-1",
+				SessionID: p.sessionID, SandboxUID: p.uid, SandboxGID: p.uid,
+			})
+		}(&participants[index])
+	}
+	close(start)
+	wg.Wait()
+	for _, participant := range participants {
+		require.NoError(t, participant.err)
+	}
+	require.NotEqual(t, participants[0].uid, participants[1].uid, "concurrent sessions must not collide")
+
+	var total, distinctUIDs, distinctWorkers int
+	require.NoError(t, pool.QueryRow(ctx, `
+		SELECT count(*), count(DISTINCT u.uid), count(DISTINCT ta.worker_id)
+		FROM runtime.turn_assignments ta
+		JOIN runtime.workflow_runs wr ON wr.id=ta.run_id
+		JOIN runtime.session_uid_allocations u ON u.session_id=wr.session_id AND u.state='in_use'
+		WHERE ta.attempt_id IN ($1,$2) AND ta.state='active'`, participants[0].runID, participants[1].runID).
+		Scan(&total, &distinctUIDs, &distinctWorkers))
+	assert.Equal(t, 2, total)
+	assert.Equal(t, 2, distinctUIDs)
+	assert.Equal(t, 2, distinctWorkers)
+}
+
 func TestStore_FenceAndTerminalize(t *testing.T) {
 	store, rt, pool := newTestStore(t)
 	ctx := context.Background()
@@ -182,9 +317,11 @@ func TestStore_FenceAndTerminalize(t *testing.T) {
 		VALUES ('ns/pool-1', 'pool-1', 'spiffe://iterabase.local/pools/pool-1/') RETURNING id::text`).Scan(&poolID))
 	identID := insertIdentity(t, pool, "ident-b")
 	runID, _, turnID := seedRunTurn(t, rt, pool, "sess-b")
+	uid := mustAllocateTestSessionUID(t, store, "sess-b")
 	_, err := store.CreateAssignment(ctx, dispatch.AssignmentInput{
 		TurnID: turnID, RunID: runID, PoolID: poolID, WorkerID: "worker-1",
 		FencingGeneration: 1, AttemptID: runID, ScopeIdentityID: identID, AgentPoolKey: "ns/pool-1",
+		SessionID: "sess-b", SandboxUID: uid, SandboxGID: uid,
 	})
 	require.NoError(t, err)
 
@@ -216,9 +353,11 @@ func TestStore_AppendTurnEventDedupAndWatermark(t *testing.T) {
 		VALUES ('ns/pool-1', 'pool-1', 'spiffe://iterabase.local/pools/pool-1/') RETURNING id::text`).Scan(&poolID))
 	identID := insertIdentity(t, pool, "ident-c")
 	runID, _, turnID := seedRunTurn(t, rt, pool, "sess-c")
+	uid := mustAllocateTestSessionUID(t, store, "sess-c")
 	_, err := store.CreateAssignment(ctx, dispatch.AssignmentInput{
 		TurnID: turnID, RunID: runID, PoolID: poolID, WorkerID: "worker-1",
 		FencingGeneration: 1, AttemptID: runID, ScopeIdentityID: identID, AgentPoolKey: "ns/pool-1",
+		SessionID: "sess-c", SandboxUID: uid, SandboxGID: uid,
 	})
 	require.NoError(t, err)
 
@@ -273,9 +412,11 @@ func TestStore_AppendAfterTerminalEventDedup(t *testing.T) {
 		VALUES ('ns/pool-1', 'pool-1', 'spiffe://iterabase.local/pools/pool-1/') RETURNING id::text`).Scan(&poolID))
 	identID := insertIdentity(t, pool, "ident-at")
 	runID, _, turnID := seedRunTurn(t, rt, pool, "sess-at")
+	uid := mustAllocateTestSessionUID(t, store, "sess-at")
 	_, err := store.CreateAssignment(ctx, dispatch.AssignmentInput{
 		TurnID: turnID, RunID: runID, PoolID: poolID, WorkerID: "worker-1",
 		FencingGeneration: 1, AttemptID: runID, ScopeIdentityID: identID, AgentPoolKey: "ns/pool-1",
+		SessionID: "sess-at", SandboxUID: uid, SandboxGID: uid,
 	})
 	require.NoError(t, err)
 	// Apply seq 1 while active, then fence (turn becomes non-active).
