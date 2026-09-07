@@ -175,10 +175,14 @@ func newGPUUpgradeClients(t *testing.T, state *permanentGPUFixtureState) gpuUpgr
 }
 
 func gpuUpgradePVC() *corev1.PersistentVolumeClaim {
+	storageClass := "iterabase-lvm-xfs"
+	volumeMode := corev1.PersistentVolumeFilesystem
 	return &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{Name: gpuUpgradeWorkloadName + "-cache", Namespace: gpuUpgradeNamespace},
 		Spec: corev1.PersistentVolumeClaimSpec{
-			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			StorageClassName: &storageClass,
+			VolumeMode:       &volumeMode,
 			Resources: corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{
 				corev1.ResourceStorage: resource.MustParse("1Gi"),
 			}},
@@ -568,6 +572,12 @@ func TestGPUUpgradePolicyReadinessAuthority(t *testing.T) {
 }
 
 func TestGPUUpgradeDeploymentSeparatesDisposableAndPersistentState(t *testing.T) {
+	pvc := gpuUpgradePVC()
+	if pvc.Spec.StorageClassName == nil || *pvc.Spec.StorageClassName != "iterabase-lvm-xfs" ||
+		pvc.Spec.VolumeMode == nil || *pvc.Spec.VolumeMode != corev1.PersistentVolumeFilesystem ||
+		len(pvc.Spec.AccessModes) != 1 || pvc.Spec.AccessModes[0] != corev1.ReadWriteOnce {
+		t.Fatalf("GPU transition cache does not use the exact general LVM claim contract: %+v", pvc.Spec)
+	}
 	deployment := gpuUpgradeDeployment("test-run")
 	pod := deployment.Spec.Template.Spec
 	if pod.RuntimeClassName == nil || *pod.RuntimeClassName != "nvidia" {

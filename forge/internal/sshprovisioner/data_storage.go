@@ -14,7 +14,6 @@ import (
 const (
 	dataStorageContractVersion = "HOR-545/v2"
 	dataStorageReceiptPath     = "/var/lib/iterabase/data-storage.receipt"
-	k3sKubeletDirectory        = "/var/lib/rancher/k3s/agent/kubelet"
 	lvmReportPairParser        = `awk -F'|' '{for(i=1;i<=2;i++){gsub(/^[[:space:]]+|[[:space:]]+$/, "", $i)}; print $1 "|" $2}'`
 )
 

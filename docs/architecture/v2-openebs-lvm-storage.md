@@ -35,7 +35,7 @@ An installed K3s whose service does not include `--disable local-storage` is imm
 - URL: `https://openebs.github.io/lvm-localpv/lvm-localpv-1.10.0.tgz`;
 - SHA-256: `3ad766c56d4a0ab0f3f2baaeb726a4554d1f51bb485f1cef00846cf1d82a179d`.
 
-`.github/inputs/remote-content.json` is authority for that archive and every runtime image digest. The companion disables analytics and CSI snapshot API/controller exposure, pins all unavoidable upstream controller/node sidecars by digest, configures `/var/lib/rancher/k3s/agent/kubelet`, and enables only the LVM LocalPV CRDs/runtime needed for provisioning and VG discovery. Snapshot/backup/restore is not a supported product API.
+`.github/inputs/remote-content.json` is authority for that archive and every runtime image digest. The companion disables analytics and CSI snapshot API/controller exposure, pins all unavoidable upstream controller/node sidecars by digest, configures K3s's actual `/var/lib/kubelet` CSI registration/mount root, and enables only the LVM LocalPV CRDs/runtime needed for provisioning and VG discovery. Snapshot/backup/restore is not a supported product API.
 
 Forge applies certificate substrate, LVM substrate, then platform. It waits boundedly for LVM CRDs, controller, node DaemonSet, `local.csi.openebs.io`, the exact one-node CSINode registration and topology keys, both classes, and one LVMNode reporting receipt-matching `iterabase-data`. Any local-path/default class, missing/extra class, contradictory VG, or unavailable controller/node/CSI authority fails closed.
 
