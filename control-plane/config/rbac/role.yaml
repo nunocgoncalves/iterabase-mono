@@ -46,6 +46,15 @@ rules:
   - update
   - watch
 - apiGroups:
+  - local.openebs.io
+  resources:
+  - lvmnodes
+  - lvmvolumes
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
   - networking.k8s.io
   resources:
   - networkpolicies

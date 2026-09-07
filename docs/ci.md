@@ -131,12 +131,13 @@ substrate: Kind reports the imported manifest digest in Pod `imageID`, while
 K3s reports the already-verified image config digest. The Forge assertion binds
 that config identity to the same tag-to-manifest mapping established during
 import; config and manifest digests are never compared as interchangeable.
-Harness-bearing Kind DAGs additionally establish their AgentPool storage
-substrate after platform-default claims bind and before worker creation. The
-shared helper applies and verifies the Forge-owned non-default,
-parameter-free `iterabase-agentpool-local-path` contract and dedicated
-synthetic path; using Kind's default local-path class is not an accepted
-fallback in any fixture mode.
+Harness-bearing Kind DAGs additionally establish storage before platform data
+claims or worker creation. The shared helper removes Kind's local-path/default
+fallback, creates a real loop-backed thick `iterabase-data` VG in the one
+privileged node, installs the exact composed `lvm-storage-substrate`, and waits
+for OpenEBS CRD/controller/node/CSI/VG discovery plus both exact classes.
+`iterabase-agentpool-lvm-xfs` is then used only by AgentPools; every chart data
+claim explicitly uses `iterabase-lvm-xfs`.
 
 ## Strict scenario results
 
@@ -180,7 +181,7 @@ or any host contact. Fork pull requests use `pull_request`, never
 The authenticated security audit additionally requires exactly the two
 fixture-scoped SSH secrets and rejects alternate provider or credential authority.
 Only then does execution bind founder-configured variables and one key to a fixed
-address, SSH user, pinned host key, and exact workspace device. Missing authority,
+address, SSH user, pinned host key, and exact selected data-storage device. Missing authority,
 credentials, connectivity, reboot/purge, or identity fails with diagnostics and
 never becomes a skip.
 
@@ -192,7 +193,7 @@ static, unit, fresh F2 Kind/browser, and other non-fixture exact-head work retai
 safe parallelism.
 
 Every selected scenario starts and ends with `forge destroy
---purge-workspace --reboot --yes`. The harness proves SSH disconnect/reconnect,
+--purge-data-storage --reboot --yes`. The harness proves SSH disconnect/reconnect,
 a changed boot ID, blank authorized workspace state, absence of stale K3s/run
 state, and strict host-key verification. GPU readiness remains at the
 NFD-published node-label/operator boundary: Forge pins the GPU Operator v26.3.3
@@ -200,7 +201,7 @@ subchart to the compatible NFD v0.19.0 image and a 30-second master full-resync
 period, then requires the rendered image/argument and the normal operator/node
 readiness evidence. GPU execution also validates the separate `/data/hf-cache`
 volume and the model authority in
-`forge/test/e2e/model-cache.json`; workspace purge never targets that device.
+`forge/test/e2e/model-cache.json`; data-storage purge never targets that device.
 Actions has no provider API credential. An SSH-unrecoverable fixture stops F3
 until founder-operated provider quarantine/recovery restores the documented
 baseline.

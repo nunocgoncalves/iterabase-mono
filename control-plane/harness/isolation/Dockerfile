@@ -6,7 +6,7 @@
 # per-session children. Production likewise renders the trusted supervisor as
 # root, retaining runtime-default capabilities plus explicit SETUID/SETGID.
 #
-# This is the HOR-381 isolation gate (bullets 1-5). Bullets 6-7 (RWO local-path
+# This is the HOR-381 isolation gate (bullets 1-5). Bullets 6-7 (same-node OpenEBS LVM RWO
 # cross-pod ownership + Pod Security admission) are HOR-245's gate.
 # Run: make harness-isolation-test
 

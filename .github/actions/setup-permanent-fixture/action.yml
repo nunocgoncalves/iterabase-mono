@@ -70,7 +70,7 @@ runs:
           printf 'FORGE_E2E_FIXTURE_SSH_USER=%s\n' "$SSH_USER"
           printf 'FORGE_E2E_FIXTURE_SSH_KEY_PATH=%s\n' "$key"
           printf 'FORGE_E2E_FIXTURE_SSH_HOST_KEY=%s\n' "$SSH_HOST_KEY"
-          printf 'FORGE_E2E_FIXTURE_WORKSPACE_DEVICE=%s\n' "$WORKSPACE_DEVICE"
+          printf 'FORGE_E2E_FIXTURE_DATA_STORAGE_DEVICES=%s\n' "$WORKSPACE_DEVICE"
           printf 'FORGE_E2E_MODEL_CACHE_DEVICE=%s\n' "$MODEL_CACHE_DEVICE"
           printf 'FORGE_E2E_MODEL_CACHE_UUID=%s\n' "$MODEL_CACHE_UUID"
         } >> "$GITHUB_ENV"

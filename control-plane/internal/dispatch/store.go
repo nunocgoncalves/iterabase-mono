@@ -724,11 +724,9 @@ func (s *Store) ReleaseSessionUID(ctx context.Context, sessionID string) error {
 	return nil
 }
 
-// WorkspaceCapacityState is the durable installation-wide hysteresis state for
-// the one Forge-owned AgentPool workspace filesystem (HOR-538). Dispatch uses
-// it as the authority across every pool and worker process; a missing prior
-// observation starts gated and may reopen only at/above 25 percent.
+// WorkspaceCapacityState is one AgentPool PVC's durable hysteresis state.
 type WorkspaceCapacityState struct {
+	PoolID        string
 	Observed      bool
 	FreeBytes     uint64
 	CapacityBytes uint64
@@ -738,50 +736,70 @@ type WorkspaceCapacityState struct {
 	ObservedAt    *time.Time
 }
 
-// LoadWorkspaceCapacityState restores the durable gate before dispatch accepts
-// worker streams. Failure prevents startup so a process restart cannot reopen
-// credit in the hysteresis band.
-func (s *Store) LoadWorkspaceCapacityState(ctx context.Context) (WorkspaceCapacityState, error) {
-	return scanWorkspaceCapacityState(s.pool.QueryRow(ctx, `
-		SELECT observed, free_bytes, capacity_bytes, free_ratio, warning, credit_gated, observed_at
-		FROM runtime.workspace_capacity_state WHERE singleton = true`))
+// LoadWorkspaceCapacityStates restores every observed pool gate before dispatch
+// accepts worker streams. Pools with no row start fail-closed in memory.
+func (s *Store) LoadWorkspaceCapacityStates(ctx context.Context) (map[string]WorkspaceCapacityState, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT s.pool_id::text, s.observed, s.free_bytes, s.capacity_bytes, s.free_ratio, s.warning, s.credit_gated, s.observed_at
+		FROM runtime.workspace_capacity_state s
+		JOIN toolgateway.pools p ON p.id = s.pool_id
+		WHERE p.deleted_at IS NULL`)
+	if err != nil {
+		return nil, fmt.Errorf("read durable workspace capacity states: %w", err)
+	}
+	defer rows.Close()
+	states := map[string]WorkspaceCapacityState{}
+	for rows.Next() {
+		state, err := scanWorkspaceCapacityState(rows)
+		if err != nil {
+			return nil, err
+		}
+		states[state.PoolID] = state
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read durable workspace capacity states: %w", err)
+	}
+	return states, nil
 }
 
-// ObserveWorkspaceCapacity serializes one validated actual-filesystem
-// observation through Postgres. The prior credit_gated value is retained in
-// the 20-25 percent band, making hysteresis deterministic across pools,
-// replacement workers, and dispatch restarts.
-func (s *Store) ObserveWorkspaceCapacity(ctx context.Context, free, capacity uint64, ratio float64) (WorkspaceCapacityState, error) {
+// ObserveWorkspaceCapacity serializes one validated AgentPool-PVC observation.
+// Each pool retains its own 20-25 percent hysteresis across replacement workers
+// and dispatch restarts; a first in-band observation starts gated.
+func (s *Store) ObserveWorkspaceCapacity(ctx context.Context, poolID string, free, capacity uint64, ratio float64) (WorkspaceCapacityState, error) {
 	if free > math.MaxInt64 || capacity > math.MaxInt64 {
 		return WorkspaceCapacityState{}, fmt.Errorf("workspace capacity exceeds durable bigint range")
 	}
 	row := s.pool.QueryRow(ctx, `
-		UPDATE runtime.workspace_capacity_state
+		INSERT INTO runtime.workspace_capacity_state
+			(pool_id, observed, free_bytes, capacity_bytes, free_ratio, warning, credit_gated, observed_at)
+		VALUES ($1::uuid, true, $2::bigint, $3::bigint, $4::double precision,
+		        $4::double precision < 0.25::double precision,
+		        $4::double precision < 0.25::double precision, now())
+		ON CONFLICT (pool_id) DO UPDATE
 		SET observed = true,
-		    free_bytes = $1::bigint,
-		    capacity_bytes = $2::bigint,
-		    free_ratio = $3::double precision,
-		    warning = $3::double precision < 0.25::double precision,
+		    free_bytes = EXCLUDED.free_bytes,
+		    capacity_bytes = EXCLUDED.capacity_bytes,
+		    free_ratio = EXCLUDED.free_ratio,
+		    warning = EXCLUDED.warning,
 		    credit_gated = CASE
-		      WHEN $3::double precision <= 0.20::double precision THEN true
-		      WHEN $3::double precision >= 0.25::double precision THEN false
-		      ELSE credit_gated
+		      WHEN EXCLUDED.free_ratio <= 0.20::double precision THEN true
+		      WHEN EXCLUDED.free_ratio >= 0.25::double precision THEN false
+		      ELSE runtime.workspace_capacity_state.credit_gated
 		    END,
 		    observed_at = now()
-		WHERE singleton = true
-		RETURNING observed, free_bytes, capacity_bytes, free_ratio, warning, credit_gated, observed_at`,
-		int64(free), int64(capacity), ratio)
+		RETURNING pool_id::text, observed, free_bytes, capacity_bytes, free_ratio, warning, credit_gated, observed_at`,
+		poolID, int64(free), int64(capacity), ratio)
 	return scanWorkspaceCapacityState(row)
 }
 
 func scanWorkspaceCapacityState(row pgx.Row) (WorkspaceCapacityState, error) {
 	var state WorkspaceCapacityState
 	var free, capacity int64
-	if err := row.Scan(&state.Observed, &free, &capacity, &state.FreeRatio, &state.Warning, &state.CreditGated, &state.ObservedAt); err != nil {
+	if err := row.Scan(&state.PoolID, &state.Observed, &free, &capacity, &state.FreeRatio, &state.Warning, &state.CreditGated, &state.ObservedAt); err != nil {
 		return WorkspaceCapacityState{}, fmt.Errorf("read durable workspace capacity state: %w", err)
 	}
-	if free < 0 || capacity < 0 {
-		return WorkspaceCapacityState{}, fmt.Errorf("durable workspace capacity state contains negative bytes")
+	if state.PoolID == "" || free < 0 || capacity < 0 {
+		return WorkspaceCapacityState{}, fmt.Errorf("durable workspace capacity state contains an invalid pool or byte count")
 	}
 	state.FreeBytes = uint64(free)
 	state.CapacityBytes = uint64(capacity)

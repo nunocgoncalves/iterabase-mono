@@ -127,7 +127,7 @@ func candidateOverlayValues(t *testing.T) string {
 	inference := imageValues("INFERENCE_GATEWAY_IMAGE_REPO", "INFERENCE_GATEWAY_IMAGE_TAG", inferenceGatewayDigestEnv, "    ")
 
 	// Storage has no overlay-selectable backend, class, path, or access mode.
-	// Forge reconciles the fixed dedicated local-path substrate before Helm.
+	// Forge reconciles the fixed receipt-bound LVM storage substrate before Helm.
 	var values strings.Builder
 	values.WriteString("\n# Forge real-machine fixture values.\n")
 	values.WriteString("control-plane:\n  dispatch:\n    enabled: true\n    defaultModel:\n      id: forge-workspace-model\n      api: openai-completions\n")

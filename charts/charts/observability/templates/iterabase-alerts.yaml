@@ -148,22 +148,22 @@ spec:
     - name: iterabase-storage
       rules:
         - alert: IterabaseWorkspaceCapacityWarning
-          expr: min by (namespace,pod) (control_plane_dispatch_workspace_free_ratio) < 0.25
+          expr: min by (namespace,pod,pool) (control_plane_dispatch_workspace_free_ratio) < 0.25
           for: 5m
           labels: {severity: warning, component: storage}
           annotations:
-            summary: "AgentPool workspace filesystem is below 25% free"
-            description: "Actual available blocks on the dedicated workspace filesystem crossed the capacity warning threshold."
-            first_action: "Pause avoidable growth, inspect workspace free bytes and largest eligible session data, then add customer-owned capacity through an explicit replacement/migration plan."
+            summary: "AgentPool PVC is below 25% free"
+            description: "Actual available blocks on one AgentPool XFS PVC crossed the capacity warning threshold."
+            first_action: "Pause avoidable growth, inspect the named pool PVC and largest eligible session data, then free customer-approved data or plan a new clean-install capacity set; no online extension or fallback exists."
             runbook_url: {{ printf "%s#iterabaseworkspacecapacitywarning" $runbook | quote }}
         - alert: IterabaseWorkspaceCreditGated
-          expr: max by (namespace,pod) (control_plane_dispatch_workspace_credit_gated) == 1
+          expr: max by (namespace,pod,pool) (control_plane_dispatch_workspace_credit_gated) == 1
           for: 1m
           labels: {severity: critical, component: storage}
           annotations:
             summary: "Fresh AgentPool dispatch credit is gated by workspace capacity"
-            description: "Actual workspace free space is at or below 20%, or has not yet recovered to the 25% reopen threshold. Active turns are not aborted solely by this gate."
-            first_action: "Keep fresh work closed, inspect exact free bytes/ratio and customer capacity response, and reopen only after the metric reaches at least 25%."
+            description: "The named AgentPool PVC is at or below 20% free, or has not yet recovered to the 25% reopen threshold. Active turns are not aborted solely by this gate and unrelated pools remain independently eligible."
+            first_action: "Keep fresh work for this pool closed, inspect its exact PVC free bytes/ratio and customer capacity response, and reopen only after the metric reaches at least 25%."
             runbook_url: {{ printf "%s#iterabaseworkspacecreditgated" $runbook | quote }}
         - alert: IterabaseWorkspaceStorageIOFailure
           expr: sum by (namespace,pod) (increase(control_plane_harness_storage_checks_total{result="fail"}[10m])) > 0
@@ -172,8 +172,26 @@ spec:
           annotations:
             summary: "AgentPool workspace I/O health transaction failed"
             description: "A real write/fsync/rename/unlink or zero-space check failed; the worker fences its active turn and exits rather than replaying it."
-            first_action: "Inspect the exact receipt-matching ext4/XFS mount source/type/options/ownership, node and disk I/O, free blocks, PVC/PV path, and worker-loss evidence before replacement."
+            first_action: "Inspect the exact AgentPool XFS PVC, OpenEBS LVMVolume/PV/node topology, ownership, node I/O, free blocks, and worker-loss evidence before replacement."
             runbook_url: {{ printf "%s#iterabaseworkspacestorageiofailure" $runbook | quote }}
+        - alert: IterabaseDataVGCapacityWarning
+          expr: min by (namespace,pod,name) (lvm_vg_free_size_bytes{name="iterabase-data"} / lvm_vg_total_size_bytes{name="iterabase-data"}) < 0.25
+          for: 5m
+          labels: {severity: warning, component: storage}
+          annotations:
+            summary: "iterabase-data volume group is below 25% free"
+            description: "Aggregate thick-LV capacity is low and a new PVC may fail even when an existing AgentPool PVC remains healthy."
+            first_action: "Inspect iterabase-data free bytes, requested pending claims, LVMVolumes, and released claim cleanup; do not extend, thin-provision, or fall back to root storage."
+            runbook_url: {{ printf "%s#iterabasedatavgcapacitywarning" $runbook | quote }}
+        - alert: IterabaseLVMClaimPending
+          expr: kube_persistentvolumeclaim_status_phase{phase="Pending"} * on(namespace,persistentvolumeclaim) group_left(storageclass) kube_persistentvolumeclaim_info{storageclass=~"iterabase-(agentpool-)?lvm-xfs"} == 1
+          for: 10m
+          labels: {severity: critical, component: storage}
+          annotations:
+            summary: "Managed OpenEBS LVM claim remains pending"
+            description: "A managed thick XFS claim did not bind; aggregate VG exhaustion, CSI/VG discovery, topology, or consumer scheduling may be blocking provisioning."
+            first_action: "Inspect claim events, OpenEBS controller/node pods, LVMNode and LVMVolume state, iterabase-data free capacity, and the scheduled consumer; never create a default/root fallback."
+            runbook_url: {{ printf "%s#iterabaselvmclaimpending" $runbook | quote }}
 
     - name: iterabase-execution
       rules:
@@ -211,7 +229,7 @@ spec:
           annotations:
             summary: "An AgentPool worker lost dedicated workspace storage I/O"
             description: "The supervisor failed its fsync/rename/unlink storage transaction and removed dispatch readiness."
-            first_action: "Inspect the AgentPool StorageReady condition, fixed class/PVC/PV path, dedicated receipt-matching ext4/XFS mount identity, actual free-space gate, and node events before allowing fresh workers."
+            first_action: "Inspect the AgentPool StorageReady condition, exact class/PVC/CSI-PV/LVMVolume/LVMNode identity, XFS mount ownership, per-pool free-space gate, and node events before allowing fresh workers."
             runbook_url: {{ printf "%s#iterabaseharnessstorageunavailable" $runbook | quote }}
         - alert: IterabaseHarnessReplayBacklog
           expr: control_plane_harness_pending_replays > 0

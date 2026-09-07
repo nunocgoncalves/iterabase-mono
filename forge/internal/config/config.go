@@ -23,16 +23,12 @@ const (
 	RoleControlPlaneWorker = "control-plane+worker"
 	RoleControlPlane       = "control-plane"
 	RoleWorker             = "worker"
-
-	WorkspaceFilesystemAuto = "auto"
-	WorkspaceFilesystemExt4 = "ext4"
-	WorkspaceFilesystemXFS  = "xfs"
 )
 
 var (
-	nameRe               = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
-	workspacePartitionRe = regexp.MustCompile(`-part[0-9]+$`)
-	contentSHA256Re      = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	nameRe                 = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
+	dataStoragePartitionRe = regexp.MustCompile(`-part[0-9]+$`)
+	contentSHA256Re        = regexp.MustCompile(`^[0-9a-f]{64}$`)
 )
 
 // Cluster is the top-level forge.yaml document.
@@ -50,59 +46,44 @@ type Metadata struct {
 
 // Spec is the cluster substrate specification.
 type Spec struct {
-	Mode               string             `yaml:"mode"`
-	Hosts              []Host             `yaml:"hosts"`
-	K3s                K3s                `yaml:"k3s"`
-	Flux               Flux               `yaml:"flux"`
-	Overlay            Overlay            `yaml:"overlay"`
-	Chart              Chart              `yaml:"chart"`
-	GPU                GPU                `yaml:"gpu"`
-	AgentPoolWorkspace AgentPoolWorkspace `yaml:"agentPoolWorkspace"`
+	Mode        string      `yaml:"mode"`
+	Hosts       []Host      `yaml:"hosts"`
+	K3s         K3s         `yaml:"k3s"`
+	Flux        Flux        `yaml:"flux"`
+	Overlay     Overlay     `yaml:"overlay"`
+	Chart       Chart       `yaml:"chart"`
+	GPU         GPU         `yaml:"gpu"`
+	DataStorage DataStorage `yaml:"dataStorage"`
 }
 
-// AgentPoolWorkspace selects the one dedicated whole disk Forge prepares for
-// AgentPool session workspaces. The stable by-id value is the sole first-format
-// authorization; forge apply never auto-selects or substitutes another device.
-type AgentPoolWorkspace struct {
-	Device     string `yaml:"device"`
-	Filesystem string `yaml:"filesystem"`
+// DataStorage selects the immutable set of blank whole disks Forge prepares as
+// the fixed iterabase-data volume group. The canonical by-id list is the sole
+// first-write authorization; forge apply never discovers or substitutes media.
+type DataStorage struct {
+	Devices []string `yaml:"devices"`
 }
 
-func (w *AgentPoolWorkspace) applyDefaults() {
-	if w.Filesystem == "" {
-		w.Filesystem = WorkspaceFilesystemAuto
+func (s DataStorage) validate() error {
+	if len(s.Devices) == 0 {
+		return fmt.Errorf("dataStorage.devices must contain at least one stable whole-disk identity")
 	}
-}
-
-// ResolveWorkspaceFilesystem applies the approved deterministic auto policy.
-// Only a reliable, exact NVMe transport observation selects XFS; every other
-// transport (including empty/unknown and virtual transports) selects ext4.
-func ResolveWorkspaceFilesystem(selection, transport string) (string, error) {
-	switch selection {
-	case WorkspaceFilesystemAuto:
-		if strings.EqualFold(strings.TrimSpace(transport), "nvme") {
-			return WorkspaceFilesystemXFS, nil
+	seen := make(map[string]struct{}, len(s.Devices))
+	for i, device := range s.Devices {
+		if !strings.HasPrefix(device, "/dev/disk/by-id/") || strings.Contains(strings.TrimPrefix(device, "/dev/disk/by-id/"), "/") {
+			return fmt.Errorf("dataStorage.devices[%d] %q must be one stable /dev/disk/by-id/<identity> whole-disk path", i, device)
 		}
-		return WorkspaceFilesystemExt4, nil
-	case WorkspaceFilesystemExt4, WorkspaceFilesystemXFS:
-		return selection, nil
-	default:
-		return "", fmt.Errorf("agentPoolWorkspace.filesystem %q is invalid (expected auto|ext4|xfs)", selection)
+		if strings.ContainsAny(device, " \t\r\n") || dataStoragePartitionRe.MatchString(device) {
+			return fmt.Errorf("dataStorage.devices[%d] %q must identify a whole disk, not a partition or volatile path", i, device)
+		}
+		if _, ok := seen[device]; ok {
+			return fmt.Errorf("dataStorage.devices contains duplicate identity %q", device)
+		}
+		seen[device] = struct{}{}
+		if i > 0 && s.Devices[i-1] > device {
+			return fmt.Errorf("dataStorage.devices must use canonical lexical order; order-only drift is refused")
+		}
 	}
-}
-
-func (w AgentPoolWorkspace) validate() error {
-	if w.Device == "" {
-		return fmt.Errorf("agentPoolWorkspace.device is required")
-	}
-	if !strings.HasPrefix(w.Device, "/dev/disk/by-id/") || strings.Contains(strings.TrimPrefix(w.Device, "/dev/disk/by-id/"), "/") {
-		return fmt.Errorf("agentPoolWorkspace.device %q must be one stable /dev/disk/by-id/<identity> whole-disk path", w.Device)
-	}
-	if strings.ContainsAny(w.Device, " \t\r\n") || workspacePartitionRe.MatchString(w.Device) {
-		return fmt.Errorf("agentPoolWorkspace.device %q must identify a whole disk, not a partition or volatile path", w.Device)
-	}
-	_, err := ResolveWorkspaceFilesystem(w.Filesystem, "")
-	return err
+	return nil
 }
 
 // Host describes a single target VM/host.
@@ -225,7 +206,7 @@ func (o Overlay) validate() error {
 // Chart is the platform umbrella chart pull pointer. An empty Version means
 // the chart phase is skipped (k3s-only). Defaults are applied in Validate.
 type Chart struct {
-	Repository string `yaml:"repository"` // OCI URL ending /iterabase-platform; Forge installs the same-version /cert-manager-substrate companion first
+	Repository string `yaml:"repository"` // OCI URL ending /iterabase-platform; Forge installs same-version certificate and LVM-storage companions first
 	Version    string `yaml:"version"`    // chart version (semver) to install; empty => skip chart
 	Release    string `yaml:"release"`    // helm release name (default: metadata.name)
 	Namespace  string `yaml:"namespace"`  // target namespace (default: iterabase-system)
@@ -392,7 +373,6 @@ func (c *Cluster) Validate() error {
 	}
 	c.Spec.Chart.applyDefaults(c.Metadata.Name)
 	c.Spec.GPU.applyDefaults(c.Metadata.Name)
-	c.Spec.AgentPoolWorkspace.applyDefaults()
 	c.Spec.Overlay.applyDefaults()
 	c.Spec.Flux.applyDefaults()
 	return c.Spec.validate()
@@ -417,7 +397,7 @@ func (s *Spec) validate() error {
 	if err := s.GPU.validate(s.Mode); err != nil {
 		return err
 	}
-	if err := s.AgentPoolWorkspace.validate(); err != nil {
+	if err := s.DataStorage.validate(); err != nil {
 		return err
 	}
 	if err := s.Overlay.validate(); err != nil {
@@ -466,6 +446,14 @@ func (t Taint) validate() error {
 }
 
 func (k K3s) validate() error {
+	for _, arg := range k.ExtraArgs {
+		if arg == "--disable" || strings.HasPrefix(arg, "--disable=") {
+			return fmt.Errorf("k3s.extraArgs must not override component disablement; use k3s.disable (local-storage is always disabled)")
+		}
+		if arg == "--data-dir" || strings.HasPrefix(arg, "--data-dir=") || strings.Contains(arg, "kubelet-arg=root-dir") {
+			return fmt.Errorf("k3s.extraArgs must not change the fixed K3s data/kubelet directory required by the LVM storage substrate")
+		}
+	}
 	if k.Version == "" {
 		return fmt.Errorf("k3s.version is required")
 	}

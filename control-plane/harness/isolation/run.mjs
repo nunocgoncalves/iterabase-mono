@@ -52,15 +52,15 @@ function prepareFreshFilesystem() {
   sh(`mkdir -p ${MOUNT}`);
   sh(`truncate -s 512M ${IMAGE}`);
   if (FILESYSTEM === "ext4") {
-    sh(`mkfs.ext4 -q -F -L iterabase-ws ${IMAGE}`);
+    sh(`mkfs.ext4 -q -F -L iterabase-ci ${IMAGE}`);
   } else {
-    sh(`mkfs.xfs -q -f -L iterabase-ws ${IMAGE}`);
+    sh(`mkfs.xfs -q -f -L iterabase-ci ${IMAGE}`);
   }
   sh(`mount -o loop ${IMAGE} ${MOUNT}`);
   const actual = execSync(`findmnt -n -o FSTYPE --target ${MOUNT}`, { encoding: "utf8" }).trim();
   if (actual !== FILESYSTEM) throw new Error(`mounted filesystem ${actual}, want ${FILESYSTEM}`);
   const label = execSync(`blkid -s LABEL -o value ${IMAGE}`, { encoding: "utf8" }).trim();
-  if (label !== "iterabase-ws") throw new Error(`filesystem label ${label}, want iterabase-ws`);
+  if (label !== "iterabase-ci") throw new Error(`filesystem label ${label}, want iterabase-ci`);
 }
 
 function setup() {

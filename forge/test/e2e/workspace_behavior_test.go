@@ -73,13 +73,13 @@ rm -f %[1]s
 	output, applyErr := runForgeE(state.forgeBin, state.forgeHome, "apply", "--config", cfg,
 		"--skip-chart", "--skip-gpu", "--skip-overlay", "--skip-secrets", "--skip-flux")
 	if applyErr == nil {
-		t.Fatalf("Forge formatted a process-held raw workspace disk:\n%s", output)
+		t.Fatalf("Forge created a PV on a process-held raw data disk:\n%s", output)
 	}
 	if !strings.Contains(output, "held open as a raw block device") {
 		t.Fatalf("process-held raw workspace refusal was not actionable:\n%s", output)
 	}
 	unchanged := mustSSHOutput(t, client, fmt.Sprintf(`sudo bash -ceu '
-test ! -e /var/lib/iterabase/agentpool-workspace.receipt
+test ! -e /var/lib/iterabase/data-storage.receipt
 test ! -e /etc/rancher/k3s/k3s.yaml
 set +e
 signature=$(blkid -p -s TYPE -o value -- %s 2>&1)
@@ -265,15 +265,24 @@ func exerciseActiveWorkspaceCapacityStage(t *testing.T, state *digitalOceanCPUSt
 		t.Fatalf("ssh dial %s: %v", state.ip, err)
 	}
 	defer client.Close()
-	const filler = "/var/lib/iterabase/agentpool-workspaces/.forge-e2e-capacity-fill"
-	removeFiller := func() { _, _ = sshOutput(client, "sudo rm -f "+filler+" && sync") }
+	const filler = "/data/sandboxes/.forge-e2e-capacity-fill"
+	removeFiller := func() {
+		_, _ = sshOutput(client, `pod=$(sudo k3s kubectl get pods -n iterabase-system -l platform.iterabase.com/agentpool=forge-storage-pool -o jsonpath='{.items[0].metadata.name}'); sudo k3s kubectl exec -n iterabase-system "$pod" -- bash -ceu 'rm -f /data/sandboxes/.forge-e2e-capacity-fill && sync'`)
+	}
 	defer removeFiller()
 
-	active := startWorkspaceWork(t, baseURL, state.workspaceWorkKey, "e2e/forge-workspace-capacity", "Active turn across capacity floor", "hor-538-capacity-active")
+	active := startWorkspaceWork(t, baseURL, state.workspaceWorkKey, "e2e/forge-workspace-capacity", "Active turn across capacity floor", "hor-545-capacity-active")
 	waitWorkspaceModelCapacity(t, modelURL, 1, 2*time.Minute)
 	waitWorkspaceDatabaseValue(t, cluster, state, fmt.Sprintf(`SELECT count(*) FROM runtime.turn_assignments WHERE attempt_id='%s' AND state='active'`, active.CurrentAttemptID), "1", time.Minute)
 	setWorkspaceFreeTarget(t, client, filler, 19)
 	waitWorkspaceGate(t, client, true, storageReasonWorkspaceCapacityGatedE2E, 3*time.Minute)
+	otherMetrics := mustSSHOutput(t, client, `pod=$(sudo k3s kubectl get pods -n iterabase-system -l platform.iterabase.com/agentpool=forge-storage-pool-b -o jsonpath='{.items[0].metadata.name}'); sudo k3s kubectl get --raw "/api/v1/namespaces/iterabase-system/pods/$pod:8081/proxy/metrics"`)
+	if !strings.Contains(otherMetrics, "control_plane_harness_workspace_credit_gated 0") {
+		t.Fatalf("filling one AgentPool PVC gated the separate pool:\n%s", otherMetrics)
+	}
+	if rows := workspaceDatabaseQuery(t, cluster, state, `SELECT count(*) FROM runtime.workspace_capacity_state WHERE observed`); rows != "2" {
+		t.Fatalf("per-pool durable capacity rows=%s want=2", rows)
+	}
 
 	// The model request remains deliberately blocked while the actual filesystem
 	// crosses the floor. The threshold alone must not terminalize/fence it.
@@ -289,7 +298,7 @@ func exerciseActiveWorkspaceCapacityStage(t *testing.T, state *digitalOceanCPUSt
 	status, _ := workspaceAPIRequest(t, modelURL, "", http.MethodPost, "/release/capacity", nil, nil)
 	requireWorkspaceStatus(t, status, http.StatusNoContent)
 	active = waitWorkspaceWorkState(t, baseURL, state.workspaceWorkKey, active.ID, "done", 4*time.Minute)
-	queued := startWorkspaceWork(t, baseURL, state.workspaceWorkKey, "e2e/forge-workspace-capacity", "Queued while workspace gated", "hor-538-capacity-queued")
+	queued := startWorkspaceWork(t, baseURL, state.workspaceWorkKey, "e2e/forge-workspace-capacity", "Queued while workspace gated", "hor-545-capacity-queued")
 	time.Sleep(15 * time.Second)
 	if got := workspaceDatabaseQuery(t, cluster, state, fmt.Sprintf(`SELECT count(*) FROM runtime.turn_assignments WHERE attempt_id='%s'`, queued.CurrentAttemptID)); got != "0" {
 		t.Fatalf("fresh assignment escaped the <=20%% capacity gate: assignments=%s", got)
@@ -310,6 +319,103 @@ func exerciseActiveWorkspaceCapacityStage(t *testing.T, state *digitalOceanCPUSt
 	_ = waitWorkspaceWorkState(t, baseURL, state.workspaceWorkKey, queued.ID, "done", 4*time.Minute)
 }
 
+func exerciseAggregateVGCapacityStage(t *testing.T, state *digitalOceanCPUState) {
+	t.Helper()
+	client, err := sshDial(state.ip, state.privKeyPath)
+	if err != nil {
+		t.Fatalf("ssh dial %s: %v", state.ip, err)
+	}
+	defer client.Close()
+	before := strings.Fields(strings.TrimSpace(mustSSHOutput(t, client, `sudo vgs --noheadings --units b --nosuffix -o vg_free,lv_count iterabase-data | awk '{$1=$1;printf "%.0f %s",$1,$2}'`)))
+	if len(before) != 2 {
+		t.Fatalf("aggregate VG baseline is malformed: %v", before)
+	}
+	free, err := strconv.ParseUint(before[0], 10, 64)
+	if err != nil || free < 2<<30 {
+		t.Fatalf("aggregate VG has insufficient test capacity: free=%q err=%v", before[0], err)
+	}
+	allocate := free * 80 / 100
+	manifest := fmt.Sprintf(`cat <<'YAML' | sudo k3s kubectl apply -f -
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: forge-vg-pressure, namespace: iterabase-system}
+spec:
+  accessModes: [ReadWriteOnce]
+  volumeMode: Filesystem
+  storageClassName: iterabase-lvm-xfs
+  resources: {requests: {storage: %d}}
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: forge-vg-pressure, namespace: iterabase-system}
+spec:
+  restartPolicy: Never
+  containers:
+    - name: hold
+      image: debian:13-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132
+      command: [bash, -ceu]
+      args: ['printf aggregate-vg-pressure=pass > /data/marker; sync -f /data/marker; sleep 600']
+      volumeMounts: [{name: data, mountPath: /data}]
+  volumes: [{name: data, persistentVolumeClaim: {claimName: forge-vg-pressure}}]
+YAML`, allocate)
+	mustSSHOutput(t, client, manifest)
+	mustSSHOutput(t, client, "sudo k3s kubectl wait -n iterabase-system --for=jsonpath='{.status.phase}'=Bound pvc/forge-vg-pressure --timeout=10m")
+	mustSSHOutput(t, client, "sudo k3s kubectl wait -n iterabase-system --for=condition=Ready pod/forge-vg-pressure --timeout=10m")
+
+	metricsCommand := `for i in $(seq 1 90); do
+  service=$(sudo k3s kubectl get service -n iterabase-system -l app=openebs-lvm-node -o jsonpath='{.items[0].metadata.name}')
+  metrics=$(sudo k3s kubectl get --raw "/api/v1/namespaces/iterabase-system/services/http:$service:9500/proxy/metrics" 2>/dev/null || true)
+  free=$(printf '%s\n' "$metrics" | awk '$1=="lvm_vg_free_size_bytes{name=\"iterabase-data\"}" {printf "%.0f",$2}')
+  total=$(printf '%s\n' "$metrics" | awk '$1=="lvm_vg_total_size_bytes{name=\"iterabase-data\"}" {printf "%.0f",$2}')
+  test -n "$free" && test -n "$total" && test "$free" -gt 0 && test $((free * 100 / total)) -le 25 && { printf '%s|%s\n' "$free" "$total"; exit 0; }
+  sleep 2
+done
+exit 1`
+	metricEvidence, err := sshOutput(client, metricsCommand)
+	if err != nil {
+		t.Fatalf("aggregate iterabase-data metrics did not report pressure: %v\n%s", err, metricEvidence)
+	}
+	remainingText := strings.TrimSpace(mustSSHOutput(t, client, `sudo vgs --noheadings --units b --nosuffix -o vg_free iterabase-data | awk '{$1=$1;printf "%.0f",$1}'`))
+	remaining, err := strconv.ParseUint(remainingText, 10, 64)
+	if err != nil {
+		t.Fatalf("parse pressured VG free capacity %q: %v", remainingText, err)
+	}
+	exhaustRequest := remaining + 1<<30
+	exhaust := fmt.Sprintf(`cat <<'YAML' | sudo k3s kubectl apply -f -
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: forge-vg-exhaustion, namespace: iterabase-system}
+spec:
+  accessModes: [ReadWriteOnce]
+  volumeMode: Filesystem
+  storageClassName: iterabase-lvm-xfs
+  resources: {requests: {storage: %d}}
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: forge-vg-exhaustion, namespace: iterabase-system}
+spec:
+  containers:
+    - name: hold
+      image: debian:13-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132
+      command: [sleep, "600"]
+      volumeMounts: [{name: data, mountPath: /data}]
+  volumes: [{name: data, persistentVolumeClaim: {claimName: forge-vg-exhaustion}}]
+YAML`, exhaustRequest)
+	mustSSHOutput(t, client, exhaust)
+	time.Sleep(20 * time.Second)
+	phase := strings.TrimSpace(mustSSHOutput(t, client, `sudo k3s kubectl get pvc forge-vg-exhaustion -n iterabase-system -o jsonpath='{.status.phase}'`))
+	events := mustSSHOutput(t, client, `sudo k3s kubectl get events -n iterabase-system --field-selector involvedObject.kind=PersistentVolumeClaim,involvedObject.name=forge-vg-exhaustion -o jsonpath='{range .items[*]}{.reason}|{.message}{"\n"}{end}'`)
+	if phase != "Pending" || !strings.Contains(events, "ProvisioningFailed") {
+		t.Fatalf("aggregate VG exhaustion was not an honest Pending/ProvisioningFailed claim: phase=%s events=%s", phase, events)
+	}
+	mustSSHOutput(t, client, "sudo k3s kubectl delete pod/forge-vg-exhaustion pvc/forge-vg-exhaustion pod/forge-vg-pressure pvc/forge-vg-pressure -n iterabase-system --ignore-not-found=true --wait=true --timeout=10m")
+	command := fmt.Sprintf(`for i in $(seq 1 150); do test "$(sudo lvs --noheadings -o lv_name iterabase-data | awk 'NF {n++} END {print n+0}')" = %s && exit 0; sleep 2; done; exit 1`, before[1])
+	if output, err := sshOutput(client, command); err != nil {
+		t.Fatalf("aggregate pressure claim cleanup leaked an LV: %v\n%s", err, output)
+	}
+}
+
 func exerciseHumanGateWorkspaceReplacementStage(t *testing.T, state *digitalOceanCPUState) {
 	t.Helper()
 	cluster := workspaceCluster(t, state)
@@ -318,7 +424,7 @@ func exerciseHumanGateWorkspaceReplacementStage(t *testing.T, state *digitalOcea
 	baseURL, stopAPI := openWorkspaceAPI(t, cluster, state)
 	defer stopAPI()
 
-	item := startWorkspaceWork(t, baseURL, state.workspaceWorkKey, "e2e/forge-workspace-recovery", "Human-gated workspace recovery", "hor-538-human-recovery")
+	item := startWorkspaceWork(t, baseURL, state.workspaceWorkKey, "e2e/forge-workspace-recovery", "Human-gated workspace recovery", "hor-545-human-recovery")
 	item = waitWorkspaceWorkState(t, baseURL, state.workspaceWorkKey, item.ID, "blocked", 4*time.Minute)
 	sessionBefore := workspaceDatabaseQuery(t, cluster, state, fmt.Sprintf(`SELECT session_id FROM runtime.workflow_runs WHERE id='%s'`, item.CurrentAttemptID))
 	assignedWorker := workspaceDatabaseQuery(t, cluster, state, fmt.Sprintf(`SELECT worker_id FROM runtime.turn_assignments WHERE attempt_id='%s' ORDER BY assigned_at LIMIT 1`, item.CurrentAttemptID))
@@ -443,7 +549,7 @@ func startWorkspaceWork(t *testing.T, baseURL, key, workflowKey, title, idempote
 	payload := map[string]any{
 		"workflowKey": workflowKey,
 		"title":       title,
-		"source":      map[string]any{"fixture": "HOR-538"},
+		"source":      map[string]any{"fixture": "HOR-545"},
 		"sourcePresentation": map[string]any{
 			"kind": "api", "title": title, "subtitle": "Exact-candidate workspace behavior",
 		},
@@ -690,19 +796,16 @@ func waitWorkspaceModelCapacity(t *testing.T, baseURL string, capacityWaiting in
 
 func setWorkspaceFreeTarget(t *testing.T, client *ssh.Client, filler string, targetPercent int) {
 	t.Helper()
-	command := fmt.Sprintf(`sudo bash -ceu '
-mount=/var/lib/iterabase/agentpool-workspaces
+	command := fmt.Sprintf(`pod=$(sudo k3s kubectl get pods -n iterabase-system -l platform.iterabase.com/agentpool=forge-storage-pool -o jsonpath='{.items[0].metadata.name}')
+sudo k3s kubectl exec -n iterabase-system "$pod" -- bash -ceu '
+mount=/data/sandboxes
 current=0
 test ! -e %s || current=$(stat -c %%s %s)
 read -r size avail < <(df -B1 --output=size,avail "$mount" | tail -1)
 target=$((size * %d / 100))
 new_size=$((current + avail - target))
 test "$new_size" -gt 0
-if test "$new_size" -ge "$current"; then
-  fallocate -l "$new_size" %s
-else
-  truncate -s "$new_size" %s
-fi
+if test "$new_size" -ge "$current"; then fallocate -l "$new_size" %s; else truncate -s "$new_size" %s; fi
 sync -f %s
 read -r final_size final_avail < <(df -B1 --output=size,avail "$mount" | tail -1)
 percent=$((final_avail * 100 / final_size))
@@ -712,7 +815,7 @@ printf "workspace-free-target=%%s actual=%%s\n" %d "$percent"
 '`, filler, filler, targetPercent, filler, filler, filler, targetPercent, targetPercent, targetPercent)
 	output, err := sshOutput(client, command)
 	if err != nil {
-		t.Fatalf("set workspace filesystem to %d%% free: %v\n%s", targetPercent, err, output)
+		t.Fatalf("set AgentPool PVC to %d%% free: %v\n%s", targetPercent, err, output)
 	}
 }
 

@@ -24,7 +24,7 @@ const (
 	permanentFixtureSSHUserEnv         = "FORGE_E2E_FIXTURE_SSH_USER"
 	permanentFixtureSSHKeyPathEnv      = "FORGE_E2E_FIXTURE_SSH_KEY_PATH"
 	permanentFixtureHostKeyEnv         = "FORGE_E2E_FIXTURE_SSH_HOST_KEY"
-	permanentFixtureWorkspaceDeviceEnv = "FORGE_E2E_FIXTURE_WORKSPACE_DEVICE"
+	permanentFixtureWorkspaceDeviceEnv = "FORGE_E2E_FIXTURE_DATA_STORAGE_DEVICES"
 	permanentFixtureModelDeviceEnv     = "FORGE_E2E_MODEL_CACHE_DEVICE"
 	permanentFixtureModelUUIDEnv       = "FORGE_E2E_MODEL_CACHE_UUID"
 	permanentFixtureModelMount         = "/data/hf-cache"
@@ -80,7 +80,7 @@ func requirePermanentFixture(t *testing.T, capacity string) *permanentFixture {
 		}
 	}
 	if !strings.HasPrefix(values[permanentFixtureWorkspaceDeviceEnv], "/dev/disk/by-id/") {
-		t.Fatalf("%s must be a fixed /dev/disk/by-id identity", permanentFixtureWorkspaceDeviceEnv)
+		t.Fatalf("%s must be a fixed /dev/disk/by-id data-storage identity", permanentFixtureWorkspaceDeviceEnv)
 	}
 	if _, _, _, rest, err := ssh.ParseAuthorizedKey([]byte(values[permanentFixtureHostKeyEnv] + "\n")); err != nil || len(strings.TrimSpace(string(rest))) != 0 {
 		t.Fatalf("%s is not exactly one pinned OpenSSH host public key", permanentFixtureHostKeyEnv)
@@ -130,9 +130,12 @@ func (fixture *permanentFixture) reset(t *testing.T, forgeBin, forgeHome string)
 		SSHKeyPath: fixture.sshKeyPath, SSHHostKey: fixture.sshHostKey, WorkspaceDevice: fixture.workspaceDevice,
 		GPU: fixture.capacity == "gpu",
 	})
-	output, err := runForgeE(forgeBin, forgeHome, "destroy", "--config", configPath, "--purge-workspace", "--reboot", "--yes")
+	if err := fixture.releaseDataStorageConsumers(); err != nil {
+		return err
+	}
+	output, err := runForgeE(forgeBin, forgeHome, "destroy", "--config", configPath, "--purge-data-storage", "--reboot", "--yes")
 	if err != nil {
-		return fmt.Errorf("forge destroy --purge-workspace --reboot --yes failed: %w\n%s", err, output)
+		return fmt.Errorf("forge destroy --purge-data-storage --reboot --yes failed: %w\n%s", err, output)
 	}
 	after, client, err := fixture.waitForReboot(before)
 	if err != nil {
@@ -173,6 +176,38 @@ func (fixture *permanentFixture) reset(t *testing.T, forgeBin, forgeHome string)
 	_ = client.Close()
 	time.Sleep(5 * time.Second)
 	t.Logf("permanent %s fixture reset: boot %s -> %s workspace=%s", fixture.capacity, before, after, fixture.workspaceDevice)
+	return nil
+}
+
+func (fixture *permanentFixture) releaseDataStorageConsumers() error {
+	client, err := sshDial(fixture.address, fixture.sshKeyPath)
+	if err != nil {
+		return fmt.Errorf("connect for pre-purge claim release: %w", err)
+	}
+	defer client.Close()
+	script := fmt.Sprintf(`sudo bash -ceu '
+if ! command -v k3s >/dev/null 2>&1 || ! k3s kubectl get --raw=/readyz >/dev/null 2>&1; then exit 0; fi
+k3s kubectl delete kustomizations.kustomize.toolkit.fluxcd.io --all -A --ignore-not-found=true --wait=true --timeout=2m || true
+if k3s kubectl get crd agentpools.platform.iterabase.com >/dev/null 2>&1; then
+  k3s kubectl delete agentpools.platform.iterabase.com --all -A --ignore-not-found=true --wait=true --timeout=5m
+fi
+if command -v helm >/dev/null 2>&1 && KUBECONFIG=/etc/rancher/k3s/k3s.yaml helm status %s -n iterabase-system >/dev/null 2>&1; then
+  KUBECONFIG=/etc/rancher/k3s/k3s.yaml helm uninstall %s -n iterabase-system --wait --timeout 5m
+fi
+k3s kubectl delete pvc --all -A --ignore-not-found=true --wait=true --timeout=5m
+for i in $(seq 1 150); do
+  volumes=0
+  if k3s kubectl get crd lvmvolumes.local.openebs.io >/dev/null 2>&1; then volumes=$(k3s kubectl get lvmvolumes.local.openebs.io -A --no-headers | awk "NF {n++} END {print n+0}"); fi
+  lvs_count=0
+  if vgs iterabase-data >/dev/null 2>&1; then lvs_count=$(lvs --noheadings --select "vg_name=iterabase-data" -o lv_name | awk "NF {n++} END {print n+0}"); fi
+  test "$volumes" = 0 && test "$lvs_count" = 0 && exit 0
+  sleep 2
+done
+exit 42
+'`, candidateShellQuote(fixture.installName()), candidateShellQuote(fixture.installName()))
+	if output, err := sshOutput(client, script); err != nil {
+		return fmt.Errorf("release platform consumers/claims before explicit data-storage purge: %w\n%s", err, output)
+	}
 	return nil
 }
 
@@ -234,14 +269,14 @@ func (fixture *permanentFixture) cleanHarnessState(client *ssh.Client) error {
 	script := fmt.Sprintf(`
 rm -rf -- %s %s
 ! command -v k3s >/dev/null 2>&1
-test ! -e /var/lib/iterabase/agentpool-workspace.receipt
-! findmnt --mountpoint /var/lib/iterabase/agentpool-workspaces >/dev/null 2>&1
-test "$(awk '!/^#/ && NF && $2 == "/var/lib/iterabase/agentpool-workspaces" {n++} END {print n+0}' /etc/fstab)" = 0
+test ! -e /var/lib/iterabase/data-storage.receipt
+! vgs iterabase-data >/dev/null 2>&1
+! pvs "$(readlink -f -- %s)" >/dev/null 2>&1
 workspace=$(readlink -f -- %s)
 test -b "$workspace"
 test -z "$(wipefs -n --noheadings --output TYPE -- "$workspace" | awk 'NF')"
 test ! -e /var/lib/rancher/k3s
-`, permanentFixtureHarnessStatePaths, candidateShellQuote("/var/lib/forge/overlay/"+fixture.installName()), candidateShellQuote(fixture.workspaceDevice))
+`, permanentFixtureHarnessStatePaths, candidateShellQuote("/var/lib/forge/overlay/"+fixture.installName()), candidateShellQuote(fixture.workspaceDevice), candidateShellQuote(fixture.workspaceDevice))
 	if output, err := sshOutput(client, "sudo bash -ceu "+candidateShellQuote(script)); err != nil {
 		return fmt.Errorf("permanent fixture clean-baseline assertion failed: %w\n%s", err, output)
 	}

@@ -10,54 +10,68 @@ import (
 	"fmt"
 )
 
-// Fixed Platform V2 workspace identities shared by Forge and its callers.
+// Fixed Platform V2 data-storage identities shared by Forge and its callers.
 const (
-	AgentPoolWorkspaceMount        = "/var/lib/iterabase/agentpool-workspaces"
-	AgentPoolWorkspaceStorageClass = "iterabase-agentpool-local-path"
-	AgentPoolWorkspaceProvisioner  = "rancher.io/local-path"
+	DataVolumeGroupName             = "iterabase-data"
+	AgentPoolStorageClass           = "iterabase-agentpool-lvm-xfs"
+	PlatformStorageClass            = "iterabase-lvm-xfs"
+	LVMStorageProvisioner           = "local.csi.openebs.io"
+	LVMStorageSubstrateChart        = "lvm-storage-substrate"
+	LVMStorageSubstrateFirstVersion = "0.4.0"
 )
 
-// WorkspaceDevice is a read-only stable whole-disk choice shown by interactive
-// forge init before the operator selects the destructive workspace target.
-type WorkspaceDevice struct {
+// DataStorageDevice is bounded, non-secret whole-disk and PV identity evidence.
+type DataStorageDevice struct {
 	Path      string
+	Resolved  string
 	Model     string
 	Serial    string
+	WWN       string
 	Transport string
 	SizeBytes uint64
+	PVUUID    string
 }
 
-// AgentPoolWorkspaceSpec binds host reconciliation to one install and one
-// persisted stable by-id device. No method may discover a replacement.
-type AgentPoolWorkspaceSpec struct {
+// DataStorageSpec binds host reconciliation to one install and the exact
+// persisted canonical by-id device set. No method may discover replacements.
+type DataStorageSpec struct {
 	InstallName string
-	Device      string
-	Filesystem  string
+	Devices     []string
 }
 
-// AgentPoolWorkspaceState is bounded, non-secret device/filesystem evidence.
-type AgentPoolWorkspaceState struct {
-	Device         string
-	Resolved       string
-	Model          string
-	Serial         string
-	WWN            string
-	SizeBytes      uint64
-	Transport      string
-	Filesystem     string
-	FilesystemUUID string
-	State          string
+// DataStorageState is bounded receipt/VG readiness and capacity evidence.
+type DataStorageState struct {
+	Devices   []DataStorageDevice
+	VGName    string
+	VGUUID    string
+	SizeBytes uint64
+	FreeBytes uint64
+	State     string
+}
+
+// LVMStorageReadiness is bounded cluster-side substrate and VG discovery
+// evidence returned after the chart-owned companion converges.
+type LVMStorageReadiness struct {
+	Ready     bool
+	NodeName  string
+	VGName    string
+	VGUUID    string
+	SizeBytes uint64
+	FreeBytes uint64
+	LVCount   int
+	PVCount   int
 }
 
 // HostState is the actual host-level state of k3s, read for reconcile.
 // Node-level state (labels/taints) is applied at install time via k3s flags in
 // v1 and reconciled via the API in a later version.
 type HostState struct {
-	Installed   bool   // k3s is installed on the host
-	Version     string // k3s version, e.g. "v1.31.5+k3s1"
-	ClusterCIDR string // as stored in config.yaml (comma-joined for dual-stack)
-	ServiceCIDR string
-	DualStack   bool
+	Installed            bool   // k3s is installed on the host
+	Version              string // k3s version, e.g. "v1.31.5+k3s1"
+	ClusterCIDR          string // as stored in config.yaml (comma-joined for dual-stack)
+	ServiceCIDR          string
+	DualStack            bool
+	LocalStorageDisabled bool
 }
 
 // PreflightResult is the read-only host readiness check outcome.
@@ -113,17 +127,17 @@ func (r GPUReadiness) String() string {
 	)
 }
 
-// WorkspacePurger is the explicit destructive extension used only by
-// `forge destroy --purge-workspace`. Keeping it separate from Provisioner makes
-// ordinary lifecycle callers incapable of implying a workspace wipe.
-type WorkspacePurger interface {
-	// PurgeAgentPoolWorkspace revalidates the configured device and its Forge
-	// receipt, then removes only that filesystem, mount, fstab, and receipt state.
-	PurgeAgentPoolWorkspace(ctx context.Context, spec AgentPoolWorkspaceSpec) error
+// DataStoragePurger is the explicit destructive extension used only by the
+// data-storage purge command. Keeping it separate makes ordinary destroy
+// incapable of implying VG/PV removal.
+type DataStoragePurger interface {
+	// PurgeDataStorage revalidates the receipt, exact PV/VG identities, empty LV
+	// set, consumers, and device safety before removing only that VG and its PVs.
+	PurgeDataStorage(ctx context.Context, spec DataStorageSpec) error
 }
 
 // Rebooter is the explicit host-reboot extension used by `forge destroy
-// --reboot`. Reboot is never implied by destroy or workspace purge.
+// --reboot`. Reboot is never implied by destroy or data-storage purge.
 type Rebooter interface {
 	Reboot(ctx context.Context) error
 }
@@ -150,22 +164,21 @@ type Provisioner interface {
 	// via the GPU operator's driver container (installs matching linux-headers,
 	// build-essential, and dkms on Ubuntu). Idempotent. Only called when GPU is enabled.
 	EnsureDriverBuildDeps(ctx context.Context) error
-	// ListAgentPoolWorkspaceDevices returns stable non-removable whole-disk
-	// identities for the interactive init selection. It is strictly read-only.
-	ListAgentPoolWorkspaceDevices(ctx context.Context) ([]WorkspaceDevice, error)
-	// InspectAgentPoolWorkspace runs the complete read-only identity/topology/
-	// in-use/partition/signature preflight used by forge apply --dry-run.
-	InspectAgentPoolWorkspace(ctx context.Context, spec AgentPoolWorkspaceSpec) (*AgentPoolWorkspaceState, error)
-	// EnsureAgentPoolWorkspaceTools installs/checks the formatter tooling needed
-	// by the already-resolved ext4/XFS choice. It never touches the selected disk.
-	EnsureAgentPoolWorkspaceTools(ctx context.Context, filesystem string) error
-	// ReconcileAgentPoolWorkspace repeats every required probe immediately before
-	// the first format, then crash-resumably reconciles type, UUID, label, fstab,
-	// mount, and filesystem marker. It never adopts or selects another device.
-	ReconcileAgentPoolWorkspace(ctx context.Context, spec AgentPoolWorkspaceSpec) (*AgentPoolWorkspaceState, error)
-	// EnsureAgentPoolLocalPathStorage configures K3s's bundled provisioner with
-	// separate fixed default and AgentPool class paths and validates both classes.
-	EnsureAgentPoolLocalPathStorage(ctx context.Context) error
+	// ListDataStorageDevices returns stable non-removable whole-disk identities
+	// for interactive selection. It is strictly read-only.
+	ListDataStorageDevices(ctx context.Context) ([]DataStorageDevice, error)
+	// InspectDataStorage runs the complete read-only set-wide identity/topology/
+	// in-use/partition/signature or receipt/PV/VG preflight used by dry-run/status.
+	InspectDataStorage(ctx context.Context, spec DataStorageSpec) (*DataStorageState, error)
+	// EnsureDataStorageTools installs/verifies lvm2 and XFS tooling and loads and
+	// persists dm-snapshot. It never touches a selected disk.
+	EnsureDataStorageTools(ctx context.Context) error
+	// ReconcileDataStorage repeats complete-set safety before every pvcreate and
+	// crash-resumably creates only receipt-bound PVs and iterabase-data.
+	ReconcileDataStorage(ctx context.Context, spec DataStorageSpec) (*DataStorageState, error)
+	// WaitForLVMStorageReady validates no local-path/default fallback exists and
+	// waits for exact CRDs, controller/node/CSI/classes, and VG discovery.
+	WaitForLVMStorageReady(ctx context.Context, namespace string, host *DataStorageState) (*LVMStorageReadiness, error)
 	// ReadGPUReadiness returns one coherent ClusterPolicy/node observation,
 	// evaluated against the requested driver. Missing resources and transitional
 	// states return Ready=false; query/parse failures return an error. Polled as

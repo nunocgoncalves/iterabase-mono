@@ -38,7 +38,7 @@ rehearsal.
 | `forge` | `forge/VERSION` | Linux/macOS × amd64/arm64 archives |
 | `control-plane-chart` | chart `Chart.yaml` | control-plane OCI chart |
 | `inference-gateway-chart` | chart `Chart.yaml` | inference-gateway OCI chart |
-| `iterabase-platform-chart` | chart `Chart.yaml` | platform chart plus same-version certificate substrate companion |
+| `iterabase-platform-chart` | chart `Chart.yaml` | platform chart plus same-version certificate and LVM-storage substrate companions |
 
 Tags remain namespaced (`control-plane-v<version>`,
 `inference-gateway-v<version>`, `forge-v<version>`, and `<chart>-<version>`).

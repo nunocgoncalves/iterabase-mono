@@ -10,9 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -543,6 +541,12 @@ ExecStart=/usr/local/bin/k3s \
 			assert.Equal(t, tt.wantDualStack, ds, "dualStack")
 		})
 	}
+}
+
+func TestSystemdUnitDisablesLocalStorage(t *testing.T) {
+	assert.True(t, systemdUnitDisables("ExecStart=/usr/local/bin/k3s server '--disable' 'local-storage'", "local-storage"))
+	assert.True(t, systemdUnitDisables("ExecStart=/usr/local/bin/k3s server --disable=local-storage", "local-storage"))
+	assert.False(t, systemdUnitDisables("ExecStart=/usr/local/bin/k3s server --disable traefik", "local-storage"))
 }
 
 func TestNodeReady(t *testing.T) {
@@ -1611,235 +1615,105 @@ func TestEnsureDriverBuildDeps_CommandShape(t *testing.T) {
 	}, got)
 }
 
-func TestWorkspacePurgeScriptIsIdentityBoundedAndIdempotent(t *testing.T) {
-	script := workspacePurgeScript(provisioner.AgentPoolWorkspaceSpec{
-		InstallName: "opo1", Device: "/dev/disk/by-id/scsi-workspace", Filesystem: config.WorkspaceFilesystemAuto,
+func TestDataStoragePurgeScriptIsReceiptBoundedAndRefusesLiveLVs(t *testing.T) {
+	script := dataStoragePurgeScript(provisioner.DataStorageSpec{
+		InstallName: "opo1", Devices: []string{"/dev/disk/by-id/scsi-data-a", "/dev/disk/by-id/scsi-data-b"},
 	})
 	for _, expected := range []string{
-		"workspace purge refusal",
-		"selected disk backs system path",
-		"workspace receipt install mismatch",
-		"workspace disk serial identity mismatch",
-		"workspace filesystem UUID drift",
-		"workspace filesystem is in use",
-		"workspace block device is in use",
-		"wipefs --all --force",
-		"FORGE_WORKSPACE_PURGE_RESULT",
-		"already-clean",
+		"data-storage purge refusal", "receipt install mismatch", "configured device order/set differs",
+		"backs system path", "raw-consumer probe failed", "still contains", "delete claims and release consumers",
+		"vgremove --yes", "pvremove --yes", "FORGE_DATA_STORAGE_PURGE_RESULT", "already-clean",
 	} {
 		assert.Contains(t, script, expected)
 	}
-	assert.NotContains(t, script, "mkfs.", "purge must leave a blank disk for the next apply instead of creating a replacement filesystem")
+	for _, forbidden := range []string{"mkfs.", "mount ", "/etc/fstab", "--force", "wipefs --all"} {
+		assert.NotContains(t, script, forbidden)
+	}
 }
 
-func TestPurgeAgentPoolWorkspaceRunsOneQuotedRemoteScript(t *testing.T) {
+func TestPurgeDataStorageRunsOneQuotedRemoteScript(t *testing.T) {
 	var got string
 	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
 		got = cmd
-		return "FORGE_WORKSPACE_PURGE_RESULT\t/dev/disk/by-id/scsi-workspace\tpurged\n", 0
+		return "FORGE_DATA_STORAGE_PURGE_RESULT\tpurged\t2\n", 0
 	})
 	defer cleanup()
 	p := newProvisioner(t, addr, cfg)
 	defer p.Close()
-	require.NoError(t, p.PurgeAgentPoolWorkspace(context.Background(), provisioner.AgentPoolWorkspaceSpec{
-		InstallName: "opo1", Device: "/dev/disk/by-id/scsi-workspace", Filesystem: config.WorkspaceFilesystemAuto,
+	require.NoError(t, p.PurgeDataStorage(context.Background(), provisioner.DataStorageSpec{
+		InstallName: "opo1", Devices: []string{"/dev/disk/by-id/scsi-data-a", "/dev/disk/by-id/scsi-data-b"},
 	}))
 	assert.True(t, strings.HasPrefix(got, "sudo bash -ceu "))
-	assert.Contains(t, got, "FORGE_WORKSPACE_PURGE_RESULT")
+	assert.Contains(t, got, "FORGE_DATA_STORAGE_PURGE_RESULT")
 }
 
-func TestAgentPoolWorkspaceCommandIsBoundedAndCrashResumable(t *testing.T) {
-	for _, filesystem := range []string{config.WorkspaceFilesystemAuto, config.WorkspaceFilesystemExt4, config.WorkspaceFilesystemXFS} {
-		t.Run(filesystem, func(t *testing.T) {
-			script := workspaceReconcileScript(provisioner.AgentPoolWorkspaceSpec{
-				InstallName: "opo1", Device: "/dev/disk/by-id/scsi-workspace", Filesystem: filesystem,
-			}, "reconcile")
-			for _, expected := range []string{
-				"probe_identity_topology", "list_process_ids", "list_process_fds", "probe_active_raw_consumers", "process_ids=$(list_process_ids)", "LC_ALL=C ls -1U", "set -o pipefail", "head -n 65537", "65536-/proc-entry limit", "65536-descriptor limit", "could not enumerate /proc", "current_process_ids=$(list_process_ids)", "remaining_fds=$(list_process_fds", "for fd_round in 1 2 3", "for fd_attempt in 1 2 3", "stat -Lc '%t:%T'", "after 3 bounded rounds", "wipefs -n --noheadings --output TYPE", "blkid -p", "write_receipt planned",
-				"mkfs.ext4 -F", "mkfs.xfs -f", "filesystem_selection", "transport_b64", "UUID=$planned_uuid",
-				"nodev,nosuid", workspaceFilesystemLabel, workspaceMarkerName,
-			} {
-				assert.Contains(t, script, expected)
-			}
-			for _, forbidden := range []string{
-				"if=/dev/", "FORGE_AGENTPOOL_WORKSPACE_FORCE", "wipefs -a", ">/tmp/forge-workspace",
-				`/proc/[0-9]*`, `test -d "$process/fd" || continue`, `for fd in "$process"/fd/[0-9]*`, `test -L "$fd" || continue`,
-			} {
-				assert.NotContains(t, script, forbidden)
-			}
-			assert.LessOrEqual(t, strings.Count(script, "probe_blank_signatures"), 4, "bounded probes are repeated only at the authorization boundary")
+func TestDataStorageCommandIsSetWideBoundedAndCrashResumable(t *testing.T) {
+	script := dataStorageReconcileScript(provisioner.DataStorageSpec{
+		InstallName: "opo1", Devices: []string{"/dev/disk/by-id/scsi-data-a", "/dev/disk/by-id/scsi-data-b"},
+	}, "reconcile")
+	for _, expected := range []string{
+		"probe_identity_topology", "probe_blank", "verify_or_blank_set", "list_process_ids", "list_process_fds",
+		"probe_active_raw_consumer", "LC_ALL=C ls -1U", "set -o pipefail", "head -n 65537",
+		"wipefs -n --noheadings --output TYPE", "blkid -p", "write_receipt planned 0",
+		"pvcreate --yes --zero y --uuid", "--norestorefile", "vgcreate --yes --uuid",
+		"planned_pv_uuid", "planned_vg_uuid", "data-storage device order/set differs",
+		"vg_name=", "iterabase-data", "actual_members", "FORGE_DATA_STORAGE_RESULT",
+	} {
+		assert.Contains(t, script, expected)
+	}
+	for _, forbidden := range []string{
+		"if=/dev/", "FORGE_DATA_STORAGE_FORCE", "wipefs -a", "mkfs.", "mount ", "/etc/fstab",
+		"AgentPoolWorkspace", "rancher.io/local-path", "--force",
+	} {
+		assert.NotContains(t, script, forbidden)
+	}
+	assert.GreaterOrEqual(t, strings.Count(script, "verify_or_blank_set"), 3)
+}
+
+func TestDataStorageScriptsAreValidBash(t *testing.T) {
+	spec := provisioner.DataStorageSpec{InstallName: "opo1", Devices: []string{"/dev/disk/by-id/scsi-a", "/dev/disk/by-id/scsi-b"}}
+	for name, script := range map[string]string{
+		"inspect":   dataStorageReconcileScript(spec, "inspect"),
+		"reconcile": dataStorageReconcileScript(spec, "reconcile"),
+		"purge":     dataStoragePurgeScript(spec),
+	} {
+		t.Run(name, func(t *testing.T) {
+			cmd := exec.Command("bash", "-n")
+			cmd.Stdin = strings.NewReader(script)
+			output, err := cmd.CombinedOutput()
+			require.NoError(t, err, string(output))
 		})
 	}
 }
 
-func TestAgentPoolWorkspaceActiveOpenProbeBehavior(t *testing.T) {
-	t.Run("unreadable fd directory for a live PID fails closed", func(t *testing.T) {
-		output, err := runWorkspaceActiveOpenProbe(t, `#!/bin/bash
-set -eu
-path="${!#}"
-if [[ "$path" == "$TEST_PROC_ROOT" ]]; then printf '100\n'; exit 0; fi
-if [[ "$path" == "$TEST_PROC_ROOT/100/fd" ]]; then printf 'permission denied\n' >&2; exit 13; fi
-printf 'unexpected ls path: %s\n' "$path" >&2
-exit 2
-`, `#!/bin/bash
-set -eu
-printf '8:1\n'
-`)
-		var exitErr *exec.ExitError
-		require.ErrorAs(t, err, &exitErr)
-		assert.Equal(t, 42, exitErr.ExitCode())
-		assert.Contains(t, output, "could not enumerate")
-		assert.Contains(t, output, "/100/fd after 3 attempts: permission denied")
-	})
-
-	t.Run("PID disappearance proven by successful process re-enumeration is ignored", func(t *testing.T) {
-		output, err := runWorkspaceActiveOpenProbe(t, `#!/bin/bash
-set -eu
-path="${!#}"
-if [[ "$path" == "$TEST_PROC_ROOT" ]]; then
-  count=0
-  if [[ -f "$TEST_STATE" ]]; then read -r count < "$TEST_STATE"; fi
-  if [[ "$count" == 0 ]]; then printf '100\nself\n'; else printf 'self\n'; fi
-  printf '%s\n' "$((count + 1))" > "$TEST_STATE"
-  exit 0
-fi
-if [[ "$path" == "$TEST_PROC_ROOT/100/fd" ]]; then printf 'process exited\n' >&2; exit 1; fi
-exit 2
-`, `#!/bin/bash
-set -eu
-printf '8:1\n'
-`)
-		require.NoError(t, err, output)
-	})
-
-	t.Run("persistently unreadable descriptor for a live PID fails closed", func(t *testing.T) {
-		output, err := runWorkspaceActiveOpenProbe(t, `#!/bin/bash
-set -eu
-path="${!#}"
-if [[ "$path" == "$TEST_PROC_ROOT" ]]; then printf '100\n'; exit 0; fi
-if [[ "$path" == "$TEST_PROC_ROOT/100/fd" ]]; then printf '9\n'; exit 0; fi
-exit 2
-`, `#!/bin/bash
-set -eu
-path="${!#}"
-if [[ "$path" == "$TEST_DEVICE" ]]; then printf '8:1\n'; exit 0; fi
-printf 'descriptor unreadable\n' >&2
-exit 13
-`)
-		var exitErr *exec.ExitError
-		require.ErrorAs(t, err, &exitErr)
-		assert.Equal(t, 42, exitErr.ExitCode())
-		assert.Contains(t, output, "/100/fd/9 after 3 bounded rounds: descriptor unreadable")
-	})
-
-	t.Run("a reused descriptor number is inspected in the next bounded round", func(t *testing.T) {
-		output, err := runWorkspaceActiveOpenProbe(t, `#!/bin/bash
-set -eu
-path="${!#}"
-if [[ "$path" == "$TEST_PROC_ROOT" ]]; then printf '100\n'; exit 0; fi
-if [[ "$path" == "$TEST_PROC_ROOT/100/fd" ]]; then printf '9\n'; exit 0; fi
-exit 2
-`, `#!/bin/bash
-set -eu
-path="${!#}"
-if [[ "$path" == "$TEST_DEVICE" ]]; then printf '8:1\n'; exit 0; fi
-count=0
-if [[ -f "$TEST_STAT_STATE" ]]; then read -r count < "$TEST_STAT_STATE"; fi
-printf '%s\n' "$((count + 1))" > "$TEST_STAT_STATE"
-if [[ "$count" -lt 3 ]]; then printf 'descriptor changed\n' >&2; exit 1; fi
-printf '8:2\n'
-`)
-		require.NoError(t, err, output)
-	})
-
-	t.Run("descriptor disappearance proven by successful re-enumeration is ignored", func(t *testing.T) {
-		output, err := runWorkspaceActiveOpenProbe(t, `#!/bin/bash
-set -eu
-path="${!#}"
-if [[ "$path" == "$TEST_PROC_ROOT" ]]; then printf '100\n'; exit 0; fi
-if [[ "$path" == "$TEST_PROC_ROOT/100/fd" ]]; then
-  count=0
-  if [[ -f "$TEST_STATE" ]]; then read -r count < "$TEST_STATE"; fi
-  if [[ "$count" == 0 ]]; then printf '9\n'; fi
-  printf '%s\n' "$((count + 1))" > "$TEST_STATE"
-  exit 0
-fi
-exit 2
-`, `#!/bin/bash
-set -eu
-path="${!#}"
-if [[ "$path" == "$TEST_DEVICE" ]]; then printf '8:1\n'; exit 0; fi
-printf 'descriptor disappeared\n' >&2
-exit 1
-`)
-		require.NoError(t, err, output)
-	})
-}
-
-func runWorkspaceActiveOpenProbe(t *testing.T, lsScript, statScript string) (string, error) {
-	t.Helper()
-	root := t.TempDir()
-	procRoot := filepath.Join(root, "proc")
-	require.NoError(t, os.MkdirAll(filepath.Join(procRoot, "100", "fd"), 0o755))
-	device := filepath.Join(root, "device")
-	require.NoError(t, os.WriteFile(device, nil, 0o600))
-	state := filepath.Join(root, "ls-state")
-	statState := filepath.Join(root, "stat-state")
-	bin := filepath.Join(root, "bin")
-	require.NoError(t, os.Mkdir(bin, 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(bin, "ls"), []byte(lsScript), 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(bin, "stat"), []byte(statScript), 0o755))
-
-	generated := workspaceReconcileScript(provisioner.AgentPoolWorkspaceSpec{
-		InstallName: "probe-test", Device: "/dev/disk/by-id/probe-test", Filesystem: config.WorkspaceFilesystemExt4,
-	}, "reconcile")
-	start := strings.Index(generated, "list_process_ids() {")
-	end := strings.Index(generated, "\nprobe_blank_signatures() {")
-	require.GreaterOrEqual(t, start, 0)
-	require.Greater(t, end, start)
-	probe := strings.ReplaceAll(generated[start:end], "/proc", procRoot)
-	script := fmt.Sprintf("set -eu\nfail() { printf 'workspace refusal: %%s\\n' \"$*\" >&2; exit 42; }\ndevice=%s\n%s\nprobe_active_raw_consumers\n", shellQuote(device), probe)
-
-	cmd := exec.Command("/bin/bash", "-ceu", script)
-	cmd.Env = append(os.Environ(),
-		"PATH="+bin+":"+os.Getenv("PATH"),
-		"TEST_PROC_ROOT="+procRoot,
-		"TEST_DEVICE="+device,
-		"TEST_STATE="+state,
-		"TEST_STAT_STATE="+statState,
-	)
-	output, err := cmd.CombinedOutput()
-	return string(output), err
-}
-
-func TestAgentPoolLocalPathSetupPreservesDedicatedMountMode(t *testing.T) {
-	script := agentPoolLocalPathSetupScript()
-	assert.Contains(t, script, provisioner.AgentPoolWorkspaceMount+"/*)")
-	assert.Contains(t, script, `parent=${VOL_DIR%/*}`)
-	assert.Contains(t, script, `chmod 0711 "$parent"`)
-	assert.Contains(t, script, `*) chmod 0701 "$VOL_DIR/.."`)
-	assert.NotContains(t, script, "chown", "the pinned helper image intentionally provides only the default minimal toolset")
-}
-
-func TestParseAgentPoolWorkspaceResultIncludesTransportAndFilesystem(t *testing.T) {
-	state, err := parseWorkspaceResult("FORGE_WORKSPACE_RESULT\t/dev/disk/by-id/nvme-ws\t/dev/nvme1n1\tModel\tSerial\tWWN\t107374182400\tnvme\txfs\t11111111-1111-1111-1111-111111111111\tcomplete\n")
+func TestParseDataStorageResultIncludesEveryPVAndVGCapacity(t *testing.T) {
+	state, err := parseDataStorageResult("FORGE_DATA_STORAGE_DEVICE_RESULT\t/dev/disk/by-id/scsi-a\t/dev/sda\tModel A\tSerial A\tWWN A\tpv-a\t100\tsata\n" +
+		"FORGE_DATA_STORAGE_DEVICE_RESULT\t/dev/disk/by-id/scsi-b\t/dev/sdb\tModel B\tSerial B\tWWN B\tpv-b\t200\tsata\n" +
+		"FORGE_DATA_STORAGE_RESULT\tcomplete\titerabase-data\tvg-a\t300\t250\t2\n")
 	require.NoError(t, err)
-	assert.Equal(t, "nvme", state.Transport)
-	assert.Equal(t, config.WorkspaceFilesystemXFS, state.Filesystem)
-	assert.Equal(t, uint64(107374182400), state.SizeBytes)
+	require.Len(t, state.Devices, 2)
+	assert.Equal(t, "pv-a", state.Devices[0].PVUUID)
+	assert.Equal(t, "iterabase-data", state.VGName)
+	assert.Equal(t, "vg-a", state.VGUUID)
+	assert.Equal(t, uint64(300), state.SizeBytes)
+	assert.Equal(t, uint64(250), state.FreeBytes)
 }
 
-func TestEnsureAgentPoolWorkspaceToolsInstallsAndVerifiesXFS(t *testing.T) {
+func TestEnsureDataStorageToolsInstallsAndPersistsModule(t *testing.T) {
 	verifyCalls := 0
+	var commands []string
 	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
+		commands = append(commands, cmd)
 		switch {
-		case strings.Contains(cmd, "command -v mkfs.xfs"):
+		case strings.Contains(cmd, "command -v pvcreate"):
 			verifyCalls++
 			if verifyCalls == 1 {
 				return "", 1
 			}
 			return "", 0
-		case strings.Contains(cmd, "apt-get install -y xfsprogs"):
+		case strings.Contains(cmd, "apt-get install -y lvm2 xfsprogs psmisc"):
+			return "", 0
+		case strings.Contains(cmd, "modprobe dm-snapshot"):
 			return "", 0
 		default:
 			return "", 1
@@ -1848,25 +1722,27 @@ func TestEnsureAgentPoolWorkspaceToolsInstallsAndVerifiesXFS(t *testing.T) {
 	defer cleanup()
 	p := newProvisioner(t, addr, cfg)
 	defer p.Close()
-	require.NoError(t, p.EnsureAgentPoolWorkspaceTools(context.Background(), config.WorkspaceFilesystemXFS))
+	require.NoError(t, p.EnsureDataStorageTools(context.Background()))
 	assert.Equal(t, 2, verifyCalls)
+	assert.Contains(t, strings.Join(commands, "\n"), "/etc/modules-load.d/iterabase-data.conf")
 }
 
-func TestEnsureAgentPoolWorkspaceToolsChecksExt4WithoutPackageMutation(t *testing.T) {
-	var commands []string
+func TestWaitForLVMStorageReadyParsesBoundedVGIdentity(t *testing.T) {
 	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
-		commands = append(commands, cmd)
-		if strings.Contains(cmd, "command -v mkfs.ext4") {
-			return "", 0
-		}
-		return "", 1
+		assert.Contains(t, cmd, "lvmnodes.local.openebs.io")
+		assert.Contains(t, cmd, "iterabase-agentpool-lvm-xfs")
+		assert.Contains(t, cmd, "K3s local-path provisioner still exists")
+		return "FORGE_LVM_STORAGE_READY\tnode-a\titerabase-data\tvg-a\t300\t250\t2\t2\n", 0
 	})
 	defer cleanup()
 	p := newProvisioner(t, addr, cfg)
 	defer p.Close()
-	require.NoError(t, p.EnsureAgentPoolWorkspaceTools(context.Background(), config.WorkspaceFilesystemExt4))
-	require.Len(t, commands, 1)
-	assert.NotContains(t, commands[0], "apt-get")
+	ready, err := p.WaitForLVMStorageReady(context.Background(), "iterabase-system", &provisioner.DataStorageState{VGName: "iterabase-data", VGUUID: "vg-a"})
+	require.NoError(t, err)
+	assert.True(t, ready.Ready)
+	assert.Equal(t, "node-a", ready.NodeName)
+	assert.Equal(t, uint64(250), ready.FreeBytes)
+	assert.Equal(t, 2, ready.PVCount)
 }
 
 func TestDriverVersionWithoutDigest(t *testing.T) {

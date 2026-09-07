@@ -53,7 +53,7 @@ spec:
     trustDomain: iterabase.local
     caSecretRef: {name: late-platform-ca}
   sandbox:
-    storageClassName: iterabase-agentpool-local-path
+    storageClassName: iterabase-agentpool-lvm-xfs
     accessMode: ReadWriteOnce
     size: 1Gi
   gateways:
@@ -219,7 +219,7 @@ spec:
     trustDomain: iterabase.local
     caSecretRef: {name: iterabase-control-plane-gateway-ca}
   sandbox:
-    storageClassName: iterabase-agentpool-local-path
+    storageClassName: iterabase-agentpool-lvm-xfs
     accessMode: ReadWriteOnce
     size: 1Gi
   gateways:

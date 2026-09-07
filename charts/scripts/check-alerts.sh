@@ -44,10 +44,12 @@ grep -Fq 'controller_runtime_reconcile_total{result="error",component="manager"}
 for contract in \
   'control_plane_dispatch_workspace_free_ratio) < 0.25' \
   'control_plane_dispatch_workspace_credit_gated) == 1' \
-  'control_plane_harness_storage_checks_total{result="fail"}'; do
+  'control_plane_harness_storage_checks_total{result="fail"}' \
+  'lvm_vg_free_size_bytes{name="iterabase-data"} / lvm_vg_total_size_bytes{name="iterabase-data"}' \
+  'kube_persistentvolumeclaim_info{storageclass=~"iterabase-(agentpool-)?lvm-xfs"}'; do
   grep -Fq "$contract" <<<"$base" || {
     echo "ERROR: missing dedicated workspace alert contract: $contract" >&2
     exit 1
   }
 done
-echo "OK: $alerts invariant alerts carry runbooks/actions; six performance alerts are threshold-gated; dedicated workspace capacity/I/O alerts render"
+echo "OK: $alerts invariant alerts carry runbooks/actions; six performance alerts are threshold-gated; per-pool and aggregate OpenEBS LVM capacity/I/O alerts render"

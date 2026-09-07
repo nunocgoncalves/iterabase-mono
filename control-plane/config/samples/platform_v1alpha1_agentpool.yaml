@@ -25,9 +25,9 @@ spec:
   # One dedicated-class node-local RWO PVC. RWO constrains the volume to the
   # single supported K3s node, not one pod, so every replica may mount it.
   # Per-session subdirs remain 0700 under stable UID/GID isolation. The PVC
-  # request is planning metadata because local-path provides no hard quota.
+  # request is the immutable thick XFS volume capacity; expansion is unsupported.
   sandbox:
-    storageClassName: iterabase-agentpool-local-path
+    storageClassName: iterabase-agentpool-lvm-xfs
     accessMode: ReadWriteOnce
     size: 100Gi
     mountPath: /data/sandboxes

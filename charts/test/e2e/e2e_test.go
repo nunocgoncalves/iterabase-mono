@@ -36,9 +36,13 @@ func chartFixtureFromEnv(t *testing.T) sharede2e.Fixture {
 }
 
 func chartScenarioMetadata(name, description, makeTarget string, minutes int, references, targets []string) sharede2e.ScenarioMetadata {
+	tier := sharede2e.TierF2
+	if name == "certificate-ownership-migration" {
+		tier = sharede2e.TierF0 // preserved 0.3-line history; never current 0.4 release authority
+	}
 	artifacts := []string{
 		"control-plane-image", "inference-gateway-image", "control-plane-chart", "inference-gateway-chart",
-		"iterabase-platform-chart", "cert-manager-substrate-chart",
+		"iterabase-platform-chart", "cert-manager-substrate-chart", "lvm-storage-substrate-chart",
 	}
 	if name == "certificate-ownership-migration" {
 		artifacts = append(artifacts, "certificate-migration-chart")
@@ -47,7 +51,7 @@ func chartScenarioMetadata(name, description, makeTarget string, minutes int, re
 		artifacts = append(artifacts, "harness-image", "tool-runner-image")
 	}
 	return sharede2e.ScenarioMetadata{
-		Name: name, Description: description, Tier: sharede2e.TierF2,
+		Name: name, Description: description, Tier: tier,
 		References: references, ReleaseTargets: targets, RequiredArtifacts: artifacts,
 		Intents:      []sharede2e.ExecutionIntent{sharede2e.IntentPR, sharede2e.IntentCandidate},
 		FixtureModes: []sharede2e.FixtureMode{sharede2e.FixtureSource, sharede2e.FixtureCandidate, sharede2e.FixturePublished},
@@ -57,6 +61,7 @@ func chartScenarioMetadata(name, description, makeTarget string, minutes int, re
 
 func transitionScenarioMetadata(name, description, makeTarget string, minutes int, references, targets []string) sharede2e.ScenarioMetadata {
 	metadata := chartScenarioMetadata(name, description, makeTarget, minutes, references, targets)
+	metadata.Tier = sharede2e.TierF0 // local-path predecessor transitions are historical, not HOR-545 release paths
 	metadata.FixtureModes = []sharede2e.FixtureMode{sharede2e.FixtureSource, sharede2e.FixtureCandidate}
 	if name == "metallb-upgrade-reapply" {
 		metadata.RequiredArtifacts = append(metadata.RequiredArtifacts, "metallb-platform-predecessor", "metallb-substrate-predecessor")

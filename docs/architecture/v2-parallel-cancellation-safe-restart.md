@@ -38,7 +38,7 @@ The founder approved the exact revised package below on 2026-08-24. The complete
 - **Approved by:** Nuno Gonçalves
 - **Approved on:** 2026-08-24
 - **Scope:** Attempt/branch identity, pi sessions, sandbox isolation, and the storage prerequisite.
-- **Decision:** Every attempt owns a durable root execution lane. Each fork visit creates a durable fork activation ID; each declared branch receives a durable branch execution ID keyed by activation plus branch key and its own lane. At most one node execution is active per lane, while an attempt may have multiple active branch lanes. Every visit/output retains attempt, lane, activation, branch, node, visit sequence, and exact execution identity. Root and branch turns retain separate pi session identities; every branch uses a distinct sandbox/session/UID lifecycle, and IDs are never reused. Branch data crosses lanes only through PostgreSQL-committed validated outputs and immutable artifact references—never through another branch’s live filesystem. Production parallel validation requires a multi-worker AgentPool backed by the fixed same-node local-path RWO session substrate; HOR-538 prepares and validates that substrate. RWO constrains the claim to the one supported node, not to one worker pod.
+- **Decision:** Every attempt owns a durable root execution lane. Each fork visit creates a durable fork activation ID; each declared branch receives a durable branch execution ID keyed by activation plus branch key and its own lane. At most one node execution is active per lane, while an attempt may have multiple active branch lanes. Every visit/output retains attempt, lane, activation, branch, node, visit sequence, and exact execution identity. Root and branch turns retain separate pi session identities; every branch uses a distinct sandbox/session/UID lifecycle, and IDs are never reused. Branch data crosses lanes only through PostgreSQL-committed validated outputs and immutable artifact references—never through another branch’s live filesystem. Production parallel validation requires a multi-worker AgentPool backed by the fixed same-node `iterabase-agentpool-lvm-xfs` RWO session substrate; HOR-545 prepares and validates that substrate. RWO constrains the claim to the one supported node, not to one worker pod.
 - **Consequences:** Parallelism requires lane-aware runtime records and isolated branch sessions; shared filesystem state is not a branch communication channel.
 - **Evidence:** Founder approval recorded in HOR-457 on 2026-08-24 before repository edits.
 
@@ -154,7 +154,7 @@ The founder approved the exact revised package below on 2026-08-24. The complete
 - Branch/node/turn automatic retry, stopped-attempt resume in place, session resurrection, or inferred checkpoints.
 - Compensation, universal undo, reversal claims, or a second consequence ledger.
 - Customer graph/checkpoint authoring or customer configuration of workers, sessions, storage, tools, or models.
-- Selection or provisioning of the dedicated local-path RWO workspace substrate.
+- Selection or provisioning of the OpenEBS LVM LocalPV RWO workspace substrate.
 
 ### Non-negotiable invariants
 
@@ -989,7 +989,7 @@ Run at least two scheduler replicas and many goroutines with deterministic failp
 - Target-state matrix tests prove `delivered` is nonterminal; turn/invocation `unreachable` requires its independent fence/ledger proof; session `unreachable` preserves the never-reusable session and UID/GID allocation; and the stop intent settles only under the complete section 9.1 predicate.
 - Late worker sequences append/dedup after-terminal evidence and never arrive/join.
 - Write cancellation after send preserves `succeeded|outcome_unknown`; no test accepts a fabricated failed/undone state.
-- Distinct branch sessions/UIDs can execute on separate workers over the approved dedicated local-path RWO substrate and cannot read each other's live directories.
+- Distinct branch sessions/UIDs can execute on separate workers over the approved `iterabase-agentpool-lvm-xfs` same-node RWO substrate and cannot read each other's live directories.
 
 ### 18.5 Work projection tests
 
@@ -1062,7 +1062,7 @@ The cutover coordinator distinguishes a fail-closed **admission fence** from the
 - With the required API, runtime/dispatch, Tool Gateway, artifact, harness, and bounded reconciliation writers still running under that allowlist, drain or explicitly stop every workflow run/turn/assignment and settle every stop target. This is the only phase allowed to turn already-authorized in-flight work into terminal evidence.
 - Against the authoritative OPO1 schema, require zero `runtime.workflow_runs` row with `state IN ('pending','running','awaiting_approval')` or `finished_at IS NULL`, zero `runtime.turns` row with `state IN ('pending','running')` or `settled_at IS NULL`, and zero `runtime.turn_assignments.state='active'`. Any inconsistent timestamp/state pair fails closed. Also require zero `dispatching|running|outcome_unknown` work-scoped gateway invocation; unknown effects must be definitively reconciled or the cutover aborts.
 - Only after all zero predicates pass may the coordinator CAS from `admission_fenced` to `maintenance_fenced`. Revoke/fence every application, gateway, worker, controller, reconciler, object-store, and human writer; wait for existing allowlisted transactions to drain. The audited maintenance coordinator is then the sole temporary writer and rechecks the zero predicates under the full fence. A premature transition is rejected rather than freezing work that still needs terminalization.
-- Before deleting any session reference or UID allocation, inventory every reset session's exact sandbox path and UID/GID. Use the existing owner/symlink/persist-after-remove safety contract (or an equivalent offline maintenance reaper) to reap each path, verify it absent on the approved dedicated local-path RWO substrate, and only then mark its allocation releasable. A missing path is an idempotent success; a foreign-owned, symlinked, unreachable, or persistent path aborts cutover and leaves its allocation fence intact.
+- Before deleting any session reference or UID allocation, inventory every reset session's exact sandbox path and UID/GID. Use the existing owner/symlink/persist-after-remove safety contract (or an equivalent offline maintenance reaper) to reap each path, verify it absent on the approved `iterabase-agentpool-lvm-xfs` same-node RWO substrate, and only then mark its allocation releasable. A missing path is an idempotent success; a foreign-owned, symlinked, unreachable, or persistent path aborts cutover and leaves its allocation fence intact.
 - Disconnect the maintenance coordinator and prove no PostgreSQL write-capable session/transaction or retained-object mutation source remains. Then take and verify one cold PostgreSQL snapshot. It is rollback protection, not a backfill source; retained object mutation stays frozen so snapshot restore cannot produce metadata/byte divergence.
 
 ### Phase C — process stop and destructive reset
@@ -1153,7 +1153,7 @@ sequenceDiagram
 - **HOR-464:** cookie-only cancel proposals/confirmation, attempt stop transaction, dispatch/gateway/session target outbox, stopped subtype/retry eligibility, late consequence projection, and race tests.
 - **HOR-463:** checkpoint schema/validation/attainment, input digest, restart proposal/confirmation, lineage selection, immutable reuse references, entry fallback, path-reachable consequence review, and UI/API attempt history.
 - **HOR-516:** interaction/presentation design must consume these status, blocker, consequence, checkpoint, and stopped-work semantics without redefining them.
-- **HOR-538:** prepare and validate the fixed dedicated local-path RWO substrate; they do not redefine lane/session semantics.
+- **HOR-545:** prepare and validate the fixed OpenEBS LVM LocalPV thick-XFS RWO substrate; they do not redefine lane/session semantics.
 - **Shared release validation:** exact same-node multi-worker RWO E2E, process recovery, consequence integrity, clean-reset rehearsal, deployment evidence, and rollback boundary.
 
 HOR-468 should establish the schema and attempt-terminal lock seam consumed by HOR-464/HOR-463. HOR-464 must land before restart execution is enabled, because restart eligibility depends on settled stop/consequence state. HOR-466 may build projections after the runtime records are stable. No Todo/cycle placement bypasses these dependency gates.

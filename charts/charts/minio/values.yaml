@@ -8,8 +8,7 @@ image:
 
 # Root credentials generated into a Secret on first install (stable via lookup).
 persistence:
-  storageClass: "" # use cluster default (k3s local-path)
-  size: 20Gi
+  size: 20Gi # fixed StorageClass is iterabase-lvm-xfs
 
 # Immutable artifact-service bucket (HOR-399). The provisioning Job uses the
 # MinIO root credential once to create this bucket + a dedicated bucket-scoped

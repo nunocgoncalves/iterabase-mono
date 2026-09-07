@@ -31,8 +31,8 @@ forge apply              # provision / reconcile the cluster
 forge kubeconfig         # fetch (or refresh) the kubeconfig
 forge status             # cluster health + drift
 forge upgrade --to v1.34.10+k3s1 # upgrade to the current repository-reviewed k3s release
-forge destroy            # customer-safe: uninstall k3s; preserve workspace bytes
-forge destroy --purge-workspace --reboot --yes # explicit destructive fixture/decommission lifecycle
+forge destroy            # customer-safe: uninstall k3s; preserve iterabase-data
+forge destroy --purge-data-storage --reboot --yes # explicit empty-VG/PV decommission lifecycle
 ```
 
 `forge` SSHes to the host as a sudoer user (key auth) and installs k3s with flags derived from `forge.yaml`. `spec.hosts[].sshHostKey` optionally pins one OpenSSH host public key; permanent automation must set it and fails on replacement. Forge verifies the repository-reviewed K3s executable and airgap image archive before placing either in a privileged path, then runs the pinned K3s service installer with downloads disabled. Helm and Flux are likewise installed only from reviewed archives after both archive and extracted-executable verification; Flux manifests are rejected unless every controller image is replaced by its reviewed digest before apply. Unsupported tool versions and changed bytes fail before execution or extraction, and retries cover transport only. These identities are recorded in `.github/inputs/remote-content.json`. The kubeconfig is fetched, rewritten to the host address, and stored at `~/.forge/<install>/kubeconfig.yaml`.
@@ -43,42 +43,45 @@ When GPU support is enabled, the default GPU Operator chart archive is bound to 
 
 Before each Helm apply, forge reads the CRDs bundled in the exact pinned chart artifact, server-side applies them, and waits for them to become `Established`. This permits an existing release to enable an operator-backed dependency later (for example, enabling observability adds the Prometheus Operator CRDs) despite Helm's limitation that `crds/` are installed only during a release's initial install. Charts without bundled CRDs are unchanged. CRDs are intentionally retained on rollback/uninstall to protect custom resources and their data.
 
-Every single-node config persists exactly one `spec.agentPoolWorkspace.device`
-stable `/dev/disk/by-id/...` whole-disk selection. `forge init` obtains it from
-the interactive list, `--agentpool-workspace-device`, or
-`FORGE_AGENTPOOL_WORKSPACE_DEVICE`; hand-authored config uses the same field.
-`spec.agentPoolWorkspace.filesystem`, `--agentpool-workspace-filesystem`, and
-`FORGE_AGENTPOOL_WORKSPACE_FILESYSTEM` support `auto|ext4|xfs`. Auto resolves
-only reliably detected NVMe to XFS and uses ext4 for SATA, unknown, and virtual
-transports. Interactive init shows transport plus recommended/resolved type and supports an override only when no explicit flag/environment filesystem source was supplied; a supplied source is preserved rather than silently reprompted.
-The disk selection is the sole authorization for Forge's first format;
-filesystem choice is not a second destructive confirmation.
+Every single-node config requires canonical `spec.dataStorage.devices`: a
+non-empty lexically ordered immutable list of stable `/dev/disk/by-id/...`
+blank whole-disk identities. Interactive init selects one or more devices;
+repeated `--data-storage-device`, comma-separated
+`FORGE_DATA_STORAGE_DEVICES`, and direct YAML express the same set. Duplicate,
+conflicting, reordered persisted, missing, replaced, or changed sets fail
+closed. Selecting that complete set is the sole first-write authorization;
+there is no force, wipe, adopt, extend, replacement, or root fallback.
 
-Before any K3s/chart mutation, apply rejects root/system, removable, volatile,
-partitioned, mounted, holder-backed, process-held raw/in-use,
-recognized-signature, missing, ambiguous, or identity-drifted devices. It repeats bounded topology/signature/active-open probes
-immediately before format; it does not scan the full device or accept a second
-confirmation, wipe/adopt switch, or root fallback. Forge installs/checks the
-required XFS tooling. A fsynced root-owned receipt makes ext4/XFS
-format/fstab/mount/marker reconciliation crash-resumable with exact transport,
-configured/resolved type, UUID, `iterabase-ws` label, and
-`/var/lib/iterabase/agentpool-workspaces` mount identity.
+Before any disk mutation and again immediately before each `pvcreate`, Forge
+performs bounded complete-set stable-identity, hardware/size, whole-device,
+topology, system/root/boot/EFI/swap/K3s-backing, mount, holder,
+LVM/RAID/crypt, partition/signature, and `/proc` raw-consumer checks. Missing
+probes, read errors, descriptor races, ambiguity, or drift fail before K3s,
+charts, workloads, or claims. Forge never scans every byte.
 
-After K3s is Ready, Forge keeps default `local-path` on K3s's normal platform
-path and configures fixed non-default `iterabase-agentpool-local-path` through
-the bundled `rancher.io/local-path` provisioner on only the dedicated mount.
+After a read-only preflight, Forge installs/verifies `lvm2` and XFS tooling,
+loads/persists `dm-snapshot`, then uses a root-owned fsynced staged receipt to
+create exact planned-UUID PVs and one fixed thick VG named `iterabase-data`.
+Reapply accepts only the receipt-matching device/PV/VG set. Forge creates no
+platform LV, filesystem, mount, or fstab entry; those belong to chart-owned
+OpenEBS LVM LocalPV dynamic PVC lifecycle.
 
-Ordinary `forge destroy` remains customer-safe: it uninstalls platform/K3s and
-preserves the workspace filesystem, receipt, mount identity, and bytes. Only
-`--purge-workspace` opts into destructive removal. Purge repeats the stable
-by-id, whole-disk, root/system, holder, active-consumer, hardware, receipt,
-filesystem UUID/label, mount, and fstab checks before unmounting and erasing the
-configured Forge filesystem signatures. Missing, ambiguous, wrong, in-use, or
-drifted identity refuses. `--reboot` is independent and runs only after successful
-destroy and any requested purge. Non-interactive destructive operation uses the
-exact explicit command `forge destroy --purge-workspace --reboot --yes`; no CI
-environment or prior state implies either flag. See
-[`../docs/architecture/v2-local-path-storage.md`](../docs/architecture/v2-local-path-storage.md).
+K3s is installed with `local-storage` disabled. Forge installs the same-version
+`cert-manager-substrate` and `lvm-storage-substrate` companions before the
+platform, then waits for the pinned OpenEBS `1.10.0` CRDs, controller, node
+plugin, CSI registration, exactly two managed non-default XFS/RWO classes, and
+receipt-matching VG discovery. No local-path/default/root storage fallback is
+reconciled.
+
+Ordinary `forge destroy` uninstalls platform/K3s but preserves the receipt,
+PVs, VG, LVs, and bytes. `--purge-data-storage` is separate explicit
+decommissioning: after consumers and LVs are gone it revalidates the exact
+receipt/device/PV/VG identities before removing only that VG and its PV
+signatures. It refuses foreign, mounted, in-use, non-empty, missing, or drifted
+state and is not secure erase. `--reboot` runs only after successful cleanup.
+The non-interactive explicit form is
+`forge destroy --purge-data-storage --reboot --yes`. See
+[`../docs/architecture/v2-openebs-lvm-storage.md`](../docs/architecture/v2-openebs-lvm-storage.md).
 
 See `forge.example.yaml` for the full substrate config schema.
 
@@ -87,7 +90,7 @@ See `forge.example.yaml` for the full substrate config schema.
 ```sh
 make test           # unit + fake-SSH integration tests
 make test-e2e       # composed bundle on the configured permanent CPU fixture
-make test-e2e-workspace # permanent-fixture dedicated-disk/local-path RWO gate
+make test-e2e-workspace # permanent-fixture PV/VG/OpenEBS thick-XFS RWO gate
 make test-e2e-unit  # compile + unit-test the separate E2E harness module
 make lint           # golangci-lint
 make fmt-check      # gofmt check

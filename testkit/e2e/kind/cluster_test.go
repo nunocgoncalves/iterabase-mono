@@ -108,66 +108,40 @@ func TestDownloadedRuntimeArtifactRequiresPostCreateClusterImport(t *testing.T) 
 	}
 }
 
-func TestConfigureAgentPoolLocalPathStorageAppliesAndVerifiesExactContract(t *testing.T) {
-	t.Parallel()
-	const configJSON = `{"nodePathMap":[{"node":"DEFAULT_PATH_FOR_NON_LISTED_NODES","paths":["/var/lib/iterabase/agentpool-workspaces"]}]}`
-	var appliedManifest string
-	executor := &fakeExecutor{outputFor: func(command process.Command) string {
-		joined := strings.Join(command.Args, " ")
-		switch {
-		case strings.Contains(joined, " apply -f "):
-			data, err := os.ReadFile(command.Args[len(command.Args)-1])
-			if err != nil {
-				t.Fatalf("read applied StorageClass manifest: %v", err)
-			}
-			appliedManifest = string(data)
-		case strings.Contains(joined, " get storageclass "):
-			return `{"metadata":{"name":"iterabase-agentpool-local-path","annotations":{"storageclass.kubernetes.io/is-default-class":"false"}},"provisioner":"rancher.io/local-path","reclaimPolicy":"Delete","volumeBindingMode":"WaitForFirstConsumer","allowVolumeExpansion":false}`
-		case strings.Contains(joined, " get configmap/local-path-config "):
-			return configJSON
-		}
-		return ""
-	}}
-	cluster, err := Use("charts", filepath.Join(t.TempDir(), "kubeconfig"), executor)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := cluster.ConfigureAgentPoolLocalPathStorage(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if appliedManifest != AgentPoolWorkspaceStorageClassManifest() {
-		t.Fatalf("applied StorageClass manifest drifted:\n%s", appliedManifest)
-	}
-	if strings.Contains(appliedManifest, "parameters:") || strings.Contains(appliedManifest, "name: local-path\n") {
-		t.Fatalf("applied StorageClass aliases the default path or carries parameters:\n%s", appliedManifest)
-	}
-	if len(executor.commands) != 6 {
-		t.Fatalf("AgentPool storage commands=%d, want patch/apply/restart/wait/class/config verification", len(executor.commands))
-	}
-	if got := strings.Join(executor.commands[0].Args, " "); !strings.Contains(got, agentPoolWorkspacePath) {
-		t.Fatalf("Kind workspace patch does not use dedicated path: %s", got)
-	}
-}
-
-func TestValidateAgentPoolWorkspaceStorageClassFailsClosed(t *testing.T) {
+func TestValidateManagedLVMStorageClassFailsClosed(t *testing.T) {
 	t.Parallel()
 	valid := map[string]any{
 		"metadata": map[string]any{
 			"name":        AgentPoolWorkspaceStorageClass,
-			"annotations": map[string]any{defaultClassAnnotation: "false"},
+			"annotations": map[string]any{defaultClassAnnotation: "false", betaDefaultClassAnnotation: "false"},
 		},
 		"provisioner": AgentPoolWorkspaceProvisioner, "reclaimPolicy": "Delete",
 		"volumeBindingMode": "WaitForFirstConsumer", "allowVolumeExpansion": false,
+		"parameters": map[string]any{
+			"storage": "lvm", "vgpattern": "^iterabase-data$", "fsType": "xfs", "thinProvision": "no", "shared": "yes",
+		},
 	}
+	data, err := json.Marshal(valid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	name, err := ValidateManagedLVMStorageClass(data)
+	if err != nil || name != AgentPoolWorkspaceStorageClass {
+		t.Fatalf("valid class=%q err=%v", name, err)
+	}
+
 	mutations := map[string]func(map[string]any){
 		"default": func(value map[string]any) {
 			value["metadata"].(map[string]any)["annotations"].(map[string]any)[defaultClassAnnotation] = "true"
 		},
-		"provisioner": func(value map[string]any) { value["provisioner"] = "kubernetes.io/no-provisioner" },
+		"provisioner": func(value map[string]any) { value["provisioner"] = "rancher.io/local-path" },
 		"reclaim":     func(value map[string]any) { value["reclaimPolicy"] = "Retain" },
 		"binding":     func(value map[string]any) { value["volumeBindingMode"] = "Immediate" },
 		"expansion":   func(value map[string]any) { value["allowVolumeExpansion"] = true },
-		"parameters":  func(value map[string]any) { value["parameters"] = map[string]any{"path": "default"} },
+		"filesystem":  func(value map[string]any) { value["parameters"].(map[string]any)["fsType"] = "ext4" },
+		"thin":        func(value map[string]any) { value["parameters"].(map[string]any)["thinProvision"] = "yes" },
+		"unshared":    func(value map[string]any) { value["parameters"].(map[string]any)["shared"] = "no" },
+		"vg":          func(value map[string]any) { value["parameters"].(map[string]any)["vgpattern"] = ".*" },
 	}
 	for name, mutate := range mutations {
 		t.Run(name, func(t *testing.T) {
@@ -184,10 +158,25 @@ func TestValidateAgentPoolWorkspaceStorageClassFailsClosed(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := ValidateAgentPoolWorkspaceStorageClass(data); err == nil {
+			if _, err := ValidateManagedLVMStorageClass(data); err == nil {
 				t.Fatalf("%s contract drift unexpectedly passed", name)
 			}
 		})
+	}
+}
+
+func TestConfigureLVMStorageRejectsMissingChartBeforeMutation(t *testing.T) {
+	t.Parallel()
+	executor := &fakeExecutor{}
+	cluster, err := Use("charts", filepath.Join(t.TempDir(), "kubeconfig"), executor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cluster.ConfigureLVMStorage(context.Background(), filepath.Join(t.TempDir(), "missing"), "iterabase-system", "iterabase-lvm-storage"); err == nil {
+		t.Fatal("missing pinned LVM chart unexpectedly reached infrastructure mutation")
+	}
+	if len(executor.commands) != 0 {
+		t.Fatalf("missing chart executed commands: %+v", executor.commands)
 	}
 }
 

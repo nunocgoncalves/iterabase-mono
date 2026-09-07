@@ -1,0 +1,21 @@
+{{- if .Values.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ .Release.Name }}-lvm-storage
+  labels:
+    app.kubernetes.io/name: observability
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: lvm-storage
+spec:
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+  selector:
+    matchLabels:
+      app: openebs-lvm-node
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 30s
+{{- end }}

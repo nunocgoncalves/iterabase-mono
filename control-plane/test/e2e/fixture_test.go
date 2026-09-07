@@ -66,6 +66,7 @@ type deployedState struct {
 	client            kube.Client
 	platform          kube.Chart
 	substrate         kube.Chart
+	lvmSubstrate      kube.Chart
 	forwards          []*kube.Forward
 	apiForward        *kube.Forward
 	apiClient         *http.Client
@@ -163,6 +164,7 @@ func (state *deployedState) resolveRuntime(t *testing.T) {
 	}
 	state.platform = kube.Chart{Mode: mode, LocalPath: platform}
 	state.substrate = kube.Chart{Mode: mode, LocalPath: filepath.Join(filepath.Dir(platform), "cert-manager-substrate")}
+	state.lvmSubstrate = kube.Chart{Mode: mode, LocalPath: filepath.Join(filepath.Dir(platform), "lvm-storage-substrate")}
 }
 
 func runtimeImage(t *testing.T, name, prefix string, required bool) deployedImage {
@@ -201,10 +203,10 @@ func createControlPlaneKindStage(t *testing.T, state *deployedState) {
 	state.client = kube.Client{Executor: state.runner, Kubeconfig: cluster.Kubeconfig, Redactor: state.redactor}
 }
 
-func configureKindWorkspaceStorage(t *testing.T, state *deployedState) {
+func installLVMStorageSubstrateStage(t *testing.T, state *deployedState) {
 	t.Helper()
-	if err := state.cluster.ConfigureAgentPoolLocalPathStorage(state.ctx); err != nil {
-		t.Fatalf("configure exact Kind AgentPool workspace substrate: %v", err)
+	if err := state.cluster.ConfigureLVMStorage(state.ctx, state.lvmSubstrate.LocalPath, controlPlaneNamespace, controlPlaneRelease+"-lvm-storage"); err != nil {
+		t.Fatalf("configure exact Kind OpenEBS LVM storage substrate: %v", err)
 	}
 }
 
@@ -436,7 +438,7 @@ spec:
     trustDomain: iterabase.local
     caSecretRef: {name: e2e-placeholder-ca}
   sandbox:
-    storageClassName: iterabase-agentpool-local-path
+    storageClassName: iterabase-agentpool-lvm-xfs
     accessMode: ReadWriteOnce
     size: 1Gi
   gateways:

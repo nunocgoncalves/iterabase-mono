@@ -87,8 +87,7 @@ kube-prometheus-stack:
       storage:
         volumeClaimTemplate:
           spec:
-            # storageClassName omitted => cluster default StorageClass; set in
-            # the overlay for prod (the Prometheus Operator CRD rejects null).
+            storageClassName: iterabase-lvm-xfs
             accessModes: ["ReadWriteOnce"]
             resources:
               requests:
@@ -110,7 +109,7 @@ kube-prometheus-stack:
       type: sts
       accessModes: ["ReadWriteOnce"]
       size: 5Gi
-      # storageClassName: set in the overlay for prod
+      storageClassName: iterabase-lvm-xfs
     # The datasource sidecar (enabled by default, label grafana_datasource=1)
     # loads the Loki datasource rendered by this chart
     # (templates/grafana-datasource-loki.yaml) alongside the stack's Prometheus
@@ -155,8 +154,7 @@ kube-prometheus-stack:
       storageSpec:
         volumeClaimTemplate:
           spec:
-            # storageClassName omitted => cluster default StorageClass; set in
-            # the overlay for prod (the Prometheus Operator CRD rejects null).
+            storageClassName: iterabase-lvm-xfs
             accessModes: ["ReadWriteOnce"]
             resources:
               requests:
@@ -231,7 +229,7 @@ loki:
     persistence:
       enabled: true
       size: 10Gi
-      # storageClassName: set in the overlay for prod
+      storageClass: iterabase-lvm-xfs
   # SingleBinary + filesystem storage does not need the external memcached
   # chunks/results caches (they add 2+ memcached pods the kind install does not
   # need); disable them. An overlay switching to object storage / SimpleScalable

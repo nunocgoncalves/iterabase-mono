@@ -4,7 +4,7 @@
 > `DES-HOR-538-01`, and `DES-HOR-538-02` withdrew this Longhorn/RWX/BYO release
 > direction before semantic promotion or deployment. It remains only as
 > reconstructable decision and implementation history. Current authority is
-> [`v2-local-path-storage.md`](v2-local-path-storage.md); no artifact, chart,
+> [`v2-openebs-lvm-storage.md`](v2-openebs-lvm-storage.md); no artifact, chart,
 > configuration, runbook, or release path below is supported.
 
 - **Status:** Approved architecture; implementation is owned by HOR-469.

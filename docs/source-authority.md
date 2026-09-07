@@ -103,7 +103,7 @@ At cutover, the root scheduled reaper was the only post-cutover cleanup
 authority and supplied the historical archive guard above. HOR-540 later
 replaced ephemeral provider resources with permanent capacity-scoped fixtures and
 removed that reaper/provider credential path. Current cleanup authority is
-`forge destroy --purge-workspace --reboot --yes` over fixture-scoped, pinned
+`forge destroy --purge-data-storage --reboot --yes` over fixture-scoped, pinned
 SSH; provider-side quarantine/recovery is founder-operated outside Actions.
 The final archive audit continues to prove that Dependabot version updates are
 unconfigured, Dependabot security updates and repository Actions are disabled,

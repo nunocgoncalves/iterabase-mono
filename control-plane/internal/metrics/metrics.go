@@ -139,20 +139,20 @@ func New(component, version, commit string) *Metrics {
 			Buckets: []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5},
 		}, []string{"result"}),
 		DispatchWorkspaceFreeBytes: prometheus.NewGaugeVec(prometheus.GaugeOpts{
-			Name: "control_plane_dispatch_workspace_free_bytes", Help: "Latest durable available bytes on the shared AgentPool workspace filesystem.",
-		}, []string{}),
+			Name: "control_plane_dispatch_workspace_free_bytes", Help: "Latest durable available bytes on one AgentPool PVC.",
+		}, []string{"pool"}),
 		DispatchWorkspaceCapacity: prometheus.NewGaugeVec(prometheus.GaugeOpts{
-			Name: "control_plane_dispatch_workspace_capacity_bytes", Help: "Latest durable total bytes on the shared AgentPool workspace filesystem.",
-		}, []string{}),
+			Name: "control_plane_dispatch_workspace_capacity_bytes", Help: "Latest durable total bytes on one AgentPool PVC.",
+		}, []string{"pool"}),
 		DispatchWorkspaceFreeRatio: prometheus.NewGaugeVec(prometheus.GaugeOpts{
-			Name: "control_plane_dispatch_workspace_free_ratio", Help: "Latest durable available-byte ratio on the shared AgentPool workspace filesystem.",
-		}, []string{}),
+			Name: "control_plane_dispatch_workspace_free_ratio", Help: "Latest durable available-byte ratio on one AgentPool PVC.",
+		}, []string{"pool"}),
 		DispatchWorkspaceWarning: prometheus.NewGaugeVec(prometheus.GaugeOpts{
-			Name: "control_plane_dispatch_workspace_capacity_warning", Help: "Whether durable workspace capacity is below the 25 percent warning threshold.",
-		}, []string{}),
+			Name: "control_plane_dispatch_workspace_capacity_warning", Help: "Whether one AgentPool PVC is below the 25 percent warning threshold.",
+		}, []string{"pool"}),
 		DispatchWorkspaceGated: prometheus.NewGaugeVec(prometheus.GaugeOpts{
-			Name: "control_plane_dispatch_workspace_credit_gated", Help: "Whether the durable installation-wide 20/25 percent hysteresis gate withholds fresh credit.",
-		}, []string{}),
+			Name: "control_plane_dispatch_workspace_credit_gated", Help: "Whether one pool's durable 20/25 percent hysteresis gate withholds fresh credit.",
+		}, []string{"pool"}),
 	}
 	registerer.MustRegister(
 		m.HTTPRequests, m.HTTPDuration, m.HTTPInFlight, m.HTTPResponseBytes,
@@ -168,11 +168,6 @@ func New(component, version, commit string) *Metrics {
 	m.GatewayRunnerConnections.WithLabelValues().Set(0)
 	m.DispatchWorkerConnections.WithLabelValues().Set(0)
 	m.DispatchPendingWork.WithLabelValues().Set(0)
-	m.DispatchWorkspaceFreeBytes.WithLabelValues().Set(0)
-	m.DispatchWorkspaceCapacity.WithLabelValues().Set(0)
-	m.DispatchWorkspaceFreeRatio.WithLabelValues().Set(0)
-	m.DispatchWorkspaceWarning.WithLabelValues().Set(1)
-	m.DispatchWorkspaceGated.WithLabelValues().Set(1)
 	return m
 }
 

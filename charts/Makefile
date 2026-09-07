@@ -2,6 +2,7 @@ CHARTS_DIR := charts
 CHARTS := $(notdir $(wildcard $(CHARTS_DIR)/*))
 UMBRELLA := iterabase-platform
 CERT_MANAGER_SUBSTRATE := cert-manager-substrate
+LVM_STORAGE_SUBSTRATE := lvm-storage-substrate
 CONTROLPLANE := control-plane
 OBSERVABILITY := observability
 RENDER := /tmp/$(UMBRELLA).rendered.yaml
@@ -38,7 +39,7 @@ else
 E2E_BUILD_DEPS := build-deps
 endif
 
-.PHONY: test-build-dependency-retry build-deps lint template kubeconform template-controlplane kubeconform-controlplane template-tls kubeconform-tls template-observability kubeconform-observability template-observability-tls kubeconform-observability-tls template-internal-observability kubeconform-internal-observability check-internal-observability template-private-control-plane kubeconform-private-control-plane check-private-control-plane check-certificate-substrate check-service-selectors check-remote-image-digests check-redis-exporter-auth check-artifact-config check-tool-runner check-manager-contract check-workload-ca check-dup-yaml-keys check-metrics-contract check-alerts test-alert-rules check-dashboards check-observability-tls check check-tls check-observability test-e2e test-e2e-unit test-e2e-certificate-migration test-e2e-install test-e2e-upgrade test-e2e-feature-enable test-e2e-observability-ingress-recovery test-e2e-reapply-rollback test-e2e-metallb-transition test-e2e-observability test-e2e-observability-tls test-e2e-internal-tls clean
+.PHONY: test-build-dependency-retry build-deps lint template kubeconform template-controlplane kubeconform-controlplane template-tls kubeconform-tls template-observability kubeconform-observability template-observability-tls kubeconform-observability-tls template-internal-observability kubeconform-internal-observability check-internal-observability template-private-control-plane kubeconform-private-control-plane check-private-control-plane check-certificate-substrate check-lvm-storage-substrate check-service-selectors check-remote-image-digests check-redis-exporter-auth check-artifact-config check-tool-runner check-manager-contract check-workload-ca check-dup-yaml-keys check-metrics-contract check-alerts test-alert-rules check-dashboards check-observability-tls check check-tls check-observability test-e2e test-e2e-unit test-e2e-certificate-migration test-e2e-install test-e2e-upgrade test-e2e-feature-enable test-e2e-observability-ingress-recovery test-e2e-reapply-rollback test-e2e-metallb-transition test-e2e-observability test-e2e-observability-tls test-e2e-internal-tls clean
 
 # Compile the owner entrypoint and run hermetic mechanics plus intentional break
 # fixtures without provisioning infrastructure.
@@ -47,7 +48,9 @@ test-e2e-unit:
 	cd test/e2e && $(E2E_ENV) go test -race -count=1 -run '^TestUnit' .
 
 # Each target creates one fresh isolated Kind cluster and runs exactly once.
-test-e2e: test-e2e-certificate-migration test-e2e-install test-e2e-upgrade test-e2e-feature-enable test-e2e-observability-ingress-recovery test-e2e-reapply-rollback test-e2e-metallb-transition test-e2e-observability test-e2e-observability-tls test-e2e-internal-tls
+# Current 0.4 release paths are clean-install/reapply only. Pre-0.4 transition
+# targets remain explicit historical evidence and are not part of this aggregate.
+test-e2e: test-e2e-install test-e2e-observability test-e2e-observability-tls test-e2e-internal-tls
 
 test-e2e-certificate-migration: $(E2E_BUILD_DEPS)
 	cd test/e2e && $(E2E_ENV) go test -v -race -count=1 -timeout 35m -run '^TestE2E$$/^certificate-ownership-migration$$' .
@@ -89,6 +92,7 @@ build-deps:
 	bash scripts/build-chart-dependency.sh $(CHARTS_DIR)/$(CONTROLPLANE)
 	bash scripts/build-chart-dependency.sh $(CHARTS_DIR)/$(OBSERVABILITY)
 	bash scripts/build-chart-dependency.sh $(CHARTS_DIR)/$(CERT_MANAGER_SUBSTRATE)
+	bash scripts/build-chart-dependency.sh $(CHARTS_DIR)/$(LVM_STORAGE_SUBSTRATE)
 	bash scripts/build-chart-dependency.sh $(CHARTS_DIR)/$(UMBRELLA)
 
 lint: build-deps
@@ -129,6 +133,9 @@ kubeconform-tls: template-tls
 check-certificate-substrate: build-deps
 	./scripts/check-certificate-substrate.sh
 
+check-lvm-storage-substrate: build-deps
+	./scripts/check-lvm-storage-substrate.sh
+
 check-service-selectors:
 	./scripts/check-service-selectors.sh
 
@@ -165,7 +172,7 @@ test-alert-rules: build-deps
 check-dashboards: build-deps
 	./scripts/check-dashboards.sh
 
-check: test-build-dependency-retry lint kubeconform kubeconform-controlplane kubeconform-observability check-internal-observability check-private-control-plane check-certificate-substrate check-service-selectors check-remote-image-digests check-redis-exporter-auth check-artifact-config check-tool-runner check-manager-contract check-workload-ca check-dup-yaml-keys check-metrics-contract check-alerts check-dashboards
+check: test-build-dependency-retry lint kubeconform kubeconform-controlplane kubeconform-observability check-internal-observability check-private-control-plane check-certificate-substrate check-lvm-storage-substrate check-service-selectors check-remote-image-digests check-redis-exporter-auth check-artifact-config check-tool-runner check-manager-contract check-workload-ca check-dup-yaml-keys check-metrics-contract check-alerts check-dashboards
 
 check-tls: kubeconform-tls kubeconform-observability-tls check-internal-observability check-private-control-plane check-redis-exporter-auth check-observability-tls
 
@@ -225,4 +232,4 @@ check-private-control-plane: kubeconform-private-control-plane
 
 clean:
 	rm -f $(RENDER) $(RENDER_CP) $(RENDER_TLS) $(RENDER_OBS) $(RENDER_OBS_TLS) $(RENDER_INTERNAL_OBS) $(RENDER_PRIVATE_CP)
-	rm -rf $(CHARTS_DIR)/$(UMBRELLA)/charts $(CHARTS_DIR)/$(CERT_MANAGER_SUBSTRATE)/charts $(CHARTS_DIR)/$(CONTROLPLANE)/charts $(CHARTS_DIR)/$(OBSERVABILITY)/charts
+	rm -rf $(CHARTS_DIR)/$(UMBRELLA)/charts $(CHARTS_DIR)/$(CERT_MANAGER_SUBSTRATE)/charts $(CHARTS_DIR)/$(LVM_STORAGE_SUBSTRATE)/charts $(CHARTS_DIR)/$(CONTROLPLANE)/charts $(CHARTS_DIR)/$(OBSERVABILITY)/charts

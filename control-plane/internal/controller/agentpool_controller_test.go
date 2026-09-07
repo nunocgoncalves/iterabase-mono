@@ -65,7 +65,7 @@ func newAgentPoolTestEnv(t *testing.T, store PoolMaterializer) (client.Client, c
 
 	adminClient, err := client.New(cfg, client.Options{Scheme: scheme})
 	require.NoError(t, err)
-	seedLocalPathClass(t, adminClient, ctx)
+	seedOpenEBSLVMClass(t, adminClient, ctx)
 	saCfg := rbacManagerConfig(t, ctx, cfg, scheme)
 
 	mgr, err := ctrl.NewManager(saCfg, ctrl.Options{
@@ -180,7 +180,7 @@ func TestAgentPoolWorkerPodTrustBoundary(t *testing.T) {
 	assert.Equal(t, sandboxPVCName(poolB), claimB)
 }
 
-func seedLocalPathClass(t *testing.T, c client.Client, ctx context.Context) {
+func seedOpenEBSLVMClass(t *testing.T, c client.Client, ctx context.Context) {
 	t.Helper()
 	reclaim := corev1.PersistentVolumeReclaimDelete
 	binding := storagev1.VolumeBindingWaitForFirstConsumer
@@ -189,6 +189,7 @@ func seedLocalPathClass(t *testing.T, c client.Client, ctx context.Context) {
 		ObjectMeta:  metav1.ObjectMeta{Name: agentPoolWorkspaceStorageClass, Annotations: map[string]string{"storageclass.kubernetes.io/is-default-class": "false"}},
 		Provisioner: agentPoolWorkspaceProvisioner, ReclaimPolicy: &reclaim,
 		VolumeBindingMode: &binding, AllowVolumeExpansion: &expand,
+		Parameters: map[string]string{"storage": "lvm", "vgpattern": "^iterabase-data$", "fsType": "xfs", "thinProvision": "no", "shared": "yes"},
 	})
 	if err != nil && !errors.IsAlreadyExists(err) {
 		require.NoError(t, err)
@@ -216,7 +217,7 @@ func TestAgentPoolReconcile(t *testing.T) {
 		StringData: map[string]string{"token": "secret-value"},
 	}))
 
-	seedLocalPathClass(t, adminClient, ctx)
+	seedOpenEBSLVMClass(t, adminClient, ctx)
 
 	pool := validAgentPool("walter-pool", ns)
 	require.NoError(t, adminClient.Create(ctx, pool))
@@ -472,7 +473,7 @@ func TestAgentPoolTransientSecretReadRecovery(t *testing.T) {
 	ca := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "platform-ca", Namespace: "default"}}
 	creds := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "graph-creds", Namespace: "default"}}
 	recorder := &recordingMaterializer{}
-	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&v1alpha1.AgentPool{}).WithObjects(pool, ca, creds, localPathClass()).Build()
+	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&v1alpha1.AgentPool{}).WithObjects(pool, ca, creds, lvmAgentPoolClass()).Build()
 	injected := fmt.Errorf("injected API reader timeout")
 	reader := &failOnceSecretReader{Reader: c, err: injected}
 	r := &AgentPoolReconciler{Client: c, Scheme: scheme, APIReader: reader, Store: recorder}
@@ -525,7 +526,7 @@ func TestAgentPoolLateSecretRecovery(t *testing.T) {
 	pool.Spec.Replicas = 0
 	pool.Spec.Sandbox.AccessMode = corev1.ReadWriteOnce
 	recorder := &recordingMaterializer{}
-	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&v1alpha1.AgentPool{}).WithObjects(pool, localPathClass()).Build()
+	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&v1alpha1.AgentPool{}).WithObjects(pool, lvmAgentPoolClass()).Build()
 	r := &AgentPoolReconciler{Client: c, Scheme: scheme, APIReader: c, Store: recorder}
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: pool.Name, Namespace: pool.Namespace}}
 
@@ -934,7 +935,7 @@ func TestAgentPoolMultiReplicaRWOReconcile(t *testing.T) {
 		StringData: map[string]string{"token": "v"},
 	}))
 
-	seedLocalPathClass(t, adminClient, ctx)
+	seedOpenEBSLVMClass(t, adminClient, ctx)
 	pool := validAgentPool("rwo-pool", ns)
 	pool.Spec.Replicas = 2
 	pool.Spec.Sandbox.AccessMode = corev1.ReadWriteOnce
@@ -960,10 +961,10 @@ func TestAgentPoolMultiReplicaRWOReconcile(t *testing.T) {
 	}, 15*time.Second, 200*time.Millisecond, "two warm-worker pods should be created for same-node RWO")
 }
 
-// TestAgentPoolLocalPathSizeMutationPreservesPVC proves the non-expandable
+// TestAgentPoolLVMSizeMutationPreservesPVC proves the non-expandable
 // contract: changing requested size never recreates or silently mutates the
 // existing claim.
-func TestAgentPoolLocalPathSizeMutationPreservesPVC(t *testing.T) {
+func TestAgentPoolLVMSizeMutationPreservesPVC(t *testing.T) {
 	adminClient, ctx := newAgentPoolTestEnv(t, nil)
 	ns := "default"
 
@@ -976,7 +977,7 @@ func TestAgentPoolLocalPathSizeMutationPreservesPVC(t *testing.T) {
 		StringData: map[string]string{"token": "v"},
 	}))
 
-	seedLocalPathClass(t, adminClient, ctx)
+	seedOpenEBSLVMClass(t, adminClient, ctx)
 	pool := validAgentPool("mut-pool", ns)
 	pool.Spec.Replicas = 1
 	pool.Spec.Sandbox.AccessMode = corev1.ReadWriteOnce
@@ -996,7 +997,7 @@ func TestAgentPoolLocalPathSizeMutationPreservesPVC(t *testing.T) {
 		return firstUID != "" && len(pvc.Spec.AccessModes) == 1 && pvc.Spec.AccessModes[0] == corev1.ReadWriteOnce
 	}, 15*time.Second, 200*time.Millisecond, "RWO sandbox PVC should be created")
 
-	// Request online expansion. The fixed local-path class is non-expandable, so
+	// Request online expansion. The fixed thick LVM class is non-expandable, so
 	// the controller must preserve the existing claim and surface the refusal.
 	require.Eventually(t, func() bool {
 		var got v1alpha1.AgentPool

@@ -75,40 +75,56 @@ func mustAllocateTestSessionUID(t *testing.T, store *dispatch.Store, sessionID s
 	return uid
 }
 
-func TestStore_WorkspaceCapacityHysteresisIsDurable(t *testing.T) {
-	store, _, _ := newTestStore(t)
+func TestStoreWorkspaceCapacityHysteresisIsDurableAndPerPool(t *testing.T) {
+	store, _, pool := newTestStore(t)
 	ctx := context.Background()
+	poolID := seedDispatchPool(t, pool, "ns/pool-a", "pool-a")
+	otherPoolID := seedDispatchPool(t, pool, "ns/pool-b", "pool-b")
 
-	initial, err := store.LoadWorkspaceCapacityState(ctx)
+	initial, err := store.LoadWorkspaceCapacityStates(ctx)
 	require.NoError(t, err)
-	assert.False(t, initial.Observed)
-	assert.True(t, initial.CreditGated, "missing history starts fail-closed")
+	assert.Empty(t, initial, "unobserved pools start fail-closed in memory without a misleading row")
 
-	opened, err := store.ObserveWorkspaceCapacity(ctx, 30, 100, 0.30)
+	opened, err := store.ObserveWorkspaceCapacity(ctx, poolID, 30, 100, 0.30)
 	require.NoError(t, err)
+	assert.Equal(t, poolID, opened.PoolID)
 	assert.False(t, opened.Warning)
 	assert.False(t, opened.CreditGated)
 
-	warning, err := store.ObserveWorkspaceCapacity(ctx, 24, 100, 0.24)
+	warning, err := store.ObserveWorkspaceCapacity(ctx, poolID, 24, 100, 0.24)
 	require.NoError(t, err)
 	assert.True(t, warning.Warning)
 	assert.False(t, warning.CreditGated, "warning alone does not close fresh credit")
 
-	gated, err := store.ObserveWorkspaceCapacity(ctx, 20, 100, 0.20)
+	gated, err := store.ObserveWorkspaceCapacity(ctx, poolID, 20, 100, 0.20)
 	require.NoError(t, err)
 	assert.True(t, gated.CreditGated)
 
-	replacement, err := store.ObserveWorkspaceCapacity(ctx, 24, 100, 0.24)
+	replacement, err := store.ObserveWorkspaceCapacity(ctx, poolID, 24, 100, 0.24)
 	require.NoError(t, err)
-	assert.True(t, replacement.CreditGated, "replacement observations retain the durable gate in-band")
+	assert.True(t, replacement.CreditGated, "replacement observations retain this pool's durable gate in-band")
 
-	reloaded, err := store.LoadWorkspaceCapacityState(ctx)
+	other, err := store.ObserveWorkspaceCapacity(ctx, otherPoolID, 30, 100, 0.30)
 	require.NoError(t, err)
-	assert.True(t, reloaded.CreditGated, "dispatch restart restores the gate")
+	assert.False(t, other.CreditGated, "one pool's fill does not gate another PVC")
 
-	reopened, err := store.ObserveWorkspaceCapacity(ctx, 25, 100, 0.25)
+	reloaded, err := store.LoadWorkspaceCapacityStates(ctx)
+	require.NoError(t, err)
+	assert.True(t, reloaded[poolID].CreditGated)
+	assert.False(t, reloaded[otherPoolID].CreditGated)
+
+	reopened, err := store.ObserveWorkspaceCapacity(ctx, poolID, 25, 100, 0.25)
 	require.NoError(t, err)
 	assert.False(t, reopened.CreditGated)
+}
+
+func seedDispatchPool(t *testing.T, pool *pgxpool.Pool, key, name string) string {
+	t.Helper()
+	var id string
+	require.NoError(t, pool.QueryRow(context.Background(), `
+		INSERT INTO toolgateway.pools (key, name, spiffe_id_prefix)
+		VALUES ($1, $2, 'spiffe://iterabase.local/pools/' || $2 || '/') RETURNING id::text`, key, name).Scan(&id))
+	return id
 }
 
 func TestStore_AssignRunToPoolAndResolve(t *testing.T) {

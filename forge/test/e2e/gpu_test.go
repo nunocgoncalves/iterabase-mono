@@ -66,7 +66,7 @@ func provisionGPUStage(t *testing.T, state *digitalOceanGPUState) {
 func applyGPUSubstrateStage(t *testing.T, state *digitalOceanGPUState) {
 	cfgPath := writeForgeConfigGPUDriver(t, state.runID, state.vm.IP, state.privKeyPath, gpuUpgradeBaselineDriver)
 	out := applyOnce(t, state.forgeBin, state.forgeHome, cfgPath)
-	assertApplyMarkers(t, out, "node ready: true", "AgentPool workspace:", "AgentPool local-path ready: true", "gpu ready: true", "gpu driver: "+gpuUpgradeBaselineDriver)
+	assertApplyMarkers(t, out, "node ready: true", "data storage: iterabase-data", "LVM storage ready: true", "gpu ready: true", "gpu driver: "+gpuUpgradeBaselineDriver)
 	state.bindKubeconfigTunnel(t)
 	assertPinnedNFDRender(t, filepath.Join(state.forgeHome, state.runID, "kubeconfig.yaml"), state.runID+"-gpu-operator")
 	t.Logf("apply output:\n%s", out)

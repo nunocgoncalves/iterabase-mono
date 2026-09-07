@@ -70,6 +70,8 @@ type chartState struct {
 	forwards             []*kube.Forward
 	platform             kube.Chart
 	substrate            kube.Chart
+	lvmSubstrate         kube.Chart
+	lvmStorageReady      bool
 	transitionBaselines  map[string]transitionBaseline
 	runtimeImageDigests  map[string]string
 	snapshots            map[string]lifecycleSnapshot
@@ -111,11 +113,11 @@ func newChartState(t *testing.T) *chartState {
 		runner:              process.Runner{Redactor: redactor, OutputDir: outputDir},
 		runtimeImageDigests: make(map[string]string), snapshots: make(map[string]lifecycleSnapshot),
 	}
-	state.platform, state.substrate = resolveCharts(t, chartsRoot)
+	state.platform, state.substrate, state.lvmSubstrate = resolveCharts(t, chartsRoot)
 	return state
 }
 
-func resolveCharts(t *testing.T, _ string) (kube.Chart, kube.Chart) {
+func resolveCharts(t *testing.T, _ string) (kube.Chart, kube.Chart, kube.Chart) {
 	t.Helper()
 	mode := sharede2e.FixtureMode(os.Getenv("ITERABASE_E2E_FIXTURE_MODE"))
 	switch mode {
@@ -129,14 +131,15 @@ func resolveCharts(t *testing.T, _ string) (kube.Chart, kube.Chart) {
 			t.Fatalf("resolve composed platform chart: %v", err)
 		}
 		substrate := filepath.Join(filepath.Dir(platform), "cert-manager-substrate")
-		return kube.Chart{Mode: mode, LocalPath: platform}, kube.Chart{Mode: mode, LocalPath: substrate}
+		lvmSubstrate := filepath.Join(filepath.Dir(platform), "lvm-storage-substrate")
+		return kube.Chart{Mode: mode, LocalPath: platform}, kube.Chart{Mode: mode, LocalPath: substrate}, kube.Chart{Mode: mode, LocalPath: lvmSubstrate}
 	case sharede2e.FixturePublished:
 		version := publishedPlatformVersion(t)
 		return kube.Chart{Mode: mode, Reference: "oci://ghcr.io/nunocgoncalves/iterabase-charts/iterabase-platform", Version: version},
-			kube.Chart{Mode: mode, Reference: "oci://ghcr.io/nunocgoncalves/iterabase-charts/cert-manager-substrate", Version: version}
+			kube.Chart{Mode: mode, Reference: "oci://ghcr.io/nunocgoncalves/iterabase-charts/cert-manager-substrate", Version: version}, kube.Chart{}
 	default:
 		t.Fatalf("unsupported charts fixture mode %q", mode)
-		return kube.Chart{}, kube.Chart{}
+		return kube.Chart{}, kube.Chart{}, kube.Chart{}
 	}
 }
 
@@ -176,11 +179,9 @@ func createKindStage(t *testing.T, state *chartState) {
 	state.client = kube.Client{Executor: state.runner, Kubeconfig: cluster.Kubeconfig, Redactor: state.redactor}
 }
 
-func configureAgentPoolLocalPathStage(t *testing.T, state *chartState) {
+func installLVMStorageStage(t *testing.T, state *chartState) {
 	t.Helper()
-	if err := state.cluster.ConfigureAgentPoolLocalPathStorage(state.ctx); err != nil {
-		t.Fatalf("configure exact Kind AgentPool workspace substrate: %v", err)
-	}
+	state.installLVMStorage(t)
 }
 
 func importRuntimeImagesStage(t *testing.T, state *chartState) {
@@ -449,6 +450,17 @@ func (state *chartState) installSubstrate(t *testing.T, valueFiles ...string) {
 	}
 }
 
+func (state *chartState) installLVMStorage(t *testing.T) {
+	t.Helper()
+	if state.lvmStorageReady || state.lvmSubstrate.LocalPath == "" {
+		return
+	}
+	if err := state.cluster.ConfigureLVMStorage(state.ctx, state.lvmSubstrate.LocalPath, testNamespace, testRelease+"-lvm-storage"); err != nil {
+		t.Fatalf("install exact Kind OpenEBS LVM storage substrate: %v", err)
+	}
+	state.lvmStorageReady = true
+}
+
 func (state *chartState) installPlatform(t *testing.T, timeout time.Duration, valueFiles ...string) {
 	t.Helper()
 	// Mirror Forge's pre-apply (DES-HOR-511-03): establish the exact chart's CRDs
@@ -490,6 +502,7 @@ func (state *chartState) installPlatform(t *testing.T, timeout time.Duration, va
 // release/namespace and the given value files and --set-string overrides.
 func (state *chartState) helmUpgrade(t *testing.T, timeout time.Duration, valueFiles []string, values map[string]string) {
 	t.Helper()
+	state.installLVMStorage(t)
 	out, err := state.client.HelmUpgrade(state.ctx, kube.HelmOptions{
 		Release: testRelease, Namespace: testNamespace, Chart: state.platform,
 		ValueFiles: valueFiles, Values: values, Wait: true, Timeout: timeout,

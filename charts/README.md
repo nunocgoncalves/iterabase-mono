@@ -2,13 +2,14 @@
 
 > Canonical source: [`iterabase-mono/charts`](https://github.com/nunocgoncalves/iterabase-mono/tree/master/charts). The former standalone source repository is historical and read-only; the existing `ghcr.io/nunocgoncalves/iterabase-charts` package namespace remains the stable artifact identity.
 
-Helm charts for the [iterabase](https://iterabase.com) platform. The `cert-manager-substrate` release establishes certificate CRDs, webhook, controller, CSI driver, and—when internal TLS is selected—the platform-owned internal CA before the `iterabase-platform` umbrella. [Forge](https://github.com/nunocgoncalves/iterabase-mono/tree/master/forge) also prepares the required dedicated AgentPool filesystem and configures K3s's bundled local-path provisioner before Helm runs.
+Helm charts for the [iterabase](https://iterabase.com) platform. The `cert-manager-substrate` release establishes certificate authority before the platform. The same-version `lvm-storage-substrate` release establishes content-pinned OpenEBS LVM LocalPV `1.10.0`, its CRDs/controller/node CSI authority, and the two managed non-default thick XFS/RWO classes. [Forge](https://github.com/nunocgoncalves/iterabase-mono/tree/master/forge) prepares only the exact receipt-bound `iterabase-data` VG and disables K3s local storage before either chart runs.
 
 ## Charts
 
 | Chart | Description | Released individually |
 |---|---|---|
 | `cert-manager-substrate` | Ordered certificate operator, CRDs, webhook, and CSI substrate | ✅, alongside platform |
+| `lvm-storage-substrate` | Pinned OpenEBS LVM LocalPV CRDs/controller/node/CSI plus exact managed StorageClasses | ✅, alongside platform |
 | `iterabase-platform` | Application umbrella — composes all platform components | ✅ |
 | `inference-gateway` | Model-access service | ✅ |
 | `control-plane` | Durable workflow/control APIs, operator, and immutable artifact service | ✅ |
@@ -24,7 +25,8 @@ control-plane ships standalone and is enabled in the umbrella by default (it pro
 ## Install
 
 Install the same-version certificate substrate first and wait for its webhook;
-then install the platform. The gateway is the only public endpoint, served over
+install the same-version LVM storage substrate and wait for CSI plus
+`iterabase-data` discovery; then install the platform. The gateway is the only public endpoint, served over
 HTTPS by the platform edge (ingress-nginx + cert-manager-issued leaves). The
 edge is always a **LoadBalancer** Service —
 no hostNetwork. The LB implementation is pluggable:
@@ -35,6 +37,8 @@ no hostNetwork. The LB implementation is pluggable:
   ```sh
   helm install iterabase-cert-manager charts/cert-manager-substrate \
     -n iterabase-system --create-namespace --wait
+  helm install iterabase-lvm-storage charts/lvm-storage-substrate \
+    -n iterabase-system --wait
   helm install iterabase charts/iterabase-platform -n iterabase-system \
     -f values-kind.yaml --set control-plane.toolRunner.enabled=false --wait
   ```
@@ -65,9 +69,12 @@ your values/overlay:
 ```sh
 helm install iterabase-cert-manager \
   oci://ghcr.io/nunocgoncalves/iterabase-charts/cert-manager-substrate \
-  --version 0.3.0 -n iterabase-system --create-namespace --wait
+  --version 0.4.0 -n iterabase-system --create-namespace --wait
+helm install iterabase-lvm-storage \
+  oci://ghcr.io/nunocgoncalves/iterabase-charts/lvm-storage-substrate \
+  --version 0.4.0 -n iterabase-system --wait
 helm install iterabase oci://ghcr.io/nunocgoncalves/iterabase-charts/iterabase-platform \
-  --version 0.3.0 -n iterabase-system \
+  --version 0.4.0 -n iterabase-system \
   --set inference-gateway.ingress.host=gateway.opo1.example.com \
   --set inference-gateway.ingress.tls.clusterIssuer=letsencrypt-prod \
   --set ingress-nginx.controller.service.ipFamilyPolicy=SingleStack \
@@ -170,42 +177,47 @@ a changed one-replica gateway, an injected failure before admission post-hooks,
 fail-closed reapply, the explicit legacy rollback above, and current forward
 recovery.
 
-### Production AgentPool local-path storage
+### Production OpenEBS LVM LocalPV storage
 
-Platform V2 has no chart-selectable storage backend. Before Helm runs, Forge
-requires one persisted stable whole-disk selection, safely prepares it as the
-resolved ext4/XFS type with label `iterabase-ws`, and mounts it at
-`/var/lib/iterabase/agentpool-workspaces`. It then configures
-K3s's bundled `rancher.io/local-path` provisioner with two isolated class maps:
+Platform V2 has no chart-selectable storage backend. Forge requires one or more
+explicit stable blank whole data disks, repeats complete-set fail-closed checks,
+and crash-resumably creates only receipt-bound PVs plus one fixed thick VG named
+`iterabase-data`. Forge creates no platform LV, filesystem, mount, or fstab
+entry. K3s's `local-storage` component is disabled; no local-path provisioner,
+default class, or root-backed fallback is supported.
 
-- the unchanged default `local-path` class remains on K3s's normal platform path;
-- fixed non-default `iterabase-agentpool-local-path` uses only the dedicated mount.
+The same-platform-version `lvm-storage-substrate` companion wraps the reviewed
+OpenEBS LVM LocalPV `1.10.0` archive (SHA-256
+`3ad766c56d4a0ab0f3f2baaeb726a4554d1f51bb485f1cef00846cf1d82a179d`),
+pins every runtime image by digest, disables analytics, configures K3s's
+`/var/lib/rancher/k3s/agent/kubelet` path, and creates exactly:
 
-Every AgentPool declares one `ReadWriteOnce` claim on the fixed class. RWO limits
-the volume to the one supported node, not one pod, so multiple same-pool workers
-may mount it concurrently. Every trusted root supervisor in a pool may access
-that whole claim; separate pools receive separate claims/mounts. Disposable
-children use stable distinct UID=GID, cleared groups/capabilities,
-`no_new_privs`, umask `0077`, and session-owned `0700` trees under the root-owned
-`0711` PVC root. No `fsGroup` grants this access. Supervisor startup/readiness
-also accepts only its pod-scoped CSI `tls.key` exact contained AtomicWriter chain
-beneath non-child-writable ancestors and a root-owned regular exact-`0440`
-resolved target (the narrow upstream exception); the supervisor uses it for mTLS
-while children get `EACCES`.
-The controller rejects another class, provisioner, reclaim policy, expansion
-mode, access mode, or bound PV path outside the dedicated
-mount. PostgreSQL, MinIO, and ordinary default-class claims cannot land there.
+- `iterabase-lvm-xfs`: `shared: no`, used explicitly by every chart-generated
+  platform data PVC;
+- `iterabase-agentpool-lvm-xfs`: `shared: yes`, authorized only for one
+  Filesystem/RWO claim per AgentPool so multiple same-pool workers can mount it
+  on the one supported node.
 
-The class is `WaitForFirstConsumer`, `Delete`, and non-expandable. Requested PVC
-sizes are planning metadata, not hard quotas. The node-local filesystem is
-non-HA, has no online expansion or secure-erasure guarantee, and is not session
-backup/DR authority. Customers own capacity response, infrastructure encryption,
-node/disk protection, and backup. Multi-node, RWX, BYO classes, existing
-filesystem adoption, and root-disk fallback are unsupported.
+Both classes use `local.csi.openebs.io`, `storage: lvm`,
+`vgpattern: ^iterabase-data$`, XFS, explicit thick `thinProvision: no`,
+`ReadWriteOnce`, `WaitForFirstConsumer`, `Delete`, expansion disabled, and false
+default annotations. PostgreSQL, MinIO, persistent observability components,
+and every other chart-generated data claim use only the general class.
 
-Direct Helm installation does not replace the Forge substrate gate: the exact
-filesystem, mount, bundled-provisioner configuration, and fixed StorageClass
-must already have been reconciled by Forge before AgentPools are created.
+The AgentPool controller accepts initial unbound `WaitForFirstConsumer` state,
+then requires the exact CSI driver, XFS, VG attribute, OpenEBS LVMVolume Ready
+identity, no-thin/shared settings, LVMNode VG identity, and local node topology.
+Trusted root-supervisor access, stable isolated child UID=GID and permissions,
+workload-key/mTLS validation, fencing, and no-replay behavior remain unchanged.
+Capacity warning/gating is per AgentPool PVC (25% warning, <=20% all-fresh-credit
+gate, >=25% reopen); OpenEBS `lvm_vg_*` metrics and chart alerts separately
+report aggregate VG pressure and pending-claim exhaustion.
+
+Direct Helm installation does not replace Forge's receipt/VG safety gate. The
+companion must observe the exact `iterabase-data` VG before the platform creates
+claims. Multi-node/HA, RWX, default/BYO classes, Longhorn, local-path, thin
+provisioning, expansion, adoption, migration, snapshot/backup/DR authority, and
+root fallback are unsupported.
 
 ### Private control-plane ingress
 
@@ -325,7 +337,12 @@ REST-map the pools:
    steady-state `Fail` policy. Forge performs this bootstrap; a direct operator
    must repeat it and verify the live webhook policy is `Fail`.
 
-### Direct upgrade and rollback ownership procedure
+### Historical pre-0.4 upgrade and rollback ownership procedures
+
+> These procedures preserve certificate/MetalLB history and test non-storage
+> transitions only. They do not authorize upgrading a local-path installation
+> into platform `0.4.0`. `DES-HOR-545-01` requires a clean host/OPO1 rebuild,
+> explicit blank disks, a new receipt-bound VG, and fresh OpenEBS claims.
 
 **Upgrading from a hook-era predecessor (0.3.19 and earlier, whose pools were
 Helm hooks).** Before running step 1 above, transfer the live hook-created pools
@@ -371,7 +388,9 @@ revision's hooks would try to recreate objects that the kept release still owns.
 Always recover via forward re-upgrade rather than re-applying the predecessor's
 raw manifests.
 
-### Upgrade from platform 0.2.2 or earlier
+### Historical certificate ownership handoff from platform 0.2.2 or earlier
+
+This is retained evidence for the 0.3 line, not a supported path into 0.4.0.
 
 Platform 0.2.2 bundled cert-manager and the CSI driver in the platform Helm
 release. **Do not install the companion substrate first** on an existing
@@ -510,19 +529,20 @@ explicit deletion validation.
 make check                  # Helm lint/template + kubeconform + static contracts
 make check-tls              # TLS presets, including observability + TLS together
 make test-e2e-unit          # compiled suite + intentional break fixtures (no cluster)
-make test-e2e-install       # one fresh Kind cluster
-make test-e2e-upgrade       # checksum-pinned N-1 -> exact current transition
-make test-e2e-feature-enable # disabled operator dependency -> CRDs -> current
-make test-e2e-observability-ingress-recovery # 0.3.12 private-ingress interrupted upgrade/reapply/rollback
-make test-e2e-reapply-rollback # idempotent reapply + inverse/forward recovery
+make test-e2e-install       # current clean OpenEBS LVM install + claim lifecycle
 make test-e2e-observability
 make test-e2e-observability-tls
 make test-e2e-internal-tls
+# Historical 0.3-line non-storage transition evidence; never 0.4 migration authority:
 make test-e2e-certificate-migration
+make test-e2e-upgrade
+make test-e2e-feature-enable
+make test-e2e-observability-ingress-recovery
+make test-e2e-reapply-rollback
 ```
 
 The runtime targets are chart-owned typed Go scenarios built on `testkit/e2e`.
-Each target creates exactly one isolated Kind cluster, runs once without retries,
+Each current target creates exactly one isolated Kind cluster, runs once without retries,
 and collects shared redacted diagnostics on failure. See
 [`test/e2e/README.md`](test/e2e/README.md) for scenario and fixture contracts.
 

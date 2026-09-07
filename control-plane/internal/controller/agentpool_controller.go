@@ -100,7 +100,7 @@ type AgentPoolReconciler struct {
 	// flaky fake). Optional: when nil, gateway materialization is skipped
 	// (e.g. envtest without Postgres).
 	Store PoolMaterializer
-	// CapacityReader projects dispatch's durable installation-wide workspace
+	// CapacityReader projects dispatch's durable per-AgentPool-PVC workspace
 	// hysteresis state into every AgentPool condition. It is separate from the
 	// authorization materializer contract so isolated controller tests may
 	// supply only the capability under test.
@@ -116,6 +116,7 @@ type AgentPoolReconciler struct {
 // +kubebuilder:rbac:groups="",resources=persistentvolumes,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get
 // +kubebuilder:rbac:groups=storage.k8s.io,resources=storageclasses,verbs=get;list;watch
+// +kubebuilder:rbac:groups=local.openebs.io,resources=lvmnodes;lvmvolumes,verbs=get;list;watch
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
 
 // PoolMaterializer is the contract by which the AgentPool reconciler
@@ -131,10 +132,10 @@ type PoolMaterializer interface {
 	SoftDeletePoolByKey(ctx context.Context, key string) error
 }
 
-// WorkspaceCapacityReader is the existing Postgres-backed bridge from
-// dispatch's durable shared-filesystem observation to operator status.
+// WorkspaceCapacityReader is the Postgres-backed bridge from dispatch's
+// durable per-AgentPool-PVC observation to the matching operator status.
 type WorkspaceCapacityReader interface {
-	WorkspaceCapacityStatus(ctx context.Context) (gateway.WorkspaceCapacityStatus, error)
+	WorkspaceCapacityStatus(ctx context.Context, poolKey string) (gateway.WorkspaceCapacityStatus, error)
 }
 
 // Reconcile handles AgentPool create/update/delete events.
@@ -594,6 +595,7 @@ func (r *AgentPoolReconciler) ensurePVC(ctx context.Context, pool *v1alpha1.Agen
 		}
 		sc := pool.Spec.Sandbox.StorageClassName
 		access := []corev1.PersistentVolumeAccessMode{pool.Spec.Sandbox.AccessMode}
+		volumeMode := corev1.PersistentVolumeFilesystem
 		if !pvc.CreationTimestamp.IsZero() {
 			if pvc.Spec.StorageClassName == nil || *pvc.Spec.StorageClassName != sc {
 				return &agentPoolStorageMutationError{
@@ -601,21 +603,22 @@ func (r *AgentPoolReconciler) ensurePVC(ctx context.Context, pool *v1alpha1.Agen
 					message: fmt.Sprintf("immutable sandbox PVC storageClassName is %v, requested %q; migrate through a separately reviewed copy/cutover plan instead of recreating the claim", pointerValue(pvc.Spec.StorageClassName), sc),
 				}
 			}
-			if len(pvc.Spec.AccessModes) != 1 || pvc.Spec.AccessModes[0] != pool.Spec.Sandbox.AccessMode {
+			if len(pvc.Spec.AccessModes) != 1 || pvc.Spec.AccessModes[0] != pool.Spec.Sandbox.AccessMode || pvc.Spec.VolumeMode == nil || *pvc.Spec.VolumeMode != corev1.PersistentVolumeFilesystem {
 				return &agentPoolStorageMutationError{
 					reason:  storageReasonClassMismatch,
-					message: fmt.Sprintf("immutable sandbox PVC accessModes are %v, requested %s; do not recreate the claim", pvc.Spec.AccessModes, pool.Spec.Sandbox.AccessMode),
+					message: fmt.Sprintf("immutable sandbox PVC accessModes/volumeMode are %v/%v, requested ReadWriteOnce/Filesystem; do not recreate the claim", pvc.Spec.AccessModes, pointerValue(pvc.Spec.VolumeMode)),
 				}
 			}
 			current := pvc.Spec.Resources.Requests[corev1.ResourceStorage]
 			if current.Cmp(pool.Spec.Sandbox.Size) != 0 {
 				return &agentPoolStorageMutationError{
 					reason:  storageReasonPVCExpansionFailed,
-					message: fmt.Sprintf("PVCExpansionFailed: local-path sandbox PVC size is immutable (current %s requested %s); online expansion and shrink are unsupported", current.String(), pool.Spec.Sandbox.Size.String()),
+					message: fmt.Sprintf("PVCExpansionFailed: OpenEBS thick XFS sandbox PVC size is immutable (current %s requested %s); online expansion and shrink are unsupported", current.String(), pool.Spec.Sandbox.Size.String()),
 				}
 			}
 		} else {
 			pvc.Spec.AccessModes = access
+			pvc.Spec.VolumeMode = &volumeMode
 			pvc.Spec.StorageClassName = &sc
 		}
 		if pvc.Spec.Resources.Requests == nil {

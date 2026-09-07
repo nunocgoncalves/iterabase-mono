@@ -41,7 +41,7 @@ Before every selected scenario, and unconditionally after diagnostics on every
 outcome, the harness runs:
 
 ```text
-forge destroy --purge-workspace --reboot --yes
+forge destroy --purge-data-storage --reboot --yes
 ```
 
 Ordinary `forge destroy` is unchanged and preserves AgentPool workspace state.
@@ -79,7 +79,7 @@ identity or AgentPool workspace assertions.
 ### `permanent-cpu`
 
 Uses the CPU fixture for no-GPU refusal, supported migration-source install,
-exact current Forge/chart/image/Flux handoff, dedicated local-path assertions,
+exact current Forge/chart/image/Flux handoff, receipt-bound OpenEBS LVM assertions,
 two-worker RWO behavior, persistence/replacement/reapply, secret sync, and Flux
 reconciliation.
 

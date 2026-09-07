@@ -34,12 +34,12 @@ func runOverlayStage(t *testing.T, state *digitalOceanCPUState) {
 	if state.freshInstall {
 		bootstrap := applyOnceArgs(t, state.forgeBin, state.forgeHome, candidateConfig,
 			"--skip-chart", "--skip-gpu", "--skip-overlay", "--skip-secrets", "--skip-flux")
-		assertApplyMarkers(t, bootstrap, "action:     install", "node ready: true", "AgentPool workspace:", "AgentPool local-path ready: true")
+		assertApplyMarkers(t, bootstrap, "action:     install", "node ready: true", "data storage: iterabase-data", "LVM storage ready: true")
 	}
 	state.runtimeImageDigests = prepareCandidateImages(t, state.ip, state.privKeyPath)
 	out := applyOnce(t, state.forgeBin, state.forgeHome, candidateConfig)
 	markers := []string{"action:     skip", "node ready: true", "AgentPool workspace:",
-		"AgentPool local-path ready: true", "certificate substrate applied: true",
+		"LVM storage ready: true", "certificate substrate applied: true", "LVM storage substrate applied: true",
 		"chart applied: true", "overlay applied: true", "overlay commit:", "flux installed: true", "gitrepository: ready=True"}
 	assertApplyMarkers(t, out, markers...)
 	t.Logf("apply output:\n%s", out)

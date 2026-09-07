@@ -36,7 +36,7 @@ func applyInferencePlatformStage(t *testing.T, state *digitalOceanGPUState) {
 	)
 	out := applyOnceArgs(t, state.forgeBin, state.forgeHome, candidateConfig, "--skip-gpu")
 	state.bindKubeconfigTunnel(t)
-	markers := []string{"action:     skip", "node ready: true", "AgentPool workspace:", "AgentPool local-path ready: true", "certificate substrate applied: true",
+	markers := []string{"action:     skip", "node ready: true", "data storage: iterabase-data", "LVM storage ready: true", "certificate substrate applied: true", "LVM storage substrate applied: true",
 		"chart applied: true", "overlay applied: true", "flux installed: true", "gitrepository: ready=True"}
 	assertApplyMarkers(t, out, markers...)
 	t.Logf("apply output:\n%s", out)

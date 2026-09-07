@@ -15,8 +15,7 @@ auth:
     username: gateway
 
 persistence:
-  storageClass: "" # use cluster default (k3s local-path)
-  size: 10Gi
+  size: 10Gi # fixed StorageClass is iterabase-lvm-xfs
 
 # Internal TLS (opt-in; the umbrella's internalTLS.enabled fans this on in prod).
 # When enabled, postgres serves TLS (ssl=on) with a cert-manager leaf cert from

@@ -30,32 +30,36 @@ func TestWorkspaceCapacityGateRevokesOnlyUnspentCredit(t *testing.T) {
 	assert.True(t, w.creditAdvertised)
 }
 
-func TestWorkspaceCapacityGateAppliesAcrossPoolsAndReplacement(t *testing.T) {
+func TestWorkspaceCapacityGateAppliesOnlyWithinPoolAndSurvivesReplacement(t *testing.T) {
 	workers := newWorkerPool()
 	first := &workerConn{poolID: "pool-a", workerID: "worker-a"}
-	second := &workerConn{poolID: "pool-b", workerID: "worker-b"}
+	sibling := &workerConn{poolID: "pool-a", workerID: "worker-a-2"}
+	other := &workerConn{poolID: "pool-b", workerID: "worker-b"}
 	workers.add(first)
-	workers.add(second)
-	first.updateWorkspaceStatus(30, 100, 0.30, false, false)
-	second.updateWorkspaceStatus(30, 100, 0.30, false, false)
-	_, _ = first.grantCreditIfIdle()
-	_, _ = second.grantCreditIfIdle()
+	workers.add(sibling)
+	workers.add(other)
+	for _, worker := range []*workerConn{first, sibling, other} {
+		worker.updateWorkspaceStatus(30, 100, 0.30, false, false)
+		_, _ = worker.grantCreditIfIdle()
+	}
 
 	workers.applyWorkspaceStatus(first, 20, 100, 0.20, true, true)
 	assert.False(t, first.idle)
-	assert.False(t, second.idle, "one filesystem observation gates every pool")
-	assert.True(t, second.workspaceGated)
+	assert.False(t, sibling.idle, "same-pool workers mount one PVC and share its gate")
+	assert.True(t, sibling.workspaceGated)
+	assert.True(t, other.idle, "a different AgentPool PVC remains independently eligible")
+	assert.False(t, other.workspaceGated)
 
-	replacement := &workerConn{poolID: "pool-b", workerID: "worker-b"}
+	replacement := &workerConn{poolID: "pool-a", workerID: "worker-a"}
 	workers.add(replacement)
 	workers.applyWorkspaceStatus(replacement, 24, 100, 0.24, true, true)
 	granted, valid := replacement.grantCreditIfIdle()
 	assert.True(t, valid)
-	assert.False(t, granted, "replacement remains gated inside the 20-25 percent band")
+	assert.False(t, granted, "replacement remains gated inside its pool's 20-25 percent band")
 
 	restored := workers.applyWorkspaceStatus(replacement, 25, 100, 0.25, false, false)
 	assert.True(t, restored)
-	assert.True(t, replacement.idle, "durable reopen restores the retained Ready without a duplicate advertisement")
+	assert.True(t, replacement.idle, "durable reopen restores the retained Ready without duplicate advertisement")
 	assert.True(t, replacement.creditAdvertised)
 }
 

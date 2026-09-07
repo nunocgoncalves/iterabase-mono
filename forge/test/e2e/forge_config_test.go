@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -12,7 +13,7 @@ import (
 // forgeConfigSpec is the shared config fixture for cloud E2E stages. Scenario
 // writers vary only the fields relevant to the contract they exercise, so the
 // common k3s/host recipe cannot drift across files.
-const workspaceDeviceEnv = "FORGE_E2E_AGENTPOOL_WORKSPACE_DEVICE"
+const workspaceDeviceEnv = "FORGE_E2E_DATA_STORAGE_DEVICES"
 
 var workspaceDevicesByAddress sync.Map
 
@@ -73,14 +74,22 @@ metadata:
   name: %s
 spec:
   mode: single-node
-  agentPoolWorkspace:
-    device: %s
-    filesystem: auto
-  hosts:
+  dataStorage:
+    devices:
+`, spec.Name)
+	devices := strings.Split(workspaceDevice(spec), ",")
+	for i := range devices {
+		devices[i] = strings.TrimSpace(devices[i])
+	}
+	slices.Sort(devices)
+	for _, device := range devices {
+		fmt.Fprintf(&cfg, "      - %s\n", device)
+	}
+	fmt.Fprintf(&cfg, `  hosts:
     - address: %s
       sshUser: %s
       sshKeyPath: %s
-`, spec.Name, workspaceDevice(spec), spec.Address, spec.SSHUser, spec.SSHKeyPath)
+`, spec.Address, spec.SSHUser, spec.SSHKeyPath)
 	if spec.SSHHostKey != "" {
 		fmt.Fprintf(&cfg, "      sshHostKey: %q\n", spec.SSHHostKey)
 	}
@@ -99,9 +108,9 @@ spec:
 	if spec.DualStack {
 		cfg.WriteString(`    clusterCIDRv6: fd42::/48
     serviceCIDRv6: fd43::/112
-    disable: [traefik, servicelb]
 `)
 	}
+	cfg.WriteString("    disable: [traefik, servicelb, local-storage]\n")
 	if spec.GPU {
 		if spec.GPUDriverVersion == "" {
 			spec.GPUDriverVersion = gpuUpgradeBaselineDriver

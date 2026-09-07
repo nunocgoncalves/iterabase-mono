@@ -132,13 +132,13 @@ tests:
             exp_annotations:
               summary: An AgentPool worker lost dedicated workspace storage I/O
               description: The supervisor failed its fsync/rename/unlink storage transaction and removed dispatch readiness.
-              first_action: Inspect the AgentPool StorageReady condition, fixed class/PVC/PV path, dedicated receipt-matching ext4/XFS mount identity, actual free-space gate, and node events before allowing fresh workers.
+              first_action: Inspect the AgentPool StorageReady condition, exact class/PVC/CSI-PV/LVMVolume/LVMNode identity, XFS mount ownership, per-pool free-space gate, and node events before allowing fresh workers.
               runbook_url: https://github.com/nunocgoncalves/iterabase-mono/blob/master/docs/runbooks/platform-alerts.md#iterabaseharnessstorageunavailable
 
   - name: workspace warning uses actual filesystem ratio below 25 percent
     interval: 1m
     input_series:
-      - series: 'control_plane_dispatch_workspace_free_ratio{namespace="iterabase-system",pod="dispatch-0"}'
+      - series: 'control_plane_dispatch_workspace_free_ratio{namespace="iterabase-system",pod="dispatch-0",pool="pool-a"}'
         values: '0.30 0.24x10'
     alert_rule_test:
       - eval_time: 7m
@@ -147,18 +147,19 @@ tests:
           - exp_labels:
               namespace: iterabase-system
               pod: dispatch-0
+              pool: pool-a
               severity: warning
               component: storage
             exp_annotations:
-              summary: AgentPool workspace filesystem is below 25% free
-              description: Actual available blocks on the dedicated workspace filesystem crossed the capacity warning threshold.
-              first_action: Pause avoidable growth, inspect workspace free bytes and largest eligible session data, then add customer-owned capacity through an explicit replacement/migration plan.
+              summary: AgentPool PVC is below 25% free
+              description: Actual available blocks on one AgentPool XFS PVC crossed the capacity warning threshold.
+              first_action: Pause avoidable growth, inspect the named pool PVC and largest eligible session data, then free customer-approved data or plan a new clean-install capacity set; no online extension or fallback exists.
               runbook_url: https://github.com/nunocgoncalves/iterabase-mono/blob/master/docs/runbooks/platform-alerts.md#iterabaseworkspacecapacitywarning
 
   - name: workspace credit gate reports the hysteretic closed state
     interval: 1m
     input_series:
-      - series: 'control_plane_dispatch_workspace_credit_gated{namespace="iterabase-system",pod="dispatch-0"}'
+      - series: 'control_plane_dispatch_workspace_credit_gated{namespace="iterabase-system",pod="dispatch-0",pool="pool-a"}'
         values: '0 1x5 0x3'
     alert_rule_test:
       - eval_time: 3m
@@ -167,12 +168,13 @@ tests:
           - exp_labels:
               namespace: iterabase-system
               pod: dispatch-0
+              pool: pool-a
               severity: critical
               component: storage
             exp_annotations:
               summary: Fresh AgentPool dispatch credit is gated by workspace capacity
-              description: Actual workspace free space is at or below 20%, or has not yet recovered to the 25% reopen threshold. Active turns are not aborted solely by this gate.
-              first_action: Keep fresh work closed, inspect exact free bytes/ratio and customer capacity response, and reopen only after the metric reaches at least 25%.
+              description: The named AgentPool PVC is at or below 20% free, or has not yet recovered to the 25% reopen threshold. Active turns are not aborted solely by this gate and unrelated pools remain independently eligible.
+              first_action: Keep fresh work for this pool closed, inspect its exact PVC free bytes/ratio and customer capacity response, and reopen only after the metric reaches at least 25%.
               runbook_url: https://github.com/nunocgoncalves/iterabase-mono/blob/master/docs/runbooks/platform-alerts.md#iterabaseworkspacecreditgated
       - eval_time: 8m
         alertname: IterabaseWorkspaceCreditGated
@@ -195,8 +197,55 @@ tests:
             exp_annotations:
               summary: AgentPool workspace I/O health transaction failed
               description: A real write/fsync/rename/unlink or zero-space check failed; the worker fences its active turn and exits rather than replaying it.
-              first_action: Inspect the exact receipt-matching ext4/XFS mount source/type/options/ownership, node and disk I/O, free blocks, PVC/PV path, and worker-loss evidence before replacement.
+              first_action: Inspect the exact AgentPool XFS PVC, OpenEBS LVMVolume/PV/node topology, ownership, node I/O, free blocks, and worker-loss evidence before replacement.
               runbook_url: https://github.com/nunocgoncalves/iterabase-mono/blob/master/docs/runbooks/platform-alerts.md#iterabaseworkspacestorageiofailure
+
+  - name: aggregate iterabase-data pressure is independently actionable
+    interval: 1m
+    input_series:
+      - series: 'lvm_vg_free_size_bytes{namespace="iterabase-system",pod="openebs-node",name="iterabase-data"}'
+        values: '30 20x10'
+      - series: 'lvm_vg_total_size_bytes{namespace="iterabase-system",pod="openebs-node",name="iterabase-data"}'
+        values: '100x11'
+    alert_rule_test:
+      - eval_time: 7m
+        alertname: IterabaseDataVGCapacityWarning
+        exp_alerts:
+          - exp_labels:
+              namespace: iterabase-system
+              pod: openebs-node
+              name: iterabase-data
+              severity: warning
+              component: storage
+            exp_annotations:
+              summary: iterabase-data volume group is below 25% free
+              description: Aggregate thick-LV capacity is low and a new PVC may fail even when an existing AgentPool PVC remains healthy.
+              first_action: Inspect iterabase-data free bytes, requested pending claims, LVMVolumes, and released claim cleanup; do not extend, thin-provision, or fall back to root storage.
+              runbook_url: https://github.com/nunocgoncalves/iterabase-mono/blob/master/docs/runbooks/platform-alerts.md#iterabasedatavgcapacitywarning
+
+  - name: managed pending claim reports honest provisioning exhaustion
+    interval: 1m
+    input_series:
+      - series: 'kube_persistentvolumeclaim_status_phase{namespace="iterabase-system",persistentvolumeclaim="data",phase="Pending"}'
+        values: '1x15'
+      - series: 'kube_persistentvolumeclaim_info{namespace="iterabase-system",persistentvolumeclaim="data",storageclass="iterabase-lvm-xfs"}'
+        values: '1x15'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: IterabaseLVMClaimPending
+        exp_alerts:
+          - exp_labels:
+              namespace: iterabase-system
+              persistentvolumeclaim: data
+              phase: Pending
+              storageclass: iterabase-lvm-xfs
+              severity: critical
+              component: storage
+            exp_annotations:
+              summary: Managed OpenEBS LVM claim remains pending
+              description: A managed thick XFS claim did not bind; aggregate VG exhaustion, CSI/VG discovery, topology, or consumer scheduling may be blocking provisioning.
+              first_action: Inspect claim events, OpenEBS controller/node pods, LVMNode and LVMVolume state, iterabase-data free capacity, and the scheduled consumer; never create a default/root fallback.
+              runbook_url: https://github.com/nunocgoncalves/iterabase-mono/blob/master/docs/runbooks/platform-alerts.md#iterabaselvmclaimpending
 
   - name: warning manager reconciliation threshold fires after the five-minute hold
     interval: 1m

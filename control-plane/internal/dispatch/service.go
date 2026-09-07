@@ -102,24 +102,26 @@ func NewService(store *Store, cfg Config, log *slog.Logger) *Service {
 func (s *Service) SetMetrics(metrics *cpmetrics.Metrics) { s.metrics = metrics }
 
 // SeedGeneration initializes the in-memory fencing-generation counter and the
-// shared workspace gate from durable Postgres state before serving traffic.
-// The turn high-water mark prevents generation reuse; the capacity singleton
-// prevents a restart from reopening credit inside the 20-25% hysteresis band.
+// per-pool workspace gates from durable Postgres state before serving traffic.
+// The turn high-water mark prevents generation reuse; each pool's capacity row
+// prevents a restart from reopening its credit inside the 20-25% band.
 // Must be called once before serving traffic; idempotent for tests.
 func (s *Service) SeedGeneration(ctx context.Context) error {
 	max, err := s.store.MaxFencingGeneration(ctx)
 	if err != nil {
 		return fmt.Errorf("seed fencing generation: %w", err)
 	}
-	capacity, err := s.store.LoadWorkspaceCapacityState(ctx)
+	capacities, err := s.store.LoadWorkspaceCapacityStates(ctx)
 	if err != nil {
-		return fmt.Errorf("seed workspace capacity gate: %w", err)
+		return fmt.Errorf("seed workspace capacity gates: %w", err)
 	}
 	s.gen.Store(max)
-	s.pool.seedWorkspaceCapacity(capacity.CreditGated)
-	s.observeWorkspaceMetrics(capacity)
-	s.log.Info("seeded fencing generation and workspace capacity gate", "from_durable_max", max,
-		"workspace_observed", capacity.Observed, "workspace_credit_gated", capacity.CreditGated)
+	s.pool.seedWorkspaceCapacity(capacities)
+	for _, capacity := range capacities {
+		s.observeWorkspaceMetrics(capacity)
+	}
+	s.log.Info("seeded fencing generation and per-pool workspace capacity gates", "from_durable_max", max,
+		"workspace_pool_states", len(capacities))
 	return nil
 }
 
@@ -293,9 +295,9 @@ func (s *Service) Work(ctx context.Context, st *connect.BidiStream[v1.WorkerMess
 					return connect.NewError(connect.CodeInvalidArgument, err)
 				}
 				ws := m.WorkspaceStatus
-				capacity, err := s.store.ObserveWorkspaceCapacity(ctx, ws.GetFreeBytes(), ws.GetCapacityBytes(), ws.GetFreeRatio())
+				capacity, err := s.store.ObserveWorkspaceCapacity(ctx, w.poolID, ws.GetFreeBytes(), ws.GetCapacityBytes(), ws.GetFreeRatio())
 				if err != nil {
-					return connect.NewError(connect.CodeUnavailable, fmt.Errorf("persist shared workspace capacity gate: %w", err))
+					return connect.NewError(connect.CodeUnavailable, fmt.Errorf("persist AgentPool workspace capacity gate: %w", err))
 				}
 				if s.pool.applyWorkspaceStatus(w, capacity.FreeBytes, capacity.CapacityBytes, capacity.FreeRatio, capacity.Warning, capacity.CreditGated) {
 					s.kickReconciler()
@@ -322,18 +324,18 @@ func (s *Service) observeWorkspaceMetrics(state WorkspaceCapacityState) {
 	if s.metrics == nil {
 		return
 	}
-	s.metrics.DispatchWorkspaceFreeBytes.WithLabelValues().Set(float64(state.FreeBytes))
-	s.metrics.DispatchWorkspaceCapacity.WithLabelValues().Set(float64(state.CapacityBytes))
-	s.metrics.DispatchWorkspaceFreeRatio.WithLabelValues().Set(state.FreeRatio)
+	s.metrics.DispatchWorkspaceFreeBytes.WithLabelValues(state.PoolID).Set(float64(state.FreeBytes))
+	s.metrics.DispatchWorkspaceCapacity.WithLabelValues(state.PoolID).Set(float64(state.CapacityBytes))
+	s.metrics.DispatchWorkspaceFreeRatio.WithLabelValues(state.PoolID).Set(state.FreeRatio)
 	if state.Warning {
-		s.metrics.DispatchWorkspaceWarning.WithLabelValues().Set(1)
+		s.metrics.DispatchWorkspaceWarning.WithLabelValues(state.PoolID).Set(1)
 	} else {
-		s.metrics.DispatchWorkspaceWarning.WithLabelValues().Set(0)
+		s.metrics.DispatchWorkspaceWarning.WithLabelValues(state.PoolID).Set(0)
 	}
 	if state.CreditGated {
-		s.metrics.DispatchWorkspaceGated.WithLabelValues().Set(1)
+		s.metrics.DispatchWorkspaceGated.WithLabelValues(state.PoolID).Set(1)
 	} else {
-		s.metrics.DispatchWorkspaceGated.WithLabelValues().Set(0)
+		s.metrics.DispatchWorkspaceGated.WithLabelValues(state.PoolID).Set(0)
 	}
 }
 

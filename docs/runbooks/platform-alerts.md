@@ -70,19 +70,27 @@ Check the individual harness pod, dispatch DNS/port, certificate validity, and r
 
 ## IterabaseHarnessStorageUnavailable
 
-Stop new AgentPool scheduling and inspect the pool's `StorageReady` reason, fixed `iterabase-agentpool-local-path` class, RWO PVC/PV hostPath, dedicated receipt-matching ext4/XFS mount source/type/options/ownership, available blocks, and node/disk I/O events. A real write/fsync/mount failure fences the active turn and replaces the worker; never replay a lost turn or external effect automatically. Refuse any root/default-path fallback.
+Stop new AgentPool scheduling and inspect the pool's `StorageReady` reason, fixed `iterabase-agentpool-lvm-xfs` class, RWO/Filesystem PVC, CSI PV driver/XFS/VG/handle/topology, Ready LVMVolume, LVMNode `iterabase-data` identity, available blocks, ownership, and node/disk I/O events. A real write/fsync/mount failure fences the active turn and replaces the worker; never replay a lost turn or external effect automatically. Refuse any alternate/default/root fallback.
 
 ## IterabaseWorkspaceCapacityWarning
 
-Actual free space is below 25%. Record the durable `control_plane_dispatch_workspace_free_bytes`, capacity, ratio, the AgentPool `WorkspaceCapacityHealthy` condition, supporting per-worker harness observations, largest eligible session data, and current active turns. Pause avoidable growth and notify the customer-owned capacity response. Requested PVC size is not a quota and changing it cannot expand local-path storage. Do not delete session data without explicit lifecycle authority.
+One AgentPool PVC is below 25% free. Record its `pool`-labelled durable `control_plane_dispatch_workspace_free_bytes`, capacity, ratio, matching `WorkspaceCapacityHealthy` condition, supporting worker observations, largest eligible session data, and active turns. Pause avoidable growth and notify the customer-owned capacity response. PVC size is immutable thick capacity and cannot be expanded online. Do not delete session data without explicit lifecycle authority.
 
 ## IterabaseWorkspaceCreditGated
 
-The filesystem is at or below 20% free, or the durable shared gate has not yet reached the 25% reopen threshold. Confirm `control_plane_dispatch_workspace_credit_gated=1`, every AgentPool reports `WorkspaceCapacityHealthy=False` with reason `WorkspaceCapacityGateActive`, supporting worker observations agree, and no unspent fresh dispatch credit remains. Worker or dispatch replacement in the 20–25% band must retain the gate. Do not abort an active turn solely for crossing the threshold; let it reach its normal terminal/ACK boundary, then verify no next credit appears. Reopen only after actual free ratio is at least 25%. Disk expansion/replacement/migration is a separate approved procedure; never switch to the root/default path.
+The named pool PVC is at or below 20% free, or its durable gate has not yet reached the 25% reopen threshold. Confirm the matching `control_plane_dispatch_workspace_credit_gated{pool=...}=1`, only that AgentPool reports `WorkspaceCapacityHealthy=False` with reason `WorkspaceCapacityGateActive`, supporting worker observations agree, and none of that pool's unspent fresh credits remain. Another pool PVC stays independently eligible. Worker or dispatch replacement in the 20–25% band must retain this pool's gate. Do not abort an active turn solely for crossing the threshold; let it reach its normal terminal/ACK boundary, then verify no next credit appears. Reopen only after that PVC reaches at least 25%. Expansion/replacement/migration is unsupported; never switch classes or fall back to root.
 
 ## IterabaseWorkspaceStorageIOFailure
 
-Treat this as actual storage failure rather than a capacity warning. Capture bounded worker-loss, turn fencing, filesystem, kernel, mount, PVC/PV, and device evidence. Verify the exact Forge receipt/UUID/label/by-id identity before any repair. Restore only the same recorded disk and mount; changed hardware, UUID, label, size, marker, fstab conflict, or unexpected consumer fails closed. Do not reformat, adopt, wipe, or replay work automatically.
+Treat this as actual claim/filesystem failure rather than a capacity warning. Capture bounded worker-loss, turn fencing, XFS, CSI mount, PVC/PV, LVMVolume, LVMNode, VG, kernel, and node-I/O evidence. Verify the Forge receipt plus exact selected-device/PV/VG UUID and membership before any host action. Changed hardware, PV/VG identity, class, topology, ownership, or unexpected consumer fails closed. Do not recreate/adopt/extend storage or replay work automatically.
+
+## IterabaseDataVGCapacityWarning
+
+Aggregate `iterabase-data` free capacity is below 25%, independently of any one AgentPool filesystem ratio. Inspect `lvm_vg_free_size_bytes{name="iterabase-data"}`, total bytes, current thick LVs/LVMVolumes, pending PVC requests, missing-PV state, and recently deleted claims. A new thick claim can fail while existing pools remain healthy. Free only explicitly eligible claims/data; do not extend the VG, thin-provision, change classes, or use root storage.
+
+## IterabaseLVMClaimPending
+
+A managed `iterabase-lvm-xfs` or `iterabase-agentpool-lvm-xfs` claim remained Pending for ten minutes. Inspect consumer scheduling (including `WaitForFirstConsumer`), PVC events, OpenEBS controller/node pods, CSI registration, LVMNode VG identity/capacity, and any Failed/Pending LVMVolume. Report capacity exhaustion honestly; never create a default class or test-authored PV/LV repair.
 
 ## IterabaseHarnessReplayBacklog
 

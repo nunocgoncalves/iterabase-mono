@@ -36,12 +36,16 @@ type Cluster struct {
 	Name       string
 	Kubeconfig string
 
-	executor  process.Executor
-	tempDir   string
-	owned     bool
-	mu        sync.Mutex
-	deleted   bool
-	deleteErr error
+	executor     process.Executor
+	tempDir      string
+	owned        bool
+	mu           sync.Mutex
+	deleted      bool
+	deleteErr    error
+	lvmPrepared  bool
+	lvmNode      string
+	lvmNamespace string
+	lvmRelease   string
 }
 
 // Create provisions a fresh cluster whose name and kubeconfig cannot collide
@@ -226,10 +230,16 @@ func (cluster *Cluster) Delete(ctx context.Context) error {
 	}
 	cluster.deleted = true
 	if cluster.owned {
-		_, cluster.deleteErr = cluster.executor.Run(ctx, process.Command{
+		if cluster.lvmPrepared {
+			cluster.deleteErr = cluster.cleanupLVMStorage(ctx)
+		}
+		_, deleteErr := cluster.executor.Run(ctx, process.Command{
 			Name: "kind", Args: []string{"delete", "cluster", "--name", cluster.Name},
 			Timeout: 5 * time.Minute, OutputName: "kind-delete-" + cluster.Name + ".log",
 		})
+		if cluster.deleteErr == nil {
+			cluster.deleteErr = deleteErr
+		}
 	}
 	if cluster.tempDir != "" {
 		if err := os.RemoveAll(cluster.tempDir); cluster.deleteErr == nil && err != nil {

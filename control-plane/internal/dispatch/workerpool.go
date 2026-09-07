@@ -223,34 +223,36 @@ func (w *workerConn) applyWorkspaceStatus(free, capacity uint64, ratio float64, 
 type workerPool struct {
 	mu             sync.Mutex
 	conns          map[string]*workerConn // key = poolID + "/" + workerID
-	workspaceGated bool                   // durable installation-wide gate restored by Service.SeedGeneration
+	workspaceGated map[string]bool        // durable per-pool gate restored by Service.SeedGeneration
 }
 
-// Start gated until the durable singleton is loaded. This fail-closed default
-// prevents an unseeded/restarted process from granting credit in the 20-25%
-// hysteresis band.
+// Every pool starts gated until its own durable state or a fresh >=25%
+// observation opens it.
 func newWorkerPool() *workerPool {
-	return &workerPool{conns: make(map[string]*workerConn), workspaceGated: true}
+	return &workerPool{conns: make(map[string]*workerConn), workspaceGated: make(map[string]bool)}
 }
 
 func workerKey(poolID, workerID string) string { return poolID + "/" + workerID }
 
-func (p *workerPool) seedWorkspaceCapacity(gated bool) {
+func (p *workerPool) seedWorkspaceCapacity(states map[string]WorkspaceCapacityState) {
 	p.mu.Lock()
-	p.workspaceGated = gated
+	for poolID, state := range states {
+		p.workspaceGated[poolID] = state.CreditGated
+	}
 	p.mu.Unlock()
 }
 
-// applyWorkspaceStatus publishes the durable global decision to every live
-// connection because every AgentPool path is on the same Forge-owned
-// filesystem. A low observation from one pool revokes all unspent credits;
-// active assignments remain untouched.
+// applyWorkspaceStatus publishes the durable decision only to workers mounting
+// the same AgentPool PVC. Other pools remain independently eligible.
 func (p *workerPool) applyWorkspaceStatus(source *workerConn, free, capacity uint64, ratio float64, warning, gated bool) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.workspaceGated = gated
+	p.workspaceGated[source.poolID] = gated
 	creditRestored := false
 	for _, w := range p.conns {
+		if w.poolID != source.poolID {
+			continue
+		}
 		if w.applyWorkspaceStatus(free, capacity, ratio, warning, gated, w == source) {
 			creditRestored = true
 		}
@@ -266,7 +268,11 @@ func (p *workerPool) add(w *workerConn) *workerConn {
 	defer p.mu.Unlock()
 	key := workerKey(w.poolID, w.workerID)
 	old := p.conns[key]
-	w.workspaceGated = p.workspaceGated
+	gated, observed := p.workspaceGated[w.poolID]
+	if !observed {
+		gated = true
+	}
+	w.workspaceGated = gated
 	p.conns[key] = w
 	return old
 }
