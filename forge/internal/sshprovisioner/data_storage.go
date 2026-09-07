@@ -526,10 +526,11 @@ csi_registered() {
   cluster_nodes=$(k3s kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null) || return 1
   test "$(printf '%%s\n' "$cluster_nodes" | awk 'NF {n++} END {print n+0}')" = 1 || return 1
   cluster_node=$(printf '%%s\n' "$cluster_nodes" | awk 'NF {print; exit}')
-  registration=$(k3s kubectl get csinode "$cluster_node" -o jsonpath='{.spec.drivers[?(@.name=="local.csi.openebs.io")].name}|{.spec.drivers[?(@.name=="local.csi.openebs.io")].nodeID}|{.spec.drivers[?(@.name=="local.csi.openebs.io")].topologyKeys}' 2>/dev/null) || return 1
-  IFS='|' read -r csi_name csi_node_id csi_keys <<<"$registration"
+  registration=$(k3s kubectl get csinode "$cluster_node" -o go-template='{{range .spec.drivers}}{{if eq .name "local.csi.openebs.io"}}{{.name}}{{"\t"}}{{.nodeID}}{{"\n"}}{{range .topologyKeys}}{{.}}{{"\n"}}{{end}}{{end}}{{end}}' 2>/dev/null) || return 1
+  csi_line=$(printf '%%s\n' "$registration" | awk 'NR == 1')
+  IFS=$'\t' read -r csi_name csi_node_id <<<"$csi_line"
   test "$csi_name" = local.csi.openebs.io && test "$csi_node_id" = "$cluster_node" || return 1
-  csi_keys=$(printf '%%s' "$csi_keys" | tr -d '[]' | tr ' ' '\n' | awk 'NF' | sort)
+  csi_keys=$(printf '%%s\n' "$registration" | awk 'NR > 1 && NF' | sort)
   test "$csi_keys" = "$(printf 'kubernetes.io/hostname\nopenebs.io/nodename')"
 }
 for attempt in $(seq 1 150); do

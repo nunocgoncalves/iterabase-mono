@@ -1750,6 +1750,8 @@ func TestWaitForLVMStorageReadyParsesBoundedVGIdentity(t *testing.T) {
 	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
 		assert.Contains(t, cmd, "lvmnodes.local.openebs.io")
 		assert.Contains(t, cmd, "get csinode")
+		assert.Contains(t, cmd, "-o go-template=")
+		assert.Contains(t, cmd, "range .topologyKeys")
 		assert.Contains(t, cmd, "openebs.io/nodename")
 		assert.Contains(t, cmd, "iterabase-agentpool-lvm-xfs")
 		assert.Contains(t, cmd, "K3s local-path provisioner still exists")
