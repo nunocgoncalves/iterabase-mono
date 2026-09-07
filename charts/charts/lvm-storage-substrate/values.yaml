@@ -5,7 +5,7 @@ lvm-localpv:
   global:
     analytics:
       enabled: false
-    kubeletDir: /var/lib/rancher/k3s/agent/kubelet
+    kubeletDir: /var/lib/kubelet
   analytics:
     enabled: false
   storageCapacity: true
@@ -18,7 +18,7 @@ lvm-localpv:
         enabled: false
         keep: true
   lvmNode:
-    kubeletDir: /var/lib/rancher/k3s/agent/kubelet
+    kubeletDir: /var/lib/kubelet
     driverRegistrar:
       image:
         registry: ""

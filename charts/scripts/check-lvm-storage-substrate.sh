@@ -20,8 +20,8 @@ done
 ! grep -Fq 'volumesnapshots.snapshot.storage.k8s.io' <<<"$render"
 ! grep -Fq 'name: snapshot-controller' <<<"$render"
 grep -Fq 'value: "false"' <<<"$render"
-grep -Fq -- '--kubelet-dir=/var/lib/rancher/k3s/agent/kubelet/' <<<"$render"
-grep -Fq '/var/lib/rancher/k3s/agent/kubelet/plugins_registry/' <<<"$render"
+grep -Fq -- '--kubelet-dir=/var/lib/kubelet/' <<<"$render"
+grep -Fq '/var/lib/kubelet/plugins_registry/' <<<"$render"
 grep -Fq 'name: local.csi.openebs.io' <<<"$render"
 
 for image in \

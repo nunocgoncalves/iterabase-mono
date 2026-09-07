@@ -189,8 +189,8 @@ default class, or root-backed fallback is supported.
 The same-platform-version `lvm-storage-substrate` companion wraps the reviewed
 OpenEBS LVM LocalPV `1.10.0` archive (SHA-256
 `3ad766c56d4a0ab0f3f2baaeb726a4554d1f51bb485f1cef00846cf1d82a179d`),
-pins every runtime image by digest, disables analytics, configures K3s's
-`/var/lib/rancher/k3s/agent/kubelet` path, and creates exactly:
+pins every runtime image by digest, disables analytics, configures K3s's actual
+`/var/lib/kubelet` CSI registration/mount root, and creates exactly:
 
 - `iterabase-lvm-xfs`: `shared: no`, used explicitly by every chart-generated
   platform data PVC;
