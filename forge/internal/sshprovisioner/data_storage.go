@@ -15,6 +15,7 @@ const (
 	dataStorageContractVersion = "HOR-545/v1"
 	dataStorageReceiptPath     = "/var/lib/iterabase/data-storage.receipt"
 	k3sKubeletDirectory        = "/var/lib/rancher/k3s/agent/kubelet"
+	lvmReportPairParser        = `awk -F'|' '{for(i=1;i<=2;i++){gsub(/^[[:space:]]+|[[:space:]]+$/, "", $i)}; print $1 "|" $2}'`
 )
 
 // ListDataStorageDevices lists blank stable whole-disk candidates without
@@ -382,7 +383,7 @@ need pvs; need vgs; need lvs
 read_pv() {
   set +e; pv_line=$(pvs --noheadings --separator '|' -o pv_uuid,vg_name -- "$1" 2>&1); pv_rc=$?; set -e
   test "$pv_rc" = 0 || return 1
-  printf '%%s' "$pv_line" | awk -F'|' '{$1=$1; $2=$2; print $1 "|" $2}'
+  printf '%%s' "$pv_line" | `+lvmReportPairParser+`
 }
 verify_or_blank_set() {
   for ((q=0; q<count; q++)); do

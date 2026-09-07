@@ -978,6 +978,8 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             "python3 .github/scripts/e2e.py compose",
             "python3 .github/scripts/e2e.py validate-results",
             "candidate-result-${{ matrix.artifact }}",
+            "candidate-result-permanent-fixture-${{ matrix.capacity }}",
+            "candidate-diagnostics-permanent-fixture-${{ matrix.capacity }}",
             "uses: ./.github/actions/setup-permanent-fixture",
             "group: iterabase-permanent-fixture-${{ matrix.capacity }}",
             "cancel-in-progress: false",
@@ -991,6 +993,8 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             "prepare_candidate_runtime.sh",
             "charts-runtime.yml",
             "historical mandatory CPU+GPU",
+            "candidate-result-capacity-${{ matrix.capacity }}",
+            "candidate-diagnostics-capacity-${{ matrix.capacity }}",
         ):
             self.assertNotIn(stale, workflow)
 

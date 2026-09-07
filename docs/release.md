@@ -164,8 +164,12 @@ and skipped; conflicts fail closed.
 Every selected F3 scenario is mandatory. Candidate execution uses the same fixed
 CPU/GPU addresses, pinned SSH identities, workspace devices, explicit
 pre/post-test purge/reboot lifecycle, and GPU model-cache authority as source
-execution. Its result retains those fixture identities alongside exact artifact
-and stage evidence.
+execution. The active scenario IDs are `forge/permanent-fixture-cpu`,
+`forge/permanent-fixture-cpu-workspace`, and
+`forge/permanent-fixture-gpu`; grouped result/diagnostic artifacts use
+`candidate-result-permanent-fixture-<capacity>` and
+`candidate-diagnostics-permanent-fixture-<capacity>`. Results retain those
+fixture identities alongside exact artifact and stage evidence.
 
 A missing fixture-scoped key, unreachable host, host-key/device drift, corrupt
 model cache, or failed cleanup/reboot produces a failing classification and

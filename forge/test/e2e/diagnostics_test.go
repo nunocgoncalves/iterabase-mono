@@ -17,12 +17,11 @@ import (
 )
 
 const (
-	failureDomainProvisioning   = "provisioning"
+	failureDomainFixtureReset   = "permanent-fixture-reset"
 	failureDomainSubstrate      = "forge-substrate"
 	failureDomainForgeReconcile = "forge-reconciliation"
 	failureDomainForgeHandoff   = "forge-artifact-handoff"
 	failureDomainDependentSmoke = "dependent-layer-smoke"
-	failureDomainCleanup        = "cloud-cleanup"
 )
 
 type forgeDiagnostics struct {
@@ -46,7 +45,7 @@ func newForgeDiagnostics(t *testing.T, scenario string) forgeDiagnostics {
 	if err := os.MkdirAll(absolute, 0o700); err != nil {
 		t.Fatalf("create Forge diagnostics directory: %v", err)
 	}
-	return forgeDiagnostics{domain: failureDomainProvisioning, outputDir: absolute, redactor: redact.New()}
+	return forgeDiagnostics{domain: failureDomainFixtureReset, outputDir: absolute, redactor: redact.New()}
 }
 
 func (diagnostics *forgeDiagnostics) setDomain(domain string) {
@@ -228,26 +227,26 @@ func (diagnostics *forgeDiagnostics) collectSharedCluster(t *testing.T, kubeconf
 	}
 }
 
-func cpuDiagnosticStage(domain string, run func(*testing.T, *digitalOceanCPUState)) func(*testing.T, *digitalOceanCPUState) {
-	return func(t *testing.T, state *digitalOceanCPUState) {
+func cpuDiagnosticStage(domain string, run func(*testing.T, *permanentCPUFixtureState)) func(*testing.T, *permanentCPUFixtureState) {
+	return func(t *testing.T, state *permanentCPUFixtureState) {
 		state.diagnostics.setDomain(domain)
 		run(t, state)
 	}
 }
 
-func gpuDiagnosticStage(domain string, run func(*testing.T, *digitalOceanGPUState)) func(*testing.T, *digitalOceanGPUState) {
-	return func(t *testing.T, state *digitalOceanGPUState) {
+func gpuDiagnosticStage(domain string, run func(*testing.T, *permanentGPUFixtureState)) func(*testing.T, *permanentGPUFixtureState) {
+	return func(t *testing.T, state *permanentGPUFixtureState) {
 		state.diagnostics.setDomain(domain)
 		run(t, state)
 	}
 }
 
-func collectCPUDiagnostics(t *testing.T, state *digitalOceanCPUState) {
+func collectCPUDiagnostics(t *testing.T, state *permanentCPUFixtureState) {
 	t.Helper()
 	state.diagnostics.recordDomain(t)
 	safeClusterLogs := state.diagnostics.registerBootstrapSecrets(t, state.ip, state.privKeyPath)
 	state.diagnostics.collectSSH(t, state.ip, state.privKeyPath, map[string]string{
-		"provisioning":   "cloud-init status --long 2>&1; systemctl --no-pager --full status k3s 2>&1 || true",
+		"fixture-state":  "cloud-init status --long 2>&1; systemctl --no-pager --full status k3s 2>&1 || true",
 		"forge-state":    fmt.Sprintf("sudo ls -la /var/lib/forge/overlay/%s 2>&1 || true; sudo k3s kubectl get gitrepositories,kustomizations -A -o wide 2>&1 || true", state.runID),
 		"platform-state": "sudo k3s kubectl get nodes -o wide 2>&1 || true; sudo k3s kubectl get deployments,statefulsets,daemonsets,pods,jobs,pvc -A -o wide 2>&1 || true; sudo k3s kubectl get events -A --sort-by=.metadata.creationTimestamp 2>&1 | tail -300 || true",
 	})
@@ -256,38 +255,38 @@ func collectCPUDiagnostics(t *testing.T, state *digitalOceanCPUState) {
 	}
 }
 
-func collectGPUDiagnostics(t *testing.T, state *digitalOceanGPUState) {
+func collectGPUDiagnostics(t *testing.T, state *permanentGPUFixtureState) {
 	t.Helper()
 	state.diagnostics.recordDomain(t)
-	if state.vm == nil {
+	if state.host == nil {
 		return
 	}
-	safeClusterLogs := state.diagnostics.registerBootstrapSecrets(t, state.vm.IP, state.privKeyPath)
-	state.diagnostics.collectSSH(t, state.vm.IP, state.privKeyPath, map[string]string{
-		"provisioning": "cloud-init status --long 2>&1; systemctl --no-pager --full status k3s 2>&1 || true",
-		"gpu-policy":   "sudo k3s kubectl get clusterpolicy -o yaml 2>&1 || true; sudo k3s kubectl get nodes -o wide --show-labels 2>&1 || true",
-		"gpu-workload": "sudo k3s kubectl get daemonsets,pods -n gpu-operator -o wide 2>&1 || true; sudo k3s kubectl get deployment,pods,pvc -n forge-gpu-upgrade -o wide 2>&1 || true",
+	safeClusterLogs := state.diagnostics.registerBootstrapSecrets(t, state.host.IP, state.privKeyPath)
+	state.diagnostics.collectSSH(t, state.host.IP, state.privKeyPath, map[string]string{
+		"fixture-state": "cloud-init status --long 2>&1; systemctl --no-pager --full status k3s 2>&1 || true",
+		"gpu-policy":    "sudo k3s kubectl get clusterpolicy -o yaml 2>&1 || true; sudo k3s kubectl get nodes -o wide --show-labels 2>&1 || true",
+		"gpu-workload":  "sudo k3s kubectl get daemonsets,pods -n gpu-operator -o wide 2>&1 || true; sudo k3s kubectl get deployment,pods,pvc -n forge-gpu-upgrade -o wide 2>&1 || true",
 	})
-	dumpGPUDiagnostics(t, state.vm.IP, state.privKeyPath)
+	dumpGPUDiagnostics(t, state.host.IP, state.privKeyPath)
 	if safeClusterLogs {
 		state.diagnostics.collectSharedCluster(t, filepath.Join(state.forgeHome, state.runID, "kubeconfig.yaml"))
 	}
 }
 
-func cpuScenarioDiagnostics() []sharede2e.Hook[*digitalOceanCPUState] {
-	return []sharede2e.Hook[*digitalOceanCPUState]{{Name: "shared-failure-evidence", Run: collectCPUDiagnostics}}
+func cpuScenarioDiagnostics() []sharede2e.Hook[*permanentCPUFixtureState] {
+	return []sharede2e.Hook[*permanentCPUFixtureState]{{Name: "shared-failure-evidence", Run: collectCPUDiagnostics}}
 }
 
-func cpuScenarioCleanup() []sharede2e.Hook[*digitalOceanCPUState] {
-	return []sharede2e.Hook[*digitalOceanCPUState]{{Name: "destroy-cloud-host", Run: func(t *testing.T, state *digitalOceanCPUState) { state.cleanup(t) }}}
+func cpuScenarioCleanup() []sharede2e.Hook[*permanentCPUFixtureState] {
+	return []sharede2e.Hook[*permanentCPUFixtureState]{{Name: "reset-permanent-cpu-fixture", Run: func(t *testing.T, state *permanentCPUFixtureState) { state.resetAfterScenario(t) }}}
 }
 
-func gpuScenarioDiagnostics() []sharede2e.Hook[*digitalOceanGPUState] {
-	return []sharede2e.Hook[*digitalOceanGPUState]{{Name: "shared-failure-evidence", Run: collectGPUDiagnostics}}
+func gpuScenarioDiagnostics() []sharede2e.Hook[*permanentGPUFixtureState] {
+	return []sharede2e.Hook[*permanentGPUFixtureState]{{Name: "shared-failure-evidence", Run: collectGPUDiagnostics}}
 }
 
-func gpuScenarioCleanup() []sharede2e.Hook[*digitalOceanGPUState] {
-	return []sharede2e.Hook[*digitalOceanGPUState]{{Name: "destroy-cloud-host", Run: func(t *testing.T, state *digitalOceanGPUState) { state.cleanup(t) }}}
+func gpuScenarioCleanup() []sharede2e.Hook[*permanentGPUFixtureState] {
+	return []sharede2e.Hook[*permanentGPUFixtureState]{{Name: "reset-permanent-gpu-fixture", Run: func(t *testing.T, state *permanentGPUFixtureState) { state.resetAfterScenario(t) }}}
 }
 
 func TestForgeDiagnosticsRecordsFailureDomain(t *testing.T) {

@@ -11,8 +11,8 @@ import (
 )
 
 // runFluxStage exercises the Flux GitOps phase on the composed CPU fixture:
-// droplet: forge reconciles Flux, its GitRepository, and Kustomization against
-// the PUBLIC exact-artifact E2E overlay fixture using only the workflow's
+// Forge reconciles Flux, its GitRepository, and Kustomization against the
+// public exact-artifact E2E overlay fixture using only the workflow's
 // ephemeral read credential,
 // and Flux source-controller materializes the fork in-cluster + kustomize-controller
 // reconciles crds/client. Validates the MECHANICS (install → sync resources →
@@ -22,7 +22,7 @@ import (
 // No explicit FORGE_OVERLAY_TOKEN is accepted. The E2E process maps the
 // workflow's ephemeral GITHUB_TOKEN into each Forge subprocess; tokenless and
 // prompt behavior remains covered by unit + fake-SSH tests.
-func runFluxStage(t *testing.T, state *digitalOceanCPUState) {
+func runFluxStage(t *testing.T, state *permanentCPUFixtureState) {
 	if _, ok := os.LookupEnv("FORGE_OVERLAY_TOKEN"); ok {
 		t.Fatal("FORGE_OVERLAY_TOKEN must be unset; E2E supplies only the ephemeral workflow token")
 	}

@@ -1,9 +1,27 @@
 # Permanent CPU/GPU E2E fixture operations
 
-Authority: `DES-HOR-540-02`. These hosts are dedicated, reimageable CI fixtures;
-they contain no customer data. Work is serialized per fixture by
-`iterabase-permanent-fixture-<capacity>` with cancellation disabled; independent
-CPU and GPU hosts may run concurrently.
+Authority: `DES-HOR-540-02` and `DES-HOR-545-02`. These hosts are dedicated,
+reimageable CI fixtures; they contain no customer data. Work is serialized per
+fixture by `iterabase-permanent-fixture-<capacity>` with cancellation disabled;
+independent CPU and GPU hosts may run concurrently.
+
+## Active evidence identities
+
+The active compiled scenario IDs are exactly:
+
+- `forge/permanent-fixture-cpu`
+- `forge/permanent-fixture-cpu-workspace`
+- `forge/permanent-fixture-gpu`
+
+PR execution retains grouped F3 evidence as
+`e2e-result-permanent-fixture-<capacity>` and
+`e2e-diagnostics-permanent-fixture-<capacity>`. Candidate execution uses
+`candidate-result-permanent-fixture-<capacity>` and
+`candidate-diagnostics-permanent-fixture-<capacity>`. Per-scenario JSON files
+derive from the provider-neutral IDs, for example
+`forge-permanent-fixture-gpu.json`. Dated acceptance records keep their exact
+legacy artifact names as immutable historical evidence; those names are not
+active selector, catalogue, plan, result, or release authority.
 
 ## Security and ownership boundary
 
@@ -116,8 +134,8 @@ Set two repository **secrets**:
 - `FORGE_E2E_GPU_SSH_KEY`
 
 No address, host key, device, or key may come from `workflow_dispatch` input.
-`DIGITALOCEAN_TOKEN` or another provider credential must not exist in repository
-Actions secrets after cutover.
+No legacy provider API token or other provider credential may exist in
+repository Actions secrets after cutover.
 
 Audit without exposing values:
 
@@ -156,20 +174,47 @@ environment, or prior fixture state never implies `--purge-data-storage`.
 
 ## Key rotation and host-key replacement
 
-Perform rotation only while fixture-backed dispatch is stopped and no job holds
-the global concurrency group.
+Perform client-key rotation only while fixture-backed dispatch is stopped and no
+job holds the global concurrency group.
 
 1. Quarantine the target fixture.
-2. Add the new fixture-scoped public key through the trusted provider channel.
-3. Verify a direct pinned SSH session, then replace only the matching GitHub
-   private-key secret.
-4. Remove the old authorized key and run one full lifecycle cycle.
+2. Add the new fixture-scoped client public key through the trusted provider
+   channel.
+3. Verify a direct session against the unchanged pinned host key, then replace
+   only the matching GitHub private-key secret.
+4. Remove the old authorized client key and run one full lifecycle cycle.
 5. Record the rotation date and validating run in the operational ticket.
 
-A changed SSH host key is not routine key rotation. Treat it as possible host
-replacement or compromise: quarantine, verify through provider console, restore
-or reimage the baseline, then update the matching repository variable and
-record why the identity changed.
+A changed SSH **host** key is not routine client-key rotation. Do not accept the
+new endpoint key, use `ssh-keyscan` as authority, rotate/update the repository
+pin, or dispatch another fixture job until the founder explicitly approves
+recovery. Use this independently verifiable procedure:
+
+1. Stop fixture-backed dispatch and quarantine the address.
+2. Through the authenticated provider account and trusted console—not SSH to the
+   suspect endpoint—confirm the intended fixture identity and run:
+
+   ```bash
+   sudo cat /etc/ssh/ssh_host_ed25519_key.pub
+   sudo ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub -E sha256
+   ```
+
+3. Independently fingerprint the currently configured repository-variable value
+   from a trusted administrator workstation with `ssh-keygen -lf - -E sha256`.
+   Compare algorithm, base64 public-key body, and SHA-256 fingerprint. Do not
+   infer trust from the address or an unauthenticated network observation.
+4. If the change was not an expected founder-authorized rebuild, treat the host
+   as replaced or compromised and reimage it through the provider console.
+   Re-establish the full Ubuntu/package/user/disk/model-cache baseline and repeat
+   the console fingerprint capture.
+5. Record the old and console-verified new fingerprints, provider resource
+   identity, rebuild reason, disk assignments, and approval in the operational
+   ticket. Only after explicit founder approval update the matching
+   `FORGE_E2E_<CAPACITY>_SSH_HOST_KEY` repository variable.
+6. Build a temporary `known_hosts` entry from that approved exact public key and
+   prove one direct session with `StrictHostKeyChecking=yes`; then run one full
+   required reset/apply/assert/reset lifecycle. Only that green lifecycle ends
+   quarantine.
 
 ## Failure, quarantine, and manual provider recovery
 

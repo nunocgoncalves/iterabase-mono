@@ -20,7 +20,7 @@ import (
 // git-init'd) and referenced via file:// so this test is self-contained (no
 // external overlay repo required). A real install points overlay.repo at the
 // client-fork overlay git URL instead.
-func runSecretsStage(t *testing.T, state *digitalOceanCPUState) {
+func runSecretsStage(t *testing.T, state *permanentCPUFixtureState) {
 	const (
 		secretName  = "e2e-test-secret"
 		secretNs    = "forge-e2e-secrets"
@@ -33,7 +33,7 @@ func runSecretsStage(t *testing.T, state *digitalOceanCPUState) {
 	state.diagnostics.redactor.Add(secretValue)
 
 	// Seed a minimal overlay on the existing forge host. Secret-sync only needs
-	// a ready k3s substrate; provisioning another VM would not add a boundary.
+	// a ready K3s substrate; resetting another host would not add a boundary.
 	sc, err := sshDial(state.ip, state.privKeyPath)
 	if err != nil {
 		t.Fatalf("ssh dial %s: %v", state.ip, err)

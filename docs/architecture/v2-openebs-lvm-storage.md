@@ -1,6 +1,6 @@
 # Platform V2 OpenEBS LVM LocalPV storage
 
-Status: current repository implementation contract for HOR-545 and approved `DES-HOR-545-01`, recorded canonically in Obsidian `Platform V2 — OpenEBS LVM LocalPV Storage`.
+Status: current repository implementation contract for HOR-545 and approved `DES-HOR-545-01` / `DES-HOR-545-02`, recorded canonically in Obsidian `Platform V2 — OpenEBS LVM LocalPV Storage`.
 
 ## Supported topology
 
@@ -90,4 +90,4 @@ A deleted claim uses `Delete` and must remove its PV, LVMVolume, and LV after co
 
 The affected semantic target set is `control-plane`, `forge`, `control-plane-chart`, and `iterabase-platform-chart`; the platform target contains both same-version companions. HOR-538 artifacts remain immutable historical evidence.
 
-Required evidence includes focused owners, generated CRDs, static/render checks, real Kind OpenEBS provisioning/deletion, permanent-fixture PV/VG receipt safety and crash matrices, same-pool concurrency/isolation, separate pools, per-pool and aggregate capacity, worker replacement, reboot/reapply, MinIO Job identity, ordinary destroy/non-purge, explicit purge, exact-head CI/E2E, exact-source candidate, protected promotion, and fresh bare-metal Ubuntu 24.04 LTS OPO1 acceptance. Merge and publication do not complete HOR-545.
+Required evidence includes focused owners, generated CRDs, static/render checks, real Kind OpenEBS provisioning/deletion, permanent-fixture PV/VG receipt safety and crash matrices, same-pool concurrency/isolation, separate pools, per-pool and aggregate capacity, worker replacement, reboot/reapply, MinIO Job identity, ordinary destroy/non-purge, explicit purge, exact-head CI/E2E, exact-source candidate, protected promotion, and fresh bare-metal Ubuntu 24.04 LTS OPO1 acceptance. Active F3 evidence uses only the provider-neutral `forge/permanent-fixture-cpu`, `forge/permanent-fixture-cpu-workspace`, and `forge/permanent-fixture-gpu` identities. Merge and publication do not complete HOR-545.
