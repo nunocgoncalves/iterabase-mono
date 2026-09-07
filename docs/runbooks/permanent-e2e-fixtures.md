@@ -94,9 +94,8 @@ model.safetensors-00001-of-00001.safetensors
 # must equal 04b1c301231dd422b8860db31311ab2721511346a32cb1e079c4c4e5f1fe4696
 ```
 
-Do not mount this disk at
-`/var/lib/iterabase/agentpool-workspaces`. Do not place its by-id identity in
-`spec.agentPoolWorkspace.device`. Forge purge never targets `/data/hf-cache`.
+Do not place this disk's by-id identity in `spec.dataStorage.devices`. Forge
+data-storage purge never targets `/data/hf-cache`.
 
 ## GitHub repository configuration
 
@@ -133,27 +132,27 @@ Every selected scenario performs this lifecycle before apply and again after
 diagnostics, regardless of success, failure, or interruption recovery:
 
 ```bash
-forge destroy --config forge.yaml --purge-workspace --reboot --yes
+forge destroy --config forge.yaml --purge-data-storage --reboot --yes
 ```
 
 Expected evidence:
 
 1. existing Flux/platform/GPU/K3s cleanup completes;
-2. the exact Forge receipt/device/filesystem/mount/fstab identity is revalidated;
-3. the workspace is unmounted and its filesystem signatures are erased;
+2. the exact Forge receipt/device/PV/VG identity and empty-LV predicate are revalidated;
+3. the receipt-matching `iterabase-data` VG and selected PV signatures are removed;
 4. reboot is requested only after successful purge;
 5. SSH disconnects, then reconnects under the same pinned host key;
 6. `/proc/sys/kernel/random/boot_id` changes;
 7. `cloud-init status` reaches `done` and the final pinned readiness session is
    closed before a short quiet handoff to Forge; SSH becoming reachable alone is
    not post-reboot readiness;
-8. workspace receipt/mount/fstab/signatures, K3s, run-scoped overlays,
+8. data-storage receipt/VG/PV signatures, K3s, run-scoped overlays,
    transferred artifacts, and stale test processes are absent;
 9. on GPU, `/data/hf-cache` still resolves to its distinct by-id device/UUID and
    its pinned model file still matches revision and SHA-256 authority.
 
 Ordinary `forge destroy` remains data-preserving. `--reboot`, CI mode,
-environment, or prior fixture state never implies `--purge-workspace`.
+environment, or prior fixture state never implies `--purge-data-storage`.
 
 ## Key rotation and host-key replacement
 

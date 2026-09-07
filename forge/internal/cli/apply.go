@@ -105,13 +105,16 @@ func printApplyResult(out io.Writer, cfg *config.Cluster, res *lifecycle.Result)
 	fmt.Fprintf(out, "  action:     %s\n", res.Plan.Action)
 	fmt.Fprintf(out, "  kubeconfig: %s\n", res.KubeconfigPath)
 	fmt.Fprintf(out, "  node ready: %v\n", res.NodeReady)
-	if res.AgentPoolWorkspace != nil {
-		fmt.Fprintf(out, "  AgentPool workspace: %s (%s, transport=%s, filesystem=%s, uuid=%s)\n", res.AgentPoolWorkspace.Device, res.AgentPoolWorkspace.State, res.AgentPoolWorkspace.Transport, res.AgentPoolWorkspace.Filesystem, res.AgentPoolWorkspace.FilesystemUUID)
+	if res.DataStorage != nil {
+		fmt.Fprintf(out, "  data storage: %s (%s, devices=%d, uuid=%s, free=%d/%d)\n", res.DataStorage.VGName, res.DataStorage.State, len(res.DataStorage.Devices), res.DataStorage.VGUUID, res.DataStorage.FreeBytes, res.DataStorage.SizeBytes)
 	}
-	fmt.Fprintf(out, "  AgentPool local-path ready: %v\n", res.AgentPoolLocalPathReady)
+	if res.LVMStorageReady != nil {
+		fmt.Fprintf(out, "  LVM storage ready: %v (node=%s, vg=%s, lvs=%d)\n", res.LVMStorageReady.Ready, res.LVMStorageReady.NodeName, res.LVMStorageReady.VGName, res.LVMStorageReady.LVCount)
+	}
 	if cfg.Spec.Chart.Version != "" {
 		fmt.Fprintf(out, "  chart:      %s\n", cfg.Spec.Chart.Version)
 		fmt.Fprintf(out, "  certificate substrate applied: %v\n", res.CertificateSubstrateApplied)
+		fmt.Fprintf(out, "  LVM storage substrate applied: %v\n", res.LVMStorageSubstrateApplied)
 		fmt.Fprintf(out, "  chart applied: %v\n", res.ChartApplied)
 	}
 	if cfg.Spec.GPU.Enabled {
@@ -159,8 +162,11 @@ func printPlan(cmd *cobra.Command, plan *lifecycle.ReconcilePlan) {
 		fmt.Fprintf(out, "  have:      %s\n", plan.HaveVersion)
 	}
 	fmt.Fprintf(out, "  want:      %s\n", plan.WantVersion)
-	if plan.AgentPoolWorkspace != nil {
-		fmt.Fprintf(out, "  workspace: %s (%s, model=%s serial=%s transport=%s filesystem=%s size=%d)\n", plan.AgentPoolWorkspace.Device, plan.AgentPoolWorkspace.State, plan.AgentPoolWorkspace.Model, plan.AgentPoolWorkspace.Serial, plan.AgentPoolWorkspace.Transport, plan.AgentPoolWorkspace.Filesystem, plan.AgentPoolWorkspace.SizeBytes)
+	if plan.DataStorage != nil {
+		fmt.Fprintf(out, "  data storage: %s (%s, devices=%d, uuid=%s, free=%d/%d)\n", plan.DataStorage.VGName, plan.DataStorage.State, len(plan.DataStorage.Devices), plan.DataStorage.VGUUID, plan.DataStorage.FreeBytes, plan.DataStorage.SizeBytes)
+		for _, device := range plan.DataStorage.Devices {
+			fmt.Fprintf(out, "    %s (model=%s serial=%s transport=%s size=%d pv=%s)\n", device.Path, device.Model, device.Serial, device.Transport, device.SizeBytes, device.PVUUID)
+		}
 	}
 	if plan.ChartVersion != "" {
 		fmt.Fprintf(out, "  chart:     %s\n", plan.ChartVersion)

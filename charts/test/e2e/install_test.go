@@ -4,11 +4,13 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	sharede2e "github.com/nunocgoncalves/iterabase-mono/testkit/e2e"
+	kindcluster "github.com/nunocgoncalves/iterabase-mono/testkit/e2e/kind"
 	"github.com/nunocgoncalves/iterabase-mono/testkit/e2e/poll"
 )
 
@@ -17,9 +19,9 @@ func freshInstallScenario() sharede2e.Definition {
 	return sharede2e.Define(sharede2e.Scenario[*chartState]{
 		Metadata: chartScenarioMetadata(
 			"fresh-install",
-			"Installs the ordered certificate substrate plus class-isolated public/private ingress planes, then proves manager, issuer, workload identity, fixed private allocation, route isolation, and verified gateway readiness.",
+			"Installs ordered certificate and pinned OpenEBS LVM substrates plus class-isolated public/private ingress planes, then proves exact storage classes/claims, manager, issuer, workload identity, fixed private allocation, route isolation, and verified gateway readiness.",
 			"test-e2e-install", 30,
-			[]string{"HOR-408", "HOR-414", "HOR-416", "HOR-475"},
+			[]string{"HOR-408", "HOR-414", "HOR-416", "HOR-475", "HOR-545", "DES-HOR-545-01"},
 			[]string{"control-plane-chart", "inference-gateway-chart", "iterabase-platform-chart"},
 		),
 		NewState: newChartState,
@@ -27,8 +29,10 @@ func freshInstallScenario() sharede2e.Definition {
 			{Name: "create-kind", Run: createKindStage},
 			{Name: "import-runtime-images", DependsOn: []string{"create-kind"}, Run: importRuntimeImagesStage},
 			{Name: "install-certificate-substrate", DependsOn: []string{"import-runtime-images"}, Run: installCertificateSubstrateStage},
-			{Name: "install-minimal-platform-edge", DependsOn: []string{"install-certificate-substrate"}, Run: installMinimalPlatformEdgeStage},
-			{Name: "assert-manager-contract", DependsOn: []string{"install-minimal-platform-edge"}, Run: assertManagerContractStage},
+			{Name: "install-lvm-storage-substrate", DependsOn: []string{"install-certificate-substrate"}, Run: installLVMStorageStage},
+			{Name: "install-minimal-platform-edge", DependsOn: []string{"install-lvm-storage-substrate"}, Run: installMinimalPlatformEdgeStage},
+			{Name: "assert-openebs-lvm-claims", DependsOn: []string{"install-minimal-platform-edge"}, Run: assertOpenEBSLVMClaimsStage},
+			{Name: "assert-manager-contract", DependsOn: []string{"assert-openebs-lvm-claims"}, Run: assertManagerContractStage},
 			{Name: "assert-certificate-issuer", DependsOn: []string{"install-minimal-platform-edge"}, Run: assertCertificateIssuerStage},
 			{Name: "assert-workload-identity", DependsOn: []string{"assert-certificate-issuer"}, Run: assertWorkloadIdentityStage},
 			{Name: "assert-verified-edge", DependsOn: []string{"install-minimal-platform-edge", "assert-certificate-issuer"}, Run: assertVerifiedEdgeStage},
@@ -81,6 +85,68 @@ func installMinimalPlatformEdgeStage(t *testing.T, state *chartState) {
 	assertCandidateImages(t, state)
 }
 
+func assertOpenEBSLVMClaimsStage(t *testing.T, state *chartState) {
+	t.Helper()
+	classes := strings.Fields(state.kubectl(t, 30*time.Second, "get", "storageclass", "-o", `jsonpath={range .items[*]}{.metadata.name}{"\n"}{end}`))
+	if len(classes) != 2 || !slices.Contains(classes, kindcluster.PlatformDataStorageClass) || !slices.Contains(classes, kindcluster.AgentPoolWorkspaceStorageClass) {
+		t.Fatalf("managed StorageClass set=%v", classes)
+	}
+	claims := strings.Fields(state.kubectl(t, 30*time.Second, "get", "pvc", "-A", "-o", `jsonpath={range .items[*]}{.metadata.namespace}/{.metadata.name}|{.spec.storageClassName}|{.status.phase}|{.spec.volumeName}{"\n"}{end}`))
+	if len(claims) == 0 {
+		t.Fatal("fresh platform rendered no data claims")
+	}
+	for _, claim := range claims {
+		parts := strings.Split(claim, "|")
+		if len(parts) != 4 || parts[1] != kindcluster.PlatformDataStorageClass || parts[2] != "Bound" || parts[3] == "" {
+			t.Fatalf("chart data claim is not explicitly Bound through the general LVM class: %s", claim)
+		}
+		pv := state.kubectl(t, 30*time.Second, "get", "pv/"+parts[3], "-o", `jsonpath={.spec.csi.driver}|{.spec.csi.fsType}|{.spec.csi.volumeAttributes.openebs\.io/volgroup}|{.spec.hostPath.path}`)
+		if pv != "local.csi.openebs.io|xfs|iterabase-data|" {
+			t.Fatalf("chart data PV %s has wrong CSI/XFS/VG/no-hostPath identity: %s", parts[3], pv)
+		}
+	}
+
+	manifest := `apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: lvm-lifecycle, namespace: iterabase-system}
+spec:
+  accessModes: [ReadWriteOnce]
+  volumeMode: Filesystem
+  storageClassName: iterabase-lvm-xfs
+  resources: {requests: {storage: 128Mi}}
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: lvm-lifecycle, namespace: iterabase-system}
+spec:
+  restartPolicy: Never
+  containers:
+    - name: write
+      image: busybox:1.37.0@sha256:9db7b59979c38555a39def84a31fb98b5296952f9e3afd4f6f11f05b07adfab0
+      command: [sh, -ceu]
+      args: ['printf lvm-lifecycle=pass > /data/marker; sync; test "$(cat /data/marker)" = lvm-lifecycle=pass']
+      volumeMounts: [{name: data, mountPath: /data}]
+  volumes: [{name: data, persistentVolumeClaim: {claimName: lvm-lifecycle}}]
+`
+	path := state.writeManifest(t, "lvm-lifecycle.yaml", manifest)
+	state.kubectl(t, 30*time.Second, "apply", "-f", path)
+	state.kubectl(t, 5*time.Minute, "wait", "pod/lvm-lifecycle", "-n", testNamespace, "--for=jsonpath={.status.phase}=Succeeded", "--timeout=4m")
+	pv := state.kubectl(t, 30*time.Second, "get", "pvc/lvm-lifecycle", "-n", testNamespace, "-o", `jsonpath={.spec.volumeName}`)
+	handle := state.kubectl(t, 30*time.Second, "get", "pv/"+pv, "-o", `jsonpath={.spec.csi.volumeHandle}`)
+	state.kubectl(t, 30*time.Second, "delete", "pod/lvm-lifecycle", "-n", testNamespace, "--wait=true", "--timeout=2m")
+	state.kubectl(t, 30*time.Second, "delete", "pvc/lvm-lifecycle", "-n", testNamespace, "--wait=true", "--timeout=2m")
+	deadline := time.Now().Add(3 * time.Minute)
+	for time.Now().Before(deadline) {
+		pvMissing := state.kubectl(t, 30*time.Second, "get", "pv/"+pv, "--ignore-not-found=true", "-o", "name") == ""
+		volumeMissing := state.kubectl(t, 30*time.Second, "get", "lvmvolume.local.openebs.io/"+handle, "-n", testNamespace, "--ignore-not-found=true", "-o", "name") == ""
+		if pvMissing && volumeMissing {
+			return
+		}
+		time.Sleep(2 * time.Second)
+	}
+	t.Fatalf("Delete reclaim left PV %s or LVMVolume %s", pv, handle)
+}
+
 func assertManagerContractStage(t *testing.T, state *chartState) {
 	t.Helper()
 	deployment := testRelease + "-control-plane-manager"
@@ -89,7 +155,7 @@ func assertManagerContractStage(t *testing.T, state *chartState) {
 	state.kubectl(t, 30*time.Second, "get", "crd", "agentpools.platform.iterabase.com", "workflows.platform.iterabase.com")
 	for _, resource := range []string{
 		"pods", "configmaps", "persistentvolumeclaims", "networkpolicies.networking.k8s.io",
-		"agentpools.platform.iterabase.com", "workflows.platform.iterabase.com",
+		"agentpools.platform.iterabase.com", "workflows.platform.iterabase.com", "lvmnodes.local.openebs.io", "lvmvolumes.local.openebs.io",
 	} {
 		if got := state.kubectl(t, 30*time.Second, "auth", "can-i", "list", resource, "--all-namespaces", "--as", subject); got != "yes" {
 			t.Fatalf("%s cannot list %s", subject, resource)

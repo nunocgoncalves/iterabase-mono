@@ -353,7 +353,7 @@ jobs:
       - name: Package exact chart and companion archives once
         run: |
           mkdir -p candidate-charts
-          for chart in control-plane observability cert-manager-substrate iterabase-platform; do
+          for chart in control-plane observability cert-manager-substrate lvm-storage-substrate iterabase-platform; do
             bash charts/scripts/build-chart-dependency.sh "charts/charts/$chart"
           done
           helm package 'charts/charts/${{ matrix.chart }}' --destination candidate-charts

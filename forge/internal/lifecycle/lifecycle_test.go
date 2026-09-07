@@ -30,8 +30,8 @@ func testConfig() *config.Cluster {
 		Kind:       config.Kind,
 		Metadata:   config.Metadata{Name: "opo1"},
 		Spec: config.Spec{
-			Mode:               config.ModeSingleNode,
-			AgentPoolWorkspace: config.AgentPoolWorkspace{Device: "/dev/disk/by-id/scsi-workspace", Filesystem: config.WorkspaceFilesystemAuto},
+			Mode:        config.ModeSingleNode,
+			DataStorage: config.DataStorage{Devices: []string{"/dev/disk/by-id/scsi-data-a", "/dev/disk/by-id/scsi-data-b"}},
 			Hosts: []config.Host{{
 				Address: "10.20.0.10", SSHUser: "forge", SSHKeyPath: "/dev/null",
 				Role: config.RoleControlPlaneWorker,
@@ -69,10 +69,10 @@ type fakeProv struct {
 	workspaceReconcileErr error
 	workspaceInspectCalls int
 	workspaceToolsErr     error
-	workspaceToolsCalls   []string
+	workspaceToolsCalls   int
 	workspaceApplyCalls   int
-	localPathErr          error
-	localPathCalls        int
+	lvmReadinessErr       error
+	lvmReadinessCalls     int
 	gpuReady              bool
 	gpuTerminal           bool
 	gpuReadinessReason    string
@@ -104,8 +104,8 @@ func (f *fakeProv) Uninstall(_ context.Context) error {
 	f.state.Installed = false
 	return nil
 }
-func (f *fakeProv) PurgeAgentPoolWorkspace(_ context.Context, spec provisioner.AgentPoolWorkspaceSpec) error {
-	f.destroyCalls = append(f.destroyCalls, "purge:"+spec.InstallName+":"+spec.Device+":"+spec.Filesystem)
+func (f *fakeProv) PurgeDataStorage(_ context.Context, spec provisioner.DataStorageSpec) error {
+	f.destroyCalls = append(f.destroyCalls, "purge:"+spec.InstallName+":"+strings.Join(spec.Devices, ","))
 	return f.purgeErr
 }
 func (f *fakeProv) Reboot(_ context.Context) error {
@@ -122,32 +122,41 @@ func (f *fakeProv) EnsureDriverBuildDeps(_ context.Context) error {
 	f.ensureDepsCalls++
 	return f.ensureDepsErr
 }
-func (f *fakeProv) ListAgentPoolWorkspaceDevices(_ context.Context) ([]provisioner.WorkspaceDevice, error) {
+func (f *fakeProv) ListDataStorageDevices(_ context.Context) ([]provisioner.DataStorageDevice, error) {
 	return nil, nil
 }
-func (f *fakeProv) InspectAgentPoolWorkspace(_ context.Context, spec provisioner.AgentPoolWorkspaceSpec) (*provisioner.AgentPoolWorkspaceState, error) {
+func (f *fakeProv) InspectDataStorage(_ context.Context, spec provisioner.DataStorageSpec) (*provisioner.DataStorageState, error) {
 	f.workspaceInspectCalls++
 	if f.workspaceInspectErr != nil {
 		return nil, f.workspaceInspectErr
 	}
-	filesystem, _ := config.ResolveWorkspaceFilesystem(spec.Filesystem, "scsi")
-	return &provisioner.AgentPoolWorkspaceState{Device: spec.Device, Transport: "scsi", Filesystem: filesystem, State: "blank-candidate"}, nil
+	devices := make([]provisioner.DataStorageDevice, len(spec.Devices))
+	for i, device := range spec.Devices {
+		devices[i] = provisioner.DataStorageDevice{Path: device, Transport: "scsi", SizeBytes: 100}
+	}
+	return &provisioner.DataStorageState{Devices: devices, VGName: provisioner.DataVolumeGroupName, State: "blank-candidate"}, nil
 }
-func (f *fakeProv) EnsureAgentPoolWorkspaceTools(_ context.Context, filesystem string) error {
-	f.workspaceToolsCalls = append(f.workspaceToolsCalls, filesystem)
+func (f *fakeProv) EnsureDataStorageTools(_ context.Context) error {
+	f.workspaceToolsCalls++
 	return f.workspaceToolsErr
 }
-func (f *fakeProv) ReconcileAgentPoolWorkspace(_ context.Context, spec provisioner.AgentPoolWorkspaceSpec) (*provisioner.AgentPoolWorkspaceState, error) {
+func (f *fakeProv) ReconcileDataStorage(_ context.Context, spec provisioner.DataStorageSpec) (*provisioner.DataStorageState, error) {
 	f.workspaceApplyCalls++
 	if f.workspaceReconcileErr != nil {
 		return nil, f.workspaceReconcileErr
 	}
-	filesystem, _ := config.ResolveWorkspaceFilesystem(spec.Filesystem, "scsi")
-	return &provisioner.AgentPoolWorkspaceState{Device: spec.Device, Transport: "scsi", Filesystem: filesystem, FilesystemUUID: "11111111-1111-1111-1111-111111111111", State: "complete"}, nil
+	devices := make([]provisioner.DataStorageDevice, len(spec.Devices))
+	for i, device := range spec.Devices {
+		devices[i] = provisioner.DataStorageDevice{Path: device, Transport: "scsi", SizeBytes: 100, PVUUID: fmt.Sprintf("pv-%d", i)}
+	}
+	return &provisioner.DataStorageState{Devices: devices, VGName: provisioner.DataVolumeGroupName, VGUUID: "vg-uuid", SizeBytes: 200, FreeBytes: 200, State: "complete"}, nil
 }
-func (f *fakeProv) EnsureAgentPoolLocalPathStorage(_ context.Context) error {
-	f.localPathCalls++
-	return f.localPathErr
+func (f *fakeProv) WaitForLVMStorageReady(_ context.Context, _ string, storage *provisioner.DataStorageState) (*provisioner.LVMStorageReadiness, error) {
+	f.lvmReadinessCalls++
+	if f.lvmReadinessErr != nil {
+		return nil, f.lvmReadinessErr
+	}
+	return &provisioner.LVMStorageReadiness{Ready: true, NodeName: "node", VGName: storage.VGName, VGUUID: storage.VGUUID, SizeBytes: storage.SizeBytes, FreeBytes: storage.FreeBytes, PVCount: len(storage.Devices)}, nil
 }
 func (f *fakeProv) ReadGPUReadiness(_ context.Context, requestedDriverVersion string) (*provisioner.GPUReadiness, error) {
 	f.gpuDriverRequests = append(f.gpuDriverRequests, requestedDriverVersion)
@@ -165,11 +174,12 @@ func readyPf() provisioner.PreflightResult {
 
 func inSyncState() provisioner.HostState {
 	return provisioner.HostState{
-		Installed:   true,
-		Version:     "v1.31.5+k3s1",
-		ClusterCIDR: "10.42.0.0/16,fd42::/48",
-		ServiceCIDR: "10.43.0.0/16,fd43::/112",
-		DualStack:   true,
+		Installed:            true,
+		Version:              "v1.31.5+k3s1",
+		ClusterCIDR:          "10.42.0.0/16,fd42::/48",
+		ServiceCIDR:          "10.43.0.0/16,fd43::/112",
+		DualStack:            true,
+		LocalStorageDisabled: true,
 	}
 }
 
@@ -501,6 +511,17 @@ func testConfigWithChart() *config.Cluster {
 	return c
 }
 
+func testConfigWithLVMChart() *config.Cluster {
+	c := testConfig()
+	c.Spec.Chart = config.Chart{
+		Version:    "0.4.0",
+		Repository: "oci://ghcr.io/nunocgoncalves/iterabase-charts/iterabase-platform",
+		Release:    "opo1",
+		Namespace:  "iterabase-system",
+	}
+	return c
+}
+
 func TestCertificateSubstrateRepository(t *testing.T) {
 	required, err := certificateSubstrateRequired("0.2.2")
 	require.NoError(t, err)
@@ -544,6 +565,38 @@ func TestApply_Chart(t *testing.T) {
 	assert.Equal(t, "0.3.0", platform.version)
 	assert.Equal(t, "opo1", platform.release)
 	assert.Equal(t, "iterabase-system", platform.namespace)
+}
+
+func TestApplyRefusesPreLVMPlatformBeforeHostOrDiskMutation(t *testing.T) {
+	p := &fakeProv{pf: readyPf(), state: inSyncState(), ready: true, kubeconfig: []byte(minKubeconfig)}
+	p.pf.Installed = true
+	d := &fakeDeployer{statusStates: map[string]deployer.ChartState{"opo1": {Installed: true, Status: "deployed", Version: "0.3.23"}}}
+	_, err := Apply(context.Background(), testConfigWithLVMChart(), p, d, nil, nil, ApplyOpts{})
+	require.ErrorContains(t, err, "supports only a clean destroy and fresh install")
+	assert.Zero(t, p.workspaceToolsCalls)
+	assert.Zero(t, p.workspaceApplyCalls)
+	assert.Empty(t, d.applyCalls)
+}
+
+func TestApplyChartOrdersBothSubstratesBeforePlatform(t *testing.T) {
+	useTempHome(t)
+	p := &fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig), readyAfterInstall: true}
+	d := &fakeDeployer{}
+	res, err := Apply(context.Background(), testConfigWithLVMChart(), p, d, nil, &fakeFluxer{}, ApplyOpts{
+		ReadyTimeout: time.Second, ReadyInterval: 10 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	assert.True(t, res.CertificateSubstrateApplied)
+	assert.True(t, res.LVMStorageSubstrateApplied)
+	require.NotNil(t, res.LVMStorageReady)
+	assert.True(t, res.LVMStorageReady.Ready)
+	assert.True(t, res.ChartApplied)
+	require.Len(t, d.applyCalls, 3)
+	assert.Equal(t, "opo1-cert-manager", d.applyCalls[0].release)
+	assert.Equal(t, "opo1-lvm-storage", d.applyCalls[1].release)
+	assert.Equal(t, "oci://ghcr.io/nunocgoncalves/iterabase-charts/lvm-storage-substrate", d.applyCalls[1].repository)
+	assert.Equal(t, "opo1", d.applyCalls[2].release)
+	assert.Equal(t, 1, p.lvmReadinessCalls)
 }
 
 func TestApply_Chart_MigratesPreSubstrateOwnershipBeforeCompanion(t *testing.T) {
@@ -687,6 +740,18 @@ func TestDestroy_Chart(t *testing.T) {
 	assert.False(t, p.state.Installed) // k3s uninstalled too
 }
 
+func TestDestroyCurrentChartRemovesPlatformThenLVMThenCertificateWithoutPurgingVG(t *testing.T) {
+	p := &fakeProv{pf: readyPf(), state: inSyncState()}
+	p.pf.Installed = true
+	d := &fakeDeployer{}
+	require.NoError(t, Destroy(context.Background(), testConfigWithLVMChart(), p, d, nil, nil))
+	require.Len(t, d.uninstallCalls, 3)
+	assert.Equal(t, "opo1", d.uninstallCalls[0].release)
+	assert.Equal(t, "opo1-lvm-storage", d.uninstallCalls[1].release)
+	assert.Equal(t, "opo1-cert-manager", d.uninstallCalls[2].release)
+	assert.Equal(t, []string{"uninstall"}, p.destroyCalls)
+}
+
 func TestDestroy_NoChart(t *testing.T) {
 	p := &fakeProv{pf: readyPf(), state: inSyncState()}
 	p.pf.Installed = true
@@ -700,12 +765,12 @@ func TestDestroy_NoChart(t *testing.T) {
 func TestDestroyWithOptions_PurgeThenReboot(t *testing.T) {
 	p := &fakeProv{pf: readyPf(), state: inSyncState()}
 	require.NoError(t, DestroyWithOptions(context.Background(), testConfig(), p, nil, nil, nil, DestroyOpts{
-		PurgeWorkspace: true,
-		Reboot:         true,
+		PurgeDataStorage: true,
+		Reboot:           true,
 	}))
 	assert.Equal(t, []string{
 		"uninstall",
-		"purge:opo1:/dev/disk/by-id/scsi-workspace:auto",
+		"purge:opo1:/dev/disk/by-id/scsi-data-a,/dev/disk/by-id/scsi-data-b",
 		"reboot",
 	}, p.destroyCalls)
 }
@@ -713,13 +778,13 @@ func TestDestroyWithOptions_PurgeThenReboot(t *testing.T) {
 func TestDestroyWithOptions_StopsBeforeRebootOnPurgeFailure(t *testing.T) {
 	p := &fakeProv{pf: readyPf(), state: inSyncState(), purgeErr: errors.New("identity drift")}
 	err := DestroyWithOptions(context.Background(), testConfig(), p, nil, nil, nil, DestroyOpts{
-		PurgeWorkspace: true,
-		Reboot:         true,
+		PurgeDataStorage: true,
+		Reboot:           true,
 	})
 	require.ErrorContains(t, err, "identity drift")
 	assert.Equal(t, []string{
 		"uninstall",
-		"purge:opo1:/dev/disk/by-id/scsi-workspace:auto",
+		"purge:opo1:/dev/disk/by-id/scsi-data-a,/dev/disk/by-id/scsi-data-b",
 	}, p.destroyCalls)
 }
 

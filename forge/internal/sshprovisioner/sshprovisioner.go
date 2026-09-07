@@ -321,6 +321,7 @@ func (p *SSHProvisioner) ReadState(ctx context.Context) (*provisioner.HostState,
 	}
 	if out, err := p.run(ctx, "sudo cat /etc/systemd/system/k3s.service"); err == nil {
 		st.ClusterCIDR, st.ServiceCIDR, st.DualStack = parseSystemdUnit(out)
+		st.LocalStorageDisabled = systemdUnitDisables(out, "local-storage")
 	}
 	return st, nil
 }
@@ -588,6 +589,22 @@ func parseSystemdUnit(out string) (clusterCIDR, serviceCIDR string, dualStack bo
 // Tokens that are not single-quoted are returned unchanged. It assumes arg
 // values contain no whitespace (true for all forge k3s flags: CIDRs, addresses,
 // labels, taints), so strings.Fields never splits a quoted value across tokens.
+func systemdUnitDisables(out, component string) bool {
+	out = strings.ReplaceAll(out, "\\\r\n", " ")
+	out = strings.ReplaceAll(out, "\\\n", " ")
+	tokens := strings.Fields(out)
+	for i, raw := range tokens {
+		tok := unquoteShellToken(raw)
+		if tok == "--disable" && i+1 < len(tokens) && unquoteShellToken(tokens[i+1]) == component {
+			return true
+		}
+		if strings.HasPrefix(tok, "--disable=") && strings.TrimPrefix(tok, "--disable=") == component {
+			return true
+		}
+	}
+	return false
+}
+
 func unquoteShellToken(tok string) string {
 	if len(tok) < 2 || tok[0] != '\'' || tok[len(tok)-1] != '\'' {
 		return tok

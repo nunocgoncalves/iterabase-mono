@@ -9,6 +9,7 @@ helm template iterabase "$root/charts/iterabase-platform" \
   --set external-dns.enabled=true --set reloader.enabled=true --set metallb.enabled=true \
   > "$tmp/optional.yaml"
 helm template iterabase-cert-manager "$root/charts/cert-manager-substrate" > "$tmp/cert-manager.yaml"
+helm template iterabase-lvm-storage "$root/charts/lvm-storage-substrate" > "$tmp/lvm-storage.yaml"
 
 status=0
 while IFS= read -r image; do

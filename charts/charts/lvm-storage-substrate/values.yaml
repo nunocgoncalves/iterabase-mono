@@ -1,0 +1,56 @@
+# DES-HOR-545-01: fixed OpenEBS LVM LocalPV 1.10.0 substrate for K3s.
+# These values are release-owned, not an overlay-selectable storage backend.
+lvm-localpv:
+  enabled: true
+  global:
+    analytics:
+      enabled: false
+    kubeletDir: /var/lib/rancher/k3s/agent/kubelet
+  analytics:
+    enabled: false
+  storageCapacity: true
+  crds:
+    lvmLocalPv:
+      enabled: true
+      keep: true
+    csi:
+      volumeSnapshots:
+        enabled: false
+        keep: true
+  lvmNode:
+    kubeletDir: /var/lib/rancher/k3s/agent/kubelet
+    driverRegistrar:
+      image:
+        registry: ""
+        repository: registry.k8s.io/sig-storage/csi-node-driver-registrar
+        tag: v2.13.0@sha256:d7138bcc3aa5f267403d45ad4292c95397e421ea17a0035888850f424c7de25d
+  lvmController:
+    replicas: 1
+    resizer:
+      image:
+        registry: ""
+        repository: registry.k8s.io/sig-storage/csi-resizer
+        tag: v2.0.0@sha256:4a95d94e57ad82f6977cd8d4fdcfcfc0b83f02d990e4e7715b688c20970a906d
+    snapshotter:
+      image:
+        registry: ""
+        repository: registry.k8s.io/sig-storage/csi-snapshotter
+        tag: v8.2.0@sha256:dd788d79cf4c1b8edee6d9b80b8a1ebfc51a38a365c5be656986b129be9ac784
+    snapshotController:
+      enabled: false
+      image:
+        registry: ""
+        repository: registry.k8s.io/sig-storage/snapshot-controller
+        tag: v8.2.0@sha256:9dade8f2f3ab29e3919c41b343f8d77b12178ac51f25574d7ed2d45a3e3ef69d
+    provisioner:
+      image:
+        registry: ""
+        repository: registry.k8s.io/sig-storage/csi-provisioner
+        tag: v6.1.0@sha256:e5900dc98b0d02f317ea9572f3824983c47a2fb5d5fe2b160aedf1b99c14c9e4
+  lvmPlugin:
+    image:
+      registry: ""
+      repository: docker.io/openebs/lvm-driver
+      tag: 1.10.0@sha256:b5932b4df5cde1f72914f665a4e4b480afd38dbc6577d7552b9f509d52e8c094
+    metricsPort: 9500
+    allowedTopologies: "kubernetes.io/hostname,"

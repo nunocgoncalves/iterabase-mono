@@ -283,15 +283,31 @@ def validate_catalogue_contract(catalogue: dict[str, Any], contract: dict[str, A
                 raise E2EError(
                     f"Kind scenario {scenario['id']} can execute before runtime image import: {bypasses}"
                 )
-            if "harness-image" in artifacts and "configure-agentpool-local-path" not in dependencies:
+            if "harness-image" in artifacts and "install-lvm-storage-substrate" not in dependencies:
                 raise E2EError(
-                    f"Kind harness scenario {scenario['id']} must establish the dedicated AgentPool local-path substrate before worker creation"
+                    f"Kind harness scenario {scenario['id']} must establish the pinned OpenEBS LVM substrate before worker creation"
                 )
-            if scenario["id"].startswith("charts/") and "harness-image" in artifacts and dependencies.get(
-                "install-harness-worker"
-            ) != {"configure-agentpool-local-path"}:
+            if scenario["id"].startswith("charts/") and "harness-image" in artifacts and not imports_before(
+                "install-harness-worker", {"create-kind", "import-runtime-images"}
+            ):
                 raise E2EError(
-                    f"Kind harness scenario {scenario['id']} must establish the dedicated AgentPool local-path substrate before worker creation"
+                    f"Kind harness scenario {scenario['id']} must keep runtime import before worker creation"
+                )
+
+            def depends_on(stage: str, required: str, visiting: set[str] | None = None) -> bool:
+                if stage == required:
+                    return True
+                visiting = set() if visiting is None else visiting
+                if stage in visiting:
+                    return False
+                visiting.add(stage)
+                return any(depends_on(parent, required, visiting.copy()) for parent in dependencies.get(stage, set()))
+
+            if scenario["id"].startswith("charts/") and "harness-image" in artifacts and not depends_on(
+                "install-harness-worker", "install-lvm-storage-substrate"
+            ):
+                raise E2EError(
+                    f"Kind harness scenario {scenario['id']} can create a worker before the pinned OpenEBS LVM substrate"
                 )
         if metadata.get("tier") == "F3":
             if not metadata.get("capacity") or metadata.get("mandatory_capacity") is not True:
@@ -1212,7 +1228,7 @@ def compose_runtime(plan_path: Path, scenario_id: str, artifacts: Path, output: 
             local_archive = runtime / archive.name
             shutil.copy2(archive, local_archive)
             record.update({"reference": expected.get("reference", archive.name), "checksum": checksum, "path": str(local_archive)})
-            if name in {"control-plane-chart", "inference-gateway-chart", "iterabase-platform-chart", "cert-manager-substrate-chart"}:
+            if name in {"control-plane-chart", "inference-gateway-chart", "iterabase-platform-chart", "cert-manager-substrate-chart", "lvm-storage-substrate-chart"}:
                 chart_archives[name] = local_archive
                 chart_paths[name] = extract_chart(local_archive, runtime / "charts" / name)
             if name in TRANSITION_ENV:
@@ -1279,6 +1295,7 @@ def compose_runtime(plan_path: Path, scenario_id: str, artifacts: Path, output: 
     # Compose selected nested charts into the exact outer platform archive.
     platform = chart_paths.get("iterabase-platform-chart")
     substrate = chart_paths.get("cert-manager-substrate-chart")
+    lvm_substrate = chart_paths.get("lvm-storage-substrate-chart")
     if platform:
         nested = platform / "charts"
         nested.mkdir(parents=True, exist_ok=True)
@@ -1315,6 +1332,20 @@ def compose_runtime(plan_path: Path, scenario_id: str, artifacts: Path, output: 
             "reference": substrate_record["reference"] + "#composed-runtime",
             "checksum": hash_file(Path(env["FORGE_E2E_SUBSTRATE_CHART_ARCHIVE"])),
             "path": env["FORGE_E2E_SUBSTRATE_CHART_ARCHIVE"],
+        })
+    if lvm_substrate:
+        companion = platform.parent / "lvm-storage-substrate" if platform else runtime / "lvm-storage-substrate"
+        if companion.exists():
+            shutil.rmtree(companion)
+        shutil.copytree(lvm_substrate, companion)
+        env["FORGE_E2E_LVM_STORAGE_CHART_ARCHIVE"] = str(runtime / "lvm-storage-substrate-composed.tgz")
+        with tarfile.open(env["FORGE_E2E_LVM_STORAGE_CHART_ARCHIVE"], "w:gz") as bundle:
+            bundle.add(companion, arcname="lvm-storage-substrate")
+        lvm_record = next(item for item in records if item["name"] == "lvm-storage-substrate-chart")
+        lvm_record.update({
+            "reference": lvm_record["reference"] + "#composed-runtime",
+            "checksum": hash_file(Path(env["FORGE_E2E_LVM_STORAGE_CHART_ARCHIVE"])),
+            "path": env["FORGE_E2E_LVM_STORAGE_CHART_ARCHIVE"],
         })
     if platform:
         env["FORGE_E2E_PLATFORM_CHART_ARCHIVE"] = str(runtime / "iterabase-platform-composed.tgz")
@@ -1497,7 +1528,7 @@ def validate_retained_runtime_bundle(
                 )
         if actual.get("runtime_digest") is not None:
             raise E2EError(f"runtime bundle for {scenario_id} preclaims an observed runtime identity for {name}")
-        composed_chart = name in {"iterabase-platform-chart", "cert-manager-substrate-chart"}
+        composed_chart = name in {"iterabase-platform-chart", "cert-manager-substrate-chart", "lvm-storage-substrate-chart"}
         if "reference" in expected:
             expected_reference = expected["reference"] + ("#composed-runtime" if composed_chart else "")
             if actual.get("reference") != expected_reference:

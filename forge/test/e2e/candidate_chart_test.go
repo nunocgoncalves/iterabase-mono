@@ -12,8 +12,9 @@ import (
 )
 
 const (
-	platformChartArchiveEnv  = "FORGE_E2E_PLATFORM_CHART_ARCHIVE"
-	substrateChartArchiveEnv = "FORGE_E2E_SUBSTRATE_CHART_ARCHIVE"
+	platformChartArchiveEnv   = "FORGE_E2E_PLATFORM_CHART_ARCHIVE"
+	substrateChartArchiveEnv  = "FORGE_E2E_SUBSTRATE_CHART_ARCHIVE"
+	lvmStorageChartArchiveEnv = "FORGE_E2E_LVM_STORAGE_CHART_ARCHIVE"
 )
 
 type importedRuntimeIdentity struct {
@@ -200,8 +201,9 @@ func prepareCandidateChart(t *testing.T, ip, keyPath string) {
 	t.Helper()
 	platform := os.Getenv(platformChartArchiveEnv)
 	substrate := os.Getenv(substrateChartArchiveEnv)
-	if platform == "" || substrate == "" {
-		t.Fatalf("exact platform validation requires %s and %s", platformChartArchiveEnv, substrateChartArchiveEnv)
+	lvmStorage := os.Getenv(lvmStorageChartArchiveEnv)
+	if platform == "" || substrate == "" || lvmStorage == "" {
+		t.Fatalf("exact platform validation requires %s, %s, and %s", platformChartArchiveEnv, substrateChartArchiveEnv, lvmStorageChartArchiveEnv)
 	}
 
 	root := fmt.Sprintf("/tmp/iterabase-release-charts-%d", os.Getpid())
@@ -214,7 +216,7 @@ func prepareCandidateChart(t *testing.T, ip, keyPath string) {
 		t.Fatalf("prepare remote candidate chart directory: %v\n%s", err, output)
 	}
 
-	for _, archive := range []string{platform, substrate} {
+	for _, archive := range []string{platform, substrate, lvmStorage} {
 		source, err := os.Open(archive)
 		if err != nil {
 			t.Fatalf("open exact candidate chart %s: %v", archive, err)
@@ -249,7 +251,7 @@ func prepareCandidateChart(t *testing.T, ip, keyPath string) {
 			t.Logf("remove remote candidate charts: %v\n%s", err, output)
 		}
 	})
-	t.Log("transferred exact platform and certificate-substrate candidate archives to the real-machine host")
+	t.Log("transferred exact platform, certificate-substrate, and LVM-storage candidate archives to the real-machine host")
 }
 
 func TestCandidateChartTransferRecreatesAnEmptyPrivateRoot(t *testing.T) {

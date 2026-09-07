@@ -60,30 +60,37 @@
       "kind": "chart",
       "target": "control-plane-chart",
       "chart": "control-plane",
-      "dependency_builds": ["control-plane", "observability", "cert-manager-substrate", "iterabase-platform"],
+      "dependency_builds": ["control-plane", "observability", "cert-manager-substrate", "lvm-storage-substrate", "iterabase-platform"],
       "paths": ["charts/charts/control-plane/**"]
     },
     "inference-gateway-chart": {
       "kind": "chart",
       "target": "inference-gateway-chart",
       "chart": "inference-gateway",
-      "dependency_builds": ["control-plane", "observability", "cert-manager-substrate", "iterabase-platform"],
+      "dependency_builds": ["control-plane", "observability", "cert-manager-substrate", "lvm-storage-substrate", "iterabase-platform"],
       "paths": ["charts/charts/inference-gateway/**"]
     },
     "iterabase-platform-chart": {
       "kind": "chart",
       "target": "iterabase-platform-chart",
       "chart": "iterabase-platform",
-      "companions": ["cert-manager-substrate"],
-      "dependency_builds": ["control-plane", "observability", "cert-manager-substrate", "iterabase-platform"],
+      "companions": ["cert-manager-substrate", "lvm-storage-substrate"],
+      "dependency_builds": ["control-plane", "observability", "cert-manager-substrate", "lvm-storage-substrate", "iterabase-platform"],
       "paths": ["charts/**"]
     },
     "cert-manager-substrate-chart": {
       "kind": "chart-companion",
       "target": "iterabase-platform-chart",
       "chart": "cert-manager-substrate",
-      "dependency_builds": ["control-plane", "observability", "cert-manager-substrate", "iterabase-platform"],
+      "dependency_builds": ["control-plane", "observability", "cert-manager-substrate", "lvm-storage-substrate", "iterabase-platform"],
       "paths": ["charts/charts/cert-manager-substrate/**"]
+    },
+    "lvm-storage-substrate-chart": {
+      "kind": "chart-companion",
+      "target": "iterabase-platform-chart",
+      "chart": "lvm-storage-substrate",
+      "dependency_builds": ["control-plane", "observability", "cert-manager-substrate", "lvm-storage-substrate", "iterabase-platform"],
+      "paths": ["charts/charts/lvm-storage-substrate/**", ".github/inputs/remote-content.json"]
     },
     "forge-binary": {
       "kind": "forge",
@@ -159,7 +166,7 @@
     "iterabase-platform-chart": {
       "chart": "iterabase-platform",
       "tag_prefix": "iterabase-platform-",
-      "artifacts": ["iterabase-platform-chart", "cert-manager-substrate-chart"]
+      "artifacts": ["iterabase-platform-chart", "cert-manager-substrate-chart", "lvm-storage-substrate-chart"]
     }
   }
 }

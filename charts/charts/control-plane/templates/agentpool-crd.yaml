@@ -858,11 +858,11 @@ spec:
                 type: object
               sandbox:
                 description: |-
-                  sandbox configures the pool's shared node-local RWO PVC. Every trusted root
+                  sandbox configures the pool's shared same-node OpenEBS LVM XFS RWO PVC. Every trusted root
                   supervisor in this pool may access the whole claim; separate AgentPools
                   receive separate claims/mounts. Each disposable child gets a stable distinct
                   UID=GID and session-owned 0700 tree beneath the root-owned 0711 PVC root.
-                  The requested size is planning metadata because local-path has no hard quota.
+                  The requested size is the fixed thick-LV/filesystem capacity; online expansion and shrink are unsupported.
                 properties:
                   accessMode:
                     description: |-
@@ -882,16 +882,16 @@ spec:
                     anyOf:
                     - type: integer
                     - type: string
-                    description: size is planning metadata for the PVC request, not
-                      a hard quota.
+                    description: size is the immutable thick XFS volume capacity requested
+                      from iterabase-data.
                     pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                     x-kubernetes-int-or-string: true
                   storageClassName:
                     description: |-
-                      storageClassName is fixed to iterabase-agentpool-local-path. Alternate or
+                      storageClassName is fixed to iterabase-agentpool-lvm-xfs. Alternate or
                       default classes are rejected before the claim or workers are mutated.
                     enum:
-                    - iterabase-agentpool-local-path
+                    - iterabase-agentpool-lvm-xfs
                     type: string
                 required:
                 - accessMode
@@ -1009,7 +1009,7 @@ spec:
               ready:
                 description: |-
                   ready is true once the warm-worker pods + PVC + NetworkPolicy are
-                  reconciled, the dedicated local-path contract is healthy, and at least one
+                  reconciled, the exact OpenEBS LVM/XFS/VG/topology contract is healthy, and at least one
                   pod is Ready (envtest has no kubelet, so this stays false).
                 type: boolean
               readyReplicas:

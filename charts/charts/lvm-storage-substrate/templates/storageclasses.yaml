@@ -1,0 +1,39 @@
+{{- if not (index .Values "lvm-localpv" "enabled") }}{{ fail "lvm-localpv.enabled must remain true" }}{{- end }}
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: iterabase-lvm-xfs
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "false"
+    storageclass.beta.kubernetes.io/is-default-class: "false"
+    iterabase.com/architecture-decision: DES-HOR-545-01
+provisioner: local.csi.openebs.io
+parameters:
+  storage: lvm
+  vgpattern: ^iterabase-data$
+  fsType: xfs
+  thinProvision: "no"
+  shared: "no"
+reclaimPolicy: Delete
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: false
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: iterabase-agentpool-lvm-xfs
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "false"
+    storageclass.beta.kubernetes.io/is-default-class: "false"
+    iterabase.com/architecture-decision: DES-HOR-545-01
+    iterabase.com/claim-authority: agentpool-only
+provisioner: local.csi.openebs.io
+parameters:
+  storage: lvm
+  vgpattern: ^iterabase-data$
+  fsType: xfs
+  thinProvision: "no"
+  shared: "yes"
+reclaimPolicy: Delete
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: false

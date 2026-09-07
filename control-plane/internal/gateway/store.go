@@ -251,10 +251,8 @@ type CallerResolution struct {
 	CallerScopeID         string // validated turn_id / run_step_id
 }
 
-// WorkspaceCapacityStatus is the manager-readable projection of dispatch's
-// durable installation-wide workspace capacity gate (HOR-538). It contains no
-// pool/session/customer labels because every AgentPool path shares one
-// Forge-owned filesystem.
+// WorkspaceCapacityStatus is the manager-readable projection of one pool's
+// durable AgentPool-PVC capacity gate (DES-HOR-545-01).
 type WorkspaceCapacityStatus struct {
 	Observed      bool
 	FreeBytes     uint64
@@ -275,17 +273,21 @@ func NewStore(pool *pgxpool.Pool) *Store {
 	return &Store{pool: pool}
 }
 
-// WorkspaceCapacityStatus reads the durable singleton that dispatch updates.
-// The AgentPool reconciler projects this state into actionable CR conditions.
-func (s *Store) WorkspaceCapacityStatus(ctx context.Context) (WorkspaceCapacityStatus, error) {
+// WorkspaceCapacityStatus reads the durable state for one AgentPool key. A
+// materialized pool without an observation starts unobserved and fail-closed.
+func (s *Store) WorkspaceCapacityStatus(ctx context.Context, poolKey string) (WorkspaceCapacityStatus, error) {
 	var status WorkspaceCapacityStatus
 	var free, capacity int64
 	err := s.pool.QueryRow(ctx, `
-		SELECT observed, free_bytes, capacity_bytes, free_ratio, warning, credit_gated, observed_at
-		FROM runtime.workspace_capacity_state WHERE singleton = true`).Scan(
+		SELECT COALESCE(s.observed, false), COALESCE(s.free_bytes, 0),
+		       COALESCE(s.capacity_bytes, 0), COALESCE(s.free_ratio, 0),
+		       COALESCE(s.warning, true), COALESCE(s.credit_gated, true), s.observed_at
+		FROM toolgateway.pools p
+		LEFT JOIN runtime.workspace_capacity_state s ON s.pool_id = p.id
+		WHERE p.key = $1 AND p.deleted_at IS NULL`, poolKey).Scan(
 		&status.Observed, &free, &capacity, &status.FreeRatio, &status.Warning, &status.CreditGated, &status.ObservedAt)
 	if err != nil {
-		return WorkspaceCapacityStatus{}, fmt.Errorf("read workspace capacity status: %w", err)
+		return WorkspaceCapacityStatus{}, fmt.Errorf("read workspace capacity status for pool %q: %w", poolKey, err)
 	}
 	if free < 0 || capacity < 0 {
 		return WorkspaceCapacityStatus{}, fmt.Errorf("workspace capacity status contains negative bytes")
@@ -1446,6 +1448,11 @@ func (s *Store) SoftDeletePoolByKey(ctx context.Context, key string) error {
 		UPDATE toolgateway.credential_bindings SET deleted_at = now()
 		WHERE pool_id = $1::uuid AND deleted_at IS NULL`, poolID); err != nil {
 		return fmt.Errorf("soft-delete credential bindings: %w", err)
+	}
+	// A future pool revival receives a new PVC and must not inherit the deleted
+	// claim's hysteresis authority. Its first observation starts fail-closed.
+	if _, err := tx.Exec(ctx, `DELETE FROM runtime.workspace_capacity_state WHERE pool_id = $1::uuid`, poolID); err != nil {
+		return fmt.Errorf("soft-delete pool workspace capacity: %w", err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {

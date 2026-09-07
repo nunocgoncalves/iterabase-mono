@@ -36,10 +36,12 @@ grep -Fq 'controller_runtime_reconcile_total{namespace=~\"$namespace\",result=\"
   exit 1
 }
 for title in \
-  'Workspace free bytes' \
-  'Workspace free ratio' \
-  'Workspace capacity warnings' \
-  'Workspace credit gates'; do
+  'AgentPool PVC free bytes' \
+  'AgentPool PVC free ratio' \
+  'AgentPool capacity warnings' \
+  'AgentPool credit gates' \
+  'iterabase-data free bytes' \
+  'iterabase-data free ratio'; do
   grep -Fq "\"title\": \"$title\"" <<<"$rendered" || {
     echo "ERROR: 50 — Data and Storage is missing dedicated workspace panel: $title" >&2
     exit 1
@@ -49,10 +51,12 @@ for query in \
   'control_plane_dispatch_workspace_free_bytes' \
   'control_plane_dispatch_workspace_free_ratio' \
   'control_plane_dispatch_workspace_capacity_warning' \
-  'control_plane_dispatch_workspace_credit_gated'; do
+  'control_plane_dispatch_workspace_credit_gated' \
+  'lvm_vg_free_size_bytes' \
+  'lvm_vg_total_size_bytes'; do
   grep -Fq "$query" <<<"$rendered" || {
     echo "ERROR: workspace dashboard contract is missing query fragment: $query" >&2
     exit 1
   }
 done
-echo "OK: $labels provisioned dashboards are organized across Kubernetes, Iterabase, Infrastructure, and Observability; stable UIDs and dedicated workspace capacity panels are enforced"
+echo "OK: $labels provisioned dashboards are organized across Kubernetes, Iterabase, Infrastructure, and Observability; stable UIDs plus per-pool and aggregate LVM capacity panels are enforced"

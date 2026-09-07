@@ -82,8 +82,8 @@ class ReleaseContractTests(unittest.TestCase):
             for item in plan["chart_matrix"]
             if item["chart"] == "iterabase-platform"
         )
-        self.assertEqual(["cert-manager-substrate"], platform["companions"])
-        self.assertEqual(1, len(platform["companion_recipes"]))
+        self.assertEqual(["cert-manager-substrate", "lvm-storage-substrate"], platform["companions"])
+        self.assertEqual(2, len(platform["companion_recipes"]))
         self.assertEqual(
             ["runtime-fixture-image"],
             [item["artifact"] for item in plan["execution_plan"]["artifact_build_matrix"]],

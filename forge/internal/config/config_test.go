@@ -18,8 +18,8 @@ func validCluster() *Cluster {
 		Kind:       Kind,
 		Metadata:   Metadata{Name: "opo1"},
 		Spec: Spec{
-			Mode:               ModeSingleNode,
-			AgentPoolWorkspace: AgentPoolWorkspace{Device: "/dev/disk/by-id/scsi-workspace-disk"},
+			Mode:        ModeSingleNode,
+			DataStorage: DataStorage{Devices: []string{"/dev/disk/by-id/scsi-data-a", "/dev/disk/by-id/scsi-data-b"}},
 			Hosts: []Host{{
 				Address:    "10.20.0.10",
 				SSHUser:    "forge",
@@ -68,7 +68,7 @@ func TestParse_Valid(t *testing.T) {
 	assert.Equal(t, "NoSchedule", h.Taints[0].Effect)
 	assert.True(t, c.Spec.K3s.DualStack)
 	assert.Equal(t, []string{"traefik", "servicelb"}, c.Spec.K3s.Disable)
-	assert.Equal(t, WorkspaceFilesystemAuto, c.Spec.AgentPoolWorkspace.Filesystem)
+	assert.Equal(t, []string{"/dev/disk/by-id/scsi-data-a", "/dev/disk/by-id/scsi-data-b"}, c.Spec.DataStorage.Devices)
 }
 
 func TestParse_DualStackDisabledNoV6Required(t *testing.T) {
@@ -84,6 +84,16 @@ func TestParse_DualStackDisabledNoV6Required(t *testing.T) {
 func TestParse_RejectsUnreviewedK3sVersion(t *testing.T) {
 	_, err := Parse(yamlFor(t, func(c *Cluster) { c.Spec.K3s.Version = "v1.32.0" }))
 	require.ErrorContains(t, err, "no repository-reviewed executable/runtime identity")
+}
+
+func TestParseRejectsK3sStorageAuthorityOverrides(t *testing.T) {
+	for _, arg := range []string{"--disable=", "--data-dir=/srv/k3s", "--kubelet-arg=root-dir=/srv/kubelet"} {
+		t.Run(arg, func(t *testing.T) {
+			_, err := Parse(yamlFor(t, func(c *Cluster) { c.Spec.K3s.ExtraArgs = []string{arg} }))
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "k3s.extraArgs")
+		})
+	}
 }
 
 func TestParse_BadAPIVersion(t *testing.T) {
@@ -110,47 +120,25 @@ func TestParse_InvalidMode(t *testing.T) {
 	assert.Contains(t, err.Error(), "invalid")
 }
 
-func TestParse_WorkspaceDeviceRequiredAndStable(t *testing.T) {
+func TestParseDataStorageRequiresCanonicalStableUniqueSet(t *testing.T) {
 	for _, tc := range []struct {
-		name   string
-		device string
-		want   string
+		name    string
+		devices []string
+		want    string
 	}{
-		{name: "missing", want: "is required"},
-		{name: "volatile", device: "/dev/sdb", want: "/dev/disk/by-id"},
-		{name: "partition", device: "/dev/disk/by-id/scsi-workspace-part1", want: "whole disk"},
-		{name: "nested", device: "/dev/disk/by-id/nested/device", want: "stable"},
+		{name: "missing", want: "at least one"},
+		{name: "volatile", devices: []string{"/dev/sdb"}, want: "/dev/disk/by-id"},
+		{name: "partition", devices: []string{"/dev/disk/by-id/scsi-data-part1"}, want: "whole disk"},
+		{name: "nested", devices: []string{"/dev/disk/by-id/nested/device"}, want: "stable"},
+		{name: "duplicate", devices: []string{"/dev/disk/by-id/scsi-a", "/dev/disk/by-id/scsi-a"}, want: "duplicate"},
+		{name: "order drift", devices: []string{"/dev/disk/by-id/scsi-b", "/dev/disk/by-id/scsi-a"}, want: "canonical lexical order"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := Parse(yamlFor(t, func(c *Cluster) { c.Spec.AgentPoolWorkspace.Device = tc.device }))
+			_, err := Parse(yamlFor(t, func(c *Cluster) { c.Spec.DataStorage.Devices = tc.devices }))
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tc.want)
 		})
 	}
-}
-
-func TestWorkspaceFilesystemPolicy(t *testing.T) {
-	for _, tc := range []struct {
-		selection string
-		transport string
-		want      string
-	}{
-		{selection: WorkspaceFilesystemAuto, transport: "nvme", want: WorkspaceFilesystemXFS},
-		{selection: WorkspaceFilesystemAuto, transport: "NVME", want: WorkspaceFilesystemXFS},
-		{selection: WorkspaceFilesystemAuto, transport: "sata", want: WorkspaceFilesystemExt4},
-		{selection: WorkspaceFilesystemAuto, transport: "virtio", want: WorkspaceFilesystemExt4},
-		{selection: WorkspaceFilesystemAuto, transport: "", want: WorkspaceFilesystemExt4},
-		{selection: WorkspaceFilesystemExt4, transport: "nvme", want: WorkspaceFilesystemExt4},
-		{selection: WorkspaceFilesystemXFS, transport: "sata", want: WorkspaceFilesystemXFS},
-	} {
-		t.Run(tc.selection+"-"+tc.transport, func(t *testing.T) {
-			got, err := ResolveWorkspaceFilesystem(tc.selection, tc.transport)
-			require.NoError(t, err)
-			assert.Equal(t, tc.want, got)
-		})
-	}
-	_, err := Parse(yamlFor(t, func(c *Cluster) { c.Spec.AgentPoolWorkspace.Filesystem = "btrfs" }))
-	require.ErrorContains(t, err, "auto|ext4|xfs")
 }
 
 func TestParse_NoHosts(t *testing.T) {

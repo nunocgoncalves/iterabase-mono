@@ -47,13 +47,14 @@ tag-to-manifest mapping separately. Registry/index, config, and runtime-manifest
 digests remain distinct identities rather than being compared as if they were
 interchangeable.
 
-Kind scenarios that create an `AgentPool` use the shared post-platform storage
-helper before worker creation. It configures Kind's pinned provisioner onto the
-synthetic dedicated workspace path, applies the Forge-owned non-default
-`iterabase-agentpool-local-path` class, and verifies its parameter-free
-`rancher.io/local-path` / `WaitForFirstConsumer` / `Delete` / no-expansion
-contract. The helper never aliases the default class; production disk and
-per-class path isolation remain Forge-owned.
+Kind scenarios that create an `AgentPool` use the shared storage helper before
+platform data claims or workers. It removes Kind's local-path/default fallback,
+prepares a real loop-backed thick `iterabase-data` VG in the one privileged node,
+installs the exact composed `lvm-storage-substrate`, and waits for OpenEBS
+CRD/controller/node/CSI/VG readiness. It verifies exactly the non-default,
+non-expandable, thick XFS/RWO `iterabase-lvm-xfs` and
+`iterabase-agentpool-lvm-xfs` classes, including the latter's same-node
+`shared: yes` boundary.
 
 The runner records exactly one terminal status for every declared stage. Failed
 or skipped prerequisites block only dependents, so independent work,
@@ -64,7 +65,7 @@ scenario and aggregate.
 The result record binds scenario status, source/plan/catalogue/runtime/stage-graph
 hashes, fixture mode, artifact identities, and every stage terminal status. F3
 results additionally bind the permanent fixture capacity, pinned host-key hash,
-configured workspace by-id device, and pre/post-cleanup boot IDs. GPU results
+configured data-storage by-id device, and pre/post-cleanup boot IDs. GPU results
 also bind the separate model-cache by-id device/mount/UUID plus the
 repository-pinned public model revision and content hash; that device may not
 alias the Forge workspace. Each retained scenario artifact includes the exact

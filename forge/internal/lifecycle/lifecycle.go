@@ -64,7 +64,7 @@ type ReconcilePlan struct {
 	OverlayRef         string // overlay.ref (branch or tag)
 	FluxEnabled        bool   // flux.enabled; the Flux GitOps phase will run
 	FluxVersion        string // flux2 release tag to install (empty => Flux disabled)
-	AgentPoolWorkspace *provisioner.AgentPoolWorkspaceState
+	DataStorage        *provisioner.DataStorageState
 }
 
 // Result is the outcome of a mutating apply.
@@ -73,8 +73,9 @@ type Result struct {
 	KubeconfigPath              string
 	NodeReady                   bool
 	CertificateSubstrateApplied bool
-	AgentPoolWorkspace          *provisioner.AgentPoolWorkspaceState
-	AgentPoolLocalPathReady     bool
+	LVMStorageSubstrateApplied  bool
+	DataStorage                 *provisioner.DataStorageState
+	LVMStorageReady             *provisioner.LVMStorageReadiness
 	ChartApplied                bool
 	GPUOperatorApplied          bool   // nvidia/gpu-operator release installed/upgraded
 	GPUDriverVersion            string // nvidia driver version pinned via driver.version (empty => chart default)
@@ -132,11 +133,11 @@ func Plan(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner) (
 		return nil, fmt.Errorf("preflight: passwordless sudo required for user %q", host.SSHUser)
 	}
 
-	workspace, err := inspectAgentPoolWorkspace(ctx, cfg, p)
+	storage, err := inspectDataStorage(ctx, cfg, p)
 	if err != nil {
 		return nil, err
 	}
-	plan := &ReconcilePlan{Preflight: pf, WantVersion: cfg.Spec.K3s.Version, ChartVersion: cfg.Spec.Chart.Version, AgentPoolWorkspace: workspace}
+	plan := &ReconcilePlan{Preflight: pf, WantVersion: cfg.Spec.K3s.Version, ChartVersion: cfg.Spec.Chart.Version, DataStorage: storage}
 
 	if cfg.Spec.GPU.Enabled {
 		if !pf.HasNVIDIAGPU {
@@ -214,11 +215,15 @@ func Apply(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner, 
 		return res, fmt.Errorf("%s", plan.Reason)
 	}
 
-	workspace, err := reconcileAgentPoolWorkspace(ctx, cfg, p, plan.AgentPoolWorkspace.Filesystem)
+	if err := refusePreLVMPlatform(ctx, cfg, d, plan); err != nil {
+		return res, err
+	}
+
+	storage, err := reconcileDataStorage(ctx, cfg, p)
 	if err != nil {
 		return res, err
 	}
-	res.AgentPoolWorkspace = workspace
+	res.DataStorage = storage
 
 	switch plan.Action {
 	case ActionInstall:
@@ -249,20 +254,14 @@ func Apply(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner, 
 		return res, err
 	}
 
-	if err := p.EnsureAgentPoolLocalPathStorage(ctx); err != nil {
-		auditFail(cfg, "apply-agentpool-local-path", err)
-		return res, fmt.Errorf("AgentPool local-path storage: %w", err)
-	}
-	res.AgentPoolLocalPathReady = true
-
 	if err := applyGPU(ctx, cfg, p, d, opts, res); err != nil {
 		return res, err
 	}
 
 	// Overlay delivery is deliberately phased: clone + secrets, certificate
-	// substrate, exact Flux source artifact, platform chart, CR instances, then
+	// substrate, LVM storage substrate, exact Flux source artifact, platform chart, CR instances, then
 	// enable continuous Flux reconciliation.
-	if err := applyOverlayPhase(ctx, cfg, o, f, d, opts, res); err != nil {
+	if err := applyOverlayPhase(ctx, cfg, p, o, f, d, opts, res); err != nil {
 		return res, err
 	}
 
@@ -279,6 +278,8 @@ const (
 	certificateMigrationAnnotation   = "forge.horizonshift.io/certificate-substrate-migration"
 	certificateMigrationComplete     = "0.3.0"
 	fluxArtifactFirstVersion         = "0.3.0"
+	lvmStorageSubstrateChart         = provisioner.LVMStorageSubstrateChart
+	lvmStorageSubstrateFirstVersion  = provisioner.LVMStorageSubstrateFirstVersion
 )
 
 func canonicalChartVersion(version string) (string, error) {
@@ -311,6 +312,50 @@ func certificateSubstrateRepository(platformRepository string) (string, error) {
 
 func certificateSubstrateRelease(platformRelease string) string {
 	return platformRelease + "-cert-manager"
+}
+
+func lvmStorageSubstrateRequired(version string) (bool, error) {
+	return chartVersionAtLeast(version, lvmStorageSubstrateFirstVersion)
+}
+
+func lvmStorageSubstrateRepository(platformRepository string) (string, error) {
+	i := strings.LastIndex(platformRepository, "/")
+	if i < 0 || platformRepository[i+1:] != "iterabase-platform" {
+		return "", fmt.Errorf("platform chart repository %q must end in /iterabase-platform to resolve its LVM storage companion", platformRepository)
+	}
+	return platformRepository[:i+1] + lvmStorageSubstrateChart, nil
+}
+
+func lvmStorageSubstrateRelease(platformRelease string) string {
+	return platformRelease + "-lvm-storage"
+}
+
+// refusePreLVMPlatform enforces HOR-545's clean-install-only boundary before
+// Forge mutates host packages, modules, PVs, or the VG. There is deliberately no
+// local-path-to-LVM chart/PVC migration path.
+func refusePreLVMPlatform(ctx context.Context, cfg *config.Cluster, d deployer.Deployer, plan *ReconcilePlan) error {
+	if d == nil || plan == nil || !plan.Installed || cfg.Spec.Chart.Version == "" {
+		return nil
+	}
+	required, err := lvmStorageSubstrateRequired(cfg.Spec.Chart.Version)
+	if err != nil || !required {
+		return err
+	}
+	state, err := d.Status(ctx, cfg.Spec.Chart.Release, cfg.Spec.Chart.Namespace)
+	if err != nil {
+		return fmt.Errorf("read installed platform before LVM storage reconciliation: %w", err)
+	}
+	if !state.Installed {
+		return nil
+	}
+	have, err := canonicalChartVersion(state.Version)
+	if err != nil {
+		return fmt.Errorf("installed platform before LVM storage reconciliation: %w", err)
+	}
+	if semver.Compare(have, "v"+lvmStorageSubstrateFirstVersion) < 0 {
+		return fmt.Errorf("installed platform %s predates the OpenEBS LVM storage contract; HOR-545 supports only a clean destroy and fresh install, never local-path migration", state.Version)
+	}
+	return nil
 }
 
 func certificateHookLabelSelector(platformRelease string) string {
@@ -394,6 +439,40 @@ func applyCertificateSubstrate(ctx context.Context, cfg *config.Cluster, d deplo
 		return fmt.Errorf("certificate substrate: %w", err)
 	}
 	res.CertificateSubstrateApplied = true
+	return nil
+}
+
+// applyLVMStorageSubstrate installs the same-version OpenEBS companion after
+// Forge has prepared the exact host VG and before any platform PVC is created.
+func applyLVMStorageSubstrate(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner, d deployer.Deployer, opts ApplyOpts, res *Result) error {
+	if d == nil || opts.SkipChart || cfg.Spec.Chart.Version == "" {
+		return nil
+	}
+	ch := cfg.Spec.Chart
+	required, err := lvmStorageSubstrateRequired(ch.Version)
+	if err != nil || !required {
+		return err
+	}
+	repository, err := lvmStorageSubstrateRepository(ch.Repository)
+	if err != nil {
+		return err
+	}
+	if err := d.Apply(ctx, deployer.ApplyOpts{
+		Release:    lvmStorageSubstrateRelease(ch.Release),
+		Repository: repository,
+		Version:    ch.Version,
+		Namespace:  ch.Namespace,
+	}); err != nil {
+		auditFail(cfg, "apply-lvm-storage-substrate", err)
+		return fmt.Errorf("LVM storage substrate: %w", err)
+	}
+	res.LVMStorageSubstrateApplied = true
+	readiness, err := p.WaitForLVMStorageReady(ctx, ch.Namespace, res.DataStorage)
+	if err != nil {
+		auditFail(cfg, "wait-lvm-storage-substrate", err)
+		return err
+	}
+	res.LVMStorageReady = readiness
 	return nil
 }
 
@@ -492,10 +571,10 @@ func applyCRDInstances(ctx context.Context, d deployer.Deployer, overlayDest str
 }
 
 // applyOverlayPhase runs the ordered delivery path: clone the client fork →
-// secrets → certificate substrate → Flux source → platform → CRs → Flux
+// secrets → certificate substrate → LVM storage substrate → Flux source → platform → CRs → Flux
 // Kustomization. The source precedes Helm because the chart-managed tool runner
 // is intentionally unready until it loads a valid generation.
-func applyOverlayPhase(ctx context.Context, cfg *config.Cluster, o overlayer.Overlayer, f fluxer.Fluxer, d deployer.Deployer, opts ApplyOpts, res *Result) error {
+func applyOverlayPhase(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner, o overlayer.Overlayer, f fluxer.Fluxer, d deployer.Deployer, opts ApplyOpts, res *Result) error {
 	overlayDest, overlayCommit, err := cloneOverlay(ctx, cfg, o, opts)
 	if err != nil {
 		auditFail(cfg, "apply-overlay", err)
@@ -529,6 +608,9 @@ func applyOverlayPhase(ctx context.Context, cfg *config.Cluster, o overlayer.Ove
 		return err
 	}
 	if err := applyCertificateSubstrate(ctx, cfg, d, opts, res, overlayDest); err != nil {
+		return err
+	}
+	if err := applyLVMStorageSubstrate(ctx, cfg, p, d, opts, res); err != nil {
 		return err
 	}
 	if err := applyFluxSourcePhase(ctx, cfg, f, d, opts, res, overlayCommit); err != nil {
@@ -821,12 +903,12 @@ func isUbuntu(os string) bool { return strings.HasPrefix(os, "Ubuntu") }
 // DestroyOpts controls the two explicit fixture/decommission operations that
 // ordinary destroy must never imply.
 type DestroyOpts struct {
-	PurgeWorkspace bool
-	Reboot         bool
+	PurgeDataStorage bool
+	Reboot           bool
 }
 
 // Destroy removes platform/K3s resources but deliberately preserves the
-// dedicated AgentPool workspace filesystem, receipt, fstab identity, and bytes.
+// receipt-matching data PVs, iterabase-data VG, LVs, and bytes.
 func Destroy(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner, d deployer.Deployer, o overlayer.Overlayer, f fluxer.Fluxer) error {
 	return DestroyWithOptions(ctx, cfg, p, d, o, f, DestroyOpts{})
 }
@@ -839,8 +921,8 @@ func DestroyWithOptions(ctx context.Context, cfg *config.Cluster, p provisioner.
 	if err := p.Uninstall(ctx); err != nil {
 		return err
 	}
-	if opts.PurgeWorkspace {
-		if err := purgeAgentPoolWorkspace(ctx, cfg, p); err != nil {
+	if opts.PurgeDataStorage {
+		if err := purgeDataStorage(ctx, cfg, p); err != nil {
 			return err
 		}
 	}
@@ -853,7 +935,7 @@ func DestroyWithOptions(ctx context.Context, cfg *config.Cluster, p provisioner.
 }
 
 // destroyProductSubstrate stops reconcilers and charts in reverse apply order.
-// Cleanup remains best-effort and never mutates the workspace disk.
+// Cleanup remains best-effort and never mutates the selected data disks or VG.
 func destroyProductSubstrate(ctx context.Context, cfg *config.Cluster, d deployer.Deployer, o overlayer.Overlayer, f fluxer.Fluxer) {
 	if f != nil && cfg.Spec.Flux.Enabled {
 		_ = f.UninstallFlux(ctx)
@@ -864,6 +946,9 @@ func destroyProductSubstrate(ctx context.Context, cfg *config.Cluster, d deploye
 	if d != nil && cfg.Spec.Chart.Version != "" {
 		ch := cfg.Spec.Chart
 		_ = d.UninstallChart(ctx, ch.Release, ch.Namespace)
+		if required, err := lvmStorageSubstrateRequired(ch.Version); err == nil && required {
+			_ = d.UninstallChart(ctx, lvmStorageSubstrateRelease(ch.Release), ch.Namespace)
+		}
 		if required, err := certificateSubstrateRequired(ch.Version); err == nil && required {
 			_ = d.UninstallChart(ctx, certificateSubstrateRelease(ch.Release), ch.Namespace)
 		}
@@ -874,18 +959,13 @@ func destroyProductSubstrate(ctx context.Context, cfg *config.Cluster, d deploye
 	}
 }
 
-func purgeAgentPoolWorkspace(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner) error {
-	purger, ok := p.(provisioner.WorkspacePurger)
+func purgeDataStorage(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner) error {
+	purger, ok := p.(provisioner.DataStoragePurger)
 	if !ok {
-		return fmt.Errorf("workspace purge is unavailable for this provisioner")
+		return fmt.Errorf("data-storage purge is unavailable for this provisioner")
 	}
-	spec := provisioner.AgentPoolWorkspaceSpec{
-		InstallName: cfg.Metadata.Name,
-		Device:      cfg.Spec.AgentPoolWorkspace.Device,
-		Filesystem:  cfg.Spec.AgentPoolWorkspace.Filesystem,
-	}
-	if err := purger.PurgeAgentPoolWorkspace(ctx, spec); err != nil {
-		return fmt.Errorf("purge AgentPool workspace: %w", err)
+	if err := purger.PurgeDataStorage(ctx, dataStorageSpec(cfg)); err != nil {
+		return fmt.Errorf("purge data storage: %w", err)
 	}
 	return nil
 }
@@ -1006,6 +1086,9 @@ func immutableDiff(cfg *config.Cluster, st *provisioner.HostState) []string {
 	}
 	if st.DualStack != cfg.Spec.K3s.DualStack {
 		diff = append(diff, "k3s.dualStack")
+	}
+	if !st.LocalStorageDisabled {
+		diff = append(diff, "k3s.disable[local-storage]")
 	}
 	return diff
 }

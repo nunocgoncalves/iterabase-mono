@@ -22,7 +22,7 @@ import (
 const (
 	observabilityToolSourceName      = "observability-e2e"
 	observabilityToolServerNamespace = "flux-system"
-	observabilityHarnessStorageClass = "iterabase-agentpool-local-path"
+	observabilityHarnessStorageClass = "iterabase-agentpool-lvm-xfs"
 	gpuOperatorFixtureNamespace      = "gpu-operator"
 )
 
@@ -31,9 +31,9 @@ func observabilityScenario() sharede2e.Definition {
 	return sharede2e.Define(sharede2e.Scenario[*chartState]{
 		Metadata: chartScenarioMetadata(
 			"observability",
-			"Installs only the chart-owned observability composition and proves stack readiness, monitor discovery, disjoint endpoints, client paths, and unambiguous Prometheus/Loki persistence.",
+			"Installs the pinned LVM substrate and chart-owned observability composition, then proves exact thick XFS persistence, per-pool and aggregate VG monitor discovery, stack readiness, disjoint endpoints, and client paths.",
 			"test-e2e-observability", 40,
-			[]string{"HOR-408", "HOR-414", "HOR-418", "HOR-416", "HOR-505"},
+			[]string{"HOR-408", "HOR-414", "HOR-418", "HOR-416", "HOR-505", "HOR-545", "DES-HOR-545-01"},
 			[]string{"control-plane-chart", "inference-gateway-chart", "iterabase-platform-chart"},
 		),
 		NewState: newChartState,
@@ -41,11 +41,11 @@ func observabilityScenario() sharede2e.Definition {
 			{Name: "create-kind", Run: createKindStage},
 			{Name: "import-runtime-images", DependsOn: []string{"create-kind"}, Run: importRuntimeImagesStage},
 			{Name: "install-certificate-substrate", DependsOn: []string{"import-runtime-images"}, Run: installCertificateSubstrateStage},
-			{Name: "install-tool-source", DependsOn: []string{"install-certificate-substrate"}, Run: installObservabilityToolSourceStage},
+			{Name: "install-lvm-storage-substrate", DependsOn: []string{"install-certificate-substrate"}, Run: installLVMStorageStage},
+			{Name: "install-tool-source", DependsOn: []string{"install-lvm-storage-substrate"}, Run: installObservabilityToolSourceStage},
 			{Name: "install-dcgm-exporter-fixture", DependsOn: []string{"install-tool-source"}, Run: installDCGMExporterFixtureStage},
 			{Name: "install-observability", DependsOn: []string{"install-dcgm-exporter-fixture"}, Run: installObservabilityStage},
-			{Name: "configure-agentpool-local-path", DependsOn: []string{"install-observability"}, Run: configureAgentPoolLocalPathStage},
-			{Name: "install-harness-worker", DependsOn: []string{"configure-agentpool-local-path"}, Run: installObservabilityHarnessStage},
+			{Name: "install-harness-worker", DependsOn: []string{"install-observability"}, Run: installObservabilityHarnessStage},
 			{Name: "assert-stack-readiness", DependsOn: []string{"install-harness-worker"}, Run: assertStackReadinessStage},
 			{Name: "assert-grafana-dashboards", DependsOn: []string{"assert-stack-readiness"}, Run: assertGrafanaDashboardsStage},
 			{Name: "assert-endpoint-separation", DependsOn: []string{"assert-stack-readiness"}, Run: assertEndpointSeparationStage},
@@ -386,10 +386,12 @@ func assertGrafanaDataStoragePanels(t *testing.T, client *http.Client, baseURL, 
 		t.Fatal(err)
 	}
 	want := map[string]string{
-		"Workspace free bytes":        "control_plane_dispatch_workspace_free_bytes",
-		"Workspace free ratio":        "control_plane_dispatch_workspace_free_ratio",
-		"Workspace capacity warnings": "control_plane_dispatch_workspace_capacity_warning",
-		"Workspace credit gates":      "control_plane_dispatch_workspace_credit_gated",
+		"AgentPool PVC free bytes":    "control_plane_dispatch_workspace_free_bytes",
+		"AgentPool PVC free ratio":    "control_plane_dispatch_workspace_free_ratio",
+		"AgentPool capacity warnings": "control_plane_dispatch_workspace_capacity_warning",
+		"AgentPool credit gates":      "control_plane_dispatch_workspace_credit_gated",
+		"iterabase-data free bytes":   "lvm_vg_free_size_bytes",
+		"iterabase-data free ratio":   "lvm_vg_total_size_bytes",
 	}
 	for _, panel := range payload.Dashboard.Panels {
 		fragment, ok := want[panel.Title]
@@ -504,6 +506,8 @@ func assertMonitorDiscoveryStage(t *testing.T, state *chartState) {
 		{`count(up{namespace="gpu-operator",service="nvidia-dcgm-exporter",endpoint="gpu-metrics"} == 1)`, "1"},
 		{`DCGM_FI_DEV_GPU_UTIL{namespace="gpu-operator",UUID="GPU-e2e",device="nvidia0",modelName="NVIDIA E2E GPU"}`, "42"},
 		{`DCGM_FI_DEV_FB_FREE{namespace="gpu-operator",UUID="GPU-e2e",device="nvidia0",modelName="NVIDIA E2E GPU"}`, "81920"},
+		{`count(lvm_vg_total_size_bytes{namespace="iterabase-system",name="iterabase-data"} > 0)`, "1"},
+		{`count(lvm_vg_free_size_bytes{namespace="iterabase-system",name="iterabase-data"} > 0)`, "1"},
 	} {
 		if err := waitPrometheusValue(state.ctx, client, forward.URL, metric.query, metric.want, 5*time.Minute); err != nil {
 			t.Fatalf("representative DCGM metric %s did not become %s: %v", metric.query, metric.want, err)
@@ -539,7 +543,7 @@ func assertMonitorDiscoveryStage(t *testing.T, state *chartState) {
 		t.Fatal(err)
 	}
 	rules := string(requireHTTP(t, client, http.MethodGet, forward.URL+"/api/v1/rules", nil, http.StatusOK))
-	for _, alert := range []string{"IterabasePlatformTargetDown", "IterabaseGatewayOutcomeUnknown", "IterabaseDispatchWithoutWorkers", "IterabaseInferenceGatewayHighErrorRate"} {
+	for _, alert := range []string{"IterabasePlatformTargetDown", "IterabaseGatewayOutcomeUnknown", "IterabaseDispatchWithoutWorkers", "IterabaseInferenceGatewayHighErrorRate", "IterabaseDataVGCapacityWarning", "IterabaseLVMClaimPending"} {
 		if !strings.Contains(rules, alert) {
 			t.Fatalf("Prometheus did not load shipped alert %s", alert)
 		}
@@ -656,7 +660,7 @@ func platformMetricQueries(includeHarness, includeToolRunner bool) []string {
 }
 
 func TestUnitObservabilityHarnessUsesDedicatedAgentPoolStorageClass(t *testing.T) {
-	if observabilityHarnessStorageClass != "iterabase-agentpool-local-path" {
+	if observabilityHarnessStorageClass != "iterabase-agentpool-lvm-xfs" {
 		t.Fatalf("observability harness storage class=%q", observabilityHarnessStorageClass)
 	}
 }

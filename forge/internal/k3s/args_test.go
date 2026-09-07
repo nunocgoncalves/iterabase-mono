@@ -65,6 +65,12 @@ func TestServerArgs_Disable(t *testing.T) {
 	assert.Contains(t, args, "--disable")
 	assert.Contains(t, args, "traefik")
 	assert.Contains(t, args, "servicelb")
+	assert.Contains(t, args, "local-storage")
+
+	c := cfg()
+	c.Spec.K3s.Disable = append(c.Spec.K3s.Disable, "local-storage", "local-storage")
+	args = ServerArgs(c)
+	assert.Equal(t, 1, countOf(args, "local-storage"))
 }
 
 func TestServerArgs_LabelsDeterministic(t *testing.T) {
@@ -118,6 +124,16 @@ func TestInstallEnv(t *testing.T) {
 func TestTaintString(t *testing.T) {
 	assert.Equal(t, "k=v:NoSchedule", TaintString(config.Taint{Key: "k", Value: "v", Effect: "NoSchedule"}))
 	assert.Equal(t, "k:NoSchedule", TaintString(config.Taint{Key: "k", Effect: "NoSchedule"}))
+}
+
+func countOf(args []string, value string) int {
+	count := 0
+	for _, arg := range args {
+		if arg == value {
+			count++
+		}
+	}
+	return count
 }
 
 func indexOf(args []string, s string) int {

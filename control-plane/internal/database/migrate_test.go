@@ -90,33 +90,33 @@ func TestMigrations(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, viewExists, "permissions.effective_capabilities view should exist after MigrateUp")
 
-	// HOR-538: the durable installation-wide workspace gate exists on a fresh
-	// install and starts unobserved/fail-closed.
-	var workspaceGate string
-	require.NoError(t, pool.QueryRow(ctx, `SELECT observed::text || '|' || credit_gated::text FROM runtime.workspace_capacity_state`).Scan(&workspaceGate))
-	assert.Equal(t, "false|true", workspaceGate)
+	// DES-HOR-545-01: per-pool gates are created by the first pool observation;
+	// a fresh install has no misleading installation-global capacity row.
+	var workspaceGateCount int
+	require.NoError(t, pool.QueryRow(ctx, `SELECT count(*) FROM runtime.workspace_capacity_state`).Scan(&workspaceGateCount))
+	assert.Zero(t, workspaceGateCount)
 
 	// HOR-489: fresh installs grant only the durable workload-authorization
 	// reads. A migration-22 OPO1 database already has this exact ACL, so moving
-	// down migrations 24 and 23 intentionally preserves it and reapplying both
+	// down migrations 25, 24, and 23 intentionally preserves it and reapplying them
 	// must be an idempotent metadata advance with no manual role update.
 	assertGatewayWorkloadPrivileges(t, ctx, pool)
-	require.NoError(t, database.MigrateDown(connStr, 2))
+	require.NoError(t, database.MigrateDown(connStr, 3))
 	var migrationVersion int
 	require.NoError(t, pool.QueryRow(ctx, `SELECT version FROM schema_migrations`).Scan(&migrationVersion))
 	assert.Equal(t, 22, migrationVersion)
 	assertGatewayWorkloadPrivileges(t, ctx, pool)
 	require.NoError(t, database.MigrateUp(connStr))
 	require.NoError(t, pool.QueryRow(ctx, `SELECT version FROM schema_migrations`).Scan(&migrationVersion))
-	assert.Equal(t, 24, migrationVersion)
+	assert.Equal(t, 25, migrationVersion)
 	assertGatewayWorkloadPrivileges(t, ctx, pool)
 
 	// HOR-254 must migrate an existing gateway ledger without requiring an
-	// unavailable customer-safe summary backfill. Roll back migration 24,
+	// unavailable customer-safe summary backfill. Roll back migration 25, 24,
 	// migration 23, the three HOR-396 migrations, plus HOR-425, HOR-397,
 	// HOR-399, and HOR-254; seed a pre-existing write descriptor/invocation; and
-	// apply all nine again.
-	require.NoError(t, database.MigrateDown(connStr, 9))
+	// apply all ten again.
+	require.NoError(t, database.MigrateDown(connStr, 10))
 	_, err = pool.Exec(ctx, `
 		INSERT INTO toolgateway.tool_versions
 		    (name,version,digest,description,input_schema,effect_class,credential_slots,artifact_capabilities,timeout_ms)

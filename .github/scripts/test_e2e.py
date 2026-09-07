@@ -263,7 +263,7 @@ class E2EPlanTests(unittest.TestCase):
         with self.assertRaisesRegex(E2EError, "import resolved runtime images"):
             validate_catalogue_contract(catalogue, self.contract)
 
-    def test_kind_harness_cannot_bypass_dedicated_agentpool_storage(self) -> None:
+    def test_kind_harness_cannot_bypass_pinned_openebs_lvm_storage(self) -> None:
         harness_scenarios = [
             scenario
             for suite in self.catalogue["suites"]
@@ -274,12 +274,7 @@ class E2EPlanTests(unittest.TestCase):
         self.assertTrue(harness_scenarios)
         for scenario in harness_scenarios:
             stages = {stage["name"]: stage for stage in scenario["stages"]}
-            self.assertIn("configure-agentpool-local-path", stages)
-            if scenario["id"].startswith("charts/"):
-                self.assertEqual(
-                    ["configure-agentpool-local-path"],
-                    stages["install-harness-worker"]["depends_on"],
-                )
+            self.assertIn("install-lvm-storage-substrate", stages)
 
         catalogue = copy.deepcopy(self.catalogue)
         scenario = next(
@@ -289,17 +284,12 @@ class E2EPlanTests(unittest.TestCase):
             if scenario["id"].startswith("charts/")
             and "harness-image" in scenario["metadata"].get("required_artifacts", [])
         )
-        scenario["stages"] = [
-            stage
-            for stage in scenario["stages"]
-            if stage["name"] != "configure-agentpool-local-path"
-        ]
         next(
             stage
             for stage in scenario["stages"]
             if stage["name"] == "install-harness-worker"
         )["depends_on"] = ["import-runtime-images"]
-        with self.assertRaisesRegex(E2EError, "dedicated AgentPool local-path substrate"):
+        with self.assertRaisesRegex(E2EError, "OpenEBS LVM substrate"):
             validate_catalogue_contract(catalogue, self.contract)
 
     def test_unselected_baseline_is_explicit_not_bumped_repository_version(self) -> None:

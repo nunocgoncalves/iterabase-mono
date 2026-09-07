@@ -94,6 +94,10 @@
       "digest": "sha256:0c79d56aee561a1d81c63f00eee5fb5fe29279560cdc55e91425133104c7fbe6"
     },
     {
+      "reference": "docker.io/openebs/lvm-driver:1.10.0",
+      "digest": "sha256:b5932b4df5cde1f72914f665a4e4b480afd38dbc6577d7552b9f509d52e8c094"
+    },
+    {
       "reference": "ghcr.io/jkroepke/kube-webhook-certgen:1.8.5",
       "digest": "sha256:d0e80b2f62fe43bb5e1b96adc692132fb4522e802f4cf673c09b1f94722b8cb6"
     },
@@ -254,6 +258,26 @@
       "digest": "sha256:99b37df34bc4f99ee322521d4c85cb98c1ceb8f70ff0618bef84eec9fe1ebc20"
     },
     {
+      "reference": "registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.13.0",
+      "digest": "sha256:d7138bcc3aa5f267403d45ad4292c95397e421ea17a0035888850f424c7de25d"
+    },
+    {
+      "reference": "registry.k8s.io/sig-storage/csi-provisioner:v6.1.0",
+      "digest": "sha256:e5900dc98b0d02f317ea9572f3824983c47a2fb5d5fe2b160aedf1b99c14c9e4"
+    },
+    {
+      "reference": "registry.k8s.io/sig-storage/csi-resizer:v2.0.0",
+      "digest": "sha256:4a95d94e57ad82f6977cd8d4fdcfcfc0b83f02d990e4e7715b688c20970a906d"
+    },
+    {
+      "reference": "registry.k8s.io/sig-storage/csi-snapshotter:v8.2.0",
+      "digest": "sha256:dd788d79cf4c1b8edee6d9b80b8a1ebfc51a38a365c5be656986b129be9ac784"
+    },
+    {
+      "reference": "registry.k8s.io/sig-storage/snapshot-controller:v8.2.0",
+      "digest": "sha256:9dade8f2f3ab29e3919c41b343f8d77b12178ac51f25574d7ed2d45a3e3ef69d"
+    },
+    {
       "reference": "vllm/vllm-openai:v0.28.0",
       "digest": "sha256:61fc8a896b0a4fbbbdc063bc4b0dbc25ce98e02b5050c24aeb7830ac02039b14"
     },
@@ -304,6 +328,13 @@
       "repository": "https://grafana.github.io/helm-charts",
       "url": "https://github.com/grafana/helm-charts/releases/download/helm-loki-7.1.0/loki-7.1.0.tgz",
       "sha256": "34361cca2bbb6fa975fd1aeec4f9d5e2b91e2c99af7dd6f9c14ef7fe646493d1"
+    },
+    {
+      "name": "lvm-localpv",
+      "version": "1.10.0",
+      "repository": "https://openebs.github.io/lvm-localpv",
+      "url": "https://openebs.github.io/lvm-localpv/lvm-localpv-1.10.0.tgz",
+      "sha256": "3ad766c56d4a0ab0f3f2baaeb726a4554d1f51bb485f1cef00846cf1d82a179d"
     },
     {
       "name": "metallb",

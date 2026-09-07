@@ -6,13 +6,13 @@ metadata:
   name: opo1
 spec:
   mode: single-node            # single-node | ha | byokubeconfig (v1: single-node)
-  agentPoolWorkspace:
-    # Device selection is the sole authorization for Forge's first format after
-    # fail-closed probes; filesystem choice is not another destructive confirmation.
-    # Must be one stable non-removable whole disk; no root/partition/mapper fallback.
-    device: /dev/disk/by-id/scsi-0DO_Volume_iterabase-workspaces
-    # auto selects XFS only for reliably detected NVMe; all other transports use ext4.
-    filesystem: auto            # auto | ext4 | xfs
+  dataStorage:
+    # This canonical non-empty immutable set is the sole authorization for
+    # receipt-bound PV/VG creation after fail-closed complete-set probes.
+    # Values must be stable blank whole-disk identities in lexical order.
+    devices:
+      - /dev/disk/by-id/scsi-0DO_Volume_iterabase-data-a
+      - /dev/disk/by-id/scsi-0DO_Volume_iterabase-data-b
   hosts:
     - address: 10.20.0.10
       sshUser: forge           # any sudoer user; preflight validates passwordless sudo
@@ -29,7 +29,7 @@ spec:
     dualStack: true
     clusterCIDRv6: fd42::/48
     serviceCIDRv6: fd43::/112
-    disable: [traefik, servicelb]   # umbrella chart owns ingress (HOR-239)
+    disable: [traefik, servicelb, local-storage]   # umbrella chart owns ingress (HOR-239)
     extraArgs: []
   flux:                        # opt-in Flux GitOps (HOR-292); empty/false => Flux phase skipped
     enabled: false              # install Flux + apply GitRepository/Kustomization watching the overlay fork

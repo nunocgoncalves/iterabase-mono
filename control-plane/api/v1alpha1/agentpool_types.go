@@ -63,11 +63,11 @@ type AgentPoolSpec struct {
 	// +kubebuilder:validation:Required
 	Identity PoolIdentitySpec `json:"identity"`
 
-	// sandbox configures the pool's shared node-local RWO PVC. Every trusted root
+	// sandbox configures the pool's shared same-node OpenEBS LVM XFS RWO PVC. Every trusted root
 	// supervisor in this pool may access the whole claim; separate AgentPools
 	// receive separate claims/mounts. Each disposable child gets a stable distinct
 	// UID=GID and session-owned 0700 tree beneath the root-owned 0711 PVC root.
-	// The requested size is planning metadata because local-path has no hard quota.
+	// The requested size is the fixed thick-LV/filesystem capacity; online expansion and shrink are unsupported.
 	// +kubebuilder:validation:Required
 	Sandbox SandboxSpec `json:"sandbox"`
 
@@ -160,12 +160,12 @@ type PoolIdentitySpec struct {
 	CertMountPath string `json:"certMountPath,omitempty"`
 }
 
-// SandboxSpec configures the shared node-local sandbox PVC.
+// SandboxSpec configures the shared same-node OpenEBS LVM XFS sandbox PVC.
 // +kubebuilder:object:generate=true
 type SandboxSpec struct {
-	// storageClassName is fixed to iterabase-agentpool-local-path. Alternate or
+	// storageClassName is fixed to iterabase-agentpool-lvm-xfs. Alternate or
 	// default classes are rejected before the claim or workers are mutated.
-	// +kubebuilder:validation:Enum=iterabase-agentpool-local-path
+	// +kubebuilder:validation:Enum=iterabase-agentpool-lvm-xfs
 	// +kubebuilder:validation:Required
 	StorageClassName string `json:"storageClassName"`
 
@@ -176,7 +176,7 @@ type SandboxSpec struct {
 	// +kubebuilder:validation:Required
 	AccessMode corev1.PersistentVolumeAccessMode `json:"accessMode"`
 
-	// size is planning metadata for the PVC request, not a hard quota.
+	// size is the immutable thick XFS volume capacity requested from iterabase-data.
 	// +kubebuilder:validation:Required
 	Size resource.Quantity `json:"size"`
 
@@ -397,7 +397,7 @@ type AgentPoolStatus struct {
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
 	// ready is true once the warm-worker pods + PVC + NetworkPolicy are
-	// reconciled, the dedicated local-path contract is healthy, and at least one
+	// reconciled, the exact OpenEBS LVM/XFS/VG/topology contract is healthy, and at least one
 	// pod is Ready (envtest has no kubelet, so this stays false).
 	// +optional
 	Ready bool `json:"ready,omitempty"`

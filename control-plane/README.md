@@ -292,14 +292,17 @@ declares the maximum gateway capability grants + logical credential-slot
 bindings for work dispatched to the pool. No separate Tool/EgressRoute/
 IntegrationBinding CRD exists in v1.
 
-The operator reconciles, per pool: one fixed-class **ReadWriteOnce sandbox
-PVC** on `iterabase-agentpool-local-path`. All trusted root supervisors in that
-pool may access the whole claim; separate pools receive separate claims/mounts.
-Model-directed children use stable distinct session UID=GID, cleared groups, no
-capabilities, `no_new_privs`, umask `0077`, and session-owned `0700`
+The operator reconciles, per pool, one explicit Filesystem-mode **ReadWriteOnce
+sandbox PVC** on `iterabase-agentpool-lvm-xfs`. The request is an immutable thick
+XFS LV/filesystem capacity in the fixed `iterabase-data` VG; online expansion
+and shrink are unsupported. All trusted root supervisors in that pool may access
+the whole claim; separate pools receive separate OpenEBS volumes. Model-directed
+children use stable distinct session UID=GID, cleared groups, no capabilities,
+`no_new_privs`, umask `0077`, and session-owned `0700`
 root/home/tmp/session/workspace beneath a root-owned `0711` PVC root. RWO limits
-a volume to one node, not one pod, so two or more workers may mount the claim on
-the supported single K3s node. Requested size is planning metadata, not a quota.
+a volume to one node, not one pod; OpenEBS `shared: yes` permits two or more
+same-pool workers to mount it on the supported single K3s node without creating
+RWX or cross-node support.
 It also reconciles a **deny-by-default NetworkPolicy** (`denied` = kube-dns + the three gateways;
 `internet` = per-pool opt-in for non-cluster egress — customer-system
 credentialed access still routes through the gateway), a **per-pod config
@@ -319,15 +322,29 @@ The rendered supervisor retains runtime-default capabilities and explicitly adds
 The child uses equal stable UID/GID, cleared groups, no capabilities,
 `no_new_privs`, and umask `0077`, so opening the key returns `EACCES`.
 
-Readiness requires Forge's exact non-default class (`rancher.io/local-path`,
-`WaitForFirstConsumer`, `Delete`, non-expandable), one RWO Filesystem claim,
-and a bound hostPath PV resolving beneath
-`/var/lib/iterabase/agentpool-workspaces` with node affinity. The initial
-WaitForFirstConsumer Pending state does not deadlock worker creation. Wrong
-class/provisioner/path/access mode, default-class fallback, immutable claim
-mutation, unsafe mount ownership, and actual I/O failure fail closed.
+Readiness requires the exact non-default, non-expandable
+`iterabase-agentpool-lvm-xfs` class (`local.csi.openebs.io`, XFS,
+`vgpattern: ^iterabase-data$`, thick, `shared: yes`, `WaitForFirstConsumer`,
+`Delete`), one explicit RWO Filesystem claim, and a bound CSI PV whose driver,
+filesystem, VG attribute, volume handle, local node affinity, Ready LVMVolume,
+and LVMNode VG identity agree. The initial unbound `WaitForFirstConsumer` state
+does not deadlock worker creation. Wrong/ambiguous class, CSI, filesystem, VG,
+OpenEBS identity, topology, access/volume mode, immutable claim mutation,
+unsafe ownership, or actual I/O failure fails closed.
 
-The harness measures available blocks on the actual shared filesystem and persists each pool's hysteresis state on its RWO claim. Dispatch serializes one installation-wide Postgres-backed gate across all pool paths, exports the durable free bytes/ratio/warning/gate metrics, and the manager projects it into each AgentPool's actionable `WorkspaceCapacityHealthy` condition. The system warns below 25%, withholds fresh dispatch credit at or below 20%, retains a triggered gate across worker/pool/dispatch replacement, and reopens only at or above 25%. Crossing the threshold alone does not abort an active turn; after its terminal event is ACKed, the next credit remains withheld. Zero space or a real write/fsync/mount failure fences through the existing worker-loss path without automatic turn/effect replay.
+The harness measures available blocks on its pool's actual XFS PVC and persists
+that pool's local hysteresis state on the claim. Dispatch serializes a separate
+Postgres-backed gate for each materialized AgentPool, exports metrics labelled by
+pool, and the manager projects only the matching state into
+`WorkspaceCapacityHealthy`. One pool warns below 25%, withholds all of its fresh
+credits at or below 20%, retains the gate across worker/pool/dispatch
+replacement, and reopens only at or above 25%; unrelated pool PVCs remain
+independent. Crossing the threshold alone does not abort an active turn; after
+its terminal event is ACKed, the next credit remains withheld. Zero space or a
+real I/O/fsync/mount failure fences through the existing worker-loss path
+without automatic turn/effect replay. Chart-owned OpenEBS `lvm_vg_*` metrics
+separately expose aggregate `iterabase-data` pressure and honest new-claim
+exhaustion.
 
 `spec.workspaceTools` is the deny-by-default local-tool switch (ARCH-016):
 `false` exposes none; `true` exposes exactly `read`/`write`/`edit`/`bash`.
@@ -336,7 +353,7 @@ maximum gateway permissions and slot→Secret bindings (values never in the CRD)
 semantic tool-registry validation is the gateway's job (HOR-392/397). Dispatch,
 warm-pool scaling, and the Work server's worker-identity/generation fencing are
 HOR-249; `worker_id` = pod name (stable slot), recorded as an amendment to the
-HOR-381/249 identity contract. Real-cluster PSS/local-path RWO/isolation validation is
+HOR-381/249 identity contract. Real-cluster PSS/OpenEBS LVM RWO/isolation validation is
 the ticket's stated real-cluster gate (envtest covers assembly + structural
 validation).
 

@@ -1,6 +1,11 @@
 # Platform V2 dedicated local-path RWO storage
 
-Status: current repository implementation contract for HOR-538, implementing approved `DES-HOR-469-03`, amended `DES-HOR-538-01`, and `DES-HOR-538-02` recorded in Obsidian `Platform V2 — Single-Node K3s Local-Path RWO Storage`. The approved DES-HOR-538-01 amendment fixes label `iterabase-ws` and the `auto|ext4|xfs` transport policy.
+> **Superseded historical record (2026-09-07).** `DES-HOR-545-01` and
+> [`v2-openebs-lvm-storage.md`](v2-openebs-lvm-storage.md) replace this storage
+> substrate. The HOR-538 implementation, corrective evidence, candidate,
+> protected promotion, published artifacts, and preserved AgentPool
+> isolation/workload-key semantics remain immutable history. No configuration,
+> command, StorageClass, or fallback below is supported by the current source.
 
 ## Supported topology
 
