@@ -25,9 +25,14 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 )
 
-const k3sPort = 6443
+const (
+	k3sPort                           = 6443
+	permanentCPUScenarioName          = "permanent-fixture-cpu"
+	permanentCPUWorkspaceScenarioName = "permanent-fixture-cpu-workspace"
+	permanentGPUScenarioName          = "permanent-fixture-gpu"
+)
 
-type digitalOceanCPUState struct {
+type permanentCPUFixtureState struct {
 	fixture             *permanentFixture
 	runID               string
 	privKeyPath         string
@@ -47,20 +52,20 @@ type digitalOceanCPUState struct {
 	diagnostics         forgeDiagnostics
 }
 
-func newDigitalOceanCPUState(t *testing.T) *digitalOceanCPUState {
-	return newDigitalOceanCPUStateForScenario(t, "digitalocean-cpu")
+func newPermanentCPUFixtureState(t *testing.T) *permanentCPUFixtureState {
+	return newPermanentCPUFixtureStateForScenario(t, permanentCPUScenarioName)
 }
 
-func newDigitalOceanWorkspaceState(t *testing.T) *digitalOceanCPUState {
+func newPermanentCPUWorkspaceFixtureState(t *testing.T) *permanentCPUFixtureState {
 	t.Setenv(workspaceBehaviorEnv, "true")
-	state := newDigitalOceanCPUStateForScenario(t, "digitalocean-workspace")
+	state := newPermanentCPUFixtureStateForScenario(t, permanentCPUWorkspaceScenarioName)
 	state.freshInstall = true
 	return state
 }
 
-func newDigitalOceanCPUStateForScenario(t *testing.T, scenario string) *digitalOceanCPUState {
+func newPermanentCPUFixtureStateForScenario(t *testing.T, scenario string) *permanentCPUFixtureState {
 	fixture := requirePermanentFixture(t, "cpu")
-	state := &digitalOceanCPUState{
+	state := &permanentCPUFixtureState{
 		fixture:             fixture,
 		runID:               fixture.installName(),
 		privKeyPath:         fixture.sshKeyPath,
@@ -79,7 +84,7 @@ func newDigitalOceanCPUStateForScenario(t *testing.T, scenario string) *digitalO
 	return state
 }
 
-func provisionCPUStage(t *testing.T, state *digitalOceanCPUState) {
+func resetPermanentCPUFixtureStage(t *testing.T, state *permanentCPUFixtureState) {
 	t.Helper()
 	if err := state.fixture.reset(t, state.forgeBin, state.forgeHome); err != nil {
 		t.Fatal(err)
@@ -88,7 +93,7 @@ func provisionCPUStage(t *testing.T, state *digitalOceanCPUState) {
 	t.Logf("permanent CPU fixture %s workspace=%s", state.ip, state.workspaceDevice)
 }
 
-func rejectGPUOnCPUStage(t *testing.T, state *digitalOceanCPUState) {
+func rejectGPUOnCPUStage(t *testing.T, state *permanentCPUFixtureState) {
 	t.Helper()
 	cfgPath := writeForgeConfigGPU(t, state.runID, state.ip, state.privKeyPath)
 	out, err := runForgeE(state.forgeBin, state.forgeHome, "apply", "--config", cfgPath)
@@ -104,7 +109,7 @@ func rejectGPUOnCPUStage(t *testing.T, state *digitalOceanCPUState) {
 // source artifact to a minimally healthy dependent layer. Chart ownership,
 // rollout, certificate, gateway, and tool-runner correctness remains in the
 // chart/control-plane owner suites.
-func assertCurrentPlatformStage(t *testing.T, state *digitalOceanCPUState) {
+func assertCurrentPlatformStage(t *testing.T, state *permanentCPUFixtureState) {
 	t.Helper()
 	sc, err := sshDial(state.ip, state.privKeyPath)
 	if err != nil {
@@ -176,7 +181,7 @@ printf "%%s|%%s\n" "$pv" "$vg"
 	checkGatewayNodePortHealth(t, kcPath, state.ip)
 }
 
-func seedLVMReapplyStage(t *testing.T, state *digitalOceanCPUState) {
+func seedLVMReapplyStage(t *testing.T, state *permanentCPUFixtureState) {
 	t.Helper()
 	sc, err := sshDial(state.ip, state.privKeyPath)
 	if err != nil {
@@ -235,7 +240,7 @@ YAML`
 	}
 }
 
-func assertLVMReapplyStage(t *testing.T, state *digitalOceanCPUState) {
+func assertLVMReapplyStage(t *testing.T, state *permanentCPUFixtureState) {
 	t.Helper()
 	sc, err := sshDial(state.ip, state.privKeyPath)
 	if err != nil {
@@ -275,7 +280,7 @@ YAML`
 	}
 }
 
-func deleteLVMClaimStage(t *testing.T, state *digitalOceanCPUState) {
+func deleteLVMClaimStage(t *testing.T, state *permanentCPUFixtureState) {
 	t.Helper()
 	sc, err := sshDial(state.ip, state.privKeyPath)
 	if err != nil {
@@ -300,7 +305,7 @@ exit 1`, state.storagePV, handle, candidateShellQuote(handle))
 	}
 }
 
-func destroyPreservesDataStorageStage(t *testing.T, state *digitalOceanCPUState) {
+func destroyPreservesDataStorageStage(t *testing.T, state *permanentCPUFixtureState) {
 	t.Helper()
 	plan := prepareCandidateOverlay(t, state.runID, state.ip, state.privKeyPath)
 	cfgPath := writeCurrentOverlayForgeConfig(t, state.runID, state.ip, state.privKeyPath, state.chartVersion, plan)
@@ -326,7 +331,7 @@ printf ordinary-destroy-vg-preserved=pass
 	}
 }
 
-func setupLVMSharedAgentPoolStage(t *testing.T, state *digitalOceanCPUState) {
+func setupLVMSharedAgentPoolStage(t *testing.T, state *permanentCPUFixtureState) {
 	t.Helper()
 	repository, tag := os.Getenv("HARNESS_IMAGE_REPO"), os.Getenv("HARNESS_IMAGE_TAG")
 	if repository == "" || tag == "" {
@@ -411,7 +416,7 @@ func waitForLVMSharedAgentPoolReady(t *testing.T, client *ssh.Client, timeout ti
 	t.Fatalf("OpenEBS shared-LVM AgentPool did not become Ready within %s: %v\n%s\n%s", timeout, err, output, diagnostics)
 }
 
-func exerciseWorkspaceCapacityGateStage(t *testing.T, state *digitalOceanCPUState) {
+func exerciseWorkspaceCapacityGateStage(t *testing.T, state *permanentCPUFixtureState) {
 	t.Helper()
 	if os.Getenv("HARNESS_IMAGE_REPO") == "" {
 		t.Fatal("workspace capacity stage requires the composed harness image")
@@ -465,7 +470,7 @@ exit 1`, want)
 	waitMetrics("0")
 }
 
-func replaceWorkspaceWorkerStage(t *testing.T, state *digitalOceanCPUState) {
+func replaceWorkspaceWorkerStage(t *testing.T, state *permanentCPUFixtureState) {
 	t.Helper()
 	if os.Getenv("HARNESS_IMAGE_REPO") == "" {
 		t.Fatal("worker replacement stage requires the composed harness image")
@@ -488,7 +493,7 @@ func replaceWorkspaceWorkerStage(t *testing.T, state *digitalOceanCPUState) {
 	}
 }
 
-func rebootPreservesLVMStorageStage(t *testing.T, state *digitalOceanCPUState) {
+func rebootPreservesLVMStorageStage(t *testing.T, state *permanentCPUFixtureState) {
 	t.Helper()
 	before, err := state.fixture.bootID()
 	if err != nil {
@@ -524,7 +529,7 @@ exit 1`, candidateShellQuote(state.storagePVCUID+"|"+state.storagePV))
 	t.Logf("storage reboot preserved identity: boot %s -> %s", before, after)
 }
 
-func reapplyCurrentPlatformStage(t *testing.T, state *digitalOceanCPUState) {
+func reapplyCurrentPlatformStage(t *testing.T, state *permanentCPUFixtureState) {
 	t.Helper()
 	prepareCandidateChart(t, state.ip, state.privKeyPath)
 	plan := prepareCandidateOverlay(t, state.runID, state.ip, state.privKeyPath)
@@ -562,17 +567,17 @@ func assertApplyMarkers(t *testing.T, out string, markers ...string) {
 	}
 }
 
-func (state *digitalOceanCPUState) cleanup(t *testing.T) {
+func (state *permanentCPUFixtureState) resetAfterScenario(t *testing.T) {
 	t.Helper()
-	state.diagnostics.setDomain(failureDomainCleanup)
+	state.diagnostics.setDomain(failureDomainFixtureReset)
 	workspaceDevicesByAddress.Delete(state.ip)
 	if err := state.fixture.reset(t, state.forgeBin, state.forgeHome); err != nil {
 		t.Errorf("reset permanent CPU fixture after diagnostics: %v", err)
 	}
 }
 
-// waitForHostReady waits until the droplet accepts SSH AND cloud-init has
-// finished applying its user-data (the forge user, passwordless sudo, curl).
+// waitForHostReady waits until the permanent fixture accepts SSH AND cloud-init
+// has finished applying its baseline (the forge user, passwordless sudo, curl).
 // Returning only once cloud-init reports "done" prevents forge's preflight from
 // racing cloud-init — e.g. `sudo -n true` failing with "passwordless sudo
 // required" before the sudoers rule is applied, or curl being absent before
@@ -629,7 +634,7 @@ func sshDial(ip, keyPath string) (*ssh.Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	hostKeyCallback := ssh.InsecureIgnoreHostKey() //nolint:gosec // branch-qualification droplets only
+	hostKeyCallback := ssh.InsecureIgnoreHostKey() //nolint:gosec // legacy non-fixture E2E paths only
 	var hostKeyAlgorithms []string
 	if pin := strings.TrimSpace(os.Getenv(permanentFixtureHostKeyEnv)); pin != "" {
 		publicKey, _, _, rest, parseErr := ssh.ParseAuthorizedKey([]byte(pin + "\n"))
@@ -857,8 +862,8 @@ func checkGatewayHealthOnPort(t *testing.T, ip string, port int) {
 	t.Fatalf("gateway /health not 200 via %s (ip %s port %d)", url, ip, port)
 }
 
-// writeEdgeOverlayOnHost creates a file:// overlay git repo on the droplet with
-// the MetalLB L2 edge values (IPAddressPool = the droplet's public IP). forge
+// writeEdgeOverlayOnHost creates a file:// overlay git repo on the fixture host
+// with the MetalLB L2 edge values (IPAddressPool = the fixture's public IP). Forge
 // apply clones it (file://, tokenless) and feeds values.yaml to the platform
 // chart. git is pre-installed by cloud-init. The scaffold matches what forge
 // validates: values.yaml + values.client.yaml + crds/client/kustomization.yaml.

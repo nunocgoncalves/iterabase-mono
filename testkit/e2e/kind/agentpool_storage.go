@@ -20,6 +20,9 @@ const (
 	DataVolumeGroupName            = "iterabase-data"
 	defaultClassAnnotation         = "storageclass.kubernetes.io/is-default-class"
 	betaDefaultClassAnnotation     = "storageclass.beta.kubernetes.io/is-default-class"
+	// The largest owner scenario enables 70 GiB of thick chart claims; keep
+	// bounded headroom for representative general and AgentPool claims.
+	kindDataVolumeGroupSizeBytes = 96 << 30
 )
 
 // ConfigureLVMStorage removes Kind's local-path fallback, creates a real thick
@@ -67,7 +70,7 @@ if vgs iterabase-data >/dev/null 2>&1; then
   test "$(vgs --noheadings -o pv_count iterabase-data | awk '{$1=$1;print}')" = 1
 else
   test ! -e /var/lib/iterabase-lvm-loop || exit 42
-  truncate -s 8G /var/lib/iterabase-data.img
+  truncate -s ` + fmt.Sprintf("%d", kindDataVolumeGroupSizeBytes) + ` /var/lib/iterabase-data.img
   loop=$(losetup --find --show /var/lib/iterabase-data.img)
   printf '%s\n' "$loop" > /var/lib/iterabase-lvm-loop
   pvcreate --yes "$loop"

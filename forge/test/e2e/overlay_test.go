@@ -15,14 +15,14 @@ import (
 //
 // It points at ref `e2e` (a minimal-scaffold test-fixture branch): `master` holds
 // the HOR-299 bare-metal prod recipe (required placeholders, not deployable bare
-// on a cloud VM). The prod recipe's deployability is HOR-299's job; this test is
+// on the permanent fixture). The prod recipe's deployability is HOR-299's job; this test is
 // forge's mechanics. See iterabase-overlay `e2e` branch.
 //
 // No explicit FORGE_OVERLAY_TOKEN is accepted. The E2E process maps the
 // workflow's ephemeral GITHUB_TOKEN only into each Forge subprocess so repeated
 // exact public-overlay clones avoid anonymous cloud-edge failures; tokenless and
 // prompt behavior remains covered by unit + fake-SSH tests.
-func runOverlayStage(t *testing.T, state *digitalOceanCPUState) {
+func runOverlayStage(t *testing.T, state *permanentCPUFixtureState) {
 	if _, ok := os.LookupEnv("FORGE_OVERLAY_TOKEN"); ok {
 		t.Fatal("FORGE_OVERLAY_TOKEN must be unset; E2E supplies only the ephemeral workflow token")
 	}

@@ -76,20 +76,20 @@ identity or AgentPool workspace assertions.
 
 ## Compiled scenarios
 
-### `permanent-cpu`
+### `permanent-fixture-cpu`
 
 Uses the CPU fixture for no-GPU refusal, supported migration-source install,
 exact current Forge/chart/image/Flux handoff, receipt-bound OpenEBS LVM assertions,
 two-worker RWO behavior, persistence/replacement/reapply, secret sync, and Flux
 reconciliation.
 
-### `permanent-workspace`
+### `permanent-fixture-cpu-workspace`
 
 Resets the same CPU fixture, then proves process-open raw-device refusal, exact
 workspace identity, concurrent isolated work, capacity gating, human-gate
 worker replacement, persisted bytes, and idempotent reapply.
 
-### `permanent-gpu`
+### `permanent-fixture-gpu`
 
 Uses the GPU fixture for exact baseline/candidate driver transition, real GPU
 smoke, disposable `emptyDir` versus durable cache behavior, exact platform
@@ -123,13 +123,13 @@ exactly one result per planned scenario.
 
 ## Qualification and legacy removal
 
-Ephemeral DigitalOcean provisioning and tagged reaping were retained only on the
-HOR-540 branch while the permanent path was qualified. Removal was authorized
+Ephemeral provider-managed host provisioning and tagged reaping were retained
+only on the HOR-540 branch while the permanent path was qualified. Removal was authorized
 only after the dated lifecycle acceptance record contained three consecutive
 CPU and three consecutive GPU green destroy/apply/test/destroy cycles; any
 failed or incomplete cycle reset that fixture's streak. The final repository has
 no provider SDK, dynamic capacity discovery, `FORGE_E2E_KEEP`, tagged reaper, or
-`DIGITALOCEAN_TOKEN` workflow path.
+provider API-token workflow path.
 
 ## Operational authority
 

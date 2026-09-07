@@ -24,13 +24,13 @@ type sshAPITunnel struct {
 	stopOnce sync.Once
 }
 
-func (state *digitalOceanGPUState) bindKubeconfigTunnel(t *testing.T) {
+func (state *permanentGPUFixtureState) bindKubeconfigTunnel(t *testing.T) {
 	t.Helper()
 	if state.fixture == nil {
-		return // qualification droplets retain their provider-created public API path
+		return // legacy non-fixture qualification paths retain their existing public API path
 	}
 	if state.apiTunnel == nil {
-		tunnel, err := startSSHAPITunnel(state.vm.IP, state.privKeyPath)
+		tunnel, err := startSSHAPITunnel(state.host.IP, state.privKeyPath)
 		if err != nil {
 			t.Fatalf("open pinned SSH tunnel to permanent GPU Kubernetes API: %v", err)
 		}
@@ -98,7 +98,7 @@ func proxyTunnelConnection(local, remote net.Conn) {
 	closeOnce.Do(closeBoth)
 }
 
-func (state *digitalOceanGPUState) stopAPITunnel() {
+func (state *permanentGPUFixtureState) stopAPITunnel() {
 	if state.apiTunnel == nil {
 		return
 	}

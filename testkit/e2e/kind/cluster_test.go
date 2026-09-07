@@ -39,6 +39,16 @@ func (executor *fakeExecutor) Run(_ context.Context, command process.Command) (p
 	return result, nil
 }
 
+func TestKindDataVolumeGroupFitsLargestThickClaimSet(t *testing.T) {
+	const (
+		largestChartClaimSet = 70 << 30
+		fixtureHeadroom      = 20 << 30
+	)
+	if kindDataVolumeGroupSizeBytes < largestChartClaimSet+fixtureHeadroom {
+		t.Fatalf("Kind data VG = %d bytes, want at least %d for thick chart claims plus fixture headroom", kindDataVolumeGroupSizeBytes, largestChartClaimSet+fixtureHeadroom)
+	}
+}
+
 func TestCreateFailureStillAttemptsClusterDeletion(t *testing.T) {
 	t.Parallel()
 	executor := &fakeExecutor{failNext: true}

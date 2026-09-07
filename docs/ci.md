@@ -166,6 +166,14 @@ upload results even on failure; the aggregate downloads the exact result-artifac
 set and reconciles it against the plan rather than trusting matrix-job success
 alone.
 
+F3 scenario IDs are provider-neutral: `forge/permanent-fixture-cpu`,
+`forge/permanent-fixture-cpu-workspace`, and
+`forge/permanent-fixture-gpu`. Their grouped PR result/diagnostic artifacts are
+`e2e-result-permanent-fixture-<capacity>` and
+`e2e-diagnostics-permanent-fixture-<capacity>`; per-scenario files derive from
+the exact scenario ID. Legacy provider-named files remain historical evidence
+only and are not active catalogue, plan, or result authority.
+
 Failure diagnostics are separate, redacted artifacts retained for seven days.
 PR plans and results are retained for 30 days. Candidate results and
 artifact identities are retained in the 90-day immutable candidate record.

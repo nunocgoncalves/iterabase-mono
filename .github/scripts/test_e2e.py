@@ -7,6 +7,7 @@ import hashlib
 import io
 import json
 from pathlib import Path
+import re
 import tarfile
 import tempfile
 import unittest
@@ -196,9 +197,19 @@ class E2EPlanTests(unittest.TestCase):
             self.assertEqual("iterabase-permanent-fixture-gpu", groups["gpu"]["capacity_group"])
             self.assertNotEqual(groups["cpu"]["capacity_group"], groups["gpu"]["capacity_group"])
             self.assertEqual(
-                ["forge/digitalocean-cpu", "forge/digitalocean-workspace"],
+                ["forge/permanent-fixture-cpu", "forge/permanent-fixture-cpu-workspace"],
                 [item["id"] for item in groups["cpu"]["scenarios"]],
             )
+            self.assertEqual(
+                ["forge/permanent-fixture-gpu"],
+                [item["id"] for item in groups["gpu"]["scenarios"]],
+            )
+            for group in groups.values():
+                for scenario in group["scenarios"]:
+                    self.assertNotRegex(
+                        scenario["id"],
+                        r"digitalocean|droplet|provision-cloud-host|destroy-cloud-host",
+                    )
 
     def test_candidate_union_uses_same_scenario_and_stage_graph(self) -> None:
         candidate = make_plan(
@@ -768,7 +779,7 @@ class ResultReconciliationTests(unittest.TestCase):
             paths=["forge/internal/lifecycle/lifecycle.go"],
         )
         # Keep one scenario so result fixtures remain small and exact.
-        selected = next(item for item in plan["scenario_matrix"] if item["id"] == "forge/digitalocean-gpu")
+        selected = next(item for item in plan["scenario_matrix"] if item["id"] == "forge/permanent-fixture-gpu")
         # Model the baseline resolver's immutable identities without network I/O.
         for artifact in selected["artifacts"]:
             if artifact["custody"] != "published-baseline":
@@ -1099,6 +1110,29 @@ class ResultReconciliationTests(unittest.TestCase):
 
 
 class WorkflowContractTests(unittest.TestCase):
+    def test_active_permanent_fixture_naming_is_provider_neutral(self) -> None:
+        paths = [
+            ROOT / "forge/Makefile",
+            ROOT / ".github/workflows/e2e.yml",
+            ROOT / ".github/workflows/release-candidate.yml",
+            ROOT / "docs/ci.md",
+            ROOT / "docs/release.md",
+            ROOT / "docs/runbooks/permanent-e2e-fixtures.md",
+            ROOT / "docs/architecture/v2-openebs-lvm-storage.md",
+        ]
+        paths.extend(
+            path
+            for path in (ROOT / "forge/test/e2e").rglob("*")
+            if path.is_file() and (path.suffix in {".go", ".md"} or path.name == "Makefile")
+        )
+        forbidden = re.compile(
+            r"digitalocean|droplet|provision-cloud-host|destroy-cloud-host",
+            re.IGNORECASE,
+        )
+        for path in paths:
+            with self.subTest(path=path.relative_to(ROOT)):
+                self.assertNotRegex(path.read_text(encoding="utf-8"), forbidden)
+
     def test_workflows_use_one_planner_composer_and_result_validator(self) -> None:
         for workflow in ("e2e.yml", "release-candidate.yml"):
             content = (ROOT / ".github" / "workflows" / workflow).read_text(encoding="utf-8")
@@ -1123,6 +1157,10 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("e2e.py resolve-baselines \\\n            --plan e2e-plan.json \\\n            --github-output \"$GITHUB_OUTPUT\"", e2e)
         self.assertNotIn("--output e2e-plan.json \\\n            --github-output", e2e)
         self.assertIn("group: iterabase-permanent-fixture-${{ matrix.capacity }}", e2e)
+        self.assertIn("e2e-result-permanent-fixture-${{ matrix.capacity }}", e2e)
+        self.assertIn("e2e-diagnostics-permanent-fixture-${{ matrix.capacity }}", e2e)
+        self.assertNotIn("result-capacity-${{ matrix.capacity }}", e2e)
+        self.assertNotIn("diagnostics-capacity-${{ matrix.capacity }}", e2e)
         self.assertIn("cancel-in-progress: false", e2e)
         self.assertNotIn("schedule:", e2e)
         self.assertNotIn("workflow_dispatch:", e2e)

@@ -19,18 +19,18 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 )
 
-// GPUVM identifies the fixed GPU fixture surface consumed by the scenario.
-type GPUVM struct {
+// GPUFixtureHost identifies the fixed GPU fixture surface consumed by the scenario.
+type GPUFixtureHost struct {
 	IP              string
 	PrivKeyPath     string
 	WorkspaceDevice string
 }
 
-type digitalOceanGPUState struct {
+type permanentGPUFixtureState struct {
 	fixture             *permanentFixture
 	runID               string
 	privKeyPath         string
-	vm                  *GPUVM
+	host                *GPUFixtureHost
 	forgeBin            string
 	forgeHome           string
 	chartVersion        string
@@ -41,30 +41,30 @@ type digitalOceanGPUState struct {
 	diagnostics         forgeDiagnostics
 }
 
-func newDigitalOceanGPUState(t *testing.T) *digitalOceanGPUState {
+func newPermanentGPUFixtureState(t *testing.T) *permanentGPUFixtureState {
 	fixture := requirePermanentFixture(t, "gpu")
-	state := &digitalOceanGPUState{
+	state := &permanentGPUFixtureState{
 		fixture:             fixture,
 		runID:               fixture.installName(),
 		privKeyPath:         fixture.sshKeyPath,
-		vm:                  &GPUVM{IP: fixture.address, PrivKeyPath: fixture.sshKeyPath, WorkspaceDevice: fixture.workspaceDevice},
+		host:                &GPUFixtureHost{IP: fixture.address, PrivKeyPath: fixture.sshKeyPath, WorkspaceDevice: fixture.workspaceDevice},
 		forgeHome:           t.TempDir(),
 		chartVersion:        platformChartVersion(t, ""),
 		runtimeImageDigests: make(map[string]importedRuntimeIdentity),
-		diagnostics:         newForgeDiagnostics(t, "digitalocean-gpu"),
+		diagnostics:         newForgeDiagnostics(t, permanentGPUScenarioName),
 	}
 	state.forgeBin = buildForge(t)
 	return state
 }
 
-func provisionGPUStage(t *testing.T, state *digitalOceanGPUState) {
+func resetPermanentGPUFixtureStage(t *testing.T, state *permanentGPUFixtureState) {
 	require.NoError(t, state.fixture.reset(t, state.forgeBin, state.forgeHome))
-	rememberWorkspaceDevice(state.vm.IP, state.vm.WorkspaceDevice)
-	t.Logf("permanent GPU fixture %s workspace=%s", state.vm.IP, state.vm.WorkspaceDevice)
+	rememberWorkspaceDevice(state.host.IP, state.host.WorkspaceDevice)
+	t.Logf("permanent GPU fixture %s workspace=%s", state.host.IP, state.host.WorkspaceDevice)
 }
 
-func applyGPUSubstrateStage(t *testing.T, state *digitalOceanGPUState) {
-	cfgPath := writeForgeConfigGPUDriver(t, state.runID, state.vm.IP, state.privKeyPath, gpuUpgradeBaselineDriver)
+func applyGPUSubstrateStage(t *testing.T, state *permanentGPUFixtureState) {
+	cfgPath := writeForgeConfigGPUDriver(t, state.runID, state.host.IP, state.privKeyPath, gpuUpgradeBaselineDriver)
 	out := applyOnce(t, state.forgeBin, state.forgeHome, cfgPath)
 	assertApplyMarkers(t, out, "node ready: true", "data storage: iterabase-data", "LVM storage ready: true", "gpu ready: true", "gpu driver: "+gpuUpgradeBaselineDriver)
 	state.bindKubeconfigTunnel(t)
@@ -142,15 +142,15 @@ func TestValidatePinnedNFDRender(t *testing.T) {
 	require.ErrorContains(t, validatePinnedNFDRender(missingResync, worker), "omit")
 }
 
-func assertGPUSmokeStage(t *testing.T, state *digitalOceanGPUState) {
+func assertGPUSmokeStage(t *testing.T, state *permanentGPUFixtureState) {
 	checkGPUSmoke(t, filepath.Join(state.forgeHome, state.runID, "kubeconfig.yaml"))
 }
 
-func (state *digitalOceanGPUState) cleanup(t *testing.T) {
+func (state *permanentGPUFixtureState) resetAfterScenario(t *testing.T) {
 	t.Helper()
 	state.stopAPITunnel()
-	state.diagnostics.setDomain(failureDomainCleanup)
-	workspaceDevicesByAddress.Delete(state.vm.IP)
+	state.diagnostics.setDomain(failureDomainFixtureReset)
+	workspaceDevicesByAddress.Delete(state.host.IP)
 	if err := state.fixture.reset(t, state.forgeBin, state.forgeHome); err != nil {
 		t.Errorf("reset permanent GPU fixture after diagnostics: %v", err)
 	}
@@ -217,7 +217,7 @@ func writeForgeConfigGPUDriver(t *testing.T, name, ip, keyPath, driverVersion st
 	})
 }
 
-// sshRun runs a command on the droplet over SSH and returns combined output.
+// sshRun runs a command on the permanent fixture host over SSH and returns combined output.
 func sshRun(t *testing.T, ip, keyPath, cmd string) (string, error) {
 	t.Helper()
 	client, err := sshDial(ip, keyPath)
@@ -234,8 +234,8 @@ func sshRun(t *testing.T, ip, keyPath, cmd string) (string, error) {
 	return string(out), err
 }
 
-// dumpGPUDiagnostics queries the GPU operator state on the droplet when the
-// readiness gate fails, so the cause (driver/toolkit/device-plugin/validator)
+// dumpGPUDiagnostics queries the GPU operator state on the permanent fixture
+// when the readiness gate fails, so the cause (driver/toolkit/device-plugin/validator)
 // is visible in the test log rather than just "gpu not ready after 15m".
 func dumpGPUDiagnostics(t *testing.T, ip, keyPath string) {
 	t.Helper()

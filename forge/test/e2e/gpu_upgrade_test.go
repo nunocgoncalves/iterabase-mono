@@ -56,7 +56,7 @@ type gpuUpgradeEvidence struct {
 	DriverVersion   string
 }
 
-func recordGPUUpgradeInputsStage(t *testing.T, state *digitalOceanGPUState) {
+func recordGPUUpgradeInputsStage(t *testing.T, state *permanentGPUFixtureState) {
 	t.Helper()
 	identity, err := runForgeE(state.forgeBin, state.forgeHome, "version")
 	if err != nil {
@@ -69,7 +69,7 @@ func recordGPUUpgradeInputsStage(t *testing.T, state *digitalOceanGPUState) {
 	)
 }
 
-func startGPUUpgradeWorkloadStage(t *testing.T, state *digitalOceanGPUState) {
+func startGPUUpgradeWorkloadStage(t *testing.T, state *permanentGPUFixtureState) {
 	t.Helper()
 	clients := newGPUUpgradeClients(t, state)
 	ctx := context.Background()
@@ -92,9 +92,9 @@ func startGPUUpgradeWorkloadStage(t *testing.T, state *digitalOceanGPUState) {
 	t.Logf("baseline GPU workload ready: %+v", evidence)
 }
 
-func applyGPUDriverUpgradeStage(t *testing.T, state *digitalOceanGPUState) {
+func applyGPUDriverUpgradeStage(t *testing.T, state *permanentGPUFixtureState) {
 	t.Helper()
-	cfgPath := writeForgeConfigGPUDriver(t, state.runID, state.vm.IP, state.privKeyPath, gpuUpgradeCandidateDriver)
+	cfgPath := writeForgeConfigGPUDriver(t, state.runID, state.host.IP, state.privKeyPath, gpuUpgradeCandidateDriver)
 	t.Logf("reconciling exact GPU driver transition %s -> %s", gpuUpgradeBaselineDriver, gpuUpgradeCandidateDriver)
 	out := applyOnce(t, state.forgeBin, state.forgeHome, cfgPath)
 	assertApplyMarkers(t, out, "node ready: true", "gpu ready: true", "gpu driver: "+gpuUpgradeCandidateDriver)
@@ -102,7 +102,7 @@ func applyGPUDriverUpgradeStage(t *testing.T, state *digitalOceanGPUState) {
 	t.Logf("driver upgrade apply output:\n%s", out)
 }
 
-func assertGPUDriverUpgradeStage(t *testing.T, state *digitalOceanGPUState) {
+func assertGPUDriverUpgradeStage(t *testing.T, state *permanentGPUFixtureState) {
 	t.Helper()
 	if state.upgradeEvidence == nil {
 		t.Fatal("baseline GPU workload evidence is missing")
@@ -155,7 +155,7 @@ type gpuUpgradeClients struct {
 	dynamic dynamic.Interface
 }
 
-func newGPUUpgradeClients(t *testing.T, state *digitalOceanGPUState) gpuUpgradeClients {
+func newGPUUpgradeClients(t *testing.T, state *permanentGPUFixtureState) gpuUpgradeClients {
 	t.Helper()
 	kubeconfig := filepath.Join(state.forgeHome, state.runID, "kubeconfig.yaml")
 	restConfig, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
@@ -328,7 +328,7 @@ func parseGPUUpgradeEvidence(logs string) (gpuUpgradeEvidence, error) {
 	return gpuUpgradeEvidence{}, fmt.Errorf("GPU upgrade readiness record not found")
 }
 
-func waitForGPUUpgradeNode(t *testing.T, state *digitalOceanGPUState, previousUID types.UID, timeout time.Duration) {
+func waitForGPUUpgradeNode(t *testing.T, state *permanentGPUFixtureState, previousUID types.UID, timeout time.Duration) {
 	t.Helper()
 	// A containerized driver replacement briefly restarts k3s on this single
 	// node. Observe that expected unavailable state through SSH, then parse one
@@ -363,7 +363,7 @@ printf '\n'
 	deadline := time.Now().Add(timeout)
 	lastObservation := "no coherent API observation"
 	for time.Now().Before(deadline) {
-		out, err := sshRun(t, state.vm.IP, state.privKeyPath, observe)
+		out, err := sshRun(t, state.host.IP, state.privKeyPath, observe)
 		if err != nil {
 			t.Fatalf("observe k3s during GPU driver upgrade: %v\n%s", err, out)
 		}

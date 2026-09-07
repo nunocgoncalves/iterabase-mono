@@ -649,7 +649,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: candidate-result-capacity-${{ matrix.capacity }}
+          name: candidate-result-permanent-fixture-${{ matrix.capacity }}
           path: ${{ runner.temp }}/results/*.json
           if-no-files-found: error
           retention-days: 90
@@ -657,7 +657,7 @@ jobs:
         if: failure() || cancelled()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: candidate-diagnostics-capacity-${{ matrix.capacity }}
+          name: candidate-diagnostics-permanent-fixture-${{ matrix.capacity }}
           path: ${{ runner.temp }}/diagnostics
           if-no-files-found: ignore
           retention-days: 7

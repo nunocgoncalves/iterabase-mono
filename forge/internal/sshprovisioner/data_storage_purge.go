@@ -111,7 +111,8 @@ fi
 for ((i=0; i<count; i++)); do
   set +e; pv_line=$(pvs --noheadings --separator '|' -o pv_uuid,vg_name -- "${resolved[$i]}" 2>&1); pv_rc=$?; set -e
   if test "$pv_rc" = 0; then
-    pv_uuid=$(printf '%%s' "$pv_line" | awk -F'|' '{$1=$1;print $1}'); pv_vg=$(printf '%%s' "$pv_line" | awk -F'|' '{$2=$2;print $2}')
+    pv=$(printf '%%s' "$pv_line" | `+lvmReportPairParser+`)
+    pv_uuid=${pv%%|*}; pv_vg=${pv#*|}
     test "$pv_uuid" = "${planned_pv_uuid[$i]}" && test -z "$pv_vg" || fail "${selected[$i]} PV identity/membership drift"
     pvremove --yes -- "${resolved[$i]}"
   elif test "$i" -lt "$pv_done"; then

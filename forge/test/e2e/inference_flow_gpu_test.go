@@ -1,5 +1,5 @@
 // Package e2e inference-flow GPU scenario: a full request→completion happy
-// path on a real GPU droplet — forge bootstraps k3s + the GPU operator + the
+// path on the real permanent GPU fixture — Forge bootstraps K3s + the GPU operator + the
 // iterabase-platform chart, the control-plane deploys a real vLLM backend, and
 // a curl to the gateway with an API key returns a real completion.
 package e2e
@@ -25,14 +25,14 @@ import (
 // path that proves the Forge-readied GPU can serve after exact chart/image
 // handoff. Portable ModelBackend rendering, identity, catalogue, authorization,
 // and inference correctness remain authoritative in control-plane E2E.
-func applyInferencePlatformStage(t *testing.T, state *digitalOceanGPUState) {
-	prepareCandidateChart(t, state.vm.IP, state.privKeyPath)
-	state.runtimeImageDigests = prepareCandidateImages(t, state.vm.IP, state.privKeyPath)
-	plan := prepareCandidateOverlay(t, state.runID, state.vm.IP, state.privKeyPath)
+func applyInferencePlatformStage(t *testing.T, state *permanentGPUFixtureState) {
+	prepareCandidateChart(t, state.host.IP, state.privKeyPath)
+	state.runtimeImageDigests = prepareCandidateImages(t, state.host.IP, state.privKeyPath)
+	plan := prepareCandidateOverlay(t, state.runID, state.host.IP, state.privKeyPath)
 	// GPU readiness was already proven on this host. Reconcile the same config
 	// with the platform chart while skipping a redundant GPU-operator upgrade.
 	candidateConfig := writeForgeConfigInferenceGPU(
-		t, state.runID, state.vm.IP, state.privKeyPath, state.chartVersion, plan,
+		t, state.runID, state.host.IP, state.privKeyPath, state.chartVersion, plan,
 	)
 	out := applyOnceArgs(t, state.forgeBin, state.forgeHome, candidateConfig, "--skip-gpu")
 	state.bindKubeconfigTunnel(t)
@@ -45,7 +45,7 @@ func applyInferencePlatformStage(t *testing.T, state *digitalOceanGPUState) {
 		controlPlaneDigestEnv, inferenceGatewayDigestEnv, toolRunnerDigestEnv)
 }
 
-func runInferenceGPUStage(t *testing.T, state *digitalOceanGPUState) {
+func runInferenceGPUStage(t *testing.T, state *permanentGPUFixtureState) {
 	runID := state.runID
 	forgeHome := state.forgeHome
 
@@ -134,7 +134,7 @@ spec:
 	t.Logf("issued gateway-scoped API key (prefix=%s)", keyPrefix(gatewayKey))
 
 	// 7. get the gateway's admin key + port-forward the gateway. Port-forward
-	//    (not the droplet IP / ingress) so the readiness poll + the completion
+	//    (not the fixture address / ingress) so the readiness poll + the completion
 	//    request depend only on the gateway pod being up — not on ingress-nginx
 	//    scheduling on the GPU node (which can lag or be tainted differently).
 	gatewayAdminKey := getSecretKey(t, c, namespace, release+"-gateway-admin", "adminApiKey")
@@ -186,7 +186,7 @@ func writeForgeConfigInferenceGPU(
 
 // waitForModelAvailable polls the gateway's /admin/v1/snapshot until the given
 // alias is present AND available=true (vLLM ready). The generous timeout covers
-// the vLLM image pull + model download + startup on the GPU droplet. Logs the
+// the vLLM image pull + model load + startup on the permanent GPU fixture. Logs the
 // last status + body periodically, and dumps vLLM pod diagnostics once at the
 // 5m mark (so a crash/image-pull issue is visible without waiting the full
 // timeout). Returns (entry, false) on timeout so the caller can dump final

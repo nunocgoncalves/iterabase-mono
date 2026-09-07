@@ -1622,7 +1622,7 @@ func TestDataStoragePurgeScriptIsReceiptBoundedAndRefusesLiveLVs(t *testing.T) {
 	for _, expected := range []string{
 		"data-storage purge refusal", "receipt install mismatch", "configured device order/set differs",
 		"backs system path", "raw-consumer probe failed", "still contains", "delete claims and release consumers",
-		"vgremove --yes", "pvremove --yes", "FORGE_DATA_STORAGE_PURGE_RESULT", "already-clean",
+		"vgremove --yes", "pvremove --yes", "FORGE_DATA_STORAGE_PURGE_RESULT", "already-clean", lvmReportPairParser,
 	} {
 		assert.Contains(t, script, expected)
 	}
@@ -1657,7 +1657,7 @@ func TestDataStorageCommandIsSetWideBoundedAndCrashResumable(t *testing.T) {
 		"wipefs -n --noheadings --output TYPE", "blkid -p", "write_receipt planned 0",
 		"pvcreate --yes --zero y --uuid", "--norestorefile", "vgcreate --yes --uuid",
 		"planned_pv_uuid", "planned_vg_uuid", "data-storage device order/set differs",
-		"vg_name=", "iterabase-data", "actual_members", "FORGE_DATA_STORAGE_RESULT",
+		"vg_name=", "iterabase-data", "actual_members", "FORGE_DATA_STORAGE_RESULT", lvmReportPairParser,
 	} {
 		assert.Contains(t, script, expected)
 	}
@@ -1668,6 +1668,13 @@ func TestDataStorageCommandIsSetWideBoundedAndCrashResumable(t *testing.T) {
 		assert.NotContains(t, script, forbidden)
 	}
 	assert.GreaterOrEqual(t, strings.Count(script, "verify_or_blank_set"), 3)
+}
+
+func TestLVMReportPairParserTrimsPaddedFields(t *testing.T) {
+	cmd := exec.Command("bash", "-ceu", "printf '  pv-uuid  |   iterabase-data  \\n' | "+lvmReportPairParser)
+	output, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(output))
+	assert.Equal(t, "pv-uuid|iterabase-data\n", string(output))
 }
 
 func TestDataStorageScriptsAreValidBash(t *testing.T) {
