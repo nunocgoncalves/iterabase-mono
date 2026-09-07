@@ -84,7 +84,6 @@ func boundWorkspaceObjects(pool *v1alpha1.AgentPool) []client.Object {
 			}},
 			NodeAffinity: &corev1.VolumeNodeAffinity{Required: &corev1.NodeSelector{NodeSelectorTerms: []corev1.NodeSelectorTerm{{MatchExpressions: []corev1.NodeSelectorRequirement{
 				{Key: "openebs.io/nodename", Operator: corev1.NodeSelectorOpIn, Values: []string{"node-1"}},
-				{Key: corev1.LabelHostname, Operator: corev1.NodeSelectorOpIn, Values: []string{"node-1"}},
 			}}}}},
 		},
 		Status: corev1.PersistentVolumeStatus{Phase: corev1.VolumeBound},
@@ -219,6 +218,13 @@ func TestAssessAgentPoolStorageRejectsCSIAndOpenEBSIdentityDrift(t *testing.T) {
 		}, want: "thin=yes"},
 		{name: "wrong node", mutate: func(objects []client.Object) {
 			_ = unstructured.SetNestedField(objects[3].(*unstructured.Unstructured).Object, "node-2", "spec", "ownerNodeID")
+		}, want: "topology"},
+		{name: "extra topology", mutate: func(objects []client.Object) {
+			pv := objects[2].(*corev1.PersistentVolume)
+			pv.Spec.NodeAffinity.Required.NodeSelectorTerms[0].MatchExpressions = append(
+				pv.Spec.NodeAffinity.Required.NodeSelectorTerms[0].MatchExpressions,
+				corev1.NodeSelectorRequirement{Key: corev1.LabelHostname, Operator: corev1.NodeSelectorOpIn, Values: []string{"node-1"}},
+			)
 		}, want: "topology"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

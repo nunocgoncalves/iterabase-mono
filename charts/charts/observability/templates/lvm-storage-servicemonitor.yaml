@@ -13,7 +13,8 @@ spec:
       - {{ .Release.Namespace }}
   selector:
     matchLabels:
-      app: openebs-lvm-node
+      name: openebs-lvm-node
+      openebs.io/component-name: openebs-lvm-node
   endpoints:
     - port: metrics
       path: /metrics

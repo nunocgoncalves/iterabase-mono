@@ -285,22 +285,16 @@ func (r *AgentPoolReconciler) validateAgentPoolLVMVolume(ctx context.Context, pv
 	return fmt.Sprintf("OpenEBS LVMNode %s is unavailable in namespace %s", ownerNode, volume.GetNamespace())
 }
 
+// OpenEBS publishes PV accessible topology with its driver key; the additional
+// allowed hostname key is a CSINode registration capability, not a PV term.
 func pvHasExactNodeTopology(pv *corev1.PersistentVolume, node string) bool {
 	terms := pv.Spec.NodeAffinity.Required.NodeSelectorTerms
-	if len(terms) != 1 || len(terms[0].MatchFields) != 0 || len(terms[0].MatchExpressions) != 2 {
+	if len(terms) != 1 || len(terms[0].MatchFields) != 0 || len(terms[0].MatchExpressions) != 1 {
 		return false
 	}
-	seen := map[string]bool{}
-	for _, expression := range terms[0].MatchExpressions {
-		if expression.Operator != corev1.NodeSelectorOpIn || len(expression.Values) != 1 || expression.Values[0] != node {
-			return false
-		}
-		if expression.Key != "openebs.io/nodename" && expression.Key != corev1.LabelHostname {
-			return false
-		}
-		seen[expression.Key] = true
-	}
-	return seen["openebs.io/nodename"] && seen[corev1.LabelHostname]
+	expression := terms[0].MatchExpressions[0]
+	return expression.Key == "openebs.io/nodename" && expression.Operator == corev1.NodeSelectorOpIn &&
+		len(expression.Values) == 1 && expression.Values[0] == node
 }
 
 func nestedNumber(value any) int64 {

@@ -106,6 +106,8 @@ func assertOpenEBSLVMClaimsStage(t *testing.T, state *chartState) {
 		}
 	}
 
+	// Ubuntu 24.04 XFS refuses filesystems at or below 300 MB; keep this real
+	// lifecycle claim above that supported minimum rather than bypassing format.
 	manifest := `apiVersion: v1
 kind: PersistentVolumeClaim
 metadata: {name: lvm-lifecycle, namespace: iterabase-system}
@@ -113,7 +115,7 @@ spec:
   accessModes: [ReadWriteOnce]
   volumeMode: Filesystem
   storageClassName: iterabase-lvm-xfs
-  resources: {requests: {storage: 128Mi}}
+  resources: {requests: {storage: 512Mi}}
 ---
 apiVersion: v1
 kind: Pod
