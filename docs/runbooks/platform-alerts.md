@@ -82,7 +82,7 @@ The named pool PVC is at or below 20% free, or its durable gate has not yet reac
 
 ## IterabaseWorkspaceStorageIOFailure
 
-Treat this as actual claim/filesystem failure rather than a capacity warning. Capture bounded worker-loss, turn fencing, XFS, CSI mount, PVC/PV, LVMVolume, LVMNode, VG, kernel, and node-I/O evidence. Verify the Forge receipt plus exact selected-device/PV/VG UUID and membership before any host action. Changed hardware, PV/VG identity, class, topology, ownership, or unexpected consumer fails closed. Do not recreate/adopt/extend storage or replay work automatically.
+Treat this as actual claim/filesystem failure rather than a capacity warning. Capture bounded worker-loss, turn fencing, XFS, CSI mount, PVC/PV, LVMVolume, LVMNode, VG, kernel, and node-I/O evidence. Verify the Forge receipt plus exact ownership tag, selected-device/PV/VG UUID, and membership before any host action. Changed hardware, PV/VG identity, class, topology, ownership, or unexpected consumer fails closed. Do not recreate/adopt/extend storage or replay work automatically.
 
 ## IterabaseDataVGCapacityWarning
 

@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	dataStorageContractVersion = "HOR-545/v1"
+	dataStorageContractVersion = "HOR-545/v2"
 	dataStorageReceiptPath     = "/var/lib/iterabase/data-storage.receipt"
 	k3sKubeletDirectory        = "/var/lib/rancher/k3s/agent/kubelet"
 	lvmReportPairParser        = `awk -F'|' '{for(i=1;i<=2;i++){gsub(/^[[:space:]]+|[[:space:]]+$/, "", $i)}; print $1 "|" $2}'`
@@ -322,14 +322,26 @@ probe_blank() {
 receipt_value() { awk -F= -v wanted="$1" '$1 == wanted {sub(/^[^=]*=/, ""); print; found=1} END {if (!found) exit 3}' "$receipt"; }
 decode_receipt() { receipt_value "$1" | base64 -d; }
 lvm_uuid() { raw=$(tr -d - < /proc/sys/kernel/random/uuid); printf '%%s-%%s-%%s-%%s-%%s-%%s-%%s\n' "${raw:0:6}" "${raw:6:4}" "${raw:10:4}" "${raw:14:4}" "${raw:18:4}" "${raw:22:4}" "${raw:26:6}"; }
+valid_lvm_uuid() { case "$1" in ??????-????-????-????-????-????-??????) return 0 ;; *) return 1 ;; esac; }
+new_ownership_tag() {
+  raw=$(tr -d - < /proc/sys/kernel/random/uuid)
+  printf '%%s' "$raw" | grep -Eq '^[0-9a-f]{32}$' || fail "kernel UUID source did not produce a valid ownership token"
+  printf 'iterabase.hor545.%%s\n' "$raw"
+}
+valid_ownership_tag() { printf '%%s' "$1" | grep -Eq '^iterabase[.]hor545[.][0-9a-f]{32}$'; }
+ownership_tag_owners() {
+  vgs --noheadings --separator '|' -o vg_name,vg_uuid,vg_tags | awk -F'|' -v wanted="$ownership_tag" '
+    {for(i=1;i<=3;i++) gsub(/^[[:space:]]+|[[:space:]]+$/, "", $i); n=split($3, tags, ","); for(i=1;i<=n;i++) if(tags[i] == wanted) {print $1 "|" $2; break}}
+  ' | sort
+}
 write_receipt() {
   status_value=$1; pv_done_value=$2; receipt_dir=$(dirname "$receipt")
   install -d -o root -g root -m 0700 "$receipt_dir"
-  tmp=$(mktemp "$receipt_dir/.data-storage.receipt.XXXXXX"); umask 077
+  umask 077; tmp=$(mktemp "$receipt_dir/.data-storage.receipt.XXXXXX")
   {
     printf 'contract=%%s\nstatus=%%s\npv_done=%%s\n' "$contract" "$status_value" "$pv_done_value"
     printf 'install_b64=%%s\n' "$(printf '%%s' "$install_name" | base64 -w0)"
-    printf 'device_count=%%s\nvg_name=%%s\nvg_uuid=%%s\n' "$count" "$vg_name" "$planned_vg_uuid"
+    printf 'device_count=%%s\nvg_name=%%s\nownership_tag=%%s\nvg_uuid=%%s\n' "$count" "$vg_name" "$ownership_tag" "$receipt_vg_uuid"
     for ((r=0; r<count; r++)); do
       printf 'device_%%s_b64=%%s\n' "$r" "$(printf '%%s' "${selected[$r]}" | base64 -w0)"
       printf 'resolved_%%s_b64=%%s\n' "$r" "$(printf '%%s' "${resolved[$r]}" | base64 -w0)"
@@ -343,7 +355,7 @@ write_receipt() {
   chown root:root "$tmp"; chmod 0600 "$tmp"; sync -f "$tmp"; mv -f "$tmp" "$receipt"; sync -f "$receipt_dir"
 }
 
-status=; pv_done=0; planned_vg_uuid=
+status=; pv_done=0; receipt_vg_uuid=; ownership_tag=
 if test -e "$receipt"; then
   test -f "$receipt" && test ! -L "$receipt" || fail "data-storage receipt is not a regular file"
   test "$(stat -c '%%u:%%g:%%a' "$receipt")" = 0:0:600 || fail "data-storage receipt ownership/mode drift"
@@ -354,8 +366,23 @@ if test -e "$receipt"; then
   test "$(decode_receipt install_b64)" = "$install_name" || fail "data-storage receipt install mismatch"
   test "$(receipt_value device_count)" = "$count" || fail "data-storage configured device-set size differs from the receipt"
   test "$(receipt_value vg_name)" = "$vg_name" || fail "data-storage VG name mismatch"
-  planned_vg_uuid=$(receipt_value vg_uuid)
-  case "$planned_vg_uuid" in ??????-????-????-????-????-????-??????) ;; *) fail "data-storage receipt VG UUID is invalid" ;; esac
+  ownership_tag=$(receipt_value ownership_tag)
+  valid_ownership_tag "$ownership_tag" || fail "data-storage receipt ownership tag is invalid"
+  receipt_vg_uuid=$(receipt_value vg_uuid)
+  case "$status" in
+    planned)
+      test "$pv_done" = 0 || fail "data-storage planned receipt has completed PV stages"
+      test -z "$receipt_vg_uuid" || fail "data-storage receipt records a VG UUID before the VG-created stage"
+      ;;
+    pvs-created)
+      test "$pv_done" -gt 0 || fail "data-storage pvs-created receipt has no completed PV"
+      test -z "$receipt_vg_uuid" || fail "data-storage receipt records a VG UUID before the VG-created stage"
+      ;;
+    vg-created|complete)
+      test "$pv_done" = "$count" || fail "data-storage VG receipt does not bind the complete PV set"
+      valid_lvm_uuid "$receipt_vg_uuid" || fail "data-storage receipt VG UUID is invalid"
+      ;;
+  esac
   for ((i=0; i<count; i++)); do
     test "$(decode_receipt device_${i}_b64)" = "${selected[$i]}" || fail "data-storage device order/set differs from the receipt"
     test "$(decode_receipt resolved_${i}_b64)" = "${resolved[$i]}" || fail "data-storage resolved device identity drift"
@@ -365,7 +392,7 @@ if test -e "$receipt"; then
     test "$(decode_receipt transport_${i}_b64)" = "${transport[$i]}" || fail "data-storage transport identity drift"
     test "$(receipt_value size_$i)" = "${size[$i]}" || fail "data-storage size identity drift"
     planned_pv_uuid[$i]=$(receipt_value pv_uuid_$i)
-    case "${planned_pv_uuid[$i]}" in ??????-????-????-????-????-????-??????) ;; *) fail "data-storage receipt PV UUID is invalid" ;; esac
+    valid_lvm_uuid "${planned_pv_uuid[$i]}" || fail "data-storage receipt PV UUID is invalid"
   done
 else
   for ((i=0; i<count; i++)); do probe_blank "$i"; done
@@ -376,10 +403,17 @@ else
   fi
   need pvcreate; need pvs; need vgcreate; need vgs; need lvs
   for ((i=0; i<count; i++)); do planned_pv_uuid[$i]=$(lvm_uuid); done
-  planned_vg_uuid=$(lvm_uuid); write_receipt planned 0; status=planned
+  ownership_tag=$(new_ownership_tag)
+  test -z "$(ownership_tag_owners)" || fail "generated data-storage ownership tag already belongs to a VG"
+  write_receipt planned 0; status=planned
 fi
 
 need pvs; need vgs; need lvs
+tag_owners=$(ownership_tag_owners)
+if test -n "$tag_owners"; then
+  test "$(printf '%%s\n' "$tag_owners" | awk 'NF {n++} END {print n+0}')" = 1 || fail "data-storage ownership tag belongs to multiple VGs"
+  test "${tag_owners%%|*}" = "$vg_name" || fail "data-storage ownership tag belongs to foreign VG ${tag_owners%%|*}"
+fi
 read_pv() {
   set +e; pv_line=$(pvs --noheadings --separator '|' -o pv_uuid,vg_name -- "$1" 2>&1); pv_rc=$?; set -e
   test "$pv_rc" = 0 || return 1
@@ -408,6 +442,8 @@ else
       test -z "$pv_vg" || test "$pv_vg" = "$vg_name" || fail "${selected[$i]} belongs to foreign VG $pv_vg"
     else
       verify_or_blank_set
+      test -z "$tag_owners" || fail "receipt PV ${selected[$i]} is missing from the tagged $vg_name VG"
+      if vgs "$vg_name" >/dev/null 2>&1; then fail "receipt PV ${selected[$i]} is missing while $vg_name already exists"; fi
       pvcreate --yes --zero y --uuid "${planned_pv_uuid[$i]}" --norestorefile -- "${resolved[$i]}"
       pv=$(read_pv "${resolved[$i]}") || fail "pvcreate did not produce a readable PV for ${selected[$i]}"
       test "${pv%%|*}" = "${planned_pv_uuid[$i]}" && test -z "${pv#*|}" || fail "pvcreate identity mismatch for ${selected[$i]}"
@@ -417,25 +453,38 @@ else
 fi
 
 vg_exists=false
-if vgs "$vg_name" >/dev/null 2>&1; then vg_exists=true; fi
+vg_record_count=$(vgs --noheadings --select "vg_name=$vg_name" -o vg_uuid 2>/dev/null | awk 'NF {n++} END {print n+0}')
+test "$vg_record_count" -le 1 || fail "multiple VGs named $vg_name are ambiguous"
+if test "$vg_record_count" = 1; then vg_exists=true; fi
 if test "$vg_exists" = false; then
+  test -z "$tag_owners" || fail "receipt ownership tag resolves to a missing or foreign VG"
+  for ((i=0; i<count; i++)); do
+    if pv=$(read_pv "${resolved[$i]}"); then
+      test -z "${pv#*|}" || fail "receipt PV ${selected[$i]} names a VG that is not uniquely readable"
+    fi
+  done
   test "$mode" = inspect && { final_state="resumable-$status"; vg_size=0; vg_free=0; vg_uuid=; }
   if test "$mode" = reconcile; then
     test "$pv_done" = "$count" || fail "not every receipt PV is complete before vgcreate"
     verify_or_blank_set
-    vgcreate --yes --uuid "$planned_vg_uuid" "$vg_name" "${resolved[@]}"
-    write_receipt vg-created "$count"; status=vg-created; vg_exists=true
+    vgcreate --yes --addtag "$ownership_tag" "$vg_name" "${resolved[@]}"
+    vg_exists=true
   fi
 fi
 
 if test "$vg_exists" = true; then
-  vg_line=$(vgs --noheadings --separator '|' --units b --nosuffix -o vg_uuid,vg_size,vg_free,lv_count,pv_count "$vg_name") || fail "cannot inspect $vg_name"
-  IFS='|' read -r vg_uuid vg_size vg_free lv_count pv_count <<<"$vg_line"
-  vg_uuid=$(printf '%%s' "$vg_uuid" | awk '{$1=$1;print}'); vg_size=$(printf '%%s' "$vg_size" | awk '{$1=$1;printf "%%.0f",$1}'); vg_free=$(printf '%%s' "$vg_free" | awk '{$1=$1;printf "%%.0f",$1}')
+  vg_line=$(vgs --noheadings --separator '|' --units b --nosuffix -o vg_uuid,vg_tags,vg_size,vg_free,lv_count,pv_count "$vg_name") || fail "cannot inspect $vg_name"
+  test "$(printf '%%s\n' "$vg_line" | awk 'NF {n++} END {print n+0}')" = 1 || fail "$vg_name identity is ambiguous"
+  IFS='|' read -r vg_uuid vg_tags vg_size vg_free lv_count pv_count <<<"$vg_line"
+  vg_uuid=$(printf '%%s' "$vg_uuid" | awk '{$1=$1;print}'); vg_tags=$(printf '%%s' "$vg_tags" | awk '{$1=$1;print}')
+  vg_size=$(printf '%%s' "$vg_size" | awk '{$1=$1;printf "%%.0f",$1}'); vg_free=$(printf '%%s' "$vg_free" | awk '{$1=$1;printf "%%.0f",$1}')
   lv_count=$(printf '%%s' "$lv_count" | awk '{$1=$1;print}'); pv_count=$(printf '%%s' "$pv_count" | awk '{$1=$1;print}')
+  valid_lvm_uuid "$vg_uuid" || fail "$vg_name reported an invalid VG UUID"
+  test "$vg_tags" = "$ownership_tag" || fail "$vg_name ownership tag differs from the receipt"
+  tag_owners=$(ownership_tag_owners)
+  test "$tag_owners" = "$vg_name|$vg_uuid" || fail "$vg_name ownership tag is not globally unique"
   unexpected_segments=$(lvs --noheadings --select "vg_name=$vg_name" -o segtype | awk '{$1=$1; if(NF && $1 != "linear") print}')
   test -z "$unexpected_segments" || fail "$vg_name contains unsupported thin/snapshot/non-linear logical volumes: $unexpected_segments"
-  test "$vg_uuid" = "$planned_vg_uuid" || fail "$vg_name UUID differs from the receipt"
   test "$pv_count" = "$count" || fail "$vg_name PV membership count differs from the receipt"
   actual_members=$(pvs --noheadings --select "vg_name=$vg_name" -o pv_name | awk '{$1=$1; if(NF)print}' | sort)
   expected_members=$(printf '%%s\n' "${resolved[@]}" | sort)
@@ -444,6 +493,14 @@ if test "$vg_exists" = true; then
     pv=$(read_pv "${resolved[$i]}") || fail "receipt PV ${selected[$i]} disappeared"
     test "${pv%%|*}" = "${planned_pv_uuid[$i]}" && test "${pv#*|}" = "$vg_name" || fail "receipt PV ${selected[$i]} identity/membership drift"
   done
+  if test -n "$receipt_vg_uuid"; then
+    test "$vg_uuid" = "$receipt_vg_uuid" || fail "$vg_name UUID differs from the receipt"
+  else
+    test "$status" = pvs-created || fail "$vg_name exists before a valid receipt stage"
+    if test "$mode" = reconcile; then
+      receipt_vg_uuid=$vg_uuid; write_receipt vg-created "$count"; status=vg-created
+    fi
+  fi
   if test "$mode" = reconcile && test "$status" != complete; then write_receipt complete "$count"; status=complete; fi
   if test "$status" = complete; then final_state=complete; else final_state="resumable-$status"; fi
 fi
@@ -466,12 +523,22 @@ expected_uuid=%s
 expected_size=%s
 expected_free=%s
 fail() { printf 'lvm-storage readiness refusal: %%s\n' "$*" >&2; exit 42; }
+csi_registered() {
+  cluster_nodes=$(k3s kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null) || return 1
+  test "$(printf '%%s\n' "$cluster_nodes" | awk 'NF {n++} END {print n+0}')" = 1 || return 1
+  cluster_node=$(printf '%%s\n' "$cluster_nodes" | awk 'NF {print; exit}')
+  registration=$(k3s kubectl get csinode "$cluster_node" -o jsonpath='{.spec.drivers[?(@.name=="local.csi.openebs.io")].name}|{.spec.drivers[?(@.name=="local.csi.openebs.io")].nodeID}|{.spec.drivers[?(@.name=="local.csi.openebs.io")].topologyKeys}' 2>/dev/null) || return 1
+  IFS='|' read -r csi_name csi_node_id csi_keys <<<"$registration"
+  test "$csi_name" = local.csi.openebs.io && test "$csi_node_id" = "$cluster_node" || return 1
+  csi_keys=$(printf '%%s' "$csi_keys" | tr -d '[]' | tr ' ' '\n' | awk 'NF' | sort)
+  test "$csi_keys" = "$(printf 'kubernetes.io/hostname\nopenebs.io/nodename')"
+}
 for attempt in $(seq 1 150); do
   if k3s kubectl get crd lvmnodes.local.openebs.io lvmvolumes.local.openebs.io lvmsnapshots.local.openebs.io >/dev/null 2>&1 &&
      k3s kubectl wait --for=condition=Established crd/lvmnodes.local.openebs.io crd/lvmvolumes.local.openebs.io crd/lvmsnapshots.local.openebs.io --timeout=10s >/dev/null 2>&1 &&
      k3s kubectl wait -n "$namespace" --for=condition=Available deployment -l app=openebs-lvm-controller --timeout=10s >/dev/null 2>&1 &&
      k3s kubectl rollout status -n "$namespace" daemonset -l app=openebs-lvm-node --timeout=10s >/dev/null 2>&1 &&
-     k3s kubectl get csidriver local.csi.openebs.io >/dev/null 2>&1; then
+     k3s kubectl get csidriver local.csi.openebs.io >/dev/null 2>&1 && csi_registered; then
     break
   fi
   test "$attempt" -lt 150 || fail "OpenEBS LVM LocalPV controller/node/CRD/CSI registration did not become Ready"

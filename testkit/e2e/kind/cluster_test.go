@@ -49,6 +49,62 @@ func TestKindDataVolumeGroupFitsLargestThickClaimSet(t *testing.T) {
 	}
 }
 
+func TestLVMStorageHelmArgsUseTheKindKubeletRegistrationPath(t *testing.T) {
+	args := lvmStorageHelmArgs("storage", "/tmp/chart", "/tmp/kubeconfig", "iterabase-system")
+	if !slices.Contains(args, "lvm-localpv.global.kubeletDir=/var/lib/kubelet") {
+		t.Fatalf("LVM storage Helm args do not override the K3s kubelet path for Kind: %v", args)
+	}
+	for _, arg := range args {
+		if strings.Contains(arg, "/var/lib/rancher/k3s") {
+			t.Fatalf("Kind Helm args retained the K3s kubelet registration path: %v", args)
+		}
+	}
+}
+
+func TestValidateLVMCSINodeRegistrationFailsClosed(t *testing.T) {
+	valid := func() map[string]any {
+		return map[string]any{"spec": map[string]any{"drivers": []any{
+			map[string]any{"name": "other.csi.example", "nodeID": "node-a", "topologyKeys": []string{"example.com/node"}},
+			map[string]any{"name": AgentPoolWorkspaceProvisioner, "nodeID": "node-a", "topologyKeys": []string{lvmTopologyKey, "kubernetes.io/hostname"}},
+		}}}
+	}
+	marshal := func(value map[string]any) []byte {
+		data, err := json.Marshal(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return data
+	}
+	if err := ValidateLVMCSINodeRegistration(marshal(valid()), "node-a"); err != nil {
+		t.Fatalf("valid OpenEBS LVM CSINode registration failed: %v", err)
+	}
+
+	for name, mutate := range map[string]func(map[string]any){
+		"missing": func(value map[string]any) {
+			value["spec"].(map[string]any)["drivers"] = []any{}
+		},
+		"wrong node": func(value map[string]any) {
+			value["spec"].(map[string]any)["drivers"].([]any)[1].(map[string]any)["nodeID"] = "node-b"
+		},
+		"missing driver topology": func(value map[string]any) {
+			value["spec"].(map[string]any)["drivers"].([]any)[1].(map[string]any)["topologyKeys"] = []string{"kubernetes.io/hostname"}
+		},
+		"extra topology": func(value map[string]any) {
+			value["spec"].(map[string]any)["drivers"].([]any)[1].(map[string]any)["topologyKeys"] = []string{lvmTopologyKey, "kubernetes.io/hostname", "example.com/zone"}
+		},
+		"duplicate": func(value map[string]any) {
+			drivers := value["spec"].(map[string]any)["drivers"].([]any)
+			value["spec"].(map[string]any)["drivers"] = append(drivers, map[string]any{"name": AgentPoolWorkspaceProvisioner, "nodeID": "node-a", "topologyKeys": []string{lvmTopologyKey, "kubernetes.io/hostname"}})
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := ValidateLVMCSINodeRegistration(marshal(func() map[string]any { value := valid(); mutate(value); return value }()), "node-a"); err == nil {
+				t.Fatalf("%s CSINode drift unexpectedly passed", name)
+			}
+		})
+	}
+}
+
 func TestCreateFailureStillAttemptsClusterDeletion(t *testing.T) {
 	t.Parallel()
 	executor := &fakeExecutor{failNext: true}

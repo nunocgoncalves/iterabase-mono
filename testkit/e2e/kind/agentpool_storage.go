@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	"sort"
 	"strings"
 	"time"
 
@@ -18,6 +19,8 @@ const (
 	PlatformDataStorageClass       = "iterabase-lvm-xfs"
 	AgentPoolWorkspaceProvisioner  = "local.csi.openebs.io"
 	DataVolumeGroupName            = "iterabase-data"
+	lvmTopologyKey                 = "openebs.io/nodename"
+	kindKubeletDirectory           = "/var/lib/kubelet"
 	defaultClassAnnotation         = "storageclass.kubernetes.io/is-default-class"
 	betaDefaultClassAnnotation     = "storageclass.beta.kubernetes.io/is-default-class"
 	// The largest owner scenario enables 70 GiB of thick chart claims; keep
@@ -93,8 +96,7 @@ vgs --noheadings -o vg_name,vg_uuid,vg_size,vg_free,pv_count,lv_count iterabase-
 	cluster.mu.Unlock()
 
 	if result, err := cluster.executor.Run(ctx, process.Command{
-		Name: "helm", Args: []string{"upgrade", "--install", release, chart, "--kubeconfig", cluster.Kubeconfig,
-			"--namespace", namespace, "--create-namespace", "--wait", "--timeout", "8m"},
+		Name: "helm", Args: lvmStorageHelmArgs(release, chart, cluster.Kubeconfig, namespace),
 		Timeout: 10 * time.Minute, OutputName: "kind-install-lvm-storage-" + cluster.Name + ".log",
 	}); err != nil {
 		return fmt.Errorf("install pinned LVM storage substrate: %w\n%s", err, result.Output)
@@ -102,7 +104,7 @@ vgs --noheadings -o vg_name,vg_uuid,vg_size,vg_free,pv_count,lv_count iterabase-
 
 	deadline := time.Now().Add(3 * time.Minute)
 	for {
-		if err := cluster.validateLVMStorage(ctx, namespace); err == nil {
+		if err := cluster.validateLVMStorage(ctx, namespace, nodeNames[0]); err == nil {
 			return nil
 		} else if time.Now().After(deadline) {
 			return err
@@ -163,7 +165,13 @@ rm -f /var/lib/iterabase-lvm-loop /var/lib/iterabase-data.img
 	return nil
 }
 
-func (cluster *Cluster) validateLVMStorage(ctx context.Context, namespace string) error {
+func lvmStorageHelmArgs(release, chart, kubeconfig, namespace string) []string {
+	return []string{"upgrade", "--install", release, chart, "--kubeconfig", kubeconfig,
+		"--namespace", namespace, "--create-namespace", "--set-string", "lvm-localpv.global.kubeletDir=" + kindKubeletDirectory,
+		"--wait", "--timeout", "8m"}
+}
+
+func (cluster *Cluster) validateLVMStorage(ctx context.Context, namespace, nodeName string) error {
 	classes, err := cluster.runKubectl(ctx, 30*time.Second, "kind-lvm-storageclasses-"+cluster.Name+".json", "get", "storageclass", "-o", "json")
 	if err != nil {
 		return fmt.Errorf("read managed LVM StorageClasses: %w", err)
@@ -190,6 +198,13 @@ func (cluster *Cluster) validateLVMStorage(ctx context.Context, namespace string
 	}
 	if _, err := cluster.runKubectl(ctx, 30*time.Second, "kind-lvm-csidriver-"+cluster.Name+".json", "get", "csidriver", AgentPoolWorkspaceProvisioner, "-o", "json"); err != nil {
 		return fmt.Errorf("read OpenEBS LVM CSIDriver: %w", err)
+	}
+	csiNode, err := cluster.runKubectl(ctx, 30*time.Second, "kind-lvm-csinode-"+cluster.Name+".json", "get", "csinode", nodeName, "-o", "json")
+	if err != nil {
+		return fmt.Errorf("read OpenEBS LVM CSINode registration: %w", err)
+	}
+	if err := ValidateLVMCSINodeRegistration([]byte(csiNode.Output), nodeName); err != nil {
+		return err
 	}
 	nodes, err := cluster.runKubectl(ctx, 30*time.Second, "kind-lvmnode-"+cluster.Name+".json", "get", "lvmnodes.local.openebs.io", "-n", namespace, "-o", "json")
 	if err != nil {
@@ -218,6 +233,41 @@ func (cluster *Cluster) validateLVMStorage(ctx context.Context, namespace string
 		}
 	}
 	return fmt.Errorf("OpenEBS LVMNode has not discovered the exact thick iterabase-data VG")
+}
+
+// ValidateLVMCSINodeRegistration rejects a missing, duplicate, wrong-node, or
+// incomplete OpenEBS node/topology registration before a WaitForFirstConsumer
+// claim can enter an unschedulable capacity loop.
+func ValidateLVMCSINodeRegistration(data []byte, nodeName string) error {
+	var csiNode struct {
+		Spec struct {
+			Drivers []struct {
+				Name         string   `json:"name"`
+				NodeID       string   `json:"nodeID"`
+				TopologyKeys []string `json:"topologyKeys"`
+			} `json:"drivers"`
+		} `json:"spec"`
+	}
+	if err := json.Unmarshal(data, &csiNode); err != nil {
+		return fmt.Errorf("decode OpenEBS LVM CSINode registration: %w", err)
+	}
+	matches := 0
+	for _, driver := range csiNode.Spec.Drivers {
+		if driver.Name != AgentPoolWorkspaceProvisioner {
+			continue
+		}
+		matches++
+		keys := append([]string(nil), driver.TopologyKeys...)
+		sort.Strings(keys)
+		expectedKeys := []string{"kubernetes.io/hostname", lvmTopologyKey}
+		if driver.NodeID != nodeName || !reflect.DeepEqual(keys, expectedKeys) {
+			return fmt.Errorf("OpenEBS LVM CSINode registration for %q does not match node/topology contract", nodeName)
+		}
+	}
+	if matches != 1 {
+		return fmt.Errorf("expected exactly one OpenEBS LVM CSINode registration for %q, observed %d", nodeName, matches)
+	}
+	return nil
 }
 
 // ValidateManagedLVMStorageClass returns the exact recognized class name and

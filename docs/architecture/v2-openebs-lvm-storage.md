@@ -1,6 +1,6 @@
 # Platform V2 OpenEBS LVM LocalPV storage
 
-Status: current repository implementation contract for HOR-545 and approved `DES-HOR-545-01` / `DES-HOR-545-02`, recorded canonically in Obsidian `Platform V2 — OpenEBS LVM LocalPV Storage`.
+Status: current repository implementation contract for HOR-545 and approved `DES-HOR-545-01` / `DES-HOR-545-02` / `DES-HOR-545-03`, recorded canonically in Obsidian `Platform V2 — OpenEBS LVM LocalPV Storage`.
 
 ## Supported topology
 
@@ -21,9 +21,9 @@ Before disk mutation and immediately before each `pvcreate`, Forge checks the co
 
 Forge never reads every device byte. Arbitrary non-signature bytes are not a secure-erasure proof and do not authorize adoption.
 
-After read-only preflight, Forge installs/verifies `lvm2` and XFS tools, loads `dm-snapshot`, and persists it in `/etc/modules-load.d/iterabase-data.conf`. A root-owned `0600`, atomic, file-and-directory-fsynced receipt at `/var/lib/iterabase/data-storage.receipt` binds contract `HOR-545/v1`, install, canonical paths, resolved identities, hardware/size, planned PV UUIDs, fixed VG UUID/name, completed PV count, and transaction stage.
+After read-only preflight, Forge installs/verifies `lvm2` and XFS tools, loads `dm-snapshot`, and persists it in `/etc/modules-load.d/iterabase-data.conf`. A root-owned `0600`, atomic, file-and-directory-fsynced receipt at `/var/lib/iterabase/data-storage.receipt` binds contract `HOR-545/v2`, install, canonical paths, resolved identities, hardware/size, planned PV UUIDs, a unique Forge ownership tag, fixed VG name, completed PV count, observed VG UUID once created, and transaction stage.
 
-The receipt is durable before `pvcreate`. Planned UUIDs plus exact metadata make a crash after command success but before receipt advancement recognizable without adopting a foreign PV. Forge creates every PV with its planned UUID, then creates exactly one `iterabase-data` VG with its planned UUID. Reapply accepts only exact receipt/PV/VG UUIDs and membership. It reports bounded total/free capacity and never creates an LV, filesystem, mount, or fstab entry.
+The receipt and ownership tag are durable before `pvcreate`. Planned PV UUIDs plus exact metadata make a crash after command success but before receipt advancement recognizable without adopting a foreign PV. Forge creates every PV with its planned UUID, then uses supported `vgcreate --addtag` to atomically create exactly one `iterabase-data` VG with the receipt-owned tag and its LVM-generated UUID. It verifies the exact tag/PV/member/name combination and fsyncs the observed UUID into the receipt before any later mutation or K3s/substrate/platform handoff. Reconcile, status, and purge accept only exact receipt tag/PV/VG UUID/name/membership. Forge reports bounded total/free capacity and never creates an LV, filesystem, mount, or fstab entry.
 
 An installed K3s whose service does not include `--disable local-storage` is immutable incompatible state and requires clean destroy/rebuild before any data-storage mutation. Fresh installs always add that disablement.
 
@@ -37,7 +37,7 @@ An installed K3s whose service does not include `--disable local-storage` is imm
 
 `.github/inputs/remote-content.json` is authority for that archive and every runtime image digest. The companion disables analytics and CSI snapshot API/controller exposure, pins all unavoidable upstream controller/node sidecars by digest, configures `/var/lib/rancher/k3s/agent/kubelet`, and enables only the LVM LocalPV CRDs/runtime needed for provisioning and VG discovery. Snapshot/backup/restore is not a supported product API.
 
-Forge applies certificate substrate, LVM substrate, then platform. It waits boundedly for LVM CRDs, controller, node DaemonSet, `local.csi.openebs.io`, both classes, and one LVMNode reporting receipt-matching `iterabase-data`. Any local-path/default class, missing/extra class, contradictory VG, or unavailable controller/node/CSI authority fails closed.
+Forge applies certificate substrate, LVM substrate, then platform. It waits boundedly for LVM CRDs, controller, node DaemonSet, `local.csi.openebs.io`, the exact one-node CSINode registration and topology keys, both classes, and one LVMNode reporting receipt-matching `iterabase-data`. Any local-path/default class, missing/extra class, contradictory VG, or unavailable controller/node/CSI authority fails closed.
 
 ## Exact StorageClasses
 
@@ -84,7 +84,7 @@ The OpenEBS node metric endpoint supplies `lvm_vg_free_size_bytes{name="iterabas
 
 A deleted claim uses `Delete` and must remove its PV, LVMVolume, and LV after consumers release it. Platform uninstall and ordinary `forge destroy` preserve the receipt, selected PVs, VG, LVs, and bytes.
 
-`forge destroy --purge-data-storage --reboot --yes` is the explicit fixture/decommission path. Purge refuses unless the receipt, set/order, resolved hardware, PV UUIDs, VG UUID/name/membership, system safety, mounts, raw consumers, and empty LV set all agree. It removes only the exact VG and PV labels, then the receipt. It has no force path and does not securely erase media.
+`forge destroy --purge-data-storage --reboot --yes` is the explicit fixture/decommission path. Purge refuses unless the receipt, ownership tag, set/order, resolved hardware, PV UUIDs, VG UUID/name/membership, system safety, mounts, raw consumers, and empty LV set all agree. It removes only the exact VG and PV labels, then the receipt. It has no force path and does not securely erase media.
 
 ## Release and acceptance
 
