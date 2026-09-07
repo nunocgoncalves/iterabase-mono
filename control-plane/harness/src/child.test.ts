@@ -18,8 +18,8 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } f
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { encodeFrame, parseSupervisorFrame, type ChildFrame } from "./ipc.js";
-import { parseAssignment, captureShutdownErrors, createSession, resolveSkillPaths, skillContentDigest, StepCompletionState, type ExtensionErrorEmitter } from "./child.js";
+import { encodeFrame, parseSupervisorFrame, type ChildFrame, type ArtifactInputRefFrame } from "./ipc.js";
+import { parseAssignment, captureShutdownErrors, createSession, resolveSkillPaths, skillContentDigest, StepCompletionState, selectArtifactInputs, type ExtensionErrorEmitter } from "./child.js";
 import { ChildRpc } from "./child-rpc.js";
 
 const HARNESS_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -451,5 +451,27 @@ describe("createSession credentialless custom provider (HOR-395)", { timeout: 30
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }
+  });
+
+  // HOR-546: a discovered descriptor that preserves its artifact read
+  // capability must cause the child to forward matching assignment artifact
+  // references, filter non-matching MIME references, and forward none for
+  // read-disabled tools. Before the gateway fix the descriptor always arrived
+  // with readsArtifacts off, so artifacts were silently dropped even when the
+  // immutable descriptor permitted reads.
+  it("selectArtifactInputs forwards matching refs, filters bad MIME, and drops for read-disabled tools (HOR-546)", () => {
+    const refs: ArtifactInputRefFrame[] = [
+      { artifactId: "a-1", mimeType: "text/plain", sizeBytes: "4", digest: "sha256:1" },
+      { artifactId: "a-2", mimeType: "application/pdf", sizeBytes: "4", digest: "sha256:2" },
+    ];
+    expect(
+      selectArtifactInputs({ readsArtifacts: true, acceptedArtifactMimeTypes: ["text/plain"] }, refs),
+    ).toEqual([refs[0]]);
+    // No accepted list → everything the tool can read is forwarded.
+    expect(selectArtifactInputs({ readsArtifacts: true, acceptedArtifactMimeTypes: undefined }, refs)).toEqual(refs);
+    // Read-disabled tool forwards none, even with matching MIME references.
+    expect(
+      selectArtifactInputs({ readsArtifacts: false, acceptedArtifactMimeTypes: ["text/plain"] }, refs),
+    ).toEqual([]);
   });
 });
