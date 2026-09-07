@@ -360,6 +360,45 @@ func TestGateway_RegistrationDiscoveryAndInvoke(t *testing.T) {
 	assert.Equal(t, `{"msg":"hi"}`, string(iresp.Msg.ResultJson))
 }
 
+// TestGateway_DiscoveryPreservesArtifactReadCapabilities verifies the persisted
+// non-secret artifact read capability and accepted MIME types survive the
+// discovery round-trip (HOR-546). Before the fix toolVersionToDescriptor
+// omitted ArtifactCapabilities, so the harness's gateway-client mapped
+// readsArtifacts=false and the child forwarded no artifact refs even when the
+// immutable descriptor permitted artifact reads.
+func TestGateway_DiscoveryPreservesArtifactReadCapabilities(t *testing.T) {
+	env := newTestEnv(t, nil)
+	desc := echoDescriptor()
+	desc.ArtifactCapabilities = &v1.ArtifactCapabilities{ReadsArtifacts: true, WritesArtifacts: false, AcceptedMimeTypes: []string{"text/plain"}}
+	rr := startRefRunner(t, env, desc, func(inv *v1.Invoke) (*v1.InvokeResult, bool) {
+		return &v1.InvokeResult{State: v1.InvokeState_INVOKE_STATE_SUCCEEDED, ResultJson: []byte(`{}`)}, false
+	})
+	defer rr.close()
+	t.Cleanup(rr.close)
+
+	runID, turnID := seedTurnAttempt(t, env)
+	gc := gatewayClient(env, env.supervisor)
+	dresp, err := gc.DiscoverEffectiveTools(context.Background(), connect.NewRequest(&v1.DiscoverRequest{
+		AttemptId: runID, CallerScope: v1.CallerScope_CALLER_SCOPE_TURN, CallerScopeId: turnID, FencingGeneration: 1,
+	}))
+	require.NoError(t, err)
+	var found *v1.ToolDescriptor
+	for _, d := range dresp.Msg.Descriptors {
+		if d.Name == "echo" {
+			found = d
+		}
+	}
+	require.NotNil(t, found, "echo should be discovered")
+	require.NotNil(t, found.ArtifactCapabilities, "discovered descriptor must expose artifact capabilities (HOR-546)")
+	assert.True(t, found.ArtifactCapabilities.ReadsArtifacts, "persisted artifact read capability must be preserved")
+	assert.False(t, found.ArtifactCapabilities.WritesArtifacts)
+	assert.Equal(t, []string{"text/plain"}, found.ArtifactCapabilities.AcceptedMimeTypes)
+	// Credential resolution and retry classification stay gateway-internal; only
+	// non-secret artifact capability may reach the child.
+	assert.Empty(t, found.CredentialSlots)
+	assert.Nil(t, found.IdempotencyProof)
+}
+
 func TestGateway_StaticRunnerApprovalReconciliation(t *testing.T) {
 	env := newTestEnv(t, nil)
 	ctx := context.Background()
