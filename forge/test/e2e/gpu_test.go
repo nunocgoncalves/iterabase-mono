@@ -66,7 +66,7 @@ func resetPermanentGPUFixtureStage(t *testing.T, state *permanentGPUFixtureState
 func applyGPUSubstrateStage(t *testing.T, state *permanentGPUFixtureState) {
 	cfgPath := writeForgeConfigGPUDriver(t, state.runID, state.host.IP, state.privKeyPath, gpuUpgradeBaselineDriver)
 	out := applyOnce(t, state.forgeBin, state.forgeHome, cfgPath)
-	assertApplyMarkers(t, out, "node ready: true", "data storage: iterabase-data", "LVM storage ready: true", "gpu ready: true", "gpu driver: "+gpuUpgradeBaselineDriver)
+	assertApplyMarkers(t, out, "node ready: true", "data storage: iterabase-data", "gpu ready: true", "gpu driver: "+gpuUpgradeBaselineDriver)
 	state.bindKubeconfigTunnel(t)
 	assertPinnedNFDRender(t, filepath.Join(state.forgeHome, state.runID, "kubeconfig.yaml"), state.runID+"-gpu-operator")
 	t.Logf("apply output:\n%s", out)

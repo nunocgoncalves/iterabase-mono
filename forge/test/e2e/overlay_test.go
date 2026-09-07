@@ -34,7 +34,7 @@ func runOverlayStage(t *testing.T, state *permanentCPUFixtureState) {
 	if state.freshInstall {
 		bootstrap := applyOnceArgs(t, state.forgeBin, state.forgeHome, candidateConfig,
 			"--skip-chart", "--skip-gpu", "--skip-overlay", "--skip-secrets", "--skip-flux")
-		assertApplyMarkers(t, bootstrap, "action:     install", "node ready: true", "data storage: iterabase-data", "LVM storage ready: true")
+		assertApplyMarkers(t, bootstrap, "action:     install", "node ready: true", "data storage: iterabase-data", "LVM storage substrate applied: false")
 	}
 	state.runtimeImageDigests = prepareCandidateImages(t, state.ip, state.privKeyPath)
 	out := applyOnce(t, state.forgeBin, state.forgeHome, candidateConfig)

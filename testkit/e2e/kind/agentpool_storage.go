@@ -126,6 +126,17 @@ node=$4
 if kubectl --kubeconfig "$kubeconfig" get crd agentpools.platform.iterabase.com >/dev/null 2>&1; then
   kubectl --kubeconfig "$kubeconfig" delete agentpools.platform.iterabase.com --all -A --ignore-not-found=true --wait=true --timeout=3m
 fi
+namespaced_resources=$(kubectl --kubeconfig "$kubeconfig" api-resources --api-group=platform.iterabase.com --namespaced=true --verbs=list,delete -o name)
+while IFS= read -r resource; do
+  test -n "$resource" || continue
+  test "$resource" = agentpools.platform.iterabase.com && continue
+  kubectl --kubeconfig "$kubeconfig" delete "$resource" --all -A --ignore-not-found=true --wait=true --timeout=3m
+done <<<"$namespaced_resources"
+cluster_resources=$(kubectl --kubeconfig "$kubeconfig" api-resources --api-group=platform.iterabase.com --namespaced=false --verbs=list,delete -o name)
+while IFS= read -r resource; do
+  test -n "$resource" || continue
+  kubectl --kubeconfig "$kubeconfig" delete "$resource" --all --ignore-not-found=true --wait=true --timeout=3m
+done <<<"$cluster_resources"
 while IFS= read -r release; do
   test -n "$release" || continue
   test "$release" = "$lvm_release" && continue

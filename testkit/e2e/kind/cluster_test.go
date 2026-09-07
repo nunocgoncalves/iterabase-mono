@@ -246,6 +246,30 @@ func TestConfigureLVMStorageRejectsMissingChartBeforeMutation(t *testing.T) {
 	}
 }
 
+func TestLVMStorageCleanupDeletesPlatformResourcesBeforeHelmUninstall(t *testing.T) {
+	t.Parallel()
+	executor := &fakeExecutor{}
+	cluster, err := Use("charts", filepath.Join(t.TempDir(), "kubeconfig"), executor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cluster.lvmNamespace = "iterabase-system"
+	cluster.lvmRelease = "iterabase-lvm-storage"
+	cluster.lvmNode = "charts-control-plane"
+	if err := cluster.cleanupLVMStorage(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(executor.commands) != 1 || executor.commands[0].Name != "bash" || len(executor.commands[0].Args) < 2 {
+		t.Fatalf("cleanup commands = %+v", executor.commands)
+	}
+	script := executor.commands[0].Args[1]
+	platformDelete := strings.Index(script, "api-resources --api-group=platform.iterabase.com")
+	helmUninstall := strings.Index(script, "helm uninstall")
+	if platformDelete < 0 || helmUninstall < 0 || platformDelete >= helmUninstall {
+		t.Fatalf("cleanup does not release platform CRs before Helm uninstall:\n%s", script)
+	}
+}
+
 func TestMissingDownloadedRuntimeArtifactCannotReachClusterImport(t *testing.T) {
 	t.Parallel()
 	executor := &fakeExecutor{}
