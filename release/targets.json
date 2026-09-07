@@ -91,7 +91,8 @@
       "paths": ["forge/**"],
       "goreleaser_config": "forge/.goreleaser.yaml",
       "goreleaser_version": "v2.12.7",
-      "platforms": ["linux_amd64", "linux_arm64", "darwin_amd64", "darwin_arm64"]
+      "platforms": ["linux_amd64", "linux_arm64", "darwin_amd64", "darwin_arm64"],
+      "checksum": "aa2edf185a29cab02e4398822a71846cb84af387daf1f19a6a5df8ae2507529f"
     },
     "certificate-migration-chart": {
       "kind": "published-chart",
@@ -127,7 +128,7 @@
     "inference-gateway-chart": "oci://ghcr.io/nunocgoncalves/iterabase-charts/inference-gateway:0.2.13",
     "iterabase-platform-chart": "oci://ghcr.io/nunocgoncalves/iterabase-charts/iterabase-platform:0.3.22",
     "cert-manager-substrate-chart": "oci://ghcr.io/nunocgoncalves/iterabase-charts/cert-manager-substrate:0.3.22",
-    "forge-binary": "https://github.com/nunocgoncalves/iterabase-mono/releases/download/forge-v0.8.5/forge_0.8.5_linux_amd64.tar.gz"
+    "forge-binary": "https://github.com/nunocgoncalves/iterabase-mono/releases/download/forge-v0.8.6/forge_0.8.6_linux_amd64.tar.gz"
   },
   "targets": {
     "control-plane": {
