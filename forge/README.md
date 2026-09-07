@@ -61,10 +61,12 @@ charts, workloads, or claims. Forge never scans every byte.
 
 After a read-only preflight, Forge installs/verifies `lvm2` and XFS tooling,
 loads/persists `dm-snapshot`, then uses a root-owned fsynced staged receipt to
-create exact planned-UUID PVs and one fixed thick VG named `iterabase-data`.
-Reapply accepts only the receipt-matching device/PV/VG set. Forge creates no
-platform LV, filesystem, mount, or fstab entry; those belong to chart-owned
-OpenEBS LVM LocalPV dynamic PVC lifecycle.
+bind exact planned-UUID PVs, a unique ownership tag, and the fixed thick VG name
+`iterabase-data` before mutation. Forge creates the VG atomically with that tag
+and LVM-generated UUID, then fsyncs the observed UUID before any handoff.
+Reconcile, status, and purge accept only the receipt-matching tag/device/PV/VG
+set. Forge creates no platform LV, filesystem, mount, or fstab entry; those
+belong to chart-owned OpenEBS LVM LocalPV dynamic PVC lifecycle.
 
 K3s is installed with `local-storage` disabled. Forge installs the same-version
 `cert-manager-substrate` and `lvm-storage-substrate` companions before the

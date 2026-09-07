@@ -156,7 +156,7 @@ forge destroy --config forge.yaml --purge-data-storage --reboot --yes
 Expected evidence:
 
 1. existing Flux/platform/GPU/K3s cleanup completes;
-2. the exact Forge receipt/device/PV/VG identity and empty-LV predicate are revalidated;
+2. the exact Forge receipt/ownership-tag/device/PV/VG identity and empty-LV predicate are revalidated;
 3. the receipt-matching `iterabase-data` VG and selected PV signatures are removed;
 4. reboot is requested only after successful purge;
 5. SSH disconnects, then reconnects under the same pinned host key;

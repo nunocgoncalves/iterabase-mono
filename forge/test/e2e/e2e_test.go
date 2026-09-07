@@ -58,9 +58,7 @@ func newPermanentCPUFixtureState(t *testing.T) *permanentCPUFixtureState {
 
 func newPermanentCPUWorkspaceFixtureState(t *testing.T) *permanentCPUFixtureState {
 	t.Setenv(workspaceBehaviorEnv, "true")
-	state := newPermanentCPUFixtureStateForScenario(t, permanentCPUWorkspaceScenarioName)
-	state.freshInstall = true
-	return state
+	return newPermanentCPUFixtureStateForScenario(t, permanentCPUWorkspaceScenarioName)
 }
 
 func newPermanentCPUFixtureStateForScenario(t *testing.T, scenario string) *permanentCPUFixtureState {
@@ -72,6 +70,7 @@ func newPermanentCPUFixtureStateForScenario(t *testing.T, scenario string) *perm
 		ip:                  fixture.address,
 		forgeHome:           t.TempDir(),
 		workspaceDevice:     fixture.workspaceDevice,
+		freshInstall:        true,
 		runtimeImageDigests: make(map[string]importedRuntimeIdentity),
 		diagnostics:         newForgeDiagnostics(t, scenario),
 	}

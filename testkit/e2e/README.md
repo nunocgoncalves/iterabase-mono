@@ -50,8 +50,10 @@ interchangeable.
 Kind scenarios that create an `AgentPool` use the shared storage helper before
 platform data claims or workers. It removes Kind's local-path/default fallback,
 prepares a real loop-backed thick `iterabase-data` VG in the one privileged node,
-installs the exact composed `lvm-storage-substrate`, and waits for OpenEBS
-CRD/controller/node/CSI/VG readiness. It verifies exactly the non-default,
+installs the exact composed `lvm-storage-substrate` with Kind's real
+`/var/lib/kubelet` registration path (rather than the production K3s path), and
+waits for exact OpenEBS CRD/controller/node/CSINode-topology/VG readiness. It
+verifies exactly the non-default,
 non-expandable, thick XFS/RWO `iterabase-lvm-xfs` and
 `iterabase-agentpool-lvm-xfs` classes, including the latter's same-node
 `shared: yes` boundary.

@@ -62,7 +62,7 @@ func (collector Collector) Collect(ctx context.Context) error {
 	}
 
 	kube("kubernetes-resources", "get",
-		"namespaces,nodes,pods,deployments,statefulsets,daemonsets,jobs,services,endpointslices,ingresses,persistentvolumeclaims",
+		"namespaces,nodes,pods,deployments,statefulsets,daemonsets,jobs,services,endpointslices,ingresses,persistentvolumeclaims,persistentvolumes,storageclasses,csidrivers,csinodes,csistoragecapacities.storage.k8s.io",
 		"-A", "-o", "yaml")
 	kube("kubernetes-events", "get", "events", "-A", "--sort-by=.lastTimestamp", "-o", "yaml")
 	// Parse only namespace/name pairs. Redacting a full Pod JSON document before

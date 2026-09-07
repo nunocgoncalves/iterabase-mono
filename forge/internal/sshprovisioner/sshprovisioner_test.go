@@ -1621,6 +1621,7 @@ func TestDataStoragePurgeScriptIsReceiptBoundedAndRefusesLiveLVs(t *testing.T) {
 	})
 	for _, expected := range []string{
 		"data-storage purge refusal", "receipt install mismatch", "configured device order/set differs",
+		"receipt ownership tag is invalid", "ownership tag differs from receipt", "ownership tag is not globally unique", "PV identity/membership drift",
 		"backs system path", "raw-consumer probe failed", "still contains", "delete claims and release consumers",
 		"vgremove --yes", "pvremove --yes", "FORGE_DATA_STORAGE_PURGE_RESULT", "already-clean", lvmReportPairParser,
 	} {
@@ -1655,19 +1656,30 @@ func TestDataStorageCommandIsSetWideBoundedAndCrashResumable(t *testing.T) {
 		"probe_identity_topology", "probe_blank", "verify_or_blank_set", "list_process_ids", "list_process_fds",
 		"probe_active_raw_consumer", "LC_ALL=C ls -1U", "set -o pipefail", "head -n 65537",
 		"wipefs -n --noheadings --output TYPE", "blkid -p", "write_receipt planned 0",
-		"pvcreate --yes --zero y --uuid", "--norestorefile", "vgcreate --yes --uuid",
-		"planned_pv_uuid", "planned_vg_uuid", "data-storage device order/set differs",
+		"pvcreate --yes --zero y --uuid", "--norestorefile", "ownership_tag=", "receipt_vg_uuid=",
+		"vgcreate --yes --addtag \"$ownership_tag\"", "receipt_vg_uuid=$vg_uuid; write_receipt vg-created",
+		"planned_pv_uuid", "ownership_tag_owners", "data-storage device order/set differs", "ownership tag differs from the receipt",
+		"ownership tag is not globally unique",
 		"vg_name=", "iterabase-data", "actual_members", "FORGE_DATA_STORAGE_RESULT", lvmReportPairParser,
 	} {
 		assert.Contains(t, script, expected)
 	}
 	for _, forbidden := range []string{
 		"if=/dev/", "FORGE_DATA_STORAGE_FORCE", "wipefs -a", "mkfs.", "mount ", "/etc/fstab",
-		"AgentPoolWorkspace", "rancher.io/local-path", "--force",
+		"AgentPoolWorkspace", "rancher.io/local-path", "vgcreate --yes --uuid", "--force",
 	} {
 		assert.NotContains(t, script, forbidden)
 	}
 	assert.GreaterOrEqual(t, strings.Count(script, "verify_or_blank_set"), 3)
+	plannedReceipt := strings.Index(script, "write_receipt planned 0")
+	firstPVCreate := strings.Index(script, "pvcreate --yes --zero y --uuid")
+	vgCreate := strings.Index(script, "vgcreate --yes --addtag")
+	observedUUIDReceipt := strings.Index(script, "receipt_vg_uuid=$vg_uuid; write_receipt vg-created")
+	for name, index := range map[string]int{"planned receipt": plannedReceipt, "pvcreate": firstPVCreate, "vgcreate": vgCreate, "observed UUID receipt": observedUUIDReceipt} {
+		require.GreaterOrEqual(t, index, 0, "%s command missing", name)
+	}
+	assert.Less(t, plannedReceipt, firstPVCreate, "ownership tag and PV UUID receipt must be durable before first mutation")
+	assert.Less(t, vgCreate, observedUUIDReceipt, "LVM-generated VG UUID can be recorded only after tagged creation")
 }
 
 func TestLVMReportPairParserTrimsPaddedFields(t *testing.T) {
@@ -1737,6 +1749,8 @@ func TestEnsureDataStorageToolsInstallsAndPersistsModule(t *testing.T) {
 func TestWaitForLVMStorageReadyParsesBoundedVGIdentity(t *testing.T) {
 	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
 		assert.Contains(t, cmd, "lvmnodes.local.openebs.io")
+		assert.Contains(t, cmd, "get csinode")
+		assert.Contains(t, cmd, "openebs.io/nodename")
 		assert.Contains(t, cmd, "iterabase-agentpool-lvm-xfs")
 		assert.Contains(t, cmd, "K3s local-path provisioner still exists")
 		return "FORGE_LVM_STORAGE_READY\tnode-a\titerabase-data\tvg-a\t300\t250\t2\t2\n", 0

@@ -65,6 +65,9 @@ func TestCollectorCapturesRedactedKubernetesHelmAndPodEvidence(t *testing.T) {
 	if err := collector.Collect(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	if len(executor.commands) == 0 || !strings.Contains(strings.Join(executor.commands[0].Args, " "), "csinodes,csistoragecapacities.storage.k8s.io") {
+		t.Fatalf("Kubernetes diagnostics omit CSI node/capacity evidence: %+v", executor.commands)
+	}
 	for _, name := range []string{
 		"kubernetes-resources.log", "kubernetes-events.log", "describe-iterabase-system-api-0.log",
 		"logs-iterabase-system-api-0.log", "helm-get-iterabase-system-platform.log",
