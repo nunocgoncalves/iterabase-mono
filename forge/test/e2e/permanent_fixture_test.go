@@ -186,7 +186,6 @@ func (fixture *permanentFixture) releaseDataStorageConsumers() error {
 	}
 	defer client.Close()
 	script := fmt.Sprintf(`sudo bash -ceu '
-install_name=%s
 workspace_device=%s
 if ! command -v k3s >/dev/null 2>&1 || ! k3s kubectl get --raw=/readyz >/dev/null 2>&1; then exit 0; fi
 k3s kubectl delete kustomizations.kustomize.toolkit.fluxcd.io --all -A --ignore-not-found=true --wait=true --timeout=2m || true
@@ -202,7 +201,7 @@ done <<<"$namespaced_resources"
 if command -v helm >/dev/null 2>&1; then
   while IFS= read -r release; do
     test -n "$release" || continue
-    case "$release" in "$install_name-cert-manager"|"$install_name-lvm-storage") continue ;; esac
+    case "$release" in *-cert-manager|*-lvm-storage) continue ;; esac
     KUBECONFIG=/etc/rancher/k3s/k3s.yaml helm uninstall "$release" -n iterabase-system --wait --timeout 5m
   done < <(KUBECONFIG=/etc/rancher/k3s/k3s.yaml helm list -n iterabase-system -q)
 fi
@@ -225,7 +224,7 @@ for i in $(seq 1 150); do
   sleep 2
 done
 exit 42
-'`, candidateShellQuote(fixture.installName()), candidateShellQuote(fixture.workspaceDevice))
+'`, candidateShellQuote(fixture.workspaceDevice))
 	if output, err := sshOutput(client, script); err != nil {
 		return fmt.Errorf("release platform consumers/claims before explicit data-storage purge: %w\n%s", err, output)
 	}
