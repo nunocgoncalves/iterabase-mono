@@ -14,7 +14,9 @@ from unittest.mock import patch
 
 from e2e import (
     E2EError,
+    PLAN_SCHEMA_VERSION,
     archive_image_config,
+    compose_runtime,
     extract_chart,
     find_metadata,
     hash_file,
@@ -22,8 +24,10 @@ from e2e import (
     load_contract,
     make_plan,
     pull_image,
+    recipe_hash,
     runtime_image_tag,
     validate_catalogue_contract,
+    validate_retained_runtime_bundle,
     validate_results,
     set_chart_dependency_version,
 )
@@ -885,145 +889,94 @@ class ResultReconciliationTests(unittest.TestCase):
         )
         return plan_path, results, result
 
-    def forge_baseline_fixture(self, directory: Path) -> tuple[Path, Path, dict]:
-        # Control-plane-only candidate: forge is non-selected, so forge-binary must
-        # resolve as a published baseline. The fixture models the corrected compose
-        # output where a published-baseline forge runtime records the released
-        # tarball checksum (matching the plan) without any network I/O.
-        plan = make_plan(
-            ROOT,
-            self.catalogue,
-            self.contract,
-            intent="candidate",
-            source_sha=SOURCE_SHA,
-            targets=["control-plane"],
-        )
-        selected = next(
-            item for item in plan["scenario_matrix"]
-            if item["id"] == "forge/digitalocean-cpu"
-        )
-        forge = next(item for item in selected["artifacts"] if item["name"] == "forge-binary")
-        self.assertEqual("published-baseline", forge["custody"])
-        self.assertEqual(
-            self.contract["artifact_recipes"]["forge-binary"]["checksum"],
-            forge["checksum"],
-        )
-        # Model the baseline resolver's immutable identities without network I/O.
-        for artifact in selected["artifacts"]:
-            if artifact["custody"] != "published-baseline":
-                continue
-            if artifact["kind"] == "image":
-                artifact["digest"] = "sha256:" + "4" * 64
-        plan["scenario_matrix"] = [selected]
-        plan["kind_matrix"] = []
-        plan["real_machine_matrix"] = [selected]
-        plan["selected_scenario_ids"] = [selected["id"]]
-        plan["scenario_total"] = 1
-        plan_path = directory / "plan.json"
-        plan_path.write_text(json.dumps(plan, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+    def test_composed_published_forge_binary_reconciles_on_tarball_checksum(self) -> None:
+        # A control-plane-only candidate leaves forge non-selected, so compose must
+        # record the released tarball checksum (the authoritative baseline identity),
+        # not the extracted-binary checksum, so the emitted bundle reconciles on the
+        # published-baseline path. This exercises compose_runtime itself rather than
+        # a hand-built bundle, so it genuinely catches a regression of the fix.
+        recipe = self.contract["artifact_recipes"]["forge-binary"]
+        with tempfile.TemporaryDirectory() as value:
+            root = Path(value)
+            output = root / "output"
+            runtime = output / "runtime"
+            runtime.mkdir(parents=True, exist_ok=True)
+            # A real gz archive whose extracted binary deliberately differs from the
+            # tarball, so the emitted checksum distinguishes the two authorities.
+            archive_name = "forge_0.8.6_linux_amd64.tar.gz"
+            archive = runtime / archive_name
+            binary_data = b"#!/bin/sh\nset -e\necho forge-0.8.6\n"
+            with tarfile.open(archive, "w:gz") as bundle:
+                member = tarfile.TarInfo("forge")
+                member.size = len(binary_data)
+                member.mode = 0o755
+                bundle.addfile(member, io.BytesIO(binary_data))
+            archive_hash = hash_file(archive)
+            binary_hash = hashlib.sha256(binary_data).hexdigest()
+            self.assertNotEqual(archive_hash, binary_hash)
 
-        bundle_artifacts = []
-        observations = {}
-        for artifact in selected["artifacts"]:
-            record = {
-                "name": artifact["name"],
-                "kind": artifact["kind"],
-                "custody": artifact["custody"],
-                "reference": artifact.get("reference", artifact["name"]),
-                "recipe_sha256": artifact["recipe_sha256"],
-                "path": "/runtime/" + artifact["name"],
+            scenario = {
+                "id": "forge/digitalocean-cpu",
+                "artifacts": [
+                    {
+                        "name": "forge-binary",
+                        "kind": "forge",
+                        "custody": "published-baseline",
+                        "reference": "https://github.com/nunocgoncalves/iterabase-mono/releases/download/forge-v0.8.6/" + archive_name,
+                        "checksum": archive_hash,
+                        "recipe_sha256": recipe_hash(recipe),
+                    }
+                ],
             }
-            for field in ("reference", "digest", "checksum"):
-                if field in artifact:
-                    record[f"planned_{field}"] = artifact[field]
-            if artifact["name"] in {"iterabase-platform-chart", "cert-manager-substrate-chart"}:
-                record["reference"] += "#composed-runtime"
-            if artifact["custody"] != "published-baseline":
-                record["source_sha"] = SOURCE_SHA
-            if artifact["kind"] == "image":
-                record["digest"] = artifact.get("digest", "sha256:" + "c" * 64)
-                record["config_digest"] = "sha256:" + "e" * 64
-                record["checksum"] = "a" * 64
-                observations[artifact["name"]] = "sha256:" + "f" * 64
-            else:
-                record["checksum"] = artifact.get("checksum", "d" * 64)
-            bundle_artifacts.append(record)
-
-        results = directory / "results"
-        results.mkdir()
-        bundle = {
-            "schema_version": 1,
-            "intent": plan["intent"],
-            "source_sha": SOURCE_SHA,
-            "plan_sha256": hash_file(plan_path),
-            "catalogue_sha256": plan["catalogue_sha256"],
-            "artifacts": bundle_artifacts,
-        }
-        bundle_path = results / "runtime-bundle.json"
-        bundle_path.write_text(json.dumps(bundle, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        result = {
-            "schema_version": 1,
-            "scenario_id": selected["id"],
-            "status": "passed",
-            "source_sha": SOURCE_SHA,
-            "plan_sha256": hash_file(plan_path),
-            "catalogue_sha256": plan["catalogue_sha256"],
-            "runtime_bundle_sha256": hash_file(bundle_path),
-            "stage_graph_sha256": selected["stage_graph_sha256"],
-            "fixture_mode": selected["fixture_mode"],
-            "artifacts": copy.deepcopy(bundle_artifacts),
-            "fixture_evidence": [
-                {
-                    "name": "lifecycle",
-                    "capacity": "cpu",
-                    "host_key_sha256": "1" * 64,
-                    "workspace_device": "/dev/disk/by-id/workspace",
-                    "boot_id_before": "boot-before",
-                    "boot_id_after": "boot-after",
-                },
-            ],
-            "stages": [
-                {
-                    "name": stage["name"],
-                    "depends_on": stage.get("depends_on", []),
-                    "status": "passed",
-                }
-                for stage in selected["stages"]
-            ],
-            "completed_at": "2026-09-01T00:00:00Z",
-        }
-        for artifact in result["artifacts"]:
-            if artifact["kind"] == "image":
-                artifact["runtime_digest"] = observations[artifact["name"]]
-        result_path = results / "result.json"
-        result_path.write_text(json.dumps(result) + "\n", encoding="utf-8")
-        Path(str(result_path) + ".runtime-images.json").write_text(
-            json.dumps(observations) + "\n", encoding="utf-8"
-        )
-        return plan_path, results, result
-
-    def test_published_baseline_forge_binary_reconciles_to_tarball_checksum(self) -> None:
-        with tempfile.TemporaryDirectory() as value:
-            plan, results, _ = self.forge_baseline_fixture(Path(value))
-            # The intact fixture records the plan's authoritative tarball checksum,
-            # so a control-plane-only candidate reconciles on the published path.
-            validate_results(plan, results)
-
-    def test_published_baseline_forge_binary_rejects_extracted_binary_checksum(self) -> None:
-        with tempfile.TemporaryDirectory() as value:
-            plan, results, result = self.forge_baseline_fixture(Path(value))
-            bundle_path = results / "runtime-bundle.json"
+            execution = {
+                "schema_version": PLAN_SCHEMA_VERSION,
+                "source_sha": SOURCE_SHA,
+                "intent": "candidate",
+                "catalogue_sha256": "0" * 64,
+                "scenario_matrix": [scenario],
+            }
+            plan_path = root / "plan.json"
+            plan_path.write_text(json.dumps(execution, sort_keys=True) + "\n", encoding="utf-8")
+            # Stub the exact-source check and the external download; the released
+            # tarball is pre-placed by the test so compose extracts it directly.
+            with patch("e2e.verify_source"), patch("e2e.run", return_value=""):
+                compose_runtime(
+                    plan_path,
+                    "forge/digitalocean-cpu",
+                    root / "artifacts",
+                    output,
+                    root / "env.out",
+                    ROOT,
+                    self.contract,
+                )
+            bundle_path = output / "runtime-bundle.json"
             bundle = json.loads(bundle_path.read_text())
             forge = next(item for item in bundle["artifacts"] if item["name"] == "forge-binary")
-            # The extracted binary hash differs from the released tarball; recording
-            # it (as the pre-fix compose did) must never reconcile on the published
-            # path because the planned checksum is the authoritative tarball identity.
-            forge["checksum"] = "b" * 64
-            bundle_path.write_text(json.dumps(bundle, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-            result["runtime_bundle_sha256"] = hash_file(bundle_path)
-            (results / "result.json").write_text(json.dumps(result) + "\n", encoding="utf-8")
+            # The published-baseline runtime records the released tarball checksum,
+            # matching the plan, so the emitted bundle reconciles on this path.
+            self.assertEqual(archive_hash, forge["checksum"])
+            self.assertEqual(archive_hash, forge["planned_checksum"])
+            self.assertNotEqual(binary_hash, forge["checksum"])
+            validate_retained_runtime_bundle(
+                bundle_path,
+                {"runtime_bundle_sha256": hash_file(bundle_path)},
+                scenario,
+                execution,
+                hash_file(plan_path),
+            )
+            # Falling back to the extracted-binary hash must never reconcile here.
+            broken = copy.deepcopy(bundle)
+            next(item for item in broken["artifacts"] if item["name"] == "forge-binary")["checksum"] = binary_hash
+            broken_path = output / "broken-bundle.json"
+            broken_path.write_text(json.dumps(broken, indent=2, sort_keys=True) + "\n", encoding="utf-8")
             with self.assertRaisesRegex(E2EError, "wrong resolved checksum"):
-                validate_results(plan, results)
+                validate_retained_runtime_bundle(
+                    broken_path,
+                    {"runtime_bundle_sha256": hash_file(broken_path)},
+                    scenario,
+                    execution,
+                    hash_file(plan_path),
+                )
 
     def test_exact_result_set_and_stages_pass(self) -> None:
         with tempfile.TemporaryDirectory() as value:
