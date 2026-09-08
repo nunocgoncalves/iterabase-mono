@@ -133,7 +133,6 @@ func candidateOverlayValues(t *testing.T) string {
 	// The smallest permanent data VG is 25 GiB. Keep both real thick XFS
 	// platform claims enabled while leaving headroom for AgentPool/lifecycle proof.
 	values.WriteString("control-plane:\n  dispatch:\n    enabled: true\n    defaultModel:\n      id: forge-workspace-model\n      api: openai-completions\n  postgresql:\n    persistence:\n      size: 5Gi\n")
-	values.WriteString("minio:\n  persistence:\n    size: 5Gi\n")
 	if controlPlane != "" {
 		values.WriteString("  image:\n")
 		values.WriteString(controlPlane)
@@ -142,6 +141,7 @@ func candidateOverlayValues(t *testing.T) string {
 		values.WriteString("  toolRunner:\n    image:\n")
 		values.WriteString(toolRunner)
 	}
+	values.WriteString("minio:\n  persistence:\n    size: 5Gi\n")
 	if os.Getenv(workspaceBehaviorEnv) == "true" {
 		values.WriteString("inference-gateway:\n  workload:\n    enabled: true\n")
 		if inference != "" {
@@ -191,6 +191,11 @@ func TestCandidateOverlayValues(t *testing.T) {
 		if !strings.Contains(plan.values, expected) {
 			t.Fatalf("candidate values missing %q:\n%s", expected, plan.values)
 		}
+	}
+	controlPlaneImage := strings.Index(plan.values, "repository: \"ghcr.io/example/control-plane\"")
+	minio := strings.Index(plan.values, "\nminio:\n")
+	if controlPlaneImage < 0 || minio < 0 || controlPlaneImage >= minio {
+		t.Fatalf("control-plane image escaped into the later MinIO mapping:\n%s", plan.values)
 	}
 }
 
