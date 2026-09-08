@@ -361,6 +361,31 @@ class E2EPlanTests(unittest.TestCase):
                 resolved[name]["reference"],
             )
 
+    def test_control_plane_forge_baseline_uses_authoritative_tarball_checksum(self) -> None:
+        # A control-plane-only candidate leaves forge non-selected, so forge-binary
+        # must resolve as a published baseline whose authoritative checksum is the
+        # released Forge tarball (the recipe checksum), not the extracted binary.
+        plan = make_plan(
+            ROOT, self.catalogue, self.contract,
+            intent="candidate", source_sha=SOURCE_SHA,
+            targets=["control-plane"],
+        )
+        forge = next(
+            artifact
+            for scenario in plan["scenario_matrix"]
+            for artifact in scenario["artifacts"]
+            if artifact["name"] == "forge-binary"
+        )
+        self.assertEqual("published-baseline", forge["custody"])
+        self.assertEqual(
+            self.contract["published_baselines"]["forge-binary"],
+            forge["reference"],
+        )
+        self.assertEqual(
+            self.contract["artifact_recipes"]["forge-binary"]["checksum"],
+            forge["checksum"],
+        )
+
     def test_selected_artifact_never_substitutes_a_baseline(self) -> None:
         plan = self.plan(["control-plane/internal/api/handler.go"])
         for scenario in plan["scenario_matrix"]:
@@ -859,6 +884,146 @@ class ResultReconciliationTests(unittest.TestCase):
             json.dumps(observations) + "\n", encoding="utf-8"
         )
         return plan_path, results, result
+
+    def forge_baseline_fixture(self, directory: Path) -> tuple[Path, Path, dict]:
+        # Control-plane-only candidate: forge is non-selected, so forge-binary must
+        # resolve as a published baseline. The fixture models the corrected compose
+        # output where a published-baseline forge runtime records the released
+        # tarball checksum (matching the plan) without any network I/O.
+        plan = make_plan(
+            ROOT,
+            self.catalogue,
+            self.contract,
+            intent="candidate",
+            source_sha=SOURCE_SHA,
+            targets=["control-plane"],
+        )
+        selected = next(
+            item for item in plan["scenario_matrix"]
+            if item["id"] == "forge/digitalocean-cpu"
+        )
+        forge = next(item for item in selected["artifacts"] if item["name"] == "forge-binary")
+        self.assertEqual("published-baseline", forge["custody"])
+        self.assertEqual(
+            self.contract["artifact_recipes"]["forge-binary"]["checksum"],
+            forge["checksum"],
+        )
+        # Model the baseline resolver's immutable identities without network I/O.
+        for artifact in selected["artifacts"]:
+            if artifact["custody"] != "published-baseline":
+                continue
+            if artifact["kind"] == "image":
+                artifact["digest"] = "sha256:" + "4" * 64
+        plan["scenario_matrix"] = [selected]
+        plan["kind_matrix"] = []
+        plan["real_machine_matrix"] = [selected]
+        plan["selected_scenario_ids"] = [selected["id"]]
+        plan["scenario_total"] = 1
+        plan_path = directory / "plan.json"
+        plan_path.write_text(json.dumps(plan, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+
+        bundle_artifacts = []
+        observations = {}
+        for artifact in selected["artifacts"]:
+            record = {
+                "name": artifact["name"],
+                "kind": artifact["kind"],
+                "custody": artifact["custody"],
+                "reference": artifact.get("reference", artifact["name"]),
+                "recipe_sha256": artifact["recipe_sha256"],
+                "path": "/runtime/" + artifact["name"],
+            }
+            for field in ("reference", "digest", "checksum"):
+                if field in artifact:
+                    record[f"planned_{field}"] = artifact[field]
+            if artifact["name"] in {"iterabase-platform-chart", "cert-manager-substrate-chart"}:
+                record["reference"] += "#composed-runtime"
+            if artifact["custody"] != "published-baseline":
+                record["source_sha"] = SOURCE_SHA
+            if artifact["kind"] == "image":
+                record["digest"] = artifact.get("digest", "sha256:" + "c" * 64)
+                record["config_digest"] = "sha256:" + "e" * 64
+                record["checksum"] = "a" * 64
+                observations[artifact["name"]] = "sha256:" + "f" * 64
+            else:
+                record["checksum"] = artifact.get("checksum", "d" * 64)
+            bundle_artifacts.append(record)
+
+        results = directory / "results"
+        results.mkdir()
+        bundle = {
+            "schema_version": 1,
+            "intent": plan["intent"],
+            "source_sha": SOURCE_SHA,
+            "plan_sha256": hash_file(plan_path),
+            "catalogue_sha256": plan["catalogue_sha256"],
+            "artifacts": bundle_artifacts,
+        }
+        bundle_path = results / "runtime-bundle.json"
+        bundle_path.write_text(json.dumps(bundle, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        result = {
+            "schema_version": 1,
+            "scenario_id": selected["id"],
+            "status": "passed",
+            "source_sha": SOURCE_SHA,
+            "plan_sha256": hash_file(plan_path),
+            "catalogue_sha256": plan["catalogue_sha256"],
+            "runtime_bundle_sha256": hash_file(bundle_path),
+            "stage_graph_sha256": selected["stage_graph_sha256"],
+            "fixture_mode": selected["fixture_mode"],
+            "artifacts": copy.deepcopy(bundle_artifacts),
+            "fixture_evidence": [
+                {
+                    "name": "lifecycle",
+                    "capacity": "cpu",
+                    "host_key_sha256": "1" * 64,
+                    "workspace_device": "/dev/disk/by-id/workspace",
+                    "boot_id_before": "boot-before",
+                    "boot_id_after": "boot-after",
+                },
+            ],
+            "stages": [
+                {
+                    "name": stage["name"],
+                    "depends_on": stage.get("depends_on", []),
+                    "status": "passed",
+                }
+                for stage in selected["stages"]
+            ],
+            "completed_at": "2026-09-01T00:00:00Z",
+        }
+        for artifact in result["artifacts"]:
+            if artifact["kind"] == "image":
+                artifact["runtime_digest"] = observations[artifact["name"]]
+        result_path = results / "result.json"
+        result_path.write_text(json.dumps(result) + "\n", encoding="utf-8")
+        Path(str(result_path) + ".runtime-images.json").write_text(
+            json.dumps(observations) + "\n", encoding="utf-8"
+        )
+        return plan_path, results, result
+
+    def test_published_baseline_forge_binary_reconciles_to_tarball_checksum(self) -> None:
+        with tempfile.TemporaryDirectory() as value:
+            plan, results, _ = self.forge_baseline_fixture(Path(value))
+            # The intact fixture records the plan's authoritative tarball checksum,
+            # so a control-plane-only candidate reconciles on the published path.
+            validate_results(plan, results)
+
+    def test_published_baseline_forge_binary_rejects_extracted_binary_checksum(self) -> None:
+        with tempfile.TemporaryDirectory() as value:
+            plan, results, result = self.forge_baseline_fixture(Path(value))
+            bundle_path = results / "runtime-bundle.json"
+            bundle = json.loads(bundle_path.read_text())
+            forge = next(item for item in bundle["artifacts"] if item["name"] == "forge-binary")
+            # The extracted binary hash differs from the released tarball; recording
+            # it (as the pre-fix compose did) must never reconcile on the published
+            # path because the planned checksum is the authoritative tarball identity.
+            forge["checksum"] = "b" * 64
+            bundle_path.write_text(json.dumps(bundle, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            result["runtime_bundle_sha256"] = hash_file(bundle_path)
+            (results / "result.json").write_text(json.dumps(result) + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(E2EError, "wrong resolved checksum"):
+                validate_results(plan, results)
 
     def test_exact_result_set_and_stages_pass(self) -> None:
         with tempfile.TemporaryDirectory() as value:
