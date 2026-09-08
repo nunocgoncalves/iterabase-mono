@@ -1,6 +1,6 @@
 # Permanent CPU/GPU E2E fixture operations
 
-Authority: `DES-HOR-540-02` and `DES-HOR-545-02`. These hosts are dedicated,
+Authority: `DES-HOR-540-02`, `DES-HOR-545-02`, and `DES-HOR-545-03`. These hosts are dedicated,
 reimageable CI fixtures; they contain no customer data. Work is serialized per
 fixture by `iterabase-permanent-fixture-<capacity>` with cancellation disabled;
 independent CPU and GPU hosts may run concurrently.
@@ -44,9 +44,10 @@ each host:
 1. Create a dedicated `forge`-style user with passwordless sudo and a unique
    Ed25519 public key. Do not reuse a personal, overlay, provider-account, or
    other fixture key.
-2. Attach one non-root whole disk for Forge AgentPool workspaces. Record its
-   stable `/dev/disk/by-id/...` identity. Leave it blank; Forge owns its
-   filesystem only after apply.
+2. Attach one non-root whole data disk. Record its stable
+   `/dev/disk/by-id/...` identity and leave it blank. Forge receipt-binds its PV
+   and membership in the fixed thick `iterabase-data` VG; chart-owned OpenEBS,
+   not Forge, owns each claim's LV/XFS/mount lifecycle.
 3. Confirm the selected disk does not back `/`, `/boot`, `/boot/efi`, `/var`,
    swap, `/var/lib/rancher/k3s`, or `/var/lib/kubelet` and has no partitions,
    holders, mounts, or signatures.
@@ -68,6 +69,12 @@ each host:
 5. Obtain the host public key through a trusted provider console or first-boot
    channel. Compare it independently before recording the exact one-line
    OpenSSH public key. Do not trust an unauthenticated first `ssh-keyscan` result.
+
+The source/candidate fixture-only Helm values keep the real thick PostgreSQL and
+MinIO claims enabled at 5 GiB each so the smallest 25 GiB disposable data VG
+retains headroom for AgentPool and lifecycle proofs. They never override the
+fixed classes, VG, provisioner, filesystem, access mode, or production chart
+default sizes; Kind owner scenarios still exercise the production defaults.
 
 The permanent GPU fixture does not require provider ingress to K3s port 6443.
 The harness rewrites only the fetched kubeconfig transport endpoint and carries

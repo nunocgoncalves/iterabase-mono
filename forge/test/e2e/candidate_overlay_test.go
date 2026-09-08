@@ -130,7 +130,10 @@ func candidateOverlayValues(t *testing.T) string {
 	// Forge reconciles the fixed receipt-bound LVM storage substrate before Helm.
 	var values strings.Builder
 	values.WriteString("\n# Forge real-machine fixture values.\n")
-	values.WriteString("control-plane:\n  dispatch:\n    enabled: true\n    defaultModel:\n      id: forge-workspace-model\n      api: openai-completions\n")
+	// The smallest permanent data VG is 25 GiB. Keep both real thick XFS
+	// platform claims enabled while leaving headroom for AgentPool/lifecycle proof.
+	values.WriteString("control-plane:\n  dispatch:\n    enabled: true\n    defaultModel:\n      id: forge-workspace-model\n      api: openai-completions\n  postgresql:\n    persistence:\n      size: 5Gi\n")
+	values.WriteString("minio:\n  persistence:\n    size: 5Gi\n")
 	if controlPlane != "" {
 		values.WriteString("  image:\n")
 		values.WriteString(controlPlane)
@@ -177,6 +180,9 @@ func TestCandidateOverlayValues(t *testing.T) {
 		"dispatch:":             {},
 		"enabled: true":         {},
 		"forge-workspace-model": {},
+		"postgresql:":           {},
+		"minio:":                {},
+		"size: 5Gi":             {},
 		"workload:":             {},
 		"repository: \"ghcr.io/example/control-plane\"": {},
 		"tag: \"candidate-run\"":                        {},
@@ -219,7 +225,7 @@ func TestCandidateOverlayValuesKeepWorkloadListenerScopedToWorkspaceScenario(t *
 
 func TestCandidateOverlayValuesContainNoStorageBackendSelection(t *testing.T) {
 	values := candidateOverlayValues(t)
-	for _, forbidden := range []string{"storage.rwx", "managed-longhorn", "external-rwx", "iterabase-rwx", "longhorn"} {
+	for _, forbidden := range []string{"storage.rwx", "managed-longhorn", "external-rwx", "iterabase-rwx", "longhorn", "storageclassname", "vgpattern", "local.csi"} {
 		if strings.Contains(strings.ToLower(values), forbidden) {
 			t.Fatalf("candidate values retain obsolete storage selector %q:\n%s", forbidden, values)
 		}
