@@ -1260,7 +1260,12 @@ def compose_runtime(plan_path: Path, scenario_id: str, artifacts: Path, output: 
                 archive_checksum = hash_file(archive)
                 if expected.get("checksum") and archive_checksum != expected["checksum"]:
                     raise E2EError("published Forge archive checksum does not match the plan")
-                checksum = hash_file(binary)
+                # A published-baseline forge runtime is identified by the released
+                # tarball checksum (the source-authoritative baseline identity), not
+                # the checksum of the extracted binary. The archive was verified above
+                # against the planned checksum, so recording it here makes the
+                # retain/reconcile checksum exactly match the plan on this path.
+                checksum = archive_checksum
             final_binary = runtime / "forge"
             if binary != final_binary:
                 shutil.copy2(binary, final_binary)
