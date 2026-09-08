@@ -144,7 +144,7 @@ test -f "$receipt" && test ! -L "$receipt" && test "$(stat -c "%%u:%%g:%%a" "$re
 selected=%s
 device=$(readlink -f -- "$selected")
 pv=$(pvs --noheadings --separator "|" -o pv_uuid,vg_name -- "$device" | awk -F"|" "{\$1=\$1;\$2=\$2;print \$1 \"|\" \$2}")
-vg=$(vgs --noheadings --separator "|" --units b --nosuffix -o vg_uuid,vg_size,vg_free,pv_count,lv_count iterabase-data | awk -F"|" "{for(i=1;i<=NF;i++){gsub(/^ +| +$/,\"\",\$i)}; print}")
+vg=$(vgs --noheadings --separator "|" --units b --nosuffix -o vg_uuid,vg_size,vg_free,pv_count,lv_count iterabase-data | awk -F"|" "BEGIN{OFS=\"|\"} {for(i=1;i<=NF;i++){gsub(/^ +| +$/,\"\",\$i)}; print}")
 printf "%%s|%%s\n" "$pv" "$vg"
 '`, candidateShellQuote(state.workspaceDevice))))
 	parts := strings.Split(lvm, "|")

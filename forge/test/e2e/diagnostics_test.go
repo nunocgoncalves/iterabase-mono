@@ -241,6 +241,33 @@ func gpuDiagnosticStage(domain string, run func(*testing.T, *permanentGPUFixture
 	}
 }
 
+func storageStateDiagnosticCommand(device string) string {
+	return fmt.Sprintf(`sudo bash -ceu '
+selected=%s
+resolved=$(readlink -f -- "$selected")
+kernel=$(lsblk -dnro KNAME -- "$resolved")
+printf "selected=%%s resolved=%%s kernel=%%s\n" "$selected" "$resolved" "$kernel"
+printf "%%s\n" "--- holders"
+holder_dir="/sys/class/block/$kernel/holders"
+if test -d "$holder_dir"; then
+  for entry in "$holder_dir"/*; do
+    test -e "$entry" || continue
+    holder=${entry##*/}
+    printf "holder=%%s\n" "$holder"
+    dmsetup info --columns --noheadings -o name,uuid,open,attr "/dev/$holder" 2>&1 || true
+  done
+fi
+printf "%%s\n" "--- receipt"
+if test -f /var/lib/iterabase/data-storage.receipt; then
+  grep -E "^(contract|status|pv_done|vg_name|vg_uuid|ownership_tag|pv_uuid_[0-9]+)=" /var/lib/iterabase/data-storage.receipt || true
+fi
+printf "%%s\n" "--- receipt-bound LVM"
+pvs --noheadings --separator "|" -o pv_name,pv_uuid,vg_name -- "$resolved" 2>&1 || true
+vgs --noheadings --separator "|" -o vg_name,vg_uuid,vg_tags,pv_count,lv_count iterabase-data 2>&1 || true
+lvs --noheadings --separator "|" -o lv_name,lv_uuid,lv_attr,vg_name --select "vg_name=iterabase-data" 2>&1 || true
+'`, candidateShellQuote(device))
+}
+
 func collectCPUDiagnostics(t *testing.T, state *permanentCPUFixtureState) {
 	t.Helper()
 	state.diagnostics.recordDomain(t)
@@ -249,6 +276,7 @@ func collectCPUDiagnostics(t *testing.T, state *permanentCPUFixtureState) {
 		"fixture-state":  "cloud-init status --long 2>&1; systemctl --no-pager --full status k3s 2>&1 || true",
 		"forge-state":    fmt.Sprintf("sudo ls -la /var/lib/forge/overlay/%s 2>&1 || true; sudo k3s kubectl get gitrepositories,kustomizations -A -o wide 2>&1 || true", state.runID),
 		"platform-state": "sudo k3s kubectl get nodes -o wide 2>&1 || true; sudo k3s kubectl get deployments,statefulsets,daemonsets,pods,jobs,pvc -A -o wide 2>&1 || true; sudo k3s kubectl get events -A --sort-by=.metadata.creationTimestamp 2>&1 | tail -300 || true",
+		"storage-state":  storageStateDiagnosticCommand(state.workspaceDevice),
 	})
 	if safeClusterLogs {
 		state.diagnostics.collectSharedCluster(t, filepath.Join(state.forgeHome, state.runID, "kubeconfig.yaml"))
@@ -266,6 +294,7 @@ func collectGPUDiagnostics(t *testing.T, state *permanentGPUFixtureState) {
 		"fixture-state": "cloud-init status --long 2>&1; systemctl --no-pager --full status k3s 2>&1 || true",
 		"gpu-policy":    "sudo k3s kubectl get clusterpolicy -o yaml 2>&1 || true; sudo k3s kubectl get nodes -o wide --show-labels 2>&1 || true",
 		"gpu-workload":  "sudo k3s kubectl get daemonsets,pods -n gpu-operator -o wide 2>&1 || true; sudo k3s kubectl get deployment,pods,pvc -n forge-gpu-upgrade -o wide 2>&1 || true",
+		"storage-state": storageStateDiagnosticCommand(state.host.WorkspaceDevice),
 	})
 	dumpGPUDiagnostics(t, state.host.IP, state.privKeyPath)
 	if safeClusterLogs {
