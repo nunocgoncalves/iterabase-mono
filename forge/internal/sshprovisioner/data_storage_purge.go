@@ -110,7 +110,11 @@ for ((i=0; i<count; i++)); do
   done < /proc/swaps
   direct_mounts=$(findmnt -rn -S "${resolved[$i]}" -o TARGET 2>/dev/null || true); test -z "$direct_mounts" || fail "${selected[$i]} is directly mounted at $direct_mounts"
   kernel=$(lsblk -dnro KNAME -- "${resolved[$i]}")
-  test ! -d "/sys/class/block/$kernel/holders" || test -z "$(find "/sys/class/block/$kernel/holders" -mindepth 1 -maxdepth 1 -print -quit)" || fail "${selected[$i]} has active holders"
+  holders=""
+  if test -d "/sys/class/block/$kernel/holders"; then
+    holders=$(find "/sys/class/block/$kernel/holders" -mindepth 1 -maxdepth 1 -printf '%%f\n' | sort | awk 'BEGIN {separator=""} {printf "%%s%%s", separator, $0; separator=","}')
+  fi
+  test -z "$holders" || fail "${selected[$i]} has active holders: $holders"
   set +e; consumers=$(fuser "${resolved[$i]}" 2>&1); consumer_rc=$?; set -e
   test "$consumer_rc" = 1 || { test "$consumer_rc" = 0 && fail "${selected[$i]} has raw consumers: $consumers"; fail "raw-consumer probe failed for ${selected[$i]}: $consumers"; }
 done
