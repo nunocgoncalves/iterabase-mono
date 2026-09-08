@@ -38,7 +38,7 @@ func runOverlayStage(t *testing.T, state *permanentCPUFixtureState) {
 	}
 	state.runtimeImageDigests = prepareCandidateImages(t, state.ip, state.privKeyPath)
 	out := applyOnce(t, state.forgeBin, state.forgeHome, candidateConfig)
-	markers := []string{"action:     skip", "node ready: true", "AgentPool workspace:",
+	markers := []string{"action:     skip", "node ready: true", "data storage: iterabase-data",
 		"LVM storage ready: true", "certificate substrate applied: true", "LVM storage substrate applied: true",
 		"chart applied: true", "overlay applied: true", "overlay commit:", "flux installed: true", "gitrepository: ready=True"}
 	assertApplyMarkers(t, out, markers...)
