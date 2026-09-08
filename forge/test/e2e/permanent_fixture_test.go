@@ -186,13 +186,24 @@ func (fixture *permanentFixture) releaseDataStorageConsumers() error {
 	}
 	defer client.Close()
 	script := fmt.Sprintf(`sudo bash -ceu '
+install_name=%s
 if ! command -v k3s >/dev/null 2>&1 || ! k3s kubectl get --raw=/readyz >/dev/null 2>&1; then exit 0; fi
 k3s kubectl delete kustomizations.kustomize.toolkit.fluxcd.io --all -A --ignore-not-found=true --wait=true --timeout=2m || true
 if k3s kubectl get crd agentpools.platform.iterabase.com >/dev/null 2>&1; then
   k3s kubectl delete agentpools.platform.iterabase.com --all -A --ignore-not-found=true --wait=true --timeout=5m
 fi
-if command -v helm >/dev/null 2>&1 && KUBECONFIG=/etc/rancher/k3s/k3s.yaml helm status %s -n iterabase-system >/dev/null 2>&1; then
-  KUBECONFIG=/etc/rancher/k3s/k3s.yaml helm uninstall %s -n iterabase-system --wait --timeout 5m
+namespaced_resources=$(k3s kubectl api-resources --api-group=platform.iterabase.com --namespaced=true --verbs=list,delete -o name)
+while IFS= read -r resource; do
+  test -n "$resource" || continue
+  test "$resource" = agentpools.platform.iterabase.com && continue
+  k3s kubectl delete "$resource" --all -A --ignore-not-found=true --wait=true --timeout=5m
+done <<<"$namespaced_resources"
+if command -v helm >/dev/null 2>&1; then
+  while IFS= read -r release; do
+    test -n "$release" || continue
+    case "$release" in "$install_name-cert-manager"|"$install_name-lvm-storage") continue ;; esac
+    KUBECONFIG=/etc/rancher/k3s/k3s.yaml helm uninstall "$release" -n iterabase-system --wait --timeout 5m
+  done < <(KUBECONFIG=/etc/rancher/k3s/k3s.yaml helm list -n iterabase-system -q)
 fi
 k3s kubectl delete pvc --all -A --ignore-not-found=true --wait=true --timeout=5m
 for i in $(seq 1 150); do
@@ -204,7 +215,7 @@ for i in $(seq 1 150); do
   sleep 2
 done
 exit 42
-'`, candidateShellQuote(fixture.installName()), candidateShellQuote(fixture.installName()))
+'`, candidateShellQuote(fixture.installName()))
 	if output, err := sshOutput(client, script); err != nil {
 		return fmt.Errorf("release platform consumers/claims before explicit data-storage purge: %w\n%s", err, output)
 	}
