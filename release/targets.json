@@ -120,14 +120,14 @@
     }
   },
   "published_baselines": {
-    "control-plane-image": "ghcr.io/nunocgoncalves/control-plane:0.0.30",
-    "harness-image": "ghcr.io/nunocgoncalves/control-plane-harness:0.0.30",
-    "tool-runner-image": "ghcr.io/nunocgoncalves/control-plane-tool-runner:0.0.30",
+    "control-plane-image": "ghcr.io/nunocgoncalves/control-plane:0.0.31",
+    "harness-image": "ghcr.io/nunocgoncalves/control-plane-harness:0.0.31",
+    "tool-runner-image": "ghcr.io/nunocgoncalves/control-plane-tool-runner:0.0.31",
     "inference-gateway-image": "ghcr.io/nunocgoncalves/inference-gateway:0.2.7",
-    "control-plane-chart": "oci://ghcr.io/nunocgoncalves/iterabase-charts/control-plane:0.4.12",
+    "control-plane-chart": "oci://ghcr.io/nunocgoncalves/iterabase-charts/control-plane:0.4.13",
     "inference-gateway-chart": "oci://ghcr.io/nunocgoncalves/iterabase-charts/inference-gateway:0.2.13",
-    "iterabase-platform-chart": "oci://ghcr.io/nunocgoncalves/iterabase-charts/iterabase-platform:0.3.22",
-    "cert-manager-substrate-chart": "oci://ghcr.io/nunocgoncalves/iterabase-charts/cert-manager-substrate:0.3.22",
+    "iterabase-platform-chart": "oci://ghcr.io/nunocgoncalves/iterabase-charts/iterabase-platform:0.3.23",
+    "cert-manager-substrate-chart": "oci://ghcr.io/nunocgoncalves/iterabase-charts/cert-manager-substrate:0.3.23",
     "forge-binary": "https://github.com/nunocgoncalves/iterabase-mono/releases/download/forge-v0.8.6/forge_0.8.6_linux_amd64.tar.gz"
   },
   "targets": {

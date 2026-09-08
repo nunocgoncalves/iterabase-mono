@@ -320,6 +320,47 @@ class E2EPlanTests(unittest.TestCase):
             control["reference"],
         )
 
+    def test_control_plane_only_candidate_resolves_corrected_published_baselines(self) -> None:
+        plan = make_plan(
+            ROOT, self.catalogue, self.contract,
+            intent="candidate", source_sha=SOURCE_SHA,
+            targets=["control-plane"],
+        )
+        resolved = {}
+        for scenario in plan["scenario_matrix"]:
+            for artifact in scenario["artifacts"]:
+                resolved.setdefault(artifact["name"], artifact)
+
+        # The selected image target is built as the candidate, never a stale
+        # published baseline or the previous control-plane release version.
+        for name in ("control-plane-image", "harness-image", "tool-runner-image"):
+            self.assertEqual("selected-candidate", resolved[name]["custody"])
+
+        # Every unselected chart dependency resolves to the corrected, already-
+        # published baseline bundle rather than a stale version or the current
+        # unpublished chart source identity.
+        corrected = {
+            "control-plane-chart": ("0.4.13", "0.4.12"),
+            "iterabase-platform-chart": ("0.3.23", "0.3.22"),
+            "cert-manager-substrate-chart": ("0.3.23", "0.3.22"),
+        }
+        for name, (version, stale) in corrected.items():
+            artifact = resolved[name]
+            self.assertEqual("published-baseline", artifact["custody"])
+            self.assertEqual(
+                self.contract["published_baselines"][name],
+                artifact["reference"],
+            )
+            self.assertTrue(artifact["reference"].endswith(f":{version}"))
+            self.assertNotIn(f":{stale}", artifact["reference"])
+
+        # Unchanged dependencies keep their published identities.
+        for name in ("inference-gateway-image", "inference-gateway-chart", "forge-binary"):
+            self.assertEqual(
+                self.contract["published_baselines"][name],
+                resolved[name]["reference"],
+            )
+
     def test_selected_artifact_never_substitutes_a_baseline(self) -> None:
         plan = self.plan(["control-plane/internal/api/handler.go"])
         for scenario in plan["scenario_matrix"]:
