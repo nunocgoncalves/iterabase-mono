@@ -187,6 +187,7 @@ func (fixture *permanentFixture) releaseDataStorageConsumers() error {
 	defer client.Close()
 	script := fmt.Sprintf(`sudo bash -ceu '
 install_name=%s
+workspace_device=%s
 if ! command -v k3s >/dev/null 2>&1 || ! k3s kubectl get --raw=/readyz >/dev/null 2>&1; then exit 0; fi
 k3s kubectl delete kustomizations.kustomize.toolkit.fluxcd.io --all -A --ignore-not-found=true --wait=true --timeout=2m || true
 if k3s kubectl get crd agentpools.platform.iterabase.com >/dev/null 2>&1; then
@@ -211,11 +212,15 @@ for i in $(seq 1 150); do
   if k3s kubectl get crd lvmvolumes.local.openebs.io >/dev/null 2>&1; then volumes=$(k3s kubectl get lvmvolumes.local.openebs.io -A --no-headers | awk "NF {n++} END {print n+0}"); fi
   lvs_count=0
   if vgs iterabase-data >/dev/null 2>&1; then lvs_count=$(lvs --noheadings --select "vg_name=iterabase-data" -o lv_name | awk "NF {n++} END {print n+0}"); fi
-  test "$volumes" = 0 && test "$lvs_count" = 0 && exit 0
+  workspace=$(readlink -f -- "$workspace_device")
+  kernel=$(lsblk -dnro KNAME -- "$workspace")
+  holders=0
+  if test -d "/sys/class/block/$kernel/holders"; then holders=$(find "/sys/class/block/$kernel/holders" -mindepth 1 -maxdepth 1 | awk "NF {n++} END {print n+0}"); fi
+  test "$volumes" = 0 && test "$lvs_count" = 0 && test "$holders" = 0 && exit 0
   sleep 2
 done
 exit 42
-'`, candidateShellQuote(fixture.installName()))
+'`, candidateShellQuote(fixture.installName()), candidateShellQuote(fixture.workspaceDevice))
 	if output, err := sshOutput(client, script); err != nil {
 		return fmt.Errorf("release platform consumers/claims before explicit data-storage purge: %w\n%s", err, output)
 	}
