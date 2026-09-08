@@ -481,14 +481,30 @@ func replaceWorkspaceWorkerStage(t *testing.T, state *permanentCPUFixtureState) 
 	defer sc.Close()
 	pod := strings.Fields(mustSSHOutput(t, sc, `sudo k3s kubectl get pods -n iterabase-system -l platform.iterabase.com/agentpool=forge-storage-pool -o name`))[0]
 	mustSSHOutput(t, sc, "sudo k3s kubectl delete -n iterabase-system "+pod+" --wait=true --timeout=5m")
-	waitForLVMSharedAgentPoolReady(t, sc, 10*time.Minute)
+	waitForReplacement := fmt.Sprintf(`before=%s
+for i in $(seq 1 300); do
+  workers=$(k3s kubectl get pods -n iterabase-system -l platform.iterabase.com/agentpool=forge-storage-pool -o jsonpath='{range .items[*]}{.metadata.uid}{"\n"}{end}')
+  count=$(printf "%%s\n" "$workers" | awk 'NF {n++} END {print n+0}')
+  fresh=$(printf "%%s\n" "$workers" | grep -Fvx -f <(printf "%%s\n" "$before") || true)
+  replicas=$(k3s kubectl get agentpool forge-storage-pool -n iterabase-system -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)
+  if test "$count" = 2 && test -n "$fresh" && test "$replicas" = 2 && k3s kubectl wait -n iterabase-system --for=condition=Ready pods -l platform.iterabase.com/agentpool=forge-storage-pool --timeout=1s >/dev/null 2>&1; then
+    printf "%%s\n" "$workers"
+    exit 0
+  fi
+  sleep 2
+done
+exit 1`, candidateShellQuote(state.initialWorkerPodUID))
+	workers, err := sshOutput(sc, "sudo bash -ceu "+candidateShellQuote(waitForReplacement))
+	if err != nil {
+		t.Fatalf("worker replacement did not produce a fresh Ready two-worker set: before=%q: %v\n%s", state.initialWorkerPodUID, err, workers)
+	}
+	workers = strings.TrimSpace(workers)
 	identity := strings.TrimSpace(mustSSHOutput(t, sc, `sudo k3s kubectl get pvc forge-storage-pool-sandbox -n iterabase-system -o jsonpath='{.metadata.uid}'`))
 	if identity != state.agentPoolPVCUID {
 		t.Fatalf("worker replacement changed AgentPool PVC: before=%s after=%s", state.agentPoolPVCUID, identity)
 	}
-	workers := strings.TrimSpace(mustSSHOutput(t, sc, `sudo k3s kubectl get pods -n iterabase-system -l platform.iterabase.com/agentpool=forge-storage-pool -o jsonpath='{range .items[*]}{.metadata.uid}{"\n"}{end}'`))
-	if len(strings.Fields(workers)) != 2 || workers == state.initialWorkerPodUID {
-		t.Fatalf("worker replacement did not produce a fresh two-worker set: before=%q after=%q", state.initialWorkerPodUID, workers)
+	if len(strings.Fields(workers)) != 2 {
+		t.Fatalf("worker replacement returned an invalid Ready worker set: %q", workers)
 	}
 }
 

@@ -363,7 +363,7 @@ YAML`, allocate)
 	mustSSHOutput(t, client, "sudo k3s kubectl wait -n iterabase-system --for=condition=Ready pod/forge-vg-pressure --timeout=10m")
 
 	metricsCommand := `for i in $(seq 1 90); do
-  service=$(sudo k3s kubectl get service -n iterabase-system -l app=openebs-lvm-node -o jsonpath='{.items[0].metadata.name}')
+  service=$(sudo k3s kubectl get service -n iterabase-system -l name=openebs-lvm-node,openebs.io/component-name=openebs-lvm-node -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
   metrics=$(sudo k3s kubectl get --raw "/api/v1/namespaces/iterabase-system/services/http:$service:9500/proxy/metrics" 2>/dev/null || true)
   free=$(printf '%s\n' "$metrics" | awk '$1=="lvm_vg_free_size_bytes{name=\"iterabase-data\"}" {printf "%.0f",$2}')
   total=$(printf '%s\n' "$metrics" | awk '$1=="lvm_vg_total_size_bytes{name=\"iterabase-data\"}" {printf "%.0f",$2}')
