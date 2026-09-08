@@ -44,7 +44,7 @@ func TestE2E(t *testing.T) {
 		sharede2e.Define(sharede2e.Scenario[*permanentCPUFixtureState]{
 			Metadata: forgeScenarioMetadata(
 				permanentCPUWorkspaceScenarioName,
-				"Fresh exact-head real-machine install proving process-open refusal, receipt-bound PV/VG identity, pinned OpenEBS thick XFS claims, authenticated concurrent same-pool work with isolated markers, per-pool active-turn capacity gating, aggregate VG pressure, human-gate worker replacement, persisted bytes, and exact reapply.",
+				"Fresh exact-head real-machine install proving process-open refusal, receipt-bound PV/VG identity, pinned OpenEBS thick XFS claims, authenticated concurrent same-pool work with isolated markers, per-pool active-turn capacity gating, aggregate VG pressure, human-gate worker replacement, persisted bytes, exact reapply, safe claim release, chart uninstall, and non-purging ordinary destroy.",
 				sharede2e.TierF3,
 				[]string{"HOR-545", "REQ-018", "REQ-035", "SCN-018", "DES-HOR-545-01", "DES-HOR-545-02", "DES-HOR-545-03", "DES-HOR-538-03"},
 				[]string{"forge", "control-plane", "iterabase-platform-chart"},

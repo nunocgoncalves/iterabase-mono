@@ -306,6 +306,9 @@ exit 1`, state.storagePV, handle, candidateShellQuote(handle))
 
 func destroyPreservesDataStorageStage(t *testing.T, state *permanentCPUFixtureState) {
 	t.Helper()
+	if err := state.fixture.releaseDataStorageConsumers(); err != nil {
+		t.Fatalf("release claims through Kubernetes before ordinary Forge destroy: %v", err)
+	}
 	plan := prepareCandidateOverlay(t, state.runID, state.ip, state.privKeyPath)
 	cfgPath := writeCurrentOverlayForgeConfig(t, state.runID, state.ip, state.privKeyPath, state.chartVersion, plan)
 	out, err := runForgeE(state.forgeBin, state.forgeHome, "destroy", "--config", cfgPath, "--yes")
