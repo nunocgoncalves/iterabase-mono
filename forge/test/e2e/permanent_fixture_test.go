@@ -206,6 +206,11 @@ if command -v helm >/dev/null 2>&1; then
     KUBECONFIG=/etc/rancher/k3s/k3s.yaml helm uninstall "$release" -n iterabase-system --wait --timeout 5m
   done < <(KUBECONFIG=/etc/rancher/k3s/k3s.yaml helm list -n iterabase-system -q)
 fi
+k3s kubectl delete jobs --all -n iterabase-system --ignore-not-found=true --wait=true --timeout=5m
+while read -r namespace pod; do
+  test -n "$namespace" && test -n "$pod" || continue
+  k3s kubectl delete pod "$pod" -n "$namespace" --ignore-not-found=true --wait=true --timeout=5m
+done < <(k3s kubectl get pods -A -o go-template="{{range .items}}{{\$namespace := .metadata.namespace}}{{\$pod := .metadata.name}}{{range .spec.volumes}}{{if .persistentVolumeClaim}}{{\$namespace}} {{\$pod}}{{\"\\n\"}}{{end}}{{end}}{{end}}" | sort -u)
 k3s kubectl delete pvc --all -A --ignore-not-found=true --wait=true --timeout=5m
 for i in $(seq 1 150); do
   volumes=0
