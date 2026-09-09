@@ -557,10 +557,25 @@ csi_registered() {
   test "$csi_keys" = "$(printf 'kubernetes.io/hostname\nopenebs.io/nodename')"
 }
 observed_node=; observed_size=; observed_free=; observed_lv_count=; observed_pv_count=; last_vg=; last_missing=; last_thin=
-# OpenEBS LVMNode reports VG capacity that may differ from the Forge receipt's
-# vgs --units b value by LVM metadata reserve / rounding, but must never
-# contradict it. cap_ok allows a small absolute+relative tolerance so gross or
-# unit-scale contradiction is still rejected while agent rounding is tolerated.
+# OpenEBS LVMNode reports VG capacity in IEC units with a suffix (e.g. 25596Mi).
+# Convert to bytes so capacity can be compared against the Forge receipt, which
+# is expressed in bytes. Pure shell arithmetic avoids fmt percent handling.
+to_bytes() {
+  local v="$1" n
+  n=$(echo "$v" | tr -cd '0-9')
+  case "$v" in
+    *K*) echo $((n * 1024)) ;;
+    *M*) echo $((n * 1048576)) ;;
+    *G*) echo $((n * 1073741824)) ;;
+    *T*) echo $((n * 1099511627776)) ;;
+    *P*) echo $((n * 1125899906842624)) ;;
+    *) echo "$n" ;;
+  esac
+}
+# OpenEBS LVMNode reports VG capacity that may differ from the Forge receipt by
+# LVM metadata reserve / rounding, but must never contradict it. cap_ok allows a
+# small absolute+relative tolerance so gross or unit-scale contradiction is still
+# rejected while agent rounding is tolerated.
 cap_ok() {
   awk -v e="$1" -v o="$2" -v abs=67108864 -v rel=0.02 'BEGIN{d=o-e; if(d<0)d=-d; if(e<=0){print (o>0)?1:0; exit} limit=(e*rel>abs?e*rel:abs); print (d<=limit)?1:0}'
 }
@@ -577,7 +592,8 @@ lvmnode_satisfies() {
   IFS='|' read -r vg_name vg_uuid vg_size vg_free lv_count pv_count <<<"$vg"
   test "$vg_name" = "$expected_vg" && test "$vg_uuid" = "$expected_uuid" || return 1
   test -n "$vg_size" && test -n "$vg_free" || return 1
-  for number in "$lv_count" "$pv_count"; do case "$number" in ''|*[!0-9]*) return 1 ;; esac; done
+  vg_size=$(to_bytes "$vg_size"); vg_free=$(to_bytes "$vg_free")
+  for number in "$lv_count" "$pv_count" "$vg_size" "$vg_free"; do case "$number" in ''|*[!0-9]*) return 1 ;; esac; done
   # Capacity must be present, self-consistent (free<=size), and within tolerance
   # of the Forge receipt; UUID and membership are always exact.
   test "$(cap_ok "$expected_size" "$vg_size")" = 1 || return 1
