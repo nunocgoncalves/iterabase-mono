@@ -595,6 +595,9 @@ func TestApplyChartOrdersBothSubstratesBeforePlatform(t *testing.T) {
 	assert.Equal(t, "opo1-cert-manager", d.applyCalls[0].release)
 	assert.Equal(t, "opo1-lvm-storage", d.applyCalls[1].release)
 	assert.Equal(t, "oci://ghcr.io/nunocgoncalves/iterabase-charts/lvm-storage-substrate", d.applyCalls[1].repository)
+	// DES-HOR-545-01: the substrate install carries the exact manager SA identity
+	// so admission fails closed unless the request is the control-plane manager.
+	assert.Equal(t, []string{"agentpool.authorizedManagerIdentity=system:serviceaccount:iterabase-system:opo1-control-plane-manager"}, d.applyCalls[1].values)
 	assert.Equal(t, "opo1", d.applyCalls[2].release)
 	assert.Equal(t, 1, p.lvmReadinessCalls)
 }

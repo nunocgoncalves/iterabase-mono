@@ -1,5 +1,13 @@
 # DES-HOR-545-01: fixed OpenEBS LVM LocalPV 1.10.0 substrate for K3s.
 # These values are release-owned, not an overlay-selectable storage backend.
+#
+# agentpool.authorizedManagerIdentity is set by Forge on install (and by the
+# E2E harness) to the exact userInfo.username of the control-plane manager
+# (system:serviceaccount:<ns>:<platform-release>-control-plane-manager). It is
+# deliberately required with an empty default so the chart fails closed rather
+# than emitting a broken admission gate.
+agentpool:
+  authorizedManagerIdentity: ""
 lvm-localpv:
   enabled: true
   global:

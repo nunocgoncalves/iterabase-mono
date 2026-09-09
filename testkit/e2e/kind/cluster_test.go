@@ -50,9 +50,12 @@ func TestKindDataVolumeGroupFitsLargestThickClaimSet(t *testing.T) {
 }
 
 func TestLVMStorageHelmArgsUseTheKindKubeletRegistrationPath(t *testing.T) {
-	args := lvmStorageHelmArgs("storage", "/tmp/chart", "/tmp/kubeconfig", "iterabase-system")
+	args := lvmStorageHelmArgs("storage-lvm-storage", "/tmp/chart", "/tmp/kubeconfig", "iterabase-system")
 	if !slices.Contains(args, "lvm-localpv.global.kubeletDir=/var/lib/kubelet") {
 		t.Fatalf("LVM storage Helm args do not override the K3s kubelet path for Kind: %v", args)
+	}
+	if !slices.Contains(args, "agentpool.authorizedManagerIdentity=system:serviceaccount:iterabase-system:storage-control-plane-manager") {
+		t.Fatalf("LVM storage Helm args do not carry the exact control-plane manager SA identity for admission (DES-HOR-545-01): %v", args)
 	}
 	for _, arg := range args {
 		if strings.Contains(arg, "/var/lib/rancher/k3s") {
