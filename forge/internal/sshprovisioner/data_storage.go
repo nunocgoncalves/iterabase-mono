@@ -556,7 +556,7 @@ csi_registered() {
   csi_keys=$(printf '%%s\n' "$registration" | awk 'NR > 1 && NF' | sort)
   test "$csi_keys" = "$(printf 'kubernetes.io/hostname\nopenebs.io/nodename')"
 }
-observed_node=; observed_size=; observed_free=; observed_lv_count=; observed_pv_count=
+observed_node=; observed_size=; observed_free=; observed_lv_count=; observed_pv_count=; last_vg=; last_missing=; last_thin=
 # OpenEBS LVMNode reports VG capacity that may differ from the Forge receipt's
 # vgs --units b value by LVM metadata reserve / rounding, but must never
 # contradict it. cap_ok allows a small absolute+relative tolerance so gross or
@@ -568,20 +568,30 @@ lvmnode_satisfies() {
   node_count=$(k3s kubectl get lvmnodes.local.openebs.io -n "$namespace" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | awk '{print NF}')
   test "$node_count" = 1 || return 1
   observed_node=$(k3s kubectl get lvmnodes.local.openebs.io -n "$namespace" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
-  vg=$(k3s kubectl get lvmnodes.local.openebs.io -n "$namespace" -o jsonpath='{range .items[0].volumeGroups[?(@.name=="iterabase-data")]}{.name}|{.uuid}|{.size}|{.free}|{.pvCount}|{.missingPvCount}|{.lvCount}|{len .thinPools}{"\n"}{end}' 2>/dev/null)
+  # Core fields match the base field set that validates on the real fixture;
+  # optional probe fields are read separately so a null/missing probe can never
+  # blank the authoritative VG line.
+  vg=$(k3s kubectl get lvmnodes.local.openebs.io -n "$namespace" -o jsonpath='{range .items[0].volumeGroups[?(@.name=="iterabase-data")]}{.name}|{.uuid}|{.size}|{.free}|{.lvCount}|{.pvCount}{"\n"}{end}' 2>/dev/null)
   test -n "$vg" || return 1
-  IFS='|' read -r vg_name vg_uuid vg_size vg_free pv_count missing_pv lv_count thin_pools <<<"$vg"
+  last_vg=$vg
+  IFS='|' read -r vg_name vg_uuid vg_size vg_free lv_count pv_count <<<"$vg"
   test "$vg_name" = "$expected_vg" && test "$vg_uuid" = "$expected_uuid" || return 1
   test -n "$vg_size" && test -n "$vg_free" || return 1
-  for number in "$lv_count" "$pv_count" "$missing_pv"; do case "$number" in ''|*[!0-9]*) return 1 ;; esac; done
+  for number in "$lv_count" "$pv_count"; do case "$number" in ''|*[!0-9]*) return 1 ;; esac; done
   # Capacity must be present, self-consistent (free<=size), and within tolerance
   # of the Forge receipt; UUID and membership are always exact.
   test "$(cap_ok "$expected_size" "$vg_size")" = 1 || return 1
   test "$(cap_ok "$expected_free" "$vg_free")" = 1 || return 1
   test "$vg_size" -ge "$vg_free" || return 1
   test "$pv_count" = "$expected_pv_count" || return 1
-  test "$missing_pv" = 0 || return 1
-  test -z "$thin_pools" || test "$thin_pools" = 0 || return 1
+  # Probe fields are read alone; an absent field reads empty and is treated as
+  # the healthy empty/zero state rather than blanking the whole VG read above.
+  missing_pv=$(k3s kubectl get lvmnodes.local.openebs.io -n "$namespace" -o jsonpath='{range .items[0].volumeGroups[?(@.name=="iterabase-data")]}{.missingPvCount}{"\n"}{end}' 2>/dev/null | tr -d '[:space:]')
+  last_missing=$missing_pv
+  test "$missing_pv" = 0 || test -z "$missing_pv" || return 1
+  thin_count=$(k3s kubectl get lvmnodes.local.openebs.io -n "$namespace" -o jsonpath='{range .items[0].volumeGroups[?(@.name=="iterabase-data")]}{len .thinPools}{"\n"}{end}' 2>/dev/null | tr -d '[:space:]')
+  last_thin=$thin_count
+  test "$thin_count" = 0 || test -z "$thin_count" || return 1
   observed_size=$vg_size; observed_free=$vg_free; observed_lv_count=$lv_count; observed_pv_count=$pv_count
   return 0
 }
@@ -593,7 +603,7 @@ for attempt in $(seq 1 150); do
      k3s kubectl get csidriver local.csi.openebs.io >/dev/null 2>&1 && csi_registered && lvmnode_satisfies; then
     break
   fi
-  test "$attempt" -lt 150 || fail "OpenEBS LVM LocalPV controller/node/CRD/CSI registration or receipt-matching iterabase-data VG discovery did not become Ready"
+  test "$attempt" -lt 150 || fail "OpenEBS LVM LocalPV controller/node/CRD/CSI registration or receipt-matching iterabase-data VG discovery did not become Ready (last vg='$last_vg' missing='$last_missing' thin='$last_thin' obs_node='$observed_node')"
   sleep 2
 done
 classes=$(k3s kubectl get storageclass -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' | sort)
