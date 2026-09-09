@@ -177,9 +177,20 @@ rm -f /var/lib/iterabase-lvm-loop /var/lib/iterabase-data.img
 }
 
 func lvmStorageHelmArgs(release, chart, kubeconfig, namespace string) []string {
+	// DES-HOR-545-01: mirror Forge's fail-closed admission identity. The substrate
+	// release is <platform>-lvm-storage; the control-plane manager SA is
+	// <platform>-control-plane-manager, so the authorized identity is derived from
+	// the release passed to the substrate install.
+	managerIdentity := lvmStorageManagerIdentityForTest(release, namespace)
 	return []string{"upgrade", "--install", release, chart, "--kubeconfig", kubeconfig,
 		"--namespace", namespace, "--create-namespace", "--set-string", "lvm-localpv.global.kubeletDir=" + kindKubeletDirectory,
+		"--set-string", "agentpool.authorizedManagerIdentity=" + managerIdentity,
 		"--wait", "--timeout", "8m"}
+}
+
+func lvmStorageManagerIdentityForTest(release, namespace string) string {
+	platformRelease := strings.TrimSuffix(release, "-lvm-storage")
+	return "system:serviceaccount:" + namespace + ":" + platformRelease + "-control-plane-manager"
 }
 
 func (cluster *Cluster) validateLVMStorage(ctx context.Context, namespace, nodeName string) error {

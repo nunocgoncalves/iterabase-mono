@@ -13,7 +13,8 @@ certificate_version=$(chart_version "$certificates")
   exit 1
 }
 
-render=$(helm template release-lvm-storage "$substrate" -n iterabase-system)
+render=$(helm template release-lvm-storage "$substrate" -n iterabase-system \
+  --set-string agentpool.authorizedManagerIdentity=system:serviceaccount:iterabase-system:release-control-plane-manager)
 for crd in lvmnodes.local.openebs.io lvmvolumes.local.openebs.io lvmsnapshots.local.openebs.io; do
   grep -Fq "name: $crd" <<<"$render" || { echo "missing $crd" >&2; exit 1; }
 done
@@ -47,6 +48,17 @@ done
 [[ $(grep -c 'storageclass.kubernetes.io/is-default-class: "false"' <<<"$render") -eq 2 ]]
 grep -A14 'name: iterabase-lvm-xfs' <<<"$render" | grep -Fq 'shared: "no"'
 grep -A15 'name: iterabase-agentpool-lvm-xfs' <<<"$render" | grep -Fq 'shared: "yes"'
+
+# DES-HOR-545-01: the agentpool class must be gated by a fail-closed admission
+# policy bound to the exact control-plane manager service-account identity.
+grep -Fq 'kind: ValidatingAdmissionPolicy' <<<"$render"
+grep -Fq 'kind: ValidatingAdmissionPolicyBinding' <<<"$render"
+grep -Fq 'name: iterabase-agentpool-claim-authority' <<<"$render"
+grep -Fq 'failurePolicy: Fail' <<<"$render"
+grep -Fq 'validationActions: [Deny]' <<<"$render"
+grep -Fq 'request.userInfo.username == '\''system:serviceaccount:iterabase-system:release-control-plane-manager'\''' <<<"$render"
+grep -Fq 'operations: ["CREATE", "UPDATE"]' <<<"$render"
+grep -Fq 'resources: ["persistentvolumeclaims"]' <<<"$render"
 
 for values in "" "-f values-observability.yaml"; do
   platform_render=$(helm template release "$platform" $values)

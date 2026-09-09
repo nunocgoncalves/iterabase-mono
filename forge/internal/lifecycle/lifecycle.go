@@ -330,6 +330,15 @@ func lvmStorageSubstrateRelease(platformRelease string) string {
 	return platformRelease + "-lvm-storage"
 }
 
+// lvmStorageManagerIdentity is the exact userInfo.username of the control-plane
+// manager that owns AgentPool workspaces (DES-HOR-545-01). The substrate's
+// admission policy fails closed unless a request creating/updating a PVC in the
+// agentpool class arrives under this service-account identity, so it must match
+// the manager's rendered serviceAccountName exactly.
+func lvmStorageManagerIdentity(platformRelease, namespace string) string {
+	return "system:serviceaccount:" + namespace + ":" + platformRelease + "-control-plane-manager"
+}
+
 // refusePreLVMPlatform enforces HOR-545's clean-install-only boundary before
 // Forge mutates host packages, modules, PVs, or the VG. There is deliberately no
 // local-path-to-LVM chart/PVC migration path.
@@ -462,6 +471,10 @@ func applyLVMStorageSubstrate(ctx context.Context, cfg *config.Cluster, p provis
 		Repository: repository,
 		Version:    ch.Version,
 		Namespace:  ch.Namespace,
+		// DES-HOR-545-01: the only principal permitted to create/update PVCs in
+		// the AgentPool workspace class is the control-plane manager. Admission
+		// fails closed unless the request arrives under this exact SA username.
+		Values: []string{"agentpool.authorizedManagerIdentity=" + lvmStorageManagerIdentity(ch.Release, ch.Namespace)},
 	}); err != nil {
 		auditFail(cfg, "apply-lvm-storage-substrate", err)
 		return fmt.Errorf("LVM storage substrate: %w", err)

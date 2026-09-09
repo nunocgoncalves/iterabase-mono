@@ -1,0 +1,56 @@
+{{- if not (index .Values "lvm-localpv" "enabled") }}{{ fail "lvm-localpv.enabled must remain true" }}{{- end }}
+{{- if not (index .Values "agentpool" "authorizedManagerIdentity") }}{{ fail "agentpool.authorizedManagerIdentity must name the control-plane manager service-account username (fail closed); it is set by Forge on install" }}{{- end }}
+# DES-HOR-545-01: only the control-plane manager may create or update PVCs that
+# select the AgentPool workspace class. An ownerReference alone can be forged by
+# any client (it is just metadata the client sets), so the admission request must
+# additionally arrive under the exact manager ServiceAccount identity. The policy
+# denies on missing or mismatched identity (failurePolicy Fail, validationActions
+# Deny). Only PVCs selecting iterabase-agentpool-lvm-xfs are evaluated; all other
+# PVCs are unaffected.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: iterabase-agentpool-claim-authority
+  annotations:
+    iterabase.com/architecture-decision: DES-HOR-545-01
+    iterabase.com/claim-authority: agentpool-only
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["persistentvolumeclaims"]
+  matchConditions:
+    - name: selects-agentpool-class
+      expression: "object.spec.storageClassName == 'iterabase-agentpool-lvm-xfs'"
+  validations:
+    - expression: "request.userInfo.username == '{{ .Values.agentpool.authorizedManagerIdentity }}'"
+      message: "Only the control-plane manager may create or update PVCs in the iterabase-agentpool-lvm-xfs class"
+    - expression: |-
+        has(object.metadata.ownerReferences) &&
+        size(object.metadata.ownerReferences.filter(r, has(r.controller) && r.controller == true)) == 1 &&
+        object.metadata.ownerReferences.existsOne(r, has(r.controller) && r.controller == true && r.apiVersion == 'platform.iterabase.com/v1alpha1' && r.kind == 'AgentPool')
+      message: "PVCs in the iterabase-agentpool-lvm-xfs class must be controller-owned by exactly one platform.iterabase.com/AgentPool"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: iterabase-agentpool-claim-authority
+  annotations:
+    iterabase.com/architecture-decision: DES-HOR-545-01
+spec:
+  policyName: iterabase-agentpool-claim-authority
+  validationActions: [Deny]
+  matchResources:
+    namespaceSelector:
+      matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: In
+          values:
+            - {{ .Release.Namespace }}
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        resources: ["persistentvolumeclaims"]
