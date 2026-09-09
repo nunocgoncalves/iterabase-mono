@@ -176,6 +176,16 @@ func runCmd(name string, args ...string) error {
 	return cmd.Run()
 }
 
+// lvmFaultDump returns the current LVM + receipt state for failure diagnostics in
+// the privileged fault matrix.
+func lvmFaultDump() string {
+	out, err := exec.Command("sh", "-c", `vgs --noheadings -o vg_name,vg_uuid 2>/dev/null; pvs --noheadings -o pv_name,pv_uuid,vg_name 2>/dev/null; echo '--- receipt ---'; cat /var/lib/iterabase/data-storage.receipt 2>/dev/null || true`).CombinedOutput()
+	if err != nil {
+		return strings.TrimSpace(string(out))
+	}
+	return strings.TrimSpace(string(out))
+}
+
 // TestDataStorageFaultMatrixScriptCoversEveryDurableStage is the locally
 // runnable structural companion: it asserts the generated script front-loads the
 // durable receipt before every mutation, binds each stage to an explicit
@@ -274,7 +284,9 @@ func TestDataStorageFaultStageMatrixExecutable(t *testing.T) {
 	// A clean full run must converge to complete and bind both PVs + the VG.
 	_, script := newFixture(t, "opo1")
 	out, okc := runDataStorageBash(t, script, "")
-	require.True(t, okc, "reconcile failed on clean run: %s", out)
+	if !okc {
+		t.Fatalf("reconcile failed on clean run: %s\n%s", out, lvmFaultDump())
+	}
 	require.Contains(t, out, "FORGE_DATA_STORAGE_RESULT\tcomplete")
 	require.Contains(t, out, lvmReportPairParser) // the bounded VG inspection parser is present
 
@@ -332,7 +344,9 @@ func TestDataStorageReapplyReceiptMonotonicExecutable(t *testing.T) {
 
 	// Fresh install must converge to complete and bind both PVs + the VG.
 	out, okc := runDataStorageBash(t, script, "")
-	require.True(t, okc, "reconcile failed on clean run: %s", out)
+	if !okc {
+		t.Fatalf("reconcile failed on clean run: %s\n%s", out, lvmFaultDump())
+	}
 	require.Contains(t, out, "FORGE_DATA_STORAGE_RESULT\tcomplete")
 	requireReceiptStatus(t, "complete")
 
