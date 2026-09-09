@@ -298,6 +298,37 @@ jobs:
         run: make test
         working-directory: forge
 
+  # Founder-approved (HOR-545 Option B): a required, isolated, privileged job that
+  # actually executes the real reconcile/purge transaction fault matrix over
+  # loop-backed by-id devices. It runs as root with the internal
+  # FORGE_FAULT_MATRIX_REQUIRED=1 flag, so it FAILS (never skips) if the LVM/root
+  # prerequisites or any matrix stage are unavailable, and FAILS if any stage
+  # misbehaves. The generated script only accepts loop devices when the internal
+  # FORGE_DATA_STORAGE_FIXTURE_LOOP env is present (injected here); normal forge
+  # apply never sets it and rejects loop devices unchanged.
+  forge-fault-matrix:
+    name: forge-fault-matrix
+    needs: changes
+    if: needs.changes.outputs.forge == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup-go
+        with:
+          go-version: 1.26.5
+          cache-dependency-path: ${{ env.GO_CACHE_DEPENDENCIES }}
+          cache-scope: forge
+      - name: Install LVM toolchain for the privileged fault matrix
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends lvm2
+      - name: Execute the executable fault-stage matrix (privileged, fail-closed)
+        working-directory: forge
+        run: |
+          GOMODCACHE="$(go env GOMODCACHE)"
+          sudo env "HOME=/tmp/forge-fx" "PATH=$PATH" "GOMODCACHE=$GOMODCACHE" \
+            FORGE_FAULT_MATRIX_REQUIRED=1 go test -count=1 \
+            -run 'TestDataStorageFaultStageMatrixExecutable|TestDataStorageReapplyReceiptMonotonicExecutable|TestDataStorageLoopDevicesRejectedWithoutFixtureFlag' \
+            ./internal/sshprovisioner/
+
   charts:
     name: charts-static
     needs: changes
@@ -362,6 +393,7 @@ jobs:
       - proto
       - inference-gateway
       - forge
+      - forge-fault-matrix
       - charts
       - images
     runs-on: ubuntu-latest

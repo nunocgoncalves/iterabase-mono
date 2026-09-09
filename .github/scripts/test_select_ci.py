@@ -75,6 +75,7 @@ class StaticCIPathSelectionTests(unittest.TestCase):
             "proto": False,
             "inference-gateway": False,
             "forge": False,
+            "forge-fault-matrix": False,
             "charts": False,
             "images": True,
         }

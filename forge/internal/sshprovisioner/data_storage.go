@@ -31,6 +31,12 @@ sanitize() { printf '%s' "$1" | tr '\t|\r\n' '    '; }
 resolved=(); model=(); serial=(); wwn=(); size=(); transport=(); kname=(); planned_pv_uuid=()
 count=${#selected[@]}
 test "$count" -gt 0 || fail "selected device set is empty"
+# FORGE_DATA_STORAGE_FIXTURE_LOOP is an INTERNAL test-process-only flag. It is
+# never set by Forge apply, the Forge CLI, or any configuration file (it is not a
+# supported knob), and it is injected solely by the privileged forge fault-matrix
+# CI harness when it executes the real script over loop-backed by-id fixtures. In
+# any other invocation the ordinary production rejection of logical/loop devices
+# and unsigned disks is retained unchanged.
 for ((i=0; i<count; i++)); do
   path=${selected[$i]}
   case "$path" in /dev/disk/by-id/*) ;; *) fail "selected device $path is not a stable /dev/disk/by-id identity" ;; esac
@@ -43,13 +49,17 @@ for ((i=0; i<count; i++)); do
   resolved[$i]=$dev
   kname[$i]=$(lsblk -dnro KNAME -- "$dev")
   test -n "${kname[$i]}" || fail "cannot determine kernel identity for $path"
-  case "${kname[$i]}" in loop*|dm-*|md*|zd*|nbd*) fail "selected device $path is an unsupported logical/network device" ;; esac
+  if [ "${FORGE_DATA_STORAGE_FIXTURE_LOOP:-}" != "1" ]; then
+    case "${kname[$i]}" in loop*|dm-*|md*|zd*|nbd*) fail "selected device $path is an unsupported logical/network device" ;; esac
+  fi
   model[$i]=$(sanitize "$(lsblk -dnro MODEL -- "$dev")")
   serial[$i]=$(sanitize "$(lsblk -dnro SERIAL -- "$dev")")
   wwn[$i]=$(sanitize "$(lsblk -dnro WWN -- "$dev")")
   size[$i]=$(lsblk -bdnro SIZE -- "$dev")
   case "${size[$i]}" in ''|*[!0-9]*) fail "selected disk $path size probe is invalid" ;; esac
-  test -n "${serial[$i]}${wwn[$i]}" || fail "selected disk $path exposes neither serial nor WWN"
+  if [ "${FORGE_DATA_STORAGE_FIXTURE_LOOP:-}" != "1" ]; then
+    test -n "${serial[$i]}${wwn[$i]}" || fail "selected disk $path exposes neither serial nor WWN"
+  fi
   transport[$i]=$(lsblk -dnro TRAN -- "$dev" | tr '[:upper:]' '[:lower:]' | tr '\t\r\n' '   ' | awk '{$1=$1; print}')
   transport[$i]=${transport[$i]:-unknown}
   for ((j=0; j<i; j++)); do

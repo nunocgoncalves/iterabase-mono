@@ -317,6 +317,7 @@ def validate_needs(result: dict[str, object], needs: dict[str, object]) -> None:
         "proto": bool(result["proto"]),
         "inference-gateway": bool(result["inference_gateway"]),
         "forge": bool(result["forge"]),
+        "forge-fault-matrix": bool(result["forge"]),
         "charts": bool(result["charts"]),
         "images": bool(result["images"]),
     }
