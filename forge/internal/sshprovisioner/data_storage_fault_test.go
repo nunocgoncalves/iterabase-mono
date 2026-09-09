@@ -77,10 +77,11 @@ func writeFaultScript(t *testing.T, spec provisioner.DataStorageSpec, mode strin
 
 // runDataStorageBash executes an already-written reconcile script under the real
 // bash interpreter in the internal fixture mode (fixtureLoopEnv set) and returns
-// stdout/exit. killAfter determines the durable receipt stage at which a SIGKILL
-// is injected to simulate a crash at exactly that transaction boundary without
-// mutating the script.
-func runDataStorageBash(t *testing.T, path, killAfter string) (string, bool) {
+// stdout together with a precise outcome tag: "ok" (exit 0, completed normally),
+// "crashed" (SIGKILL injected at the requested durable stage), or "error" (the
+// script refused/failed). This lets callers distinguish a clean success from an
+// injected crash and from a refusal, which a single boolean cannot.
+func runDataStorageBash(t *testing.T, path, killAfter string) (string, string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
@@ -103,7 +104,7 @@ func runDataStorageBash(t *testing.T, path, killAfter string) (string, bool) {
 					_ = cmd.Process.Kill()
 					return
 				}
-				time.Sleep(10 * time.Millisecond)
+				time.Sleep(2 * time.Millisecond)
 			}
 		}()
 	}
@@ -114,7 +115,7 @@ func runDataStorageBash(t *testing.T, path, killAfter string) (string, bool) {
 	case <-ctx.Done():
 		_ = cmd.Process.Kill()
 		t.Fatalf("reconcile script timed out; stdout=%s stderr=%s", stdout.String(), stderr.String())
-		return "", false
+		return "", "error"
 	case err := <-done:
 		if ctx.Err() != nil {
 			_ = cmd.Process.Kill()
@@ -123,11 +124,11 @@ func runDataStorageBash(t *testing.T, path, killAfter string) (string, bool) {
 			var exitErr *exec.ExitError
 			if errors.As(err, &exitErr) && killAfter != "" && exitErr.ExitCode() == -1 {
 				// SIGKILL injected at the requested stage is the expected crash.
-				return stdout.String(), true
+				return stdout.String(), "crashed"
 			}
-			return stdout.String() + "\nstderr: " + stderr.String(), false
+			return stdout.String() + "\nstderr: " + stderr.String(), "error"
 		}
-		return stdout.String(), true
+		return stdout.String(), "ok"
 	}
 }
 
@@ -332,12 +333,11 @@ func TestDataStorageFaultStageMatrixExecutable(t *testing.T) {
 
 	// A clean full run must converge to complete and bind both PVs + the VG.
 	spec, script := newFixture(t, "opo1")
-	out, okc := runDataStorageBash(t, script, "")
-	if !okc {
-		t.Fatalf("reconcile failed on clean run: %s\n%s", out, lvmFaultDump())
-	}
+	out, outcome := runDataStorageBash(t, script, "")
+	require.Equal(t, "ok", outcome, "reconcile failed on clean run: %s\n%s", out, lvmFaultDump())
 	require.Contains(t, out, "FORGE_DATA_STORAGE_RESULT\tcomplete")
-	require.Contains(t, out, lvmReportPairParser) // the bounded VG inspection parser is present
+	// The bounded VG inspection parser must be present in the generated script.
+	require.Contains(t, dataStorageReconcileScript(spec, "reconcile"), lvmReportPairParser)
 	requireReceiptPVIdentityMatchesLive(t, spec)
 
 	// Fault-stage matrix: crash after each durable receipt stage then resume.
@@ -352,10 +352,10 @@ func TestDataStorageFaultStageMatrixExecutable(t *testing.T) {
 	} {
 		t.Run("resume-after-"+sc.name, func(t *testing.T) {
 			rspec, fscript := newFixture(t, "opo1")
-			out, crashed := runDataStorageBash(t, fscript, sc.marker)
-			require.True(t, crashed, "expected SIGKILL crash at %s; out=%s", sc.name, out)
-			out2, ok2 := runDataStorageBash(t, fscript, "")
-			require.True(t, ok2, "resume failed after %s crash: %s", sc.name, out2)
+			out, outcome := runDataStorageBash(t, fscript, sc.marker)
+			require.Equal(t, "crashed", outcome, "expected SIGKILL crash at %s; out=%s", sc.name, out)
+			out2, outcome2 := runDataStorageBash(t, fscript, "")
+			require.Equal(t, "ok", outcome2, "resume failed after %s crash: %s", sc.name, out2)
 			require.Contains(t, out2, "FORGE_DATA_STORAGE_RESULT\tcomplete")
 			requireReceiptPVIdentityMatchesLive(t, rspec)
 		})
@@ -365,13 +365,13 @@ func TestDataStorageFaultStageMatrixExecutable(t *testing.T) {
 	// run it against the same durable fixture - the receipt must refuse it.
 	t.Run("refuses-foreign-install", func(t *testing.T) {
 		basespec, base := newFixture(t, "opo1")
-		out, ok := runDataStorageBash(t, base, "")
-		require.True(t, ok, "seed complete receipt: %s", out)
+		out, outcome := runDataStorageBash(t, base, "")
+		require.Equal(t, "ok", outcome, "seed complete receipt: %s", out)
 		require.Contains(t, out, "FORGE_DATA_STORAGE_RESULT\tcomplete")
 		requireReceiptPVIdentityMatchesLive(t, basespec)
 		foreign := writeFaultScript(t, provisioner.DataStorageSpec{InstallName: "other", Devices: curAliases}, "reconcile")
-		outF, okF := runDataStorageBash(t, foreign, "")
-		require.False(t, okF, "foreign install identity must be refused")
+		outF, outcomeF := runDataStorageBash(t, foreign, "")
+		require.Equal(t, "error", outcomeF, "foreign install identity must be refused")
 		require.Contains(t, outF, "receipt install mismatch")
 	})
 }
@@ -395,19 +395,17 @@ func TestDataStorageReapplyReceiptMonotonicExecutable(t *testing.T) {
 	script := writeFaultScript(t, spec, "reconcile")
 
 	// Fresh install must converge to complete and bind both PVs + the VG.
-	out, okc := runDataStorageBash(t, script, "")
-	if !okc {
-		t.Fatalf("reconcile failed on clean run: %s\n%s", out, lvmFaultDump())
-	}
+	out, outcome := runDataStorageBash(t, script, "")
+	require.Equal(t, "ok", outcome, "reconcile failed on clean run: %s\n%s", out, lvmFaultDump())
 	require.Contains(t, out, "FORGE_DATA_STORAGE_RESULT\tcomplete")
 	requireReceiptStatus(t, "complete")
 	requireReceiptPVIdentityMatchesLive(t, spec)
 
 	// Exact reapply: with the monotonic guard the pvs-created marker is never
 	// re-emitted for an already-complete receipt, so the run completes normally
-	// (crashed=false) and the receipt stays complete.
-	out, crashed := runDataStorageBash(t, script, "pvs-created")
-	require.False(t, crashed, "exact reapply regressed the receipt to pvs-created:\n%s", out)
+	// (outcome "ok", not "crashed") and the receipt stays complete.
+	out, outcome = runDataStorageBash(t, script, "pvs-created")
+	require.Equal(t, "ok", outcome, "exact reapply regressed the receipt to pvs-created:\n%s", out)
 	require.Contains(t, out, "FORGE_DATA_STORAGE_RESULT\tcomplete")
 	requireReceiptStatus(t, "complete")
 	requireReceiptPVIdentityMatchesLive(t, spec)
@@ -415,8 +413,8 @@ func TestDataStorageReapplyReceiptMonotonicExecutable(t *testing.T) {
 	// Crash during reapply (killed after loading the complete receipt) must leave
 	// a resumable, still-complete receipt; the next run completes without repair.
 	_, _ = runDataStorageBash(t, script, "complete") // best-effort SIGKILL mid-reapply
-	out2, ok2 := runDataStorageBash(t, script, "")
-	require.True(t, ok2, "reapply did not resume to complete after crash: %s", out2)
+	out2, outcome2 := runDataStorageBash(t, script, "")
+	require.Equal(t, "ok", outcome2, "reapply did not resume to complete after crash: %s", out2)
 	require.Contains(t, out2, "FORGE_DATA_STORAGE_RESULT\tcomplete")
 	requireReceiptStatus(t, "complete")
 	requireReceiptPVIdentityMatchesLive(t, spec)
