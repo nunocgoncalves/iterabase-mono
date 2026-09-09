@@ -170,13 +170,56 @@ func (fixture *permanentFixture) reset(t *testing.T, forgeBin, forgeHome string)
 			return err
 		}
 	}
-	// Close the readiness session and leave a short quiet window before handing
-	// the fixture to Forge. Public SSH frontends can reset an immediate next
-	// handshake even after cloud-final and strict pinned probes have succeeded.
+	// Close the readiness session and hand the fixture to Forge only once the
+	// post-reboot public SSH frontend has demonstrably settled. A single
+	// successful readiness session is not a reliable handoff: the very next
+	// handshake can still be reset while the LB frontend converges after reboot
+	// (seen as apply-gpu-substrate failing with `ssh handshake failed ... reset`
+	// immediately after a passing reset). Establish bounded stability evidence
+	// instead of a fixed sleep before returning control to Forge.
 	_ = client.Close()
-	time.Sleep(5 * time.Second)
+	if err := fixture.waitForSSHStable(); err != nil {
+		return err
+	}
 	t.Logf("permanent %s fixture reset: boot %s -> %s workspace=%s", fixture.capacity, before, after, fixture.workspaceDevice)
 	return nil
+}
+
+// waitForSSHStable proves bounded post-reboot SSH stability before handing the
+// fixture to Forge. It requires several consecutive fresh read-only handshakes
+// (each servable end to end) spread over a short window to all succeed; any
+// reset while the frontend is still converging resets the counter and re-probes
+// until stability is observed or a bounded deadline expires. This is
+// evidence-based (not a fixed sleep) and read-only (opens/closes idle sessions),
+// so it can never double-apply a mutation.
+func (fixture *permanentFixture) waitForSSHStable() error {
+	const (
+		window     = 90 * time.Second
+		interval   = 3 * time.Second
+		minSuccess = 3
+	)
+	deadline := time.Now().Add(window)
+	consecutive := 0
+	for {
+		client, err := sshDial(fixture.address, fixture.sshKeyPath)
+		if err == nil {
+			if _, rerr := sshOutput(client, "true"); rerr == nil {
+				consecutive++
+				client.Close()
+				if consecutive >= minSuccess {
+					return nil
+				}
+				time.Sleep(interval)
+				continue
+			}
+			client.Close()
+		}
+		consecutive = 0
+		if time.Now().After(deadline) {
+			return fmt.Errorf("post-reboot SSH frontend did not reach %d consecutive stable handshakes within %s (last dial err=%v)", minSuccess, window, err)
+		}
+		time.Sleep(2 * time.Second)
+	}
 }
 
 func (fixture *permanentFixture) releaseDataStorageConsumers() error {

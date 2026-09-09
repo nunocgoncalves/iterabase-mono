@@ -124,6 +124,57 @@ spec:
 		t.Fatalf("an unrelated PVC selecting the AgentPool class was admitted; DES-HOR-545-01 requires the manager-owned AgentPool claim shape only")
 	}
 
+	// The claim-authority binding is cluster-wide (REQ-035: no unrelated claim may
+	// use the AgentPool class in ANY namespace, because the StorageClass and the
+	// manager watch are cluster-scoped). Prove the out-of-namespace bypass is
+	// closed: a generic PVC in a namespace other than the release namespace must
+	// be denied too, not just a same-namespace one.
+	crossNS := `apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: unrelated-agentpool-claim-cn, namespace: kube-system}
+spec:
+  accessModes: [ReadWriteOnce]
+  volumeMode: Filesystem
+  storageClassName: ` + AgentPoolWorkspaceStorageClass + `
+  resources: {requests: {storage: 512Mi}}
+`
+	crossNSPath := state.writeManifest(t, "unrelated-agentpool-claim-cn.yaml", crossNS)
+	if _, err := state.kubectlResult(30*time.Second, "apply", "-f", crossNSPath); err == nil {
+		t.Fatalf("a cross-namespace PVC selecting the AgentPool class was admitted; REQ-035 requires cluster-wide claim authority")
+	}
+
+	// UPDATE owner-replacement bypass: an existing AgentPool claim whose matching
+	// controller ownerReference is replaced with a different AgentPool {name,uid}
+	// at the same count must be denied. Create a valid manager-identity + single
+	// AgentPool claim (which CREATE admits), then attempt to swap its ownerRef to
+	// a different AgentPool and assert the UPDATE is denied.
+	managerIdentity := "system:serviceaccount:" + testNamespace + ":" + testRelease + "-control-plane-manager"
+	agentClaim := `apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: manager-agentpool-claim
+  namespace: ` + testNamespace + `
+  ownerReferences:
+    - apiVersion: platform.iterabase.com/v1alpha1
+      kind: AgentPool
+      name: ap-manager
+      uid: 11111111-1111-1111-1111-111111111111
+      controller: true
+spec:
+  accessModes: [ReadWriteOnce]
+  volumeMode: Filesystem
+  storageClassName: ` + AgentPoolWorkspaceStorageClass + `
+  resources: {requests: {storage: 512Mi}}
+`
+	agentClaimPath := state.writeManifest(t, "manager-agentpool-claim.yaml", agentClaim)
+	if _, err := state.kubectlResult(30*time.Second, "create", "-f", agentClaimPath, "--as", managerIdentity); err != nil {
+		t.Fatalf("manager-identity + AgentPool-owned PVC selecting the class was denied on CREATE: %v", err)
+	}
+	if _, err := state.kubectlResult(30*time.Second, "patch", "pvc/manager-agentpool-claim", "-n", testNamespace, "--type=merge", "-p", `{"metadata":{"ownerReferences":[{"apiVersion":"platform.iterabase.com/v1alpha1","kind":"AgentPool","name":"ap-other","uid":"22222222-2222-2222-2222-222222222222","controller":true}]}}`); err == nil {
+		t.Fatalf("an AgentPool PVC UPDATE swapping its controller ownerReference to a different AgentPool was admitted; ownership must be immutable")
+	}
+	state.kubectl(t, 30*time.Second, "delete", "pvc/manager-agentpool-claim", "-n", testNamespace, "--ignore-not-found=true", "--wait=true", "--timeout=2m")
+
 	// Ubuntu 24.04 XFS refuses filesystems at or below 300 MB; keep this real
 	// lifecycle claim above that supported minimum rather than bypassing format.
 	manifest := `apiVersion: v1

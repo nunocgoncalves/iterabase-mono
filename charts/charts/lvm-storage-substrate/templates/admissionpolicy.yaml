@@ -18,8 +18,11 @@
 #
 # The policy denies on missing/mismatched identity (failurePolicy Fail,
 # validationActions Deny). Only PVCs selecting iterabase-agentpool-lvm-xfs are
-# evaluated (matchConditions + binding namespaceSelector); all other PVCs are
-# unaffected.
+# evaluated (matchConditions), regardless of namespace: the StorageClass and the
+# manager watch are cluster-wide and the underlying PVs are literal whole-disk
+# LVM, so REQ-035 ("no unrelated claim may use the AgentPool class") must hold in
+# every namespace, not just the release namespace. The binding therefore applies
+# cluster-wide; all other PVCs are unaffected.
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
@@ -48,9 +51,11 @@ spec:
     # UPDATE: the class is immutable once the PVC exists.
     - expression: "request.operation != 'UPDATE' || (has(oldObject.spec) && has(object.spec) && object.spec.storageClassName == oldObject.spec.storageClassName)"
       message: "The storageClassName of a PVC in the iterabase-agentpool-lvm-xfs class is immutable"
-    # UPDATE: the AgentPool controller ownership is immutable; removing or
-    # replacing it is denied, while scheduler/CSI/kubelet updates pass untouched.
-    - expression: "request.operation != 'UPDATE' || (has(oldObject.metadata.ownerReferences) == has(object.metadata.ownerReferences) && size(object.metadata.ownerReferences.filter(r, has(r.controller) && r.controller == true && r.apiVersion == 'platform.iterabase.com/v1alpha1' && r.kind == 'AgentPool')) == size(oldObject.metadata.ownerReferences.filter(r, has(r.controller) && r.controller == true && r.apiVersion == 'platform.iterabase.com/v1alpha1' && r.kind == 'AgentPool')))"
+    # UPDATE: the AgentPool controller ownership is immutable; removing,
+    # replacing, or swapping the ownerReference to a different AgentPool (even at
+    # the same count with a different {name,uid}) is denied, while
+    # scheduler/CSI/kubelet updates that never touch ownership pass untouched.
+    - expression: "request.operation != 'UPDATE' || (size(object.metadata.ownerReferences.filter(r, has(r.controller) && r.controller == true && r.apiVersion == 'platform.iterabase.com/v1alpha1' && r.kind == 'AgentPool')) == 1 && size(oldObject.metadata.ownerReferences.filter(r, has(r.controller) && r.controller == true && r.apiVersion == 'platform.iterabase.com/v1alpha1' && r.kind == 'AgentPool')) == 1 && object.metadata.ownerReferences.filter(r, r.controller == true && r.apiVersion == 'platform.iterabase.com/v1alpha1' && r.kind == 'AgentPool')[0].name == oldObject.metadata.ownerReferences.filter(r, r.controller == true && r.apiVersion == 'platform.iterabase.com/v1alpha1' && r.kind == 'AgentPool')[0].name && object.metadata.ownerReferences.filter(r, r.controller == true && r.apiVersion == 'platform.iterabase.com/v1alpha1' && r.kind == 'AgentPool')[0].uid == oldObject.metadata.ownerReferences.filter(r, r.controller == true && r.apiVersion == 'platform.iterabase.com/v1alpha1' && r.kind == 'AgentPool')[0].uid)"
       message: "The AgentPool controller ownership of a PVC in the iterabase-agentpool-lvm-xfs class is immutable"
 ---
 apiVersion: admissionregistration.k8s.io/v1
@@ -63,12 +68,6 @@ spec:
   policyName: iterabase-agentpool-claim-authority
   validationActions: [Deny]
   matchResources:
-    namespaceSelector:
-      matchExpressions:
-        - key: kubernetes.io/metadata.name
-          operator: In
-          values:
-            - {{ .Release.Namespace }}
     resourceRules:
       - apiGroups: [""]
         apiVersions: ["v1"]

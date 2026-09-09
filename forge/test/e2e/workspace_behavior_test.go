@@ -404,33 +404,36 @@ spec:
 YAML`, exhaustRequest)
 	mustSSHOutput(t, client, exhaust)
 	// DES-HOR-545-01 honest new-claim exhaustion. Under WaitForFirstConsumer +
-	// CSI storage-capacity scheduling the new claim either reaches
-	// ProvisioningFailed (OpenEBS attempts and is refused because the VG cannot
-	// fit it) or stays Pending with its consumer pod withheld until no node can
-	// satisfy the claim. Both are honest "cannot fit, no overcommit": the claim
-	// must never become Bound and no LV may be created. Observe deterministically
-	// with a bounded poll rather than racing a fixed sleep against scheduling.
+	// CSI storage-capacity scheduling the exhausted claim must reach a concrete,
+	// actionable terminal to count as evidence: either ProvisioningFailed (OpenEBS
+	// attempted and was refused because the VG cannot fit it) or a scheduler
+	// capacity decision (FailedBinding on the PVC, or FailedScheduling on the
+	// consumer pod) withholding the claim because no node can satisfy it. The
+	// bare post-create Pending/Pending state is not proof of exhaustion (it is
+	// the ordinary initial state before any scheduling), so we require an observed
+	// reason event. The claim must never become Bound and no LV may be created;
+	// observe deterministically with a bounded poll rather than a fixed sleep.
 	deadline := time.Now().Add(2 * time.Minute)
 	var phase, podPhase, ev string
 	for {
 		phase = strings.TrimSpace(mustSSHOutput(t, client, `sudo k3s kubectl get pvc forge-vg-exhaustion -n iterabase-system -o jsonpath='{.status.phase}'`))
 		podPhase = strings.TrimSpace(mustSSHOutput(t, client, `sudo k3s kubectl get pod forge-vg-exhaustion -n iterabase-system -o jsonpath='{.status.phase}'`))
-		ev = mustSSHOutput(t, client, `sudo k3s kubectl get events -n iterabase-system --field-selector involvedObject.kind=PersistentVolumeClaim,involvedObject.name=forge-vg-exhaustion -o jsonpath='{range .items[*]}{.reason}{"\n"}{end}'`)
+		ev = mustSSHOutput(t, client, `sudo k3s kubectl get events -n iterabase-system --field-selector involvedObject.name=forge-vg-exhaustion -o jsonpath='{range .items[*]}{.reason}{"\n"}{end}'`)
 		if phase == "Bound" {
 			t.Fatalf("aggregate VG exhaustion claim became Bound (overcommit/fallback forbidden): podPhase=%s events=%s", podPhase, ev)
 		}
-		provisionFailed := strings.Contains(ev, "ProvisioningFailed")
-		capacityWithheld := phase == "Pending" && podPhase == "Pending"
-		if provisionFailed || capacityWithheld {
+		concrete := strings.Contains(ev, "ProvisioningFailed") || strings.Contains(ev, "FailedBinding") || strings.Contains(ev, "FailedScheduling")
+		capacityWithheld := phase == "Pending" && concrete
+		if capacityWithheld {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("aggregate VG exhaustion did not settle into an honest Pending/withheld/ProvisioningFailed terminal state: phase=%s podPhase=%s events=%s", phase, podPhase, ev)
+			t.Fatalf("aggregate VG exhaustion did not reach a concrete honest terminal (ProvisioningFailed/FailedBinding/FailedScheduling): phase=%s podPhase=%s events=%s", phase, podPhase, ev)
 		}
 		time.Sleep(time.Second)
 	}
 	if phase != "Pending" {
-		t.Fatalf("aggregate VG exhaustion was not an honest Pending claim: phase=%s podPhase=%s events=%s", phase, podPhase, ev)
+		t.Fatalf("aggregate VG exhaustion was not an honest Pending claim (must be withheld with a concrete event, not another terminal): phase=%s podPhase=%s events=%s", phase, podPhase, ev)
 	}
 	mustSSHOutput(t, client, "sudo k3s kubectl delete pod/forge-vg-exhaustion pvc/forge-vg-exhaustion pod/forge-vg-pressure pvc/forge-vg-pressure -n iterabase-system --ignore-not-found=true --wait=true --timeout=10m")
 	command := fmt.Sprintf(`for i in $(seq 1 150); do test "$(sudo lvs --noheadings -o lv_name iterabase-data | awk 'NF {n++} END {print n+0}')" = %s && exit 0; sleep 2; done; exit 1`, before[1])
