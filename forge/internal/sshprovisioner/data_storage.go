@@ -407,7 +407,7 @@ if test -n "$tag_owners"; then
   test "${tag_owners%%|*}" = "$vg_name" || fail "data-storage ownership tag belongs to foreign VG ${tag_owners%%|*}"
 fi
 read_pv() {
-  set +e; pv_line=$(pvs --noheadings --separator '|' -o pv_uuid,vg_name -- "$1" 2>&1); pv_rc=$?; set -e
+  set +e; pv_line=$(pvs --noheadings --separator '|' -o pv_uuid,vg_name -- "$1" 2>/dev/null); pv_rc=$?; set -e
   test "$pv_rc" = 0 || return 1
   printf '%%s' "$pv_line" | `+lvmReportPairParser+`
 }
