@@ -1,17 +1,25 @@
 {{- if not (index .Values "lvm-localpv" "enabled") }}{{ fail "lvm-localpv.enabled must remain true" }}{{- end }}
 {{- if not (index .Values "agentpool" "authorizedManagerIdentity") }}{{ fail "agentpool.authorizedManagerIdentity must name the control-plane manager service-account username (fail closed); it is set by Forge on install" }}{{- end }}
-# DES-HOR-545-01: only the control-plane manager may newly claim the AgentPool
-# workspace class. The decision is made at CREATE: storageClassName and
-# ownerReferences are immutable once the PVC exists, so blocking at CREATE fully
-# guarantees that only manager-created, AgentPool-owned PVCs ever select the
-# class. An ownerReference alone can be forged by any client (it is just metadata
-# the client sets), so the CREATE request must additionally arrive under the
-# exact manager ServiceAccount identity. UPDATEs (scheduler prebind, CSI, kubelet)
-# are intentionally not gated by identity so normal binding/provisioning flows
-# proceed; they cannot change the class or ownership because both are immutable.
-# The policy denies on missing or mismatched identity (failurePolicy Fail,
+# DES-HOR-545-01: only the control-plane manager may claim the AgentPool
+# workspace class, and the resulting PVC must be controller-owned by exactly one
+# platform.iterabase.com AgentPool. The policy is operation-aware so the agreed
+# security invariant holds on both CREATE and UPDATE:
+#
+#  * CREATE  - the request must arrive under the exact control-plane manager
+#    ServiceAccount identity (request.userInfo.username) AND describe exactly one
+#    controller ownerReference to platform.iterabase.com/v1alpha1 AgentPool. An
+#    ownerReference alone can be forged by any client (it is client-set metadata),
+#    so both must hold.
+#  * UPDATE  - for an existing PVC that selects the AgentPool class, the protected
+#    fields (spec.storageClassName and the AgentPool controller ownerReference)
+#    are immutable: any UPDATE that changes them is Denied. Legitimate
+#    scheduler (VolumeBinding prebind), CSI, and kubelet updates - which never
+#    touch storageClassName or ownership - remain allowed regardless of identity.
+#
+# The policy denies on missing/mismatched identity (failurePolicy Fail,
 # validationActions Deny). Only PVCs selecting iterabase-agentpool-lvm-xfs are
-# evaluated; all other PVCs are unaffected.
+# evaluated (matchConditions + binding namespaceSelector); all other PVCs are
+# unaffected.
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
@@ -25,18 +33,25 @@ spec:
     resourceRules:
       - apiGroups: [""]
         apiVersions: ["v1"]
-        operations: ["CREATE"]
+        operations: ["CREATE", "UPDATE"]
         resources: ["persistentvolumeclaims"]
   matchConditions:
     - name: selects-agentpool-class
       expression: "object.spec.storageClassName == 'iterabase-agentpool-lvm-xfs'"
   validations:
-    - expression: "request.userInfo.username == '{{ .Values.agentpool.authorizedManagerIdentity }}'"
+    # CREATE: exact manager identity (ownership alone is forgeable).
+    - expression: "request.operation != 'CREATE' || request.userInfo.username == '{{ .Values.agentpool.authorizedManagerIdentity }}'"
       message: "Only the control-plane manager may create PVCs in the iterabase-agentpool-lvm-xfs class"
-    - expression: |-
-        has(object.metadata.ownerReferences) &&
-        size(object.metadata.ownerReferences.filter(r, has(r.controller) && r.controller == true && r.apiVersion == 'platform.iterabase.com/v1alpha1' && r.kind == 'AgentPool')) == 1
+    # CREATE: exactly one controller ownerReference to platform.iterabase.com AgentPool.
+    - expression: "request.operation != 'CREATE' || (has(object.metadata.ownerReferences) && size(object.metadata.ownerReferences.filter(r, has(r.controller) && r.controller == true && r.apiVersion == 'platform.iterabase.com/v1alpha1' && r.kind == 'AgentPool')) == 1)"
       message: "PVCs in the iterabase-agentpool-lvm-xfs class must be controller-owned by exactly one platform.iterabase.com/AgentPool"
+    # UPDATE: the class is immutable once the PVC exists.
+    - expression: "request.operation != 'UPDATE' || (has(oldObject.spec) && has(object.spec) && object.spec.storageClassName == oldObject.spec.storageClassName)"
+      message: "The storageClassName of a PVC in the iterabase-agentpool-lvm-xfs class is immutable"
+    # UPDATE: the AgentPool controller ownership is immutable; removing or
+    # replacing it is denied, while scheduler/CSI/kubelet updates pass untouched.
+    - expression: "request.operation != 'UPDATE' || (has(oldObject.metadata.ownerReferences) == has(object.metadata.ownerReferences) && size(object.metadata.ownerReferences.filter(r, has(r.controller) && r.controller == true && r.apiVersion == 'platform.iterabase.com/v1alpha1' && r.kind == 'AgentPool')) == size(oldObject.metadata.ownerReferences.filter(r, has(r.controller) && r.controller == true && r.apiVersion == 'platform.iterabase.com/v1alpha1' && r.kind == 'AgentPool')))"
+      message: "The AgentPool controller ownership of a PVC in the iterabase-agentpool-lvm-xfs class is immutable"
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
@@ -57,5 +72,5 @@ spec:
     resourceRules:
       - apiGroups: [""]
         apiVersions: ["v1"]
-        operations: ["CREATE"]
+        operations: ["CREATE", "UPDATE"]
         resources: ["persistentvolumeclaims"]
