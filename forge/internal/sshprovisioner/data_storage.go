@@ -446,7 +446,11 @@ verify_or_blank_set() {
       pv_uuid=${pv%%|*}; pv_vg=${pv#*|}
       test "$pv_uuid" = "${planned_pv_uuid[$q]}" || fail "${selected[$q]} PV UUID is foreign"
       test -z "$pv_vg" || test "$pv_vg" = "$vg_name" || fail "${selected[$q]} belongs to foreign VG $pv_vg"
-      probe_no_child_or_holder "$q"
+      # Child/holder drift on an already-created PV is only meaningful during
+      # CREATE/concile (before any LV exists): a receipt VG that legitimately owns
+      # LVs will always have child devices at reapply/inspect time, so the
+      # zero-child probe must not run there. Probe on the mutation path only.
+      test "$mode" = inspect || probe_no_child_or_holder "$q"
     else
       probe_blank "$q"
     fi
