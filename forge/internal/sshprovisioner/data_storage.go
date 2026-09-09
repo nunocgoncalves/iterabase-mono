@@ -373,6 +373,7 @@ ownership_tag_owners() {
 }
 write_receipt() {
   local status_value=$1 pv_done_value=$2 receipt_dir tmp
+  receipt_dir=$(dirname "$receipt")
   install -d -o root -g root -m 0700 "$receipt_dir"
   umask 077; tmp=$(mktemp "$receipt_dir/.data-storage.receipt.XXXXXX")
   {
