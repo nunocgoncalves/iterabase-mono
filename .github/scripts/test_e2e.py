@@ -36,6 +36,17 @@ from e2e import (
 ROOT = Path(__file__).resolve().parents[2]
 SOURCE_SHA = "a" * 40
 
+# DES-HOR-545-02 provider-neutrality forbidden terms, assembled from fragments so
+# this file's own raw text never contains a whole forbidden token (the guard scans
+# test_e2e.py itself now) while the runtime pattern still matches scenario ids.
+_FORBIDDEN_PROVIDER_TERMS = (
+    "digital" + "ocean",
+    "dro" + "plet",
+    "provision" + "-cloud-" + "host",
+    "destroy" + "-cloud-" + "host",
+)
+_FORBIDDEN_PROVIDER_RE = re.compile("|".join(_FORBIDDEN_PROVIDER_TERMS), re.IGNORECASE)
+
 
 class E2EPlanTests(unittest.TestCase):
     @classmethod
@@ -208,7 +219,7 @@ class E2EPlanTests(unittest.TestCase):
                 for scenario in group["scenarios"]:
                     self.assertNotRegex(
                         scenario["id"],
-                        r"digitalocean|droplet|provision-cloud-host|destroy-cloud-host",
+                        _FORBIDDEN_PROVIDER_RE,
                     )
 
     def test_candidate_union_uses_same_scenario_and_stage_graph(self) -> None:
@@ -917,7 +928,7 @@ class ResultReconciliationTests(unittest.TestCase):
             self.assertNotEqual(archive_hash, binary_hash)
 
             scenario = {
-                "id": "forge/digitalocean-cpu",
+                "id": "forge/workspace-cpu",
                 "artifacts": [
                     {
                         "name": "forge-binary",
@@ -943,7 +954,7 @@ class ResultReconciliationTests(unittest.TestCase):
             with patch("e2e.verify_source"), patch("e2e.run", return_value=""):
                 compose_runtime(
                     plan_path,
-                    "forge/digitalocean-cpu",
+                    "forge/workspace-cpu",
                     root / "artifacts",
                     output,
                     root / "env.out",
@@ -1119,16 +1130,14 @@ class WorkflowContractTests(unittest.TestCase):
             ROOT / "docs/release.md",
             ROOT / "docs/runbooks/permanent-e2e-fixtures.md",
             ROOT / "docs/architecture/v2-openebs-lvm-storage.md",
+            ROOT / ".github/scripts/test_e2e.py",
         ]
         paths.extend(
             path
             for path in (ROOT / "forge/test/e2e").rglob("*")
             if path.is_file() and (path.suffix in {".go", ".md"} or path.name == "Makefile")
         )
-        forbidden = re.compile(
-            r"digitalocean|droplet|provision-cloud-host|destroy-cloud-host",
-            re.IGNORECASE,
-        )
+        forbidden = _FORBIDDEN_PROVIDER_RE
         for path in paths:
             with self.subTest(path=path.relative_to(ROOT)):
                 self.assertNotRegex(path.read_text(encoding="utf-8"), forbidden)
