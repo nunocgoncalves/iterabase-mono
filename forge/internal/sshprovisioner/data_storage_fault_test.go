@@ -345,10 +345,12 @@ func TestDataStorageFaultStageMatrixExecutable(t *testing.T) {
 		name   string
 		marker string
 	}{
-		{name: "planned", marker: "status=planned"},
-		{name: "after-pv0", marker: "status=pvs-created\npv_done=1"},
-		{name: "after-pv1", marker: "status=pvs-created\npv_done=2"},
-		{name: "after-vg", marker: "status=vg-created"},
+		// killAfter is a receipt status/field suffix; runDataStorageBash prepends
+		// "status=" when watching for it, so these markers carry no prefix.
+		{name: "planned", marker: "planned"},
+		{name: "after-pv0", marker: "pvs-created\npv_done=1"},
+		{name: "after-pv1", marker: "pvs-created\npv_done=2"},
+		{name: "after-vg", marker: "vg-created"},
 	} {
 		t.Run("resume-after-"+sc.name, func(t *testing.T) {
 			rspec, fscript := newFixture(t, "opo1")
