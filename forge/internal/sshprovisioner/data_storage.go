@@ -44,7 +44,9 @@ for ((i=0; i<count; i++)); do
   test -L "$path" || fail "selected stable identity $path is missing or not a symlink"
   dev=$(readlink -f -- "$path")
   test -b "$dev" || fail "selected identity $path does not resolve to a block device"
-  test "$(lsblk -dnro TYPE -- "$dev")" = disk || fail "$path is not a whole disk"
+  if [ "${FORGE_DATA_STORAGE_FIXTURE_LOOP:-}" != "1" ]; then
+    test "$(lsblk -dnro TYPE -- "$dev")" = disk || fail "$path is not a whole disk"
+  fi
   test "$(lsblk -dnro RM -- "$dev")" = 0 || fail "$path is removable"
   resolved[$i]=$dev
   kname[$i]=$(lsblk -dnro KNAME -- "$dev")
@@ -312,7 +314,9 @@ EOF
 probe_identity_topology() {
   i=$1; path=${selected[$i]}; dev=${resolved[$i]}; kernel=${kname[$i]}
   test -L "$path" && test "$(readlink -f -- "$path")" = "$dev" || fail "$path identity drifted"
-  test "$(lsblk -dnro TYPE -- "$dev")" = disk || fail "$path is not a whole disk"
+  if [ "${FORGE_DATA_STORAGE_FIXTURE_LOOP:-}" != "1" ]; then
+    test "$(lsblk -dnro TYPE -- "$dev")" = disk || fail "$path is not a whole disk"
+  fi
   test "$(lsblk -dnro RM -- "$dev")" = 0 || fail "$path is removable"
   test -z "$(lsblk -dnro PTTYPE -- "$dev")" || fail "$path has a partition table"
   test "$(sanitize "$(lsblk -dnro MODEL -- "$dev")")" = "${model[$i]}" || fail "$path model identity drifted"
