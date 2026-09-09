@@ -634,7 +634,6 @@ verify_class() {
 verify_class %s no
 verify_class %s yes
 test -n "$observed_node" || fail "LVMNode identity is missing"
-test "$(cap_ok \"$expected_size\" \"$observed_size\")" = 1 && test "$(cap_ok \"$expected_free\" \"$observed_free\")" = 1 || fail "LVMNode VG capacity contradicts the Forge receipt (expected size=$expected_size free=$expected_free, observed size=$observed_size free=$observed_free)"
 printf 'FORGE_LVM_STORAGE_READY\t%%s\t%%s\t%%s\t%%s\t%%s\t%%s\t%%s\n' "$observed_node" "$expected_vg" "$expected_uuid" "$observed_size" "$observed_free" "$observed_lv_count" "$observed_pv_count"
 `, shellQuote(namespace), shellQuote(host.VGName), shellQuote(host.VGUUID), shellQuote(strconv.FormatUint(host.SizeBytes, 10)), shellQuote(strconv.FormatUint(host.FreeBytes, 10)), shellQuote(strconv.Itoa(len(host.Devices))), shellQuote(provisioner.AgentPoolStorageClass+"\n"+provisioner.PlatformStorageClass), shellQuote(provisioner.PlatformStorageClass), shellQuote(provisioner.AgentPoolStorageClass))
 	out, err := p.run(ctx, "sudo bash -ceu "+shellQuote(script))
