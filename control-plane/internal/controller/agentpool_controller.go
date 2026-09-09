@@ -221,6 +221,19 @@ func (r *AgentPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	// missing/wrong/default/expandable class must fail without leaving a new PVC.
 	storagePreflight := r.assessAgentPoolStorage(ctx, &pool)
 	if !storagePreflight.CanMount {
+		// DES-HOR-545-01: class/PVC/PV/OpenEBS identity drift withdraws readiness
+		// AND quiesces established workers, or connected pods keep advertising
+		// dispatch credit after PV/LVMVolume/LVMNode drift. A scaled-to-zero or
+		// not-yet-created pool has no workers, so this is a no-op there while the
+		// no-PVC first-create path is preserved (assess returns CanMount for it).
+		hadWorkers := r.countReadyWorkers(ctx, &pool) > 0 || storageWasOperationallyReady(&pool)
+		if err := r.quiesceWorkers(ctx, &pool); err != nil {
+			return ctrl.Result{}, err
+		}
+		if hadWorkers {
+			storagePreflight.ReplacementPending = true
+			storagePreflight.Message += "; existing workers were removed to stop scheduling credit, and recovery requires healthy storage plus fresh workers without automatic turn/effect replay"
+		}
 		_ = r.patchStatus(ctx, &pool, false, 0, storagePreflight.Message, false, &storagePreflight)
 		return ctrl.Result{RequeueAfter: healthRequeueInterval}, nil
 	}

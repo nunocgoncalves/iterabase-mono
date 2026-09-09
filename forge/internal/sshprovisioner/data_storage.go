@@ -17,6 +17,49 @@ const (
 	lvmReportPairParser        = `awk -F'|' '{for(i=1;i<=2;i++){gsub(/^[[:space:]]+|[[:space:]]+$/, "", $i)}; print $1 "|" $2}'`
 )
 
+// dataStorageDeviceResolutionPrelude is the shared read-only device identity
+// prelude used by BOTH reconcile and purge so a single lifecycle path cannot
+// silently accept state the other rejects. It resolves the stable by-id set,
+// captures model/serial/WWN/size/transport, and rejects non-whole/logical
+// disks, duplicates, or missing identities. It performs no mutation and emits
+// no result lines; callers layer reconcile/purge transactions on top. The
+// returned string uses single '%' characters and is injected through an outer
+// fmt.Sprintf %s argument, never parsed as part of a format verb.
+func dataStorageDeviceResolutionPrelude() string {
+	return `
+sanitize() { printf '%s' "$1" | tr '\t|\r\n' '    '; }
+resolved=(); model=(); serial=(); wwn=(); size=(); transport=(); kname=(); planned_pv_uuid=()
+count=${#selected[@]}
+test "$count" -gt 0 || fail "selected device set is empty"
+for ((i=0; i<count; i++)); do
+  path=${selected[$i]}
+  case "$path" in /dev/disk/by-id/*) ;; *) fail "selected device $path is not a stable /dev/disk/by-id identity" ;; esac
+  case "$path" in *-part[0-9]*) fail "selected device $path is a partition identity" ;; esac
+  test -L "$path" || fail "selected stable identity $path is missing or not a symlink"
+  dev=$(readlink -f -- "$path")
+  test -b "$dev" || fail "selected identity $path does not resolve to a block device"
+  test "$(lsblk -dnro TYPE -- "$dev")" = disk || fail "$path is not a whole disk"
+  test "$(lsblk -dnro RM -- "$dev")" = 0 || fail "$path is removable"
+  resolved[$i]=$dev
+  kname[$i]=$(lsblk -dnro KNAME -- "$dev")
+  test -n "${kname[$i]}" || fail "cannot determine kernel identity for $path"
+  case "${kname[$i]}" in loop*|dm-*|md*|zd*|nbd*) fail "selected device $path is an unsupported logical/network device" ;; esac
+  model[$i]=$(sanitize "$(lsblk -dnro MODEL -- "$dev")")
+  serial[$i]=$(sanitize "$(lsblk -dnro SERIAL -- "$dev")")
+  wwn[$i]=$(sanitize "$(lsblk -dnro WWN -- "$dev")")
+  size[$i]=$(lsblk -bdnro SIZE -- "$dev")
+  case "${size[$i]}" in ''|*[!0-9]*) fail "selected disk $path size probe is invalid" ;; esac
+  test -n "${serial[$i]}${wwn[$i]}" || fail "selected disk $path exposes neither serial nor WWN"
+  transport[$i]=$(lsblk -dnro TRAN -- "$dev" | tr '[:upper:]' '[:lower:]' | tr '\t\r\n' '   ' | awk '{$1=$1; print}')
+  transport[$i]=${transport[$i]:-unknown}
+  for ((j=0; j<i; j++)); do
+    test "${resolved[$j]}" != "$dev" || fail "selected stable identities ${selected[$j]} and $path resolve to the same disk"
+  done
+  planned_pv_uuid[$i]=
+done
+`
+}
+
 // ListDataStorageDevices lists blank stable whole-disk candidates without
 // reading arbitrary device bytes or mutating the host.
 func (p *SSHProvisioner) ListDataStorageDevices(ctx context.Context) ([]provisioner.DataStorageDevice, error) {
@@ -185,34 +228,7 @@ selected=(%s)
 fail() { printf 'data-storage refusal: %%s\n' "$*" >&2; exit 42; }
 need() { command -v "$1" >/dev/null 2>&1 || fail "required probe/tool $1 is unavailable"; }
 for tool in readlink lsblk findmnt blkid wipefs awk grep stat base64 sync find tr head sort dirname mktemp mv chown chmod cat; do need "$tool"; done
-count=${#selected[@]}
-test "$count" -gt 0 || fail "selected device set is empty"
-
-sanitize() { printf '%%s' "$1" | tr '\t|\r\n' '    '; }
-resolved=(); model=(); serial=(); wwn=(); size=(); transport=(); kname=(); planned_pv_uuid=()
-for ((i=0; i<count; i++)); do
-  path=${selected[$i]}
-  case "$path" in /dev/disk/by-id/*) ;; *) fail "selected device $path is not a stable /dev/disk/by-id identity" ;; esac
-  case "$path" in *-part[0-9]*) fail "selected device $path is a partition identity" ;; esac
-  test -L "$path" || fail "selected stable identity $path is missing or not a symlink"
-  dev=$(readlink -f -- "$path")
-  test -b "$dev" || fail "selected identity $path does not resolve to a block device"
-  resolved[$i]=$dev
-  kname[$i]=$(lsblk -dnro KNAME -- "$dev")
-  test -n "${kname[$i]}" || fail "cannot determine kernel identity for $path"
-  case "${kname[$i]}" in loop*|dm-*|md*|zd*|nbd*) fail "selected device $path is an unsupported logical/network device" ;; esac
-  model[$i]=$(sanitize "$(lsblk -dnro MODEL -- "$dev")")
-  serial[$i]=$(sanitize "$(lsblk -dnro SERIAL -- "$dev")")
-  wwn[$i]=$(sanitize "$(lsblk -dnro WWN -- "$dev")")
-  size[$i]=$(lsblk -bdnro SIZE -- "$dev")
-  case "${size[$i]}" in ''|*[!0-9]*) fail "selected disk $path size probe is invalid" ;; esac
-  test -n "${serial[$i]}${wwn[$i]}" || fail "selected disk $path exposes neither serial nor WWN"
-  transport[$i]=$(lsblk -dnro TRAN -- "$dev" | tr '[:upper:]' '[:lower:]' | tr '\t\r\n' '   ' | awk '{$1=$1; print}')
-  transport[$i]=${transport[$i]:-unknown}
-  for ((j=0; j<i; j++)); do
-    test "${resolved[$j]}" != "$dev" || fail "selected stable identities ${selected[$j]} and $path resolve to the same disk"
-  done
-done
+%s
 
 list_process_ids() {
   process_list_error=
@@ -307,10 +323,15 @@ probe_identity_topology() {
   probe_active_raw_consumer "$dev"
 }
 
-probe_blank() {
-  i=$1; probe_identity_topology "$i"; dev=${resolved[$i]}; kernel=${kname[$i]}
+probe_no_child_or_holder() {
+  i=$1; dev=${resolved[$i]}; kernel=${kname[$i]}
   test "$(lsblk -nrpo PATH -- "$dev" | awk 'NF {n++} END {print n+0}')" = 1 || fail "${selected[$i]} has partitions or child devices"
   test ! -d "/sys/class/block/$kernel/holders" || test -z "$(find "/sys/class/block/$kernel/holders" -mindepth 1 -maxdepth 1 -print -quit)" || fail "${selected[$i]} has active holders"
+}
+
+probe_blank() {
+  i=$1; probe_identity_topology "$i"; dev=${resolved[$i]}
+  probe_no_child_or_holder "$i"
   set +e; wipe_types=$(wipefs -n --noheadings --output TYPE -- "$dev" 2>&1); wipe_rc=$?; set -e
   test "$wipe_rc" = 0 || fail "wipefs probe failed for ${selected[$i]}: $wipe_types"
   test -z "$(printf '%%s' "$wipe_types" | awk 'NF')" || fail "${selected[$i]} has a recognized partition/filesystem/RAID/LVM/crypt signature"
@@ -425,6 +446,7 @@ verify_or_blank_set() {
       pv_uuid=${pv%%|*}; pv_vg=${pv#*|}
       test "$pv_uuid" = "${planned_pv_uuid[$q]}" || fail "${selected[$q]} PV UUID is foreign"
       test -z "$pv_vg" || test "$pv_vg" = "$vg_name" || fail "${selected[$q]} belongs to foreign VG $pv_vg"
+      probe_no_child_or_holder "$q"
     else
       probe_blank "$q"
     fi
@@ -506,7 +528,7 @@ fi
 
 for ((i=0; i<count; i++)); do printf 'FORGE_DATA_STORAGE_DEVICE_RESULT\t%%s\t%%s\t%%s\t%%s\t%%s\t%%s\t%%s\t%%s\n' "${selected[$i]}" "${resolved[$i]}" "${model[$i]}" "${serial[$i]}" "${wwn[$i]}" "${planned_pv_uuid[$i]}" "${size[$i]}" "${transport[$i]}"; done
 printf 'FORGE_DATA_STORAGE_RESULT\t%%s\t%%s\t%%s\t%%s\t%%s\t%%s\n' "$final_state" "$vg_name" "${vg_uuid:-}" "${vg_size:-0}" "${vg_free:-0}" "$count"
-`, shellQuote(spec.InstallName), shellQuote(mode), shellQuote(dataStorageContractVersion), shellQuote(dataStorageReceiptPath), shellQuote(provisioner.DataVolumeGroupName), strings.Join(quoted, " "))
+`, shellQuote(spec.InstallName), shellQuote(mode), shellQuote(dataStorageContractVersion), shellQuote(dataStorageReceiptPath), shellQuote(provisioner.DataVolumeGroupName), strings.Join(quoted, " "), dataStorageDeviceResolutionPrelude())
 }
 
 // WaitForLVMStorageReady validates the chart-owned substrate and exact VG
@@ -521,6 +543,7 @@ expected_vg=%s
 expected_uuid=%s
 expected_size=%s
 expected_free=%s
+expected_pv_count=%s
 fail() { printf 'lvm-storage readiness refusal: %%s\n' "$*" >&2; exit 42; }
 csi_registered() {
   cluster_nodes=$(k3s kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null) || return 1
@@ -533,15 +556,33 @@ csi_registered() {
   csi_keys=$(printf '%%s\n' "$registration" | awk 'NR > 1 && NF' | sort)
   test "$csi_keys" = "$(printf 'kubernetes.io/hostname\nopenebs.io/nodename')"
 }
+observed_node=; observed_size=; observed_free=; observed_lv_count=; observed_pv_count=
+lvmnode_satisfies() {
+  node_count=$(k3s kubectl get lvmnodes.local.openebs.io -n "$namespace" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | awk '{print NF}')
+  test "$node_count" = 1 || return 1
+  observed_node=$(k3s kubectl get lvmnodes.local.openebs.io -n "$namespace" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+  vg=$(k3s kubectl get lvmnodes.local.openebs.io -n "$namespace" -o jsonpath='{range .items[0].volumeGroups[?(@.name=="iterabase-data")]}{.name}|{.uuid}|{.size}|{.free}|{.pvCount}|{.missingPvCount}|{.lvCount}|{len .thinPools}{"\n"}{end}' 2>/dev/null)
+  test -n "$vg" || return 1
+  IFS='|' read -r vg_name vg_uuid vg_size vg_free pv_count missing_pv lv_count thin_pools <<<"$vg"
+  test "$vg_name" = "$expected_vg" && test "$vg_uuid" = "$expected_uuid" || return 1
+  test -n "$vg_size" && test -n "$vg_free" || return 1
+  for number in "$lv_count" "$pv_count" "$missing_pv"; do case "$number" in ''|*[!0-9]*) return 1 ;; esac; done
+  test "$vg_size" = "$expected_size" && test "$vg_free" = "$expected_free" || return 1
+  test "$pv_count" = "$expected_pv_count" || return 1
+  test "$missing_pv" = 0 || return 1
+  test -z "$thin_pools" || test "$thin_pools" = 0 || return 1
+  observed_size=$vg_size; observed_free=$vg_free; observed_lv_count=$lv_count; observed_pv_count=$pv_count
+  return 0
+}
 for attempt in $(seq 1 150); do
   if k3s kubectl get crd lvmnodes.local.openebs.io lvmvolumes.local.openebs.io lvmsnapshots.local.openebs.io >/dev/null 2>&1 &&
      k3s kubectl wait --for=condition=Established crd/lvmnodes.local.openebs.io crd/lvmvolumes.local.openebs.io crd/lvmsnapshots.local.openebs.io --timeout=10s >/dev/null 2>&1 &&
      k3s kubectl wait -n "$namespace" --for=condition=Available deployment -l app=openebs-lvm-controller --timeout=10s >/dev/null 2>&1 &&
      k3s kubectl rollout status -n "$namespace" daemonset -l app=openebs-lvm-node --timeout=10s >/dev/null 2>&1 &&
-     k3s kubectl get csidriver local.csi.openebs.io >/dev/null 2>&1 && csi_registered; then
+     k3s kubectl get csidriver local.csi.openebs.io >/dev/null 2>&1 && csi_registered && lvmnode_satisfies; then
     break
   fi
-  test "$attempt" -lt 150 || fail "OpenEBS LVM LocalPV controller/node/CRD/CSI registration did not become Ready"
+  test "$attempt" -lt 150 || fail "OpenEBS LVM LocalPV controller/node/CRD/CSI registration or receipt-matching iterabase-data VG discovery did not become Ready"
   sleep 2
 done
 classes=$(k3s kubectl get storageclass -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' | sort)
@@ -555,17 +596,10 @@ verify_class() {
 }
 verify_class %s no
 verify_class %s yes
-node_count=$(k3s kubectl get lvmnodes.local.openebs.io -n "$namespace" -o jsonpath='{.items[*].metadata.name}' | awk '{print NF}')
-test "$node_count" = 1 || fail "expected exactly one LVMNode, observed $node_count"
-node_name=$(k3s kubectl get lvmnodes.local.openebs.io -n "$namespace" -o jsonpath='{.items[0].metadata.name}')
-vg=$(k3s kubectl get lvmnodes.local.openebs.io -n "$namespace" -o jsonpath='{range .items[0].volumeGroups[?(@.name=="iterabase-data")]}{.name}|{.uuid}|{.size}|{.free}|{.lvCount}|{.pvCount}{"\n"}{end}')
-test -n "$vg" || fail "LVMNode does not report iterabase-data"
-IFS='|' read -r vg_name vg_uuid vg_size vg_free lv_count pv_count <<<"$vg"
-test "$vg_name" = "$expected_vg" && test "$vg_uuid" = "$expected_uuid" || fail "LVMNode VG identity differs from the Forge receipt"
-test -n "$vg_size" && test -n "$vg_free" || fail "LVMNode VG capacity is missing: $vg"
-for number in "$lv_count" "$pv_count"; do case "$number" in ''|*[!0-9]*) fail "LVMNode VG count is invalid: $vg" ;; esac; done
-printf 'FORGE_LVM_STORAGE_READY\t%%s\t%%s\t%%s\t%%s\t%%s\t%%s\t%%s\n' "$node_name" "$vg_name" "$vg_uuid" "$expected_size" "$expected_free" "$lv_count" "$pv_count"
-`, shellQuote(namespace), shellQuote(host.VGName), shellQuote(host.VGUUID), shellQuote(strconv.FormatUint(host.SizeBytes, 10)), shellQuote(strconv.FormatUint(host.FreeBytes, 10)), shellQuote(provisioner.AgentPoolStorageClass+"\n"+provisioner.PlatformStorageClass), shellQuote(provisioner.PlatformStorageClass), shellQuote(provisioner.AgentPoolStorageClass))
+test -n "$observed_node" || fail "LVMNode identity is missing"
+test "$observed_size" = "$expected_size" && test "$observed_free" = "$expected_free" || fail "LVMNode VG capacity differs from the Forge receipt"
+printf 'FORGE_LVM_STORAGE_READY\t%%s\t%%s\t%%s\t%%s\t%%s\t%%s\t%%s\n' "$observed_node" "$expected_vg" "$expected_uuid" "$observed_size" "$observed_free" "$observed_lv_count" "$observed_pv_count"
+`, shellQuote(namespace), shellQuote(host.VGName), shellQuote(host.VGUUID), shellQuote(strconv.FormatUint(host.SizeBytes, 10)), shellQuote(strconv.FormatUint(host.FreeBytes, 10)), shellQuote(strconv.Itoa(len(host.Devices))), shellQuote(provisioner.AgentPoolStorageClass+"\n"+provisioner.PlatformStorageClass), shellQuote(provisioner.PlatformStorageClass), shellQuote(provisioner.AgentPoolStorageClass))
 	out, err := p.run(ctx, "sudo bash -ceu "+shellQuote(script))
 	if err != nil {
 		return nil, fmt.Errorf("wait for LVM storage substrate: %w", err)

@@ -35,20 +35,7 @@ selected=(%s)
 fail() { printf 'data-storage purge refusal: %%s\n' "$*" >&2; exit 42; }
 need() { command -v "$1" >/dev/null 2>&1 || fail "required probe/tool $1 is unavailable"; }
 for tool in readlink lsblk findmnt blkid wipefs awk grep stat base64 sync sort dirname tr; do need "$tool"; done
-count=${#selected[@]}; test "$count" -gt 0 || fail "selected device set is empty"
-resolved=(); model=(); serial=(); wwn=(); size=(); transport=(); planned_pv_uuid=()
-sanitize() { printf '%%s' "$1" | tr '\t|\r\n' '    '; }
-for ((i=0; i<count; i++)); do
-  path=${selected[$i]}; case "$path" in /dev/disk/by-id/*) ;; *) fail "$path is not a stable by-id identity" ;; esac
-  case "$path" in *-part[0-9]*) fail "$path is a partition identity" ;; esac
-  test -L "$path" || fail "$path is missing or not a symlink"
-  dev=$(readlink -f -- "$path"); test -b "$dev" || fail "$path does not resolve to a block device"
-  test "$(lsblk -dnro TYPE -- "$dev")" = disk || fail "$path is not a whole disk"
-  test "$(lsblk -dnro RM -- "$dev")" = 0 || fail "$path is removable"
-  resolved[$i]=$dev; model[$i]=$(sanitize "$(lsblk -dnro MODEL -- "$dev")"); serial[$i]=$(sanitize "$(lsblk -dnro SERIAL -- "$dev")"); wwn[$i]=$(sanitize "$(lsblk -dnro WWN -- "$dev")"); size[$i]=$(lsblk -bdnro SIZE -- "$dev")
-  transport[$i]=$(lsblk -dnro TRAN -- "$dev" | tr '[:upper:]' '[:lower:]' | tr '\t\r\n' '   ' | awk '{$1=$1;print}'); transport[$i]=${transport[$i]:-unknown}
-  for ((j=0; j<i; j++)); do test "${resolved[$j]}" != "$dev" || fail "two selected identities resolve to $dev"; done
-done
+%s
 
 if test ! -e "$receipt"; then
   if command -v vgs >/dev/null 2>&1 && vgs "$vg_name" >/dev/null 2>&1; then fail "$vg_name exists without its Forge receipt"; fi
@@ -172,5 +159,5 @@ for ((i=0; i<count; i++)); do
 done
 rm -f -- "$receipt"; sync -f "$(dirname "$receipt")"
 printf 'FORGE_DATA_STORAGE_PURGE_RESULT\tpurged\t%%s\n' "$count"
-`, shellQuote(spec.InstallName), shellQuote(dataStorageContractVersion), shellQuote(dataStorageReceiptPath), shellQuote(provisioner.DataVolumeGroupName), strings.Join(quoted, " "))
+`, shellQuote(spec.InstallName), shellQuote(dataStorageContractVersion), shellQuote(dataStorageReceiptPath), shellQuote(provisioner.DataVolumeGroupName), strings.Join(quoted, " "), dataStorageDeviceResolutionPrelude())
 }
