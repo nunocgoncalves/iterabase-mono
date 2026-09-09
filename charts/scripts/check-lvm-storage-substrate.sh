@@ -57,7 +57,7 @@ grep -Fq 'name: iterabase-agentpool-claim-authority' <<<"$render"
 grep -Fq 'failurePolicy: Fail' <<<"$render"
 grep -Fq 'validationActions: [Deny]' <<<"$render"
 grep -Fq 'request.userInfo.username == '\''system:serviceaccount:iterabase-system:release-control-plane-manager'\''' <<<"$render"
-grep -Fq 'operations: ["CREATE", "UPDATE"]' <<<"$render"
+grep -Fq 'operations: ["CREATE"]' <<<"$render"
 grep -Fq 'resources: ["persistentvolumeclaims"]' <<<"$render"
 
 for values in "" "-f values-observability.yaml"; do
