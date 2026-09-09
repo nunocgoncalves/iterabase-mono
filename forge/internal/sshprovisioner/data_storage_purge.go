@@ -94,7 +94,7 @@ if test "$vg_record_count" = 1; then
   members=$(pvs --noheadings --select "vg_name=$vg_name" -o pv_name | awk '{$1=$1;if(NF)print}' | sort)
   expected=$(printf '%%s\n' "${resolved[@]}" | sort); test "$members" = "$expected" || fail "$vg_name membership differs from receipt"
   for ((i=0; i<count; i++)); do
-    set +e; pv_line=$(pvs --noheadings --separator '|' -o pv_uuid,vg_name -- "${resolved[$i]}" 2>&1); pv_rc=$?; set -e
+    set +e; pv_line=$(pvs --noheadings --separator '|' -o pv_uuid,vg_name -- "${resolved[$i]}" 2>/dev/null); pv_rc=$?; set -e
     test "$pv_rc" = 0 || fail "receipt PV ${selected[$i]} disappeared before VG purge"
     pv=$(printf '%%s' "$pv_line" | `+lvmReportPairParser+`); pv_uuid=${pv%%|*}; pv_vg=${pv#*|}
     test "$pv_uuid" = "${planned_pv_uuid[$i]}" && test "$pv_vg" = "$vg_name" || fail "${selected[$i]} PV identity/membership drift"
@@ -108,7 +108,7 @@ else
 fi
 
 for ((i=0; i<count; i++)); do
-  set +e; pv_line=$(pvs --noheadings --separator '|' -o pv_uuid,vg_name -- "${resolved[$i]}" 2>&1); pv_rc=$?; set -e
+  set +e; pv_line=$(pvs --noheadings --separator '|' -o pv_uuid,vg_name -- "${resolved[$i]}" 2>/dev/null); pv_rc=$?; set -e
   if test "$pv_rc" = 0; then
     pv=$(printf '%%s' "$pv_line" | `+lvmReportPairParser+`)
     pv_uuid=${pv%%|*}; pv_vg=${pv#*|}
