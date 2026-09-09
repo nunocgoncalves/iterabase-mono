@@ -1620,7 +1620,7 @@ func TestDataStoragePurgeScriptIsReceiptBoundedAndRefusesLiveLVs(t *testing.T) {
 		InstallName: "opo1", Devices: []string{"/dev/disk/by-id/scsi-data-a", "/dev/disk/by-id/scsi-data-b"},
 	})
 	for _, expected := range []string{
-		"data-storage purge refusal", "receipt install mismatch", "configured device order/set differs",
+		"data-storage purge refusal", "receipt install mismatch", "device order/set differs",
 		"receipt ownership tag is invalid", "ownership tag differs from receipt", "ownership tag is not globally unique", "PV identity/membership drift",
 		"backs system path", "raw-consumer probe failed", "still contains", "delete claims and release consumers",
 		"vgremove --yes", "pvremove --yes", "FORGE_DATA_STORAGE_PURGE_RESULT", "already-clean", lvmReportPairParser,

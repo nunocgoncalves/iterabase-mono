@@ -403,11 +403,34 @@ spec:
   volumes: [{name: data, persistentVolumeClaim: {claimName: forge-vg-exhaustion}}]
 YAML`, exhaustRequest)
 	mustSSHOutput(t, client, exhaust)
-	time.Sleep(20 * time.Second)
-	phase := strings.TrimSpace(mustSSHOutput(t, client, `sudo k3s kubectl get pvc forge-vg-exhaustion -n iterabase-system -o jsonpath='{.status.phase}'`))
-	events := mustSSHOutput(t, client, `sudo k3s kubectl get events -n iterabase-system --field-selector involvedObject.kind=PersistentVolumeClaim,involvedObject.name=forge-vg-exhaustion -o jsonpath='{range .items[*]}{.reason}|{.message}{"\n"}{end}'`)
-	if phase != "Pending" || !strings.Contains(events, "ProvisioningFailed") {
-		t.Fatalf("aggregate VG exhaustion was not an honest Pending/ProvisioningFailed claim: phase=%s events=%s", phase, events)
+	// DES-HOR-545-01 honest new-claim exhaustion. Under WaitForFirstConsumer +
+	// CSI storage-capacity scheduling the new claim either reaches
+	// ProvisioningFailed (OpenEBS attempts and is refused because the VG cannot
+	// fit it) or stays Pending with its consumer pod withheld until no node can
+	// satisfy the claim. Both are honest "cannot fit, no overcommit": the claim
+	// must never become Bound and no LV may be created. Observe deterministically
+	// with a bounded poll rather than racing a fixed sleep against scheduling.
+	deadline := time.Now().Add(2 * time.Minute)
+	var phase, podPhase, ev string
+	for {
+		phase = strings.TrimSpace(mustSSHOutput(t, client, `sudo k3s kubectl get pvc forge-vg-exhaustion -n iterabase-system -o jsonpath='{.status.phase}'`))
+		podPhase = strings.TrimSpace(mustSSHOutput(t, client, `sudo k3s kubectl get pod forge-vg-exhaustion -n iterabase-system -o jsonpath='{.status.phase}'`))
+		ev = mustSSHOutput(t, client, `sudo k3s kubectl get events -n iterabase-system --field-selector involvedObject.kind=PersistentVolumeClaim,involvedObject.name=forge-vg-exhaustion -o jsonpath='{range .items[*]}{.reason}{"\n"}{end}'`)
+		if phase == "Bound" {
+			t.Fatalf("aggregate VG exhaustion claim became Bound (overcommit/fallback forbidden): podPhase=%s events=%s", podPhase, ev)
+		}
+		provisionFailed := strings.Contains(ev, "ProvisioningFailed")
+		capacityWithheld := phase == "Pending" && podPhase == "Pending"
+		if provisionFailed || capacityWithheld {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("aggregate VG exhaustion did not settle into an honest Pending/withheld/ProvisioningFailed terminal state: phase=%s podPhase=%s events=%s", phase, podPhase, ev)
+		}
+		time.Sleep(time.Second)
+	}
+	if phase != "Pending" {
+		t.Fatalf("aggregate VG exhaustion was not an honest Pending claim: phase=%s podPhase=%s events=%s", phase, podPhase, ev)
 	}
 	mustSSHOutput(t, client, "sudo k3s kubectl delete pod/forge-vg-exhaustion pvc/forge-vg-exhaustion pod/forge-vg-pressure pvc/forge-vg-pressure -n iterabase-system --ignore-not-found=true --wait=true --timeout=10m")
 	command := fmt.Sprintf(`for i in $(seq 1 150); do test "$(sudo lvs --noheadings -o lv_name iterabase-data | awk 'NF {n++} END {print n+0}')" = %s && exit 0; sleep 2; done; exit 1`, before[1])

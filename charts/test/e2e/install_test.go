@@ -105,6 +105,25 @@ func assertOpenEBSLVMClaimsStage(t *testing.T, state *chartState) {
 		}
 	}
 
+	// DES-HOR-545-01 claims authority: the AgentPool workspace class is authorized
+	// ONLY for the manager-created, AgentPool-owned PVC shape. A generic unrelated
+	// claim selecting it under a non-manager identity must be denied by the
+	// iterabase-agentpool-claim-authority ValidatingAdmissionPolicy (the chart
+	// installs it with the manager ServiceAccount as authorizedManagerIdentity).
+	blocked := `apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: unrelated-agentpool-claim, namespace: ` + testNamespace + `}
+spec:
+  accessModes: [ReadWriteOnce]
+  volumeMode: Filesystem
+  storageClassName: ` + AgentPoolWorkspaceStorageClass + `
+  resources: {requests: {storage: 512Mi}}
+`
+	blockedPath := state.writeManifest(t, "unrelated-agentpool-claim.yaml", blocked)
+	if _, err := state.kubectlResult(30*time.Second, "apply", "-f", blockedPath); err == nil {
+		t.Fatalf("an unrelated PVC selecting the AgentPool class was admitted; DES-HOR-545-01 requires the manager-owned AgentPool claim shape only")
+	}
+
 	// Ubuntu 24.04 XFS refuses filesystems at or below 300 MB; keep this real
 	// lifecycle claim above that supported minimum rather than bypassing format.
 	manifest := `apiVersion: v1
