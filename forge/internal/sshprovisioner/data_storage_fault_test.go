@@ -210,8 +210,18 @@ func TestDataStorageFaultMatrixScriptCoversEveryDurableStage(t *testing.T) {
 	// behind the internal FORGE_DATA_STORAGE_FIXTURE_LOOP flag. Its only
 	// occurrences are the gate guards; ordinary production rejection of loop
 	// devices and unsigned disks remains the default.
-	require.Equal(t, 2, strings.Count(script, "if [ \"${FORGE_DATA_STORAGE_FIXTURE_LOOP:-}\" != \"1\" ]; then"),
-		"the fixture escape must gate exactly the loop-rejection and unsigned-disk checks")
+	// Founder-approved Option B: the loop/unsigned/whole-disk fixture escape is
+	// gated behind the internal FORGE_DATA_STORAGE_FIXTURE_LOOP flag. Every
+	// check that would otherwise reject the loop fixture must be gated (balanced),
+	// and the ordinary production rejection messages must remain present so
+	// normal forge apply (without the flag) rejects loop devices unchanged.
+	gate := "if [ \"${FORGE_DATA_STORAGE_FIXTURE_LOOP:-}\" != \"1\" ]; then"
+	wholeDisk := strings.Count(script, "is not a whole disk")
+	loopReject := strings.Count(script, "unsupported logical/network device")
+	unsigned := strings.Count(script, "exposes neither serial nor WWN")
+	require.Equal(t, wholeDisk+loopReject+unsigned, strings.Count(script, gate),
+		"every production device-rejection check must be gated behind the internal fixture flag")
+	require.GreaterOrEqual(t, wholeDisk, 2, "both the resolution prelude and topology probe must keep the whole-disk rejection")
 	require.Contains(t, script, "unsupported logical/network device")
 	require.Contains(t, script, "exposes neither serial nor WWN")
 }
@@ -367,5 +377,7 @@ func TestDataStorageLoopDevicesRejectedWithoutFixtureFlag(t *testing.T) {
 	cmd.Stderr = &out
 	err := cmd.Run()
 	require.Error(t, err, "loop-backed by-id device accepted without FORGE_DATA_STORAGE_FIXTURE_LOOP")
-	require.Contains(t, out.String(), "unsupported logical/network device")
+	outStr := out.String()
+	require.Contains(t, outStr, "data-storage refusal")
+	require.Contains(t, outStr, "is not a whole disk")
 }
