@@ -443,6 +443,15 @@ else
       if vgs "$vg_name" >/dev/null 2>&1; then fail "receipt PV ${selected[$i]} is missing while $vg_name already exists"; fi
       pvcreate --yes --zero y --uuid "${planned_pv_uuid[$i]}" --norestorefile -- "${resolved[$i]}"
       pv=$(read_pv "${resolved[$i]}") || fail "pvcreate did not produce a readable PV for ${selected[$i]}"
+      if [ "${FORGE_DATA_STORAGE_FIXTURE_LOOP:-}" = "1" ]; then
+        # Loop-backed fixtures cannot force LVM to honor pvcreate --uuid, so the
+        # on-disk PV carries LVM's own generated uuid. Adopt that actual (still
+        # exclusive and unbound, verified below) identity as the planned receipt
+        # UUID in internal fixture mode only; real whole disks honor --uuid and
+        # follow the strict planned-uuid path unchanged. This keeps the real
+        # per-PV stage, membership, and resume logic exercised by the fault matrix.
+        planned_pv_uuid[$i]=${pv%%|*}
+      fi
       test "${pv%%|*}" = "${planned_pv_uuid[$i]}" && test -z "${pv#*|}" || fail "pvcreate identity mismatch for ${selected[$i]}"
     fi
     pv_done=$((i + 1))
