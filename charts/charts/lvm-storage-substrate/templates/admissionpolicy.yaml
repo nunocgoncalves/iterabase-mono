@@ -30,8 +30,7 @@ spec:
       message: "Only the control-plane manager may create or update PVCs in the iterabase-agentpool-lvm-xfs class"
     - expression: |-
         has(object.metadata.ownerReferences) &&
-        size(object.metadata.ownerReferences.filter(r, has(r.controller) && r.controller == true)) == 1 &&
-        object.metadata.ownerReferences.existsOne(r, has(r.controller) && r.controller == true && r.apiVersion == 'platform.iterabase.com/v1alpha1' && r.kind == 'AgentPool')
+        size(object.metadata.ownerReferences.filter(r, has(r.controller) && r.controller == true && r.apiVersion == 'platform.iterabase.com/v1alpha1' && r.kind == 'AgentPool')) == 1
       message: "PVCs in the iterabase-agentpool-lvm-xfs class must be controller-owned by exactly one platform.iterabase.com/AgentPool"
 ---
 apiVersion: admissionregistration.k8s.io/v1
@@ -53,4 +52,5 @@ spec:
     resourceRules:
       - apiGroups: [""]
         apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
         resources: ["persistentvolumeclaims"]
