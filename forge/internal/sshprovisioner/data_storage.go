@@ -339,16 +339,12 @@ probe_blank() {
   test "$blk_rc" = 2 || { test "$blk_rc" = 0 && fail "${selected[$i]} has recognized signature $blk_type"; fail "blkid probe failed or was ambiguous for ${selected[$i]}: $blk_type"; }
 }
 
-receipt_value() { awk -F= -v wanted="$1" '$1 == wanted {sub(/^[^=]*=/, ""); print; found=1} END {if (!found) exit 3}' "$receipt"; }
-decode_receipt() { receipt_value "$1" | base64 -d; }
 lvm_uuid() { raw=$(tr -d - < /proc/sys/kernel/random/uuid); printf '%%s-%%s-%%s-%%s-%%s-%%s-%%s\n' "${raw:0:6}" "${raw:6:4}" "${raw:10:4}" "${raw:14:4}" "${raw:18:4}" "${raw:22:4}" "${raw:26:6}"; }
-valid_lvm_uuid() { case "$1" in ??????-????-????-????-????-????-??????) return 0 ;; *) return 1 ;; esac; }
 new_ownership_tag() {
   raw=$(tr -d - < /proc/sys/kernel/random/uuid)
   printf '%%s' "$raw" | grep -Eq '^[0-9a-f]{32}$' || fail "kernel UUID source did not produce a valid ownership token"
   printf 'iterabase.hor545.%%s\n' "$raw"
 }
-valid_ownership_tag() { printf '%%s' "$1" | grep -Eq '^iterabase[.]hor545[.][0-9a-f]{32}$'; }
 ownership_tag_owners() {
   vgs --noheadings --separator '|' -o vg_name,vg_uuid,vg_tags | awk -F'|' -v wanted="$ownership_tag" '
     {for(i=1;i<=3;i++) gsub(/^[[:space:]]+|[[:space:]]+$/, "", $i); n=split($3, tags, ","); for(i=1;i<=n;i++) if(tags[i] == wanted) {print $1 "|" $2; break}}
@@ -375,46 +371,8 @@ write_receipt() {
   chown root:root "$tmp"; chmod 0600 "$tmp"; sync -f "$tmp"; mv -f "$tmp" "$receipt"; sync -f "$receipt_dir"
 }
 
-status=; pv_done=0; receipt_vg_uuid=; ownership_tag=
-if test -e "$receipt"; then
-  test -f "$receipt" && test ! -L "$receipt" || fail "data-storage receipt is not a regular file"
-  test "$(stat -c '%%u:%%g:%%a' "$receipt")" = 0:0:600 || fail "data-storage receipt ownership/mode drift"
-  test "$(receipt_value contract)" = "$contract" || fail "data-storage receipt contract mismatch"
-  status=$(receipt_value status); case "$status" in planned|pvs-created|vg-created|complete) ;; *) fail "data-storage receipt status is invalid" ;; esac
-  pv_done=$(receipt_value pv_done); case "$pv_done" in ''|*[!0-9]*) fail "data-storage receipt pv_done is invalid" ;; esac
-  test "$pv_done" -le "$count" || fail "data-storage receipt pv_done exceeds device count"
-  test "$(decode_receipt install_b64)" = "$install_name" || fail "data-storage receipt install mismatch"
-  test "$(receipt_value device_count)" = "$count" || fail "data-storage configured device-set size differs from the receipt"
-  test "$(receipt_value vg_name)" = "$vg_name" || fail "data-storage VG name mismatch"
-  ownership_tag=$(receipt_value ownership_tag)
-  valid_ownership_tag "$ownership_tag" || fail "data-storage receipt ownership tag is invalid"
-  receipt_vg_uuid=$(receipt_value vg_uuid)
-  case "$status" in
-    planned)
-      test "$pv_done" = 0 || fail "data-storage planned receipt has completed PV stages"
-      test -z "$receipt_vg_uuid" || fail "data-storage receipt records a VG UUID before the VG-created stage"
-      ;;
-    pvs-created)
-      test "$pv_done" -gt 0 || fail "data-storage pvs-created receipt has no completed PV"
-      test -z "$receipt_vg_uuid" || fail "data-storage receipt records a VG UUID before the VG-created stage"
-      ;;
-    vg-created|complete)
-      test "$pv_done" = "$count" || fail "data-storage VG receipt does not bind the complete PV set"
-      valid_lvm_uuid "$receipt_vg_uuid" || fail "data-storage receipt VG UUID is invalid"
-      ;;
-  esac
-  for ((i=0; i<count; i++)); do
-    test "$(decode_receipt device_${i}_b64)" = "${selected[$i]}" || fail "data-storage device order/set differs from the receipt"
-    test "$(decode_receipt resolved_${i}_b64)" = "${resolved[$i]}" || fail "data-storage resolved device identity drift"
-    test "$(decode_receipt model_${i}_b64)" = "${model[$i]}" || fail "data-storage model identity drift"
-    test "$(decode_receipt serial_${i}_b64)" = "${serial[$i]}" || fail "data-storage serial identity drift"
-    test "$(decode_receipt wwn_${i}_b64)" = "${wwn[$i]}" || fail "data-storage WWN identity drift"
-    test "$(decode_receipt transport_${i}_b64)" = "${transport[$i]}" || fail "data-storage transport identity drift"
-    test "$(receipt_value size_$i)" = "${size[$i]}" || fail "data-storage size identity drift"
-    planned_pv_uuid[$i]=$(receipt_value pv_uuid_$i)
-    valid_lvm_uuid "${planned_pv_uuid[$i]}" || fail "data-storage receipt PV UUID is invalid"
-  done
-else
+%s
+if test "$receipt_present" = 0; then
   for ((i=0; i<count; i++)); do probe_blank "$i"; done
   if command -v vgs >/dev/null 2>&1 && vgs "$vg_name" >/dev/null 2>&1; then fail "fixed VG $vg_name already exists without the Forge receipt"; fi
   if test "$mode" = inspect; then
@@ -473,7 +431,14 @@ else
       pv=$(read_pv "${resolved[$i]}") || fail "pvcreate did not produce a readable PV for ${selected[$i]}"
       test "${pv%%|*}" = "${planned_pv_uuid[$i]}" && test -z "${pv#*|}" || fail "pvcreate identity mismatch for ${selected[$i]}"
     fi
-    pv_done=$((i + 1)); write_receipt pvs-created "$pv_done"; status=pvs-created
+    pv_done=$((i + 1))
+    # Advance to pvs-created only while the VG is not yet receipt-bound. Once
+    # the VG exists and its UUID is durable (vg-created/complete), a later
+    # reapply sees every PV already present and must never regress the receipt:
+    # a pvs-created stage with a non-empty vg_uuid is invalid and would brick
+    # the next run. The pvs-created marker is only meaningful during the PV
+    # creation transaction, before vgcreate (DES-HOR-545-03).
+    if test -z "$receipt_vg_uuid"; then write_receipt pvs-created "$pv_done"; status=pvs-created; fi
   done
 fi
 
@@ -532,7 +497,7 @@ fi
 
 for ((i=0; i<count; i++)); do printf 'FORGE_DATA_STORAGE_DEVICE_RESULT\t%%s\t%%s\t%%s\t%%s\t%%s\t%%s\t%%s\t%%s\n' "${selected[$i]}" "${resolved[$i]}" "${model[$i]}" "${serial[$i]}" "${wwn[$i]}" "${planned_pv_uuid[$i]}" "${size[$i]}" "${transport[$i]}"; done
 printf 'FORGE_DATA_STORAGE_RESULT\t%%s\t%%s\t%%s\t%%s\t%%s\t%%s\n' "$final_state" "$vg_name" "${vg_uuid:-}" "${vg_size:-0}" "${vg_free:-0}" "$count"
-`, shellQuote(spec.InstallName), shellQuote(mode), shellQuote(dataStorageContractVersion), shellQuote(dataStorageReceiptPath), shellQuote(provisioner.DataVolumeGroupName), strings.Join(quoted, " "), dataStorageDeviceResolutionPrelude())
+`, shellQuote(spec.InstallName), shellQuote(mode), shellQuote(dataStorageContractVersion), shellQuote(dataStorageReceiptPath), shellQuote(provisioner.DataVolumeGroupName), strings.Join(quoted, " "), dataStorageDeviceResolutionPrelude(), dataStorageReceiptPrelude())
 }
 
 // WaitForLVMStorageReady validates the chart-owned substrate and exact VG
@@ -668,4 +633,62 @@ printf 'FORGE_LVM_STORAGE_READY\t%%s\t%%s\t%%s\t%%s\t%%s\t%%s\t%%s\n' "$observed
 		return &provisioner.LVMStorageReadiness{Ready: true, NodeName: parts[1], VGName: parts[2], VGUUID: parts[3], SizeBytes: size, FreeBytes: free, LVCount: lvCount, PVCount: pvCount}, nil
 	}
 	return nil, fmt.Errorf("LVM storage readiness returned no bounded result")
+}
+
+// dataStorageReceiptPrelude emits the shared read-only receipt-parsing and
+// identity-validation prelude used by both exact reconcile and explicit purge
+// (DES-HOR-545-03). It defines the receipt accessors, loads the durable receipt
+// (when present) into status/pv_done/receipt_vg_uuid/ownership_tag/
+// planned_pv_uuid, sets receipt_present, and fails closed on any identity,
+// membership, hardware, or stage drift. It performs no mutation, so the two
+// lifecycle paths can never diverge on what state they accept. Callers layer
+// their reconcile/purge mutations on top of this read-only prelude.
+func dataStorageReceiptPrelude() string {
+	return `
+receipt_value() { awk -F= -v wanted="$1" '$1 == wanted {sub(/^[^=]*=/, ""); print; found=1} END {if (!found) exit 3}' "$receipt"; }
+decode_receipt() { receipt_value "$1" | base64 -d; }
+valid_lvm_uuid() { case "$1" in ??????-????-????-????-????-????-??????) return 0 ;; *) return 1 ;; esac; }
+valid_ownership_tag() { printf '%s' "$1" | grep -Eq '^iterabase[.]hor545[.][0-9a-f]{32}$'; }
+status=; pv_done=0; receipt_vg_uuid=; ownership_tag=; planned_pv_uuid=(); receipt_present=0
+if test -e "$receipt"; then
+  receipt_present=1
+  test -f "$receipt" && test ! -L "$receipt" || fail "data-storage receipt is not a regular file"
+  test "$(stat -c '%u:%g:%a' "$receipt")" = 0:0:600 || fail "data-storage receipt ownership/mode drift"
+  test "$(receipt_value contract)" = "$contract" || fail "data-storage receipt contract mismatch"
+  status=$(receipt_value status); case "$status" in planned|pvs-created|vg-created|complete) ;; *) fail "data-storage receipt status is invalid" ;; esac
+  pv_done=$(receipt_value pv_done); case "$pv_done" in ''|*[!0-9]*) fail "data-storage receipt pv_done is invalid" ;; esac
+  test "$pv_done" -le "$count" || fail "data-storage receipt pv_done exceeds device count"
+  test "$(decode_receipt install_b64)" = "$install_name" || fail "data-storage receipt install mismatch"
+  test "$(receipt_value device_count)" = "$count" || fail "data-storage configured device-set size differs from the receipt"
+  test "$(receipt_value vg_name)" = "$vg_name" || fail "data-storage VG name mismatch"
+  ownership_tag=$(receipt_value ownership_tag)
+  valid_ownership_tag "$ownership_tag" || fail "data-storage receipt ownership tag is invalid"
+  receipt_vg_uuid=$(receipt_value vg_uuid)
+  case "$status" in
+    planned)
+      test "$pv_done" = 0 || fail "data-storage planned receipt has completed PV stages"
+      test -z "$receipt_vg_uuid" || fail "data-storage receipt records a VG UUID before the VG-created stage"
+      ;;
+    pvs-created)
+      test "$pv_done" -gt 0 || fail "data-storage pvs-created receipt has no completed PV"
+      test -z "$receipt_vg_uuid" || fail "data-storage receipt records a VG UUID before the VG-created stage"
+      ;;
+    vg-created|complete)
+      test "$pv_done" = "$count" || fail "data-storage VG receipt does not bind the complete PV set"
+      valid_lvm_uuid "$receipt_vg_uuid" || fail "data-storage receipt VG UUID is invalid"
+      ;;
+  esac
+  for ((i=0; i<count; i++)); do
+    test "$(decode_receipt device_${i}_b64)" = "${selected[$i]}" || fail "data-storage device order/set differs from the receipt"
+    test "$(decode_receipt resolved_${i}_b64)" = "${resolved[$i]}" || fail "data-storage resolved device identity drift"
+    test "$(decode_receipt model_${i}_b64)" = "${model[$i]}" || fail "data-storage model identity drift"
+    test "$(decode_receipt serial_${i}_b64)" = "${serial[$i]}" || fail "data-storage serial identity drift"
+    test "$(decode_receipt wwn_${i}_b64)" = "${wwn[$i]}" || fail "data-storage WWN identity drift"
+    test "$(decode_receipt transport_${i}_b64)" = "${transport[$i]}" || fail "data-storage transport identity drift"
+    test "$(receipt_value size_$i)" = "${size[$i]}" || fail "data-storage size identity drift"
+    planned_pv_uuid[$i]=$(receipt_value pv_uuid_$i)
+    valid_lvm_uuid "${planned_pv_uuid[$i]}" || fail "data-storage receipt PV UUID is invalid"
+  done
+fi
+`
 }

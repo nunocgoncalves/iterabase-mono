@@ -207,8 +207,75 @@ func TestDataStorageFaultMatrixScriptCoversEveryDurableStage(t *testing.T) {
 	require.Less(t, pvcreateIdx, receipt, "each pvcreate must be followed by the durable pvs-created receipt")
 	require.Equal(t, 1, strings.Count(script, "write_receipt pvs-created"))
 
+	// DES-HOR-545-03 monotonic receipt: the pvs-created write is gated on an
+	// unbound VG UUID, so exact reapply of an already-complete receipt never
+	// regresses to pvs-created (which, paired with a real vg_uuid, is invalid and
+	// would brick the next run). The VG-created and complete markers remain
+	// unconditional promotion only.
+	require.Contains(t, script, "if test -z \"$receipt_vg_uuid\"; then write_receipt pvs-created", "reapply must guard the pvs-created receipt write on an unbound VG UUID")
+
 	// The planned receipt precedes the first mutation and the VG-created receipt
 	// binds the complete PV set before the UUID is persisted.
 	require.Less(t, strings.Index(script, "write_receipt planned 0"), strings.Index(script, "pvcreate --yes --zero y --uuid"))
 	require.Less(t, strings.Index(script, "vgcreate --yes --addtag"), strings.Index(script, "receipt_vg_uuid=$vg_uuid; write_receipt vg-created"))
+}
+
+// requireReceiptStatus asserts the durable receipt currently reports the given
+// status field, proving the on-disk stage survived (or was not regressed by)
+// the preceding run/crash.
+func requireReceiptStatus(t *testing.T, want string) {
+	t.Helper()
+	data, err := os.ReadFile(dataStorageReceiptPath)
+	require.NoError(t, err, "read durable receipt")
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(line, "status=") {
+			require.Equal(t, "status="+want, strings.TrimSpace(line))
+			return
+		}
+	}
+	t.Fatalf("receipt has no status field: %s", string(data))
+}
+
+// TestDataStorageReapplyReceiptMonotonicExecutable proves exact reapply of an
+// already-complete receipt is idempotent, crash-resumable, and never regresses
+// the receipt to pvs-created (DES-HOR-545-03 / HOR-545 exact-reapply
+// acceptance). It executes the real reconcile script over loop-backed devices,
+// injects SIGKILL crashes, and asserts the complete receipt is always preserved.
+func TestDataStorageReapplyReceiptMonotonicExecutable(t *testing.T) {
+	ok, reason := lvmFaultMatrixEnv(t)
+	if !ok {
+		t.Skip(reason)
+	}
+	_ = os.Remove(dataStorageReceiptPath) // isolate from any prior global receipt
+	t.Cleanup(func() { _ = os.Remove(dataStorageReceiptPath) })
+
+	dir := t.TempDir()
+	devices := makeFaultLoopDevices(t, dir, 2)
+	t.Cleanup(func() { teardownFaultLoopDevices(t, devices) })
+	spec := provisioner.DataStorageSpec{InstallName: "opo1", Devices: devices}
+	script := writeFaultScript(t, spec, "reconcile")
+
+	// Fresh install must converge to complete and bind both PVs + the VG.
+	out, okc := runDataStorageBash(t, script, spec, "")
+	require.True(t, okc, "reconcile failed on clean run: %s", out)
+	require.Contains(t, out, "FORGE_DATA_STORAGE_RESULT\tcomplete")
+	requireReceiptStatus(t, "complete")
+
+	// Exact reapply: if the old (bricking) logic were present, the per-PV loop
+	// would write pvs-created while retaining the real vg_uuid, and the
+	// killAfter=pvs-created watcher would SIGKILL once it observed that
+	// regressive stage. With the monotonic guard the marker is never emitted, so
+	// the run completes normally (crashed=false) and the receipt stays complete.
+	out, crashed := runDataStorageBash(t, script, spec, "pvs-created")
+	require.False(t, crashed, "exact reapply regressed the receipt to pvs-created:\n%s", out)
+	require.Contains(t, out, "FORGE_DATA_STORAGE_RESULT\tcomplete")
+	requireReceiptStatus(t, "complete")
+
+	// Crash during reapply (killed after loading the complete receipt) must leave
+	// a resumable, still-complete receipt; the next run completes without repair.
+	_, _ = runDataStorageBash(t, script, spec, "complete") // best-effort SIGKILL mid-reapply
+	out2, ok2 := runDataStorageBash(t, script, spec, "")
+	require.True(t, ok2, "reapply did not resume to complete after crash: %s", out2)
+	require.Contains(t, out2, "FORGE_DATA_STORAGE_RESULT\tcomplete")
+	requireReceiptStatus(t, "complete")
 }
