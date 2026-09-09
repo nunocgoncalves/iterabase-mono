@@ -243,6 +243,7 @@ for tool in readlink lsblk findmnt blkid wipefs awk grep stat base64 sync find t
 %s
 
 list_process_ids() {
+  local process_list process_list_rc process_list_error process_list_attempt
   process_list_error=
   for process_list_attempt in 1 2 3; do
     set +e
@@ -261,6 +262,7 @@ list_process_ids() {
 }
 
 list_process_fds() {
+  local process_path fd_list_rc fd_list fd_list_error fd_list_attempt process_id current_process_ids
   process_path=$1
   fd_list_error=
   for fd_list_attempt in 1 2 3; do
@@ -278,6 +280,7 @@ list_process_fds() {
 }
 
 probe_active_raw_consumer() {
+  local dev device_number scanned_fds process_ids process fd_names fd_name fd fd_rc fd_number fd_gone fd_round fd_attempt remaining_fds
   dev=$1
   device_number=$(stat -Lc '%%t:%%T' "$dev" 2>/dev/null) || fail "cannot determine $dev device number"
   scanned_fds=0
@@ -312,7 +315,8 @@ EOF
 }
 
 probe_identity_topology() {
-  i=$1; path=${selected[$i]}; dev=${resolved[$i]}; kernel=${kname[$i]}
+  local i=$1 path dev kernel source direct_mounts
+  path=${selected[$i]}; dev=${resolved[$i]}; kernel=${kname[$i]}
   test -L "$path" && test "$(readlink -f -- "$path")" = "$dev" || fail "$path identity drifted"
   if [ "${FORGE_DATA_STORAGE_FIXTURE_LOOP:-}" != "1" ]; then
     test "$(lsblk -dnro TYPE -- "$dev")" = disk || fail "$path is not a whole disk"
@@ -338,13 +342,15 @@ probe_identity_topology() {
 }
 
 probe_no_child_or_holder() {
-  i=$1; dev=${resolved[$i]}; kernel=${kname[$i]}
+  local i=$1 dev kernel
+  dev=${resolved[$i]}; kernel=${kname[$i]}
   test "$(lsblk -nrpo PATH -- "$dev" | awk 'NF {n++} END {print n+0}')" = 1 || fail "${selected[$i]} has partitions or child devices"
   test ! -d "/sys/class/block/$kernel/holders" || test -z "$(find "/sys/class/block/$kernel/holders" -mindepth 1 -maxdepth 1 -print -quit)" || fail "${selected[$i]} has active holders"
 }
 
 probe_blank() {
-  i=$1; probe_identity_topology "$i"; dev=${resolved[$i]}
+  local i=$1 dev wipe_types wipe_rc blk_type blk_rc
+  probe_identity_topology "$i"; dev=${resolved[$i]}
   probe_no_child_or_holder "$i"
   set +e; wipe_types=$(wipefs -n --noheadings --output TYPE -- "$dev" 2>&1); wipe_rc=$?; set -e
   test "$wipe_rc" = 0 || fail "wipefs probe failed for ${selected[$i]}: $wipe_types"
@@ -353,8 +359,9 @@ probe_blank() {
   test "$blk_rc" = 2 || { test "$blk_rc" = 0 && fail "${selected[$i]} has recognized signature $blk_type"; fail "blkid probe failed or was ambiguous for ${selected[$i]}: $blk_type"; }
 }
 
-lvm_uuid() { raw=$(tr -d - < /proc/sys/kernel/random/uuid); printf '%%s-%%s-%%s-%%s-%%s-%%s-%%s\n' "${raw:0:6}" "${raw:6:4}" "${raw:10:4}" "${raw:14:4}" "${raw:18:4}" "${raw:22:4}" "${raw:26:6}"; }
+lvm_uuid() { local raw; raw=$(tr -d - < /proc/sys/kernel/random/uuid); printf '%%s-%%s-%%s-%%s-%%s-%%s-%%s\n' "${raw:0:6}" "${raw:6:4}" "${raw:10:4}" "${raw:14:4}" "${raw:18:4}" "${raw:22:4}" "${raw:26:6}"; }
 new_ownership_tag() {
+  local raw
   raw=$(tr -d - < /proc/sys/kernel/random/uuid)
   printf '%%s' "$raw" | grep -Eq '^[0-9a-f]{32}$' || fail "kernel UUID source did not produce a valid ownership token"
   printf 'iterabase.hor545.%%s\n' "$raw"
@@ -365,7 +372,7 @@ ownership_tag_owners() {
   ' | sort
 }
 write_receipt() {
-  status_value=$1; pv_done_value=$2; receipt_dir=$(dirname "$receipt")
+  local status_value=$1 pv_done_value=$2 receipt_dir tmp
   install -d -o root -g root -m 0700 "$receipt_dir"
   umask 077; tmp=$(mktemp "$receipt_dir/.data-storage.receipt.XXXXXX")
   {
@@ -407,11 +414,13 @@ if test -n "$tag_owners"; then
   test "${tag_owners%%|*}" = "$vg_name" || fail "data-storage ownership tag belongs to foreign VG ${tag_owners%%|*}"
 fi
 read_pv() {
+  local pv_line pv_rc
   set +e; pv_line=$(pvs --noheadings --separator '|' -o pv_uuid,vg_name -- "$1" 2>/dev/null); pv_rc=$?; set -e
   test "$pv_rc" = 0 || return 1
   printf '%%s' "$pv_line" | `+lvmReportPairParser+`
 }
 verify_or_blank_set() {
+  local q pv pv_uuid pv_vg
   for ((q=0; q<count; q++)); do
     probe_identity_topology "$q"
     if pv=$(read_pv "${resolved[$q]}"); then
@@ -443,15 +452,6 @@ else
       if vgs "$vg_name" >/dev/null 2>&1; then fail "receipt PV ${selected[$i]} is missing while $vg_name already exists"; fi
       pvcreate --yes --zero y --uuid "${planned_pv_uuid[$i]}" --norestorefile -- "${resolved[$i]}"
       pv=$(read_pv "${resolved[$i]}") || fail "pvcreate did not produce a readable PV for ${selected[$i]}"
-      if [ "${FORGE_DATA_STORAGE_FIXTURE_LOOP:-}" = "1" ]; then
-        # Loop-backed fixtures cannot force LVM to honor pvcreate --uuid, so the
-        # on-disk PV carries LVM's own generated uuid. Adopt that actual (still
-        # exclusive and unbound, verified below) identity as the planned receipt
-        # UUID in internal fixture mode only; real whole disks honor --uuid and
-        # follow the strict planned-uuid path unchanged. This keeps the real
-        # per-PV stage, membership, and resume logic exercised by the fault matrix.
-        planned_pv_uuid[$i]=${pv%%|*}
-      fi
       test "${pv%%|*}" = "${planned_pv_uuid[$i]}" && test -z "${pv#*|}" || fail "pvcreate identity mismatch for ${selected[$i]}"
     fi
     pv_done=$((i + 1))

@@ -3,6 +3,7 @@ package sshprovisioner
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"os"
@@ -252,6 +253,54 @@ func requireReceiptStatus(t *testing.T, want string) {
 	t.Fatalf("receipt has no status field: %s", string(data))
 }
 
+// requireReceiptPVIdentityMatchesLive proves the durable receipt's planned PV
+// UUID for every bound device exactly equals the on-disk PV UUID LVM reports for
+// that device. The reconcile enforces this strictly; this assertion makes the
+// two-device fault matrix prove it explicitly (both explicit pvcreate stages and
+// exact receipt UUIDs), so any future relaxation is caught here, not only via a
+// non-failure of the reconcile run.
+func requireReceiptPVIdentityMatchesLive(t *testing.T, spec provisioner.DataStorageSpec) {
+	t.Helper()
+	data, err := os.ReadFile(dataStorageReceiptPath)
+	require.NoError(t, err, "read durable receipt")
+	resolved := map[int]string{}
+	pvUUID := map[int]string{}
+	for _, line := range strings.Split(string(data), "\n") {
+		kv := strings.SplitN(line, "=", 2)
+		if len(kv) != 2 {
+			continue
+		}
+		key, val := kv[0], strings.TrimSpace(kv[1])
+		if rem, ok := strings.CutPrefix(key, "resolved_"); ok {
+			idx, err := strconv.Atoi(strings.TrimSuffix(rem, "_b64"))
+			if err != nil {
+				continue
+			}
+			b, err := base64.StdEncoding.DecodeString(val)
+			if err != nil {
+				continue
+			}
+			resolved[idx] = string(b)
+		} else if rem, ok := strings.CutPrefix(key, "pv_uuid_"); ok {
+			idx, err := strconv.Atoi(rem)
+			if err != nil {
+				continue
+			}
+			pvUUID[idx] = val
+		}
+	}
+	for i := 0; i < len(spec.Devices); i++ {
+		dev, ok := resolved[i]
+		require.Truef(t, ok, "receipt missing resolved device %d", i)
+		want, ok := pvUUID[i]
+		require.Truef(t, ok, "receipt missing pv_uuid for device %d", i)
+		out, err := exec.Command("pvs", "--noheadings", "-o", "pv_uuid", "--", dev).CombinedOutput()
+		require.NoErrorf(t, err, "pvs on %s: %s", dev, string(out))
+		got := strings.TrimSpace(string(out))
+		require.Equalf(t, want, got, "receipt PV UUID for device %d (%s) does not match live on-disk UUID", i, dev)
+	}
+}
+
 // TestDataStorageFaultStageMatrixExecutable stages a real LVM transaction across
 // every durable boundary and proves Forge's crash-resumable and mismatch-refusal
 // contract by actually executing the generated reconcile script over loop-backed
@@ -282,13 +331,14 @@ func TestDataStorageFaultStageMatrixExecutable(t *testing.T) {
 	}
 
 	// A clean full run must converge to complete and bind both PVs + the VG.
-	_, script := newFixture(t, "opo1")
+	spec, script := newFixture(t, "opo1")
 	out, okc := runDataStorageBash(t, script, "")
 	if !okc {
 		t.Fatalf("reconcile failed on clean run: %s\n%s", out, lvmFaultDump())
 	}
 	require.Contains(t, out, "FORGE_DATA_STORAGE_RESULT\tcomplete")
 	require.Contains(t, out, lvmReportPairParser) // the bounded VG inspection parser is present
+	requireReceiptPVIdentityMatchesLive(t, spec)
 
 	// Fault-stage matrix: crash after each durable receipt stage then resume.
 	for _, sc := range []struct {
@@ -301,22 +351,24 @@ func TestDataStorageFaultStageMatrixExecutable(t *testing.T) {
 		{name: "after-vg", marker: "status=vg-created"},
 	} {
 		t.Run("resume-after-"+sc.name, func(t *testing.T) {
-			_, fscript := newFixture(t, "opo1")
+			rspec, fscript := newFixture(t, "opo1")
 			out, crashed := runDataStorageBash(t, fscript, sc.marker)
 			require.True(t, crashed, "expected SIGKILL crash at %s; out=%s", sc.name, out)
 			out2, ok2 := runDataStorageBash(t, fscript, "")
 			require.True(t, ok2, "resume failed after %s crash: %s", sc.name, out2)
 			require.Contains(t, out2, "FORGE_DATA_STORAGE_RESULT\tcomplete")
+			requireReceiptPVIdentityMatchesLive(t, rspec)
 		})
 	}
 
 	// Mismatch refusal: regenerate the script from mismatched install input and
 	// run it against the same durable fixture - the receipt must refuse it.
 	t.Run("refuses-foreign-install", func(t *testing.T) {
-		_, base := newFixture(t, "opo1")
+		basespec, base := newFixture(t, "opo1")
 		out, ok := runDataStorageBash(t, base, "")
 		require.True(t, ok, "seed complete receipt: %s", out)
 		require.Contains(t, out, "FORGE_DATA_STORAGE_RESULT\tcomplete")
+		requireReceiptPVIdentityMatchesLive(t, basespec)
 		foreign := writeFaultScript(t, provisioner.DataStorageSpec{InstallName: "other", Devices: curAliases}, "reconcile")
 		outF, okF := runDataStorageBash(t, foreign, "")
 		require.False(t, okF, "foreign install identity must be refused")
@@ -349,6 +401,7 @@ func TestDataStorageReapplyReceiptMonotonicExecutable(t *testing.T) {
 	}
 	require.Contains(t, out, "FORGE_DATA_STORAGE_RESULT\tcomplete")
 	requireReceiptStatus(t, "complete")
+	requireReceiptPVIdentityMatchesLive(t, spec)
 
 	// Exact reapply: with the monotonic guard the pvs-created marker is never
 	// re-emitted for an already-complete receipt, so the run completes normally
@@ -357,6 +410,7 @@ func TestDataStorageReapplyReceiptMonotonicExecutable(t *testing.T) {
 	require.False(t, crashed, "exact reapply regressed the receipt to pvs-created:\n%s", out)
 	require.Contains(t, out, "FORGE_DATA_STORAGE_RESULT\tcomplete")
 	requireReceiptStatus(t, "complete")
+	requireReceiptPVIdentityMatchesLive(t, spec)
 
 	// Crash during reapply (killed after loading the complete receipt) must leave
 	// a resumable, still-complete receipt; the next run completes without repair.
@@ -365,6 +419,7 @@ func TestDataStorageReapplyReceiptMonotonicExecutable(t *testing.T) {
 	require.True(t, ok2, "reapply did not resume to complete after crash: %s", out2)
 	require.Contains(t, out2, "FORGE_DATA_STORAGE_RESULT\tcomplete")
 	requireReceiptStatus(t, "complete")
+	requireReceiptPVIdentityMatchesLive(t, spec)
 }
 
 // TestDataStorageLoopDevicesRejectedWithoutFixtureFlag proves the ordinary
