@@ -189,8 +189,6 @@ losetup -d "$loop"
 rm -f /var/lib/iterabase-lvm-loop /var/lib/iterabase-data.img
 ' kind-lvm-cleanup-inner "$vg"
 `
-	cluster.mu.Lock()
-	defer cluster.mu.Unlock()
 	vgName := ""
 	if cluster.lvmContract.DataVolumeGroupName != "" {
 		vgName = cluster.lvmContract.DataVolumeGroupName
