@@ -28,6 +28,29 @@ import (
 
 const testNamespace = "iterabase-system"
 
+// Chart-owned DES-HOR-545-01 storage expectations. The shared testkit helper
+// validates these through an LVMStorageContract that this owning suite
+// constructs; the exact product names and identities stay here (testkit/AGENTS.md).
+const (
+	PlatformDataStorageClass       = "iterabase-lvm-xfs"
+	AgentPoolWorkspaceStorageClass = "iterabase-agentpool-lvm-xfs"
+	lvmProvisioner                 = "local.csi.openebs.io"
+	lvmDataVolumeGroupName         = "iterabase-data"
+	lvmNodeTopologyKey             = "openebs.io/nodename"
+)
+
+func lvmStorageContract() kindcluster.LVMStorageContract {
+	return kindcluster.LVMStorageContract{
+		DataVolumeGroupName: lvmDataVolumeGroupName,
+		Provisioner:         lvmProvisioner,
+		NodeTopologyKey:     lvmNodeTopologyKey,
+		StorageClasses: []kindcluster.StorageClassExpectation{
+			{Name: PlatformDataStorageClass, Shared: false},
+			{Name: AgentPoolWorkspaceStorageClass, Shared: true},
+		},
+	}
+}
+
 const (
 	metalLBValidationPolicyValue = "metallb.crds.validationFailurePolicy"
 	metalLBPolicyFail            = "Fail"
@@ -455,7 +478,7 @@ func (state *chartState) installLVMStorage(t *testing.T) {
 	if state.lvmStorageReady || state.lvmSubstrate.LocalPath == "" {
 		return
 	}
-	if err := state.cluster.ConfigureLVMStorage(state.ctx, state.lvmSubstrate.LocalPath, testNamespace, testRelease+"-lvm-storage"); err != nil {
+	if err := state.cluster.ConfigureLVMStorage(state.ctx, state.lvmSubstrate.LocalPath, testNamespace, testRelease+"-lvm-storage", lvmStorageContract()); err != nil {
 		t.Fatalf("install exact Kind OpenEBS LVM storage substrate: %v", err)
 	}
 	state.lvmStorageReady = true

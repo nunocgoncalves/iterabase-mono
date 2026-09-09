@@ -46,6 +46,7 @@ type Cluster struct {
 	lvmNode      string
 	lvmNamespace string
 	lvmRelease   string
+	lvmContract  LVMStorageContract
 }
 
 // Create provisions a fresh cluster whose name and kubeconfig cannot collide

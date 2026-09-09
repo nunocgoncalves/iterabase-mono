@@ -65,10 +65,11 @@ func TestLVMStorageHelmArgsUseTheKindKubeletRegistrationPath(t *testing.T) {
 }
 
 func TestValidateLVMCSINodeRegistrationFailsClosed(t *testing.T) {
+	contract := testLVMStorageContract()
 	valid := func() map[string]any {
 		return map[string]any{"spec": map[string]any{"drivers": []any{
 			map[string]any{"name": "other.csi.example", "nodeID": "node-a", "topologyKeys": []string{"example.com/node"}},
-			map[string]any{"name": AgentPoolWorkspaceProvisioner, "nodeID": "node-a", "topologyKeys": []string{lvmTopologyKey, "kubernetes.io/hostname"}},
+			map[string]any{"name": contract.Provisioner, "nodeID": "node-a", "topologyKeys": []string{contract.NodeTopologyKey, "kubernetes.io/hostname"}},
 		}}}
 	}
 	marshal := func(value map[string]any) []byte {
@@ -78,7 +79,7 @@ func TestValidateLVMCSINodeRegistrationFailsClosed(t *testing.T) {
 		}
 		return data
 	}
-	if err := ValidateLVMCSINodeRegistration(marshal(valid()), "node-a"); err != nil {
+	if err := ValidateLVMCSINodeRegistration(marshal(valid()), "node-a", contract); err != nil {
 		t.Fatalf("valid OpenEBS LVM CSINode registration failed: %v", err)
 	}
 
@@ -93,15 +94,15 @@ func TestValidateLVMCSINodeRegistrationFailsClosed(t *testing.T) {
 			value["spec"].(map[string]any)["drivers"].([]any)[1].(map[string]any)["topologyKeys"] = []string{"kubernetes.io/hostname"}
 		},
 		"extra topology": func(value map[string]any) {
-			value["spec"].(map[string]any)["drivers"].([]any)[1].(map[string]any)["topologyKeys"] = []string{lvmTopologyKey, "kubernetes.io/hostname", "example.com/zone"}
+			value["spec"].(map[string]any)["drivers"].([]any)[1].(map[string]any)["topologyKeys"] = []string{contract.NodeTopologyKey, "kubernetes.io/hostname", "example.com/zone"}
 		},
 		"duplicate": func(value map[string]any) {
 			drivers := value["spec"].(map[string]any)["drivers"].([]any)
-			value["spec"].(map[string]any)["drivers"] = append(drivers, map[string]any{"name": AgentPoolWorkspaceProvisioner, "nodeID": "node-a", "topologyKeys": []string{lvmTopologyKey, "kubernetes.io/hostname"}})
+			value["spec"].(map[string]any)["drivers"] = append(drivers, map[string]any{"name": contract.Provisioner, "nodeID": "node-a", "topologyKeys": []string{contract.NodeTopologyKey, "kubernetes.io/hostname"}})
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if err := ValidateLVMCSINodeRegistration(marshal(func() map[string]any { value := valid(); mutate(value); return value }()), "node-a"); err == nil {
+			if err := ValidateLVMCSINodeRegistration(marshal(func() map[string]any { value := valid(); mutate(value); return value }()), "node-a", contract); err == nil {
 				t.Fatalf("%s CSINode drift unexpectedly passed", name)
 			}
 		})
@@ -179,23 +180,24 @@ func TestDownloadedRuntimeArtifactRequiresPostCreateClusterImport(t *testing.T) 
 
 func TestValidateManagedLVMStorageClassFailsClosed(t *testing.T) {
 	t.Parallel()
+	contract := testLVMStorageContract()
 	valid := map[string]any{
 		"metadata": map[string]any{
-			"name":        AgentPoolWorkspaceStorageClass,
+			"name":        contract.StorageClasses[1].Name,
 			"annotations": map[string]any{defaultClassAnnotation: "false", betaDefaultClassAnnotation: "false"},
 		},
-		"provisioner": AgentPoolWorkspaceProvisioner, "reclaimPolicy": "Delete",
+		"provisioner": contract.Provisioner, "reclaimPolicy": "Delete",
 		"volumeBindingMode": "WaitForFirstConsumer", "allowVolumeExpansion": false,
 		"parameters": map[string]any{
-			"storage": "lvm", "vgpattern": "^iterabase-data$", "fsType": "xfs", "thinProvision": "no", "shared": "yes",
+			"storage": "lvm", "vgpattern": "^" + contract.DataVolumeGroupName + "$", "fsType": "xfs", "thinProvision": "no", "shared": "yes",
 		},
 	}
 	data, err := json.Marshal(valid)
 	if err != nil {
 		t.Fatal(err)
 	}
-	name, err := ValidateManagedLVMStorageClass(data)
-	if err != nil || name != AgentPoolWorkspaceStorageClass {
+	name, err := ValidateManagedLVMStorageClass(data, contract)
+	if err != nil || name != contract.StorageClasses[1].Name {
 		t.Fatalf("valid class=%q err=%v", name, err)
 	}
 
@@ -227,10 +229,25 @@ func TestValidateManagedLVMStorageClassFailsClosed(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := ValidateManagedLVMStorageClass(data); err == nil {
+			if _, err := ValidateManagedLVMStorageClass(data, contract); err == nil {
 				t.Fatalf("%s contract drift unexpectedly passed", name)
 			}
 		})
+	}
+}
+
+// testLVMStorageContract returns a representative owner-supplied LVM storage
+// contract used to exercise the shared, parameterized validation mechanics in
+// testkit itself. The exact expectations are the owning suite's responsibility.
+func testLVMStorageContract() LVMStorageContract {
+	return LVMStorageContract{
+		DataVolumeGroupName: "iterabase-data",
+		Provisioner:         "local.csi.openebs.io",
+		NodeTopologyKey:     "openebs.io/nodename",
+		StorageClasses: []StorageClassExpectation{
+			{Name: "iterabase-lvm-xfs", Shared: false},
+			{Name: "iterabase-agentpool-lvm-xfs", Shared: true},
+		},
 	}
 }
 
@@ -241,7 +258,7 @@ func TestConfigureLVMStorageRejectsMissingChartBeforeMutation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := cluster.ConfigureLVMStorage(context.Background(), filepath.Join(t.TempDir(), "missing"), "iterabase-system", "iterabase-lvm-storage"); err == nil {
+	if err := cluster.ConfigureLVMStorage(context.Background(), filepath.Join(t.TempDir(), "missing"), "iterabase-system", "iterabase-lvm-storage", testLVMStorageContract()); err == nil {
 		t.Fatal("missing pinned LVM chart unexpectedly reached infrastructure mutation")
 	}
 	if len(executor.commands) != 0 {
@@ -259,6 +276,7 @@ func TestLVMStorageCleanupDeletesPlatformResourcesBeforeHelmUninstall(t *testing
 	cluster.lvmNamespace = "iterabase-system"
 	cluster.lvmRelease = "iterabase-lvm-storage"
 	cluster.lvmNode = "charts-control-plane"
+	cluster.lvmContract = testLVMStorageContract()
 	if err := cluster.cleanupLVMStorage(context.Background()); err != nil {
 		t.Fatal(err)
 	}

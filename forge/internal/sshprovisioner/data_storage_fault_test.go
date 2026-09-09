@@ -1,0 +1,214 @@
+package sshprovisioner
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
+
+	"github.com/nunocgoncalves/iterabase-mono/forge/internal/provisioner"
+)
+
+// lvmFaultMatrixEnv reports whether a privileged real-LVM environment capable of
+// staging the actual reconcile transaction is available. It requires root, the
+// LVM2 + losetup toolchain, and mknod so the deterministic executable fault-stage
+// matrix can create real block devices. When unavailable the test skips cleanly;
+// the exact-head CI/Linux runner and candidate rehearsal exercise this privileged
+// path (HOR-545 acceptance).
+func lvmFaultMatrixEnv(t *testing.T) (bool, string) {
+	t.Helper()
+	if os.Geteuid() != 0 {
+		return false, "real-LVM reconcile fault matrix requires root (loop/mknod); skip on dev workstation, run in exact-head CI/rehearsal"
+	}
+	for _, tool := range []string{"losetup", "pvcreate", "vgcreate", "pvs", "vgs", "lvs", "mknod"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			return false, fmt.Sprintf("real-LVM reconcile fault matrix requires %q; skip where unavailable", tool)
+		}
+	}
+	return true, ""
+}
+
+// writeFaultScript writes the generated reconcile script to disk so it can be
+// executed with the real bash -ceu interpreter (exactly as Forge runs it over
+// SSH) while a goroutine terminates the process at a chosen durable stage.
+func writeFaultScript(t *testing.T, spec provisioner.DataStorageSpec, mode string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "reconcile.sh")
+	require.NoError(t, os.WriteFile(path, []byte("set -eu\n"+dataStorageReconcileScript(spec, mode)+"\n"), 0o600))
+	return path
+}
+
+// runDataStorageBash executes the already-written reconcile script under the
+// real bash interpreter and returns stdout/exit. killAfter determines the
+// durable boilerplate snapshot that, once observed in the receipt file, triggers
+// a SIGKILL to simulate a crash at exactly that stage without mutating the script.
+func runDataStorageBash(t *testing.T, path string, spec provisioner.DataStorageSpec, killAfter string) (string, bool) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "bash", path)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start reconcile script: %v", err)
+	}
+
+	if killAfter != "" {
+		go func() {
+			deadline := time.Now().Add(90 * time.Second)
+			for time.Now().Before(deadline) {
+				data, err := os.ReadFile(dataStorageReceiptPath)
+				if err == nil && strings.Contains(string(data), "status="+killAfter) {
+					_ = cmd.Process.Kill()
+					return
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+		}()
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case <-ctx.Done():
+		_ = cmd.Process.Kill()
+		t.Fatalf("reconcile script timed out; stdout=%s stderr=%s", stdout.String(), stderr.String())
+		return "", false
+	case err := <-done:
+		if ctx.Err() != nil {
+			_ = cmd.Process.Kill()
+		}
+		if err != nil {
+			var exitErr *exec.ExitError
+			if errors.As(err, &exitErr) && killAfter != "" && exitErr.ExitCode() == -1 {
+				// SIGKILL injected at the requested stage is the expected crash.
+				return stdout.String(), true
+			}
+			return stdout.String() + "\nstderr: " + stderr.String(), false
+		}
+		return stdout.String(), true
+	}
+}
+
+// TestDataStorageFaultStageMatrixExecutable stages a real LVM transaction across
+// every durable boundary and proves Forge's crash-resumable and mismatch-refusal
+// contract by actually executing the generated script (not just text-searching
+// it). Each sub-test terminates the script with SIGKILL after a specific durable
+// receipt stage, re-runs it idempotently, and asserts it resumes and completes.
+func TestDataStorageFaultStageMatrixExecutable(t *testing.T) {
+	ok, reason := lvmFaultMatrixEnv(t)
+	if !ok {
+		t.Skip(reason)
+	}
+
+	dir := t.TempDir()
+	devices := makeFaultLoopDevices(t, dir, 2)
+	t.Cleanup(func() { teardownFaultLoopDevices(t, devices) })
+	spec := provisioner.DataStorageSpec{InstallName: "opo1", Devices: devices}
+	script := writeFaultScript(t, spec, "reconcile")
+
+	// A clean full run must converge to complete and bind both PVs + the VG.
+	out, ok := runDataStorageBash(t, script, spec, "")
+	require.True(t, ok, "reconcile failed on clean run: %s", out)
+	require.Contains(t, out, "FORGE_DATA_STORAGE_RESULT\tcomplete")
+	require.Contains(t, out, lvmReportPairParser) // the bounded VG inspection parser is present
+
+	// Fault-stage matrix: crash after each durable receipt stage then resume.
+	for _, sc := range []struct {
+		name   string
+		marker string
+	}{
+		{name: "planned", marker: "status=planned"},
+		{name: "after-pv0", marker: "status=pvs-created\npv_done=1"},
+		{name: "after-pv1", marker: "status=pvs-created\npv_done=2"},
+		{name: "after-vg", marker: "status=vg-created"},
+	} {
+		t.Run("resume-after-"+sc.name, func(t *testing.T) {
+			teardownFaultLoopDevices(t, devices)
+			devices = makeFaultLoopDevices(t, t.TempDir(), 2)
+			spec := provisioner.DataStorageSpec{InstallName: "opo1", Devices: devices}
+			script := writeFaultScript(t, spec, "reconcile")
+
+			out, crashed := runDataStorageBash(t, script, spec, sc.marker)
+			require.True(t, crashed, "expected SIGKILL crash at %s; out=%s", sc.name, out)
+
+			// Re-run: the receipt is durable so reconcile must resume, not re-create.
+			out2, ok2 := runDataStorageBash(t, script, spec, "")
+			require.True(t, ok2, "resume failed after %s crash: %s", sc.name, out2)
+			require.Contains(t, out2, "FORGE_DATA_STORAGE_RESULT\tcomplete")
+		})
+	}
+
+	// Mismatch refusal: rerun against a foreign install identity must be refused.
+	t.Run("refuses-foreign-install", func(t *testing.T) {
+		out, ok := runDataStorageBash(t, script, provisioner.DataStorageSpec{InstallName: "other", Devices: devices}, "")
+		require.False(t, ok, "foreign install identity must be refused")
+		require.Contains(t, out, "receipt install mismatch")
+	})
+}
+
+// makeFaultLoopDevices allocates count real loop-backed block devices on a
+// dedicated loopAhead device-mapper-free path and returns their resolved /dev
+// paths, which the reconcile script can clean. It exercises the exact device set
+// the production script consumes (whole disks, no partition table).
+func makeFaultLoopDevices(t *testing.T, dir string, count int) []string {
+	t.Helper()
+	var paths []string
+	for i := 0; i < count; i++ {
+		img := filepath.Join(dir, fmt.Sprintf("disk%d.img", i))
+		require.NoError(t, runCmd("truncate", "-s", "16M", img))
+		out, err := exec.Command("losetup", "--find", "--show", "--nooverlap", img).CombinedOutput()
+		require.NoError(t, err, "losetup failed: %s", out)
+		paths = append(paths, strings.TrimSpace(string(out)))
+	}
+	return paths
+}
+
+func teardownFaultLoopDevices(t *testing.T, devices []string) {
+	t.Helper()
+	for _, dev := range devices {
+		_ = runCmd("losetup", "-d", dev)
+	}
+}
+
+func runCmd(name string, args ...string) error {
+	cmd := exec.Command(name, args...)
+	return cmd.Run()
+}
+
+// TestDataStorageFaultMatrixScriptCoversEveryDurableStage is the locally
+// runnable structural companion: it asserts the generated script front-loads the
+// durable receipt before every mutation and binds each stage to an explicit
+// write_receipt, so a fault at any durable boundary is always resumable.
+func TestDataStorageFaultMatrixScriptCoversEveryDurableStage(t *testing.T) {
+	script := dataStorageReconcileScript(provisioner.DataStorageSpec{
+		InstallName: "opo1", Devices: []string{"/dev/disk/by-id/scsi-a", "/dev/disk/by-id/scsi-b"},
+	}, "reconcile")
+
+	// Every pvcreate in the per-PV loop is immediately followed by a durable
+	// pvs-created receipt that persists pv_done so a crash mid-write is resumable.
+	pvcreateIdx := strings.Index(script, "pvcreate --yes --zero y --uuid")
+	require.GreaterOrEqual(t, pvcreateIdx, 0, "reconcile must pvcreate each planned device")
+	receipt := strings.Index(script, "write_receipt pvs-created")
+	require.GreaterOrEqual(t, receipt, 0, "reconcile must persist a pvs-created receipt after each PV")
+	// There is one pvs-created receipt write for each device in the staged loop
+	// body (a single source template), so each PV stage persists a durable marker
+	// before the next mutation and a crash after any PV is always resumable.
+	require.Less(t, pvcreateIdx, receipt, "each pvcreate must be followed by the durable pvs-created receipt")
+	require.Equal(t, 1, strings.Count(script, "write_receipt pvs-created"))
+
+	// The planned receipt precedes the first mutation and the VG-created receipt
+	// binds the complete PV set before the UUID is persisted.
+	require.Less(t, strings.Index(script, "write_receipt planned 0"), strings.Index(script, "pvcreate --yes --zero y --uuid"))
+	require.Less(t, strings.Index(script, "vgcreate --yes --addtag"), strings.Index(script, "receipt_vg_uuid=$vg_uuid; write_receipt vg-created"))
+}

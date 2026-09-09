@@ -13,16 +13,32 @@ import (
 	"github.com/nunocgoncalves/iterabase-mono/testkit/e2e/process"
 )
 
-// Exact DES-HOR-545-01 storage identities shared by owner scenarios.
+// StorageClassExpectation names one managed OpenEBS LVM StorageClass the
+// consuming owner expects, and whether the class is `shared: yes` (the AgentPool
+// class is shared because its PV may be claimed by multiple workspaces; the
+// general class is not).
+type StorageClassExpectation struct {
+	Name   string
+	Shared bool
+}
+
+// LVMStorageContract carries the exact storage identities the consuming owner
+// suite expects the pinned lvm-storage-substrate chart to render and the Kind
+// node to discover. testkit/e2e provides only generic reusable Kind/LVM
+// orchestration and parameterized validation mechanics; the owner constructs
+// this contract so the exact product/chart expectations remain with the owning
+// suite (testkit/AGENTS.md). It is deliberately a value type with no behavior.
+type LVMStorageContract struct {
+	DataVolumeGroupName string
+	Provisioner         string
+	NodeTopologyKey     string
+	StorageClasses      []StorageClassExpectation
+}
+
 const (
-	AgentPoolWorkspaceStorageClass = "iterabase-agentpool-lvm-xfs"
-	PlatformDataStorageClass       = "iterabase-lvm-xfs"
-	AgentPoolWorkspaceProvisioner  = "local.csi.openebs.io"
-	DataVolumeGroupName            = "iterabase-data"
-	lvmTopologyKey                 = "openebs.io/nodename"
-	kindKubeletDirectory           = "/var/lib/kubelet"
-	defaultClassAnnotation         = "storageclass.kubernetes.io/is-default-class"
-	betaDefaultClassAnnotation     = "storageclass.beta.kubernetes.io/is-default-class"
+	kindKubeletDirectory       = "/var/lib/kubelet"
+	defaultClassAnnotation     = "storageclass.kubernetes.io/is-default-class"
+	betaDefaultClassAnnotation = "storageclass.beta.kubernetes.io/is-default-class"
 	// The largest owner scenario enables 70 GiB of thick chart claims; keep
 	// bounded headroom for representative general and AgentPool claims.
 	kindDataVolumeGroupSizeBytes = 96 << 30
@@ -30,13 +46,17 @@ const (
 
 // ConfigureLVMStorage removes Kind's local-path fallback, creates a real thick
 // loop-backed LVM VG inside the one privileged node, installs the exact pinned
-// lvm-storage-substrate chart, and waits for CRD/CSI/VG/class discovery.
-func (cluster *Cluster) ConfigureLVMStorage(ctx context.Context, chart, namespace, release string) error {
+// lvm-storage-substrate chart, and waits until the StorageClasses, CSI
+// registration, and LVMNode discovery match contract.
+func (cluster *Cluster) ConfigureLVMStorage(ctx context.Context, chart, namespace, release string, contract LVMStorageContract) error {
 	if cluster == nil || cluster.executor == nil || cluster.Kubeconfig == "" {
 		return fmt.Errorf("kind LVM storage requires an initialized cluster")
 	}
 	if chart == "" || namespace == "" || release == "" {
 		return fmt.Errorf("kind LVM storage requires chart, namespace, and release identities")
+	}
+	if contract.DataVolumeGroupName == "" || contract.Provisioner == "" || contract.NodeTopologyKey == "" || len(contract.StorageClasses) == 0 {
+		return fmt.Errorf("kind LVM storage requires a complete owner-supplied LVMStorageContract")
 	}
 	if info, err := os.Stat(chart); err != nil || (!info.IsDir() && !info.Mode().IsRegular()) {
 		return fmt.Errorf("kind LVM storage chart %q is unavailable", chart)
@@ -69,23 +89,23 @@ if ! command -v pvcreate >/dev/null || ! command -v mkfs.xfs >/dev/null || ! com
   apt-get install -y lvm2 xfsprogs util-linux kmod
 fi
 modprobe dm-snapshot
-if vgs iterabase-data >/dev/null 2>&1; then
-  test "$(vgs --noheadings -o pv_count iterabase-data | awk '{$1=$1;print}')" = 1
+if vgs "$1" >/dev/null 2>&1; then
+  test "$(vgs --noheadings -o pv_count "$1" | awk '{$1=$1;print}')" = 1
 else
   test ! -e /var/lib/iterabase-lvm-loop || exit 42
   truncate -s ` + fmt.Sprintf("%d", kindDataVolumeGroupSizeBytes) + ` /var/lib/iterabase-data.img
   loop=$(losetup --find --show /var/lib/iterabase-data.img)
   printf '%s\n' "$loop" > /var/lib/iterabase-lvm-loop
   pvcreate --yes "$loop"
-  vgcreate --yes iterabase-data "$loop"
+  vgcreate --yes "$1" "$loop"
 fi
-vgs --noheadings -o vg_name,vg_uuid,vg_size,vg_free,pv_count,lv_count iterabase-data
+vgs --noheadings -o vg_name,vg_uuid,vg_size,vg_free,pv_count,lv_count "$1"
 `
 	if result, err := cluster.executor.Run(ctx, process.Command{
-		Name: "docker", Args: []string{"exec", nodeNames[0], "bash", "-ceu", prepare}, Timeout: 5 * time.Minute,
+		Name: "docker", Args: []string{"exec", nodeNames[0], "bash", "-ceu", prepare, "kind-lvm-prepare", contract.DataVolumeGroupName}, Timeout: 5 * time.Minute,
 		OutputName: "kind-prepare-lvm-" + cluster.Name + ".log",
 	}); err != nil {
-		return fmt.Errorf("prepare real Kind iterabase-data VG: %w\n%s", err, result.Output)
+		return fmt.Errorf("prepare real Kind %s VG: %w\n%s", contract.DataVolumeGroupName, err, result.Output)
 	}
 
 	cluster.mu.Lock()
@@ -93,6 +113,7 @@ vgs --noheadings -o vg_name,vg_uuid,vg_size,vg_free,pv_count,lv_count iterabase-
 	cluster.lvmNode = nodeNames[0]
 	cluster.lvmNamespace = namespace
 	cluster.lvmRelease = release
+	cluster.lvmContract = contract
 	cluster.mu.Unlock()
 
 	if result, err := cluster.executor.Run(ctx, process.Command{
@@ -104,7 +125,7 @@ vgs --noheadings -o vg_name,vg_uuid,vg_size,vg_free,pv_count,lv_count iterabase-
 
 	deadline := time.Now().Add(3 * time.Minute)
 	for {
-		if err := cluster.validateLVMStorage(ctx, namespace, nodeNames[0]); err == nil {
+		if err := cluster.validateLVMStorage(ctx, namespace, nodeNames[0], contract); err == nil {
 			return nil
 		} else if time.Now().After(deadline) {
 			return err
@@ -123,6 +144,7 @@ kubeconfig=$1
 namespace=$2
 lvm_release=$3
 node=$4
+vg=$5
 if kubectl --kubeconfig "$kubeconfig" get crd agentpools.platform.iterabase.com >/dev/null 2>&1; then
   kubectl --kubeconfig "$kubeconfig" delete agentpools.platform.iterabase.com --all -A --ignore-not-found=true --wait=true --timeout=3m
 fi
@@ -158,16 +180,23 @@ if helm status "$lvm_release" --kubeconfig "$kubeconfig" -n "$namespace" >/dev/n
   helm uninstall "$lvm_release" --kubeconfig "$kubeconfig" -n "$namespace" --wait --timeout 3m
 fi
 docker exec "$node" bash -ceu '
-test "$(lvs --noheadings --select vg_name=iterabase-data -o lv_name | awk "NF {n++} END {print n+0}")" = 0
+vg=$1
+test "$(lvs --noheadings --select vg_name="$vg" -o lv_name | awk "NF {n++} END {print n+0}")" = 0
 loop=$(cat /var/lib/iterabase-lvm-loop)
-vgremove --yes iterabase-data
+vgremove --yes "$vg"
 pvremove --yes "$loop"
 losetup -d "$loop"
 rm -f /var/lib/iterabase-lvm-loop /var/lib/iterabase-data.img
-'
+' kind-lvm-cleanup-inner "$vg"
 `
+	cluster.mu.Lock()
+	defer cluster.mu.Unlock()
+	vgName := ""
+	if cluster.lvmContract.DataVolumeGroupName != "" {
+		vgName = cluster.lvmContract.DataVolumeGroupName
+	}
 	result, err := cluster.executor.Run(ctx, process.Command{
-		Name: "bash", Args: []string{"-ceu", script, "lvm-cleanup", cluster.Kubeconfig, cluster.lvmNamespace, cluster.lvmRelease, cluster.lvmNode},
+		Name: "bash", Args: []string{"-ceu", script, "lvm-cleanup", cluster.Kubeconfig, cluster.lvmNamespace, cluster.lvmRelease, cluster.lvmNode, vgName},
 		Timeout: 10 * time.Minute, OutputName: "kind-cleanup-lvm-storage-" + cluster.Name + ".log",
 	})
 	if err != nil {
@@ -177,10 +206,9 @@ rm -f /var/lib/iterabase-lvm-loop /var/lib/iterabase-data.img
 }
 
 func lvmStorageHelmArgs(release, chart, kubeconfig, namespace string) []string {
-	// DES-HOR-545-01: mirror Forge's fail-closed admission identity. The substrate
-	// release is <platform>-lvm-storage; the control-plane manager SA is
-	// <platform>-control-plane-manager, so the authorized identity is derived from
-	// the release passed to the substrate install.
+	// The substrate chart's admission policy (DES-HOR-545 gate) requires the
+	// exact control-plane manager identity; the substrate release is
+	// <platform>-lvm-storage and the manager SA is <platform>-control-plane-manager.
 	managerIdentity := lvmStorageManagerIdentityForTest(release, namespace)
 	return []string{"upgrade", "--install", release, chart, "--kubeconfig", kubeconfig,
 		"--namespace", namespace, "--create-namespace", "--set-string", "lvm-localpv.global.kubeletDir=" + kindKubeletDirectory,
@@ -193,7 +221,7 @@ func lvmStorageManagerIdentityForTest(release, namespace string) string {
 	return "system:serviceaccount:" + namespace + ":" + platformRelease + "-control-plane-manager"
 }
 
-func (cluster *Cluster) validateLVMStorage(ctx context.Context, namespace, nodeName string) error {
+func (cluster *Cluster) validateLVMStorage(ctx context.Context, namespace, nodeName string, contract LVMStorageContract) error {
 	classes, err := cluster.runKubectl(ctx, 30*time.Second, "kind-lvm-storageclasses-"+cluster.Name+".json", "get", "storageclass", "-o", "json")
 	if err != nil {
 		return fmt.Errorf("read managed LVM StorageClasses: %w", err)
@@ -204,28 +232,30 @@ func (cluster *Cluster) validateLVMStorage(ctx context.Context, namespace, nodeN
 	if err := json.Unmarshal([]byte(classes.Output), &list); err != nil {
 		return fmt.Errorf("decode managed LVM StorageClasses: %w", err)
 	}
-	if len(list.Items) != 2 {
-		return fmt.Errorf("managed cluster must have exactly two StorageClasses, observed %d", len(list.Items))
+	if len(list.Items) != len(contract.StorageClasses) {
+		return fmt.Errorf("managed cluster must have exactly %d StorageClasses, observed %d", len(contract.StorageClasses), len(list.Items))
 	}
 	seen := map[string]bool{}
 	for _, item := range list.Items {
-		name, err := ValidateManagedLVMStorageClass(item)
+		name, err := ValidateManagedLVMStorageClass(item, contract)
 		if err != nil {
 			return err
 		}
 		seen[name] = true
 	}
-	if !seen[PlatformDataStorageClass] || !seen[AgentPoolWorkspaceStorageClass] {
-		return fmt.Errorf("managed LVM StorageClass set is incomplete")
+	for _, expected := range contract.StorageClasses {
+		if !seen[expected.Name] {
+			return fmt.Errorf("managed LVM StorageClass %q is missing", expected.Name)
+		}
 	}
-	if _, err := cluster.runKubectl(ctx, 30*time.Second, "kind-lvm-csidriver-"+cluster.Name+".json", "get", "csidriver", AgentPoolWorkspaceProvisioner, "-o", "json"); err != nil {
+	if _, err := cluster.runKubectl(ctx, 30*time.Second, "kind-lvm-csidriver-"+cluster.Name+".json", "get", "csidriver", contract.Provisioner, "-o", "json"); err != nil {
 		return fmt.Errorf("read OpenEBS LVM CSIDriver: %w", err)
 	}
 	csiNode, err := cluster.runKubectl(ctx, 30*time.Second, "kind-lvm-csinode-"+cluster.Name+".json", "get", "csinode", nodeName, "-o", "json")
 	if err != nil {
 		return fmt.Errorf("read OpenEBS LVM CSINode registration: %w", err)
 	}
-	if err := ValidateLVMCSINodeRegistration([]byte(csiNode.Output), nodeName); err != nil {
+	if err := ValidateLVMCSINodeRegistration([]byte(csiNode.Output), nodeName, contract); err != nil {
 		return err
 	}
 	nodes, err := cluster.runKubectl(ctx, 30*time.Second, "kind-lvmnode-"+cluster.Name+".json", "get", "lvmnodes.local.openebs.io", "-n", namespace, "-o", "json")
@@ -250,17 +280,17 @@ func (cluster *Cluster) validateLVMStorage(ctx context.Context, namespace, nodeN
 		return fmt.Errorf("expected one OpenEBS LVMNode, observed %d", len(lvmNodes.Items))
 	}
 	for _, group := range lvmNodes.Items[0].VolumeGroups {
-		if group.Name == DataVolumeGroupName && group.UUID != "" && group.PVCount == 1 && group.MissingPVCount == 0 && len(group.ThinPools) == 0 {
+		if group.Name == contract.DataVolumeGroupName && group.UUID != "" && group.PVCount == 1 && group.MissingPVCount == 0 && len(group.ThinPools) == 0 {
 			return nil
 		}
 	}
-	return fmt.Errorf("OpenEBS LVMNode has not discovered the exact thick iterabase-data VG")
+	return fmt.Errorf("OpenEBS LVMNode has not discovered the exact thick %s VG", contract.DataVolumeGroupName)
 }
 
 // ValidateLVMCSINodeRegistration rejects a missing, duplicate, wrong-node, or
 // incomplete OpenEBS node/topology registration before a WaitForFirstConsumer
 // claim can enter an unschedulable capacity loop.
-func ValidateLVMCSINodeRegistration(data []byte, nodeName string) error {
+func ValidateLVMCSINodeRegistration(data []byte, nodeName string, contract LVMStorageContract) error {
 	var csiNode struct {
 		Spec struct {
 			Drivers []struct {
@@ -275,13 +305,13 @@ func ValidateLVMCSINodeRegistration(data []byte, nodeName string) error {
 	}
 	matches := 0
 	for _, driver := range csiNode.Spec.Drivers {
-		if driver.Name != AgentPoolWorkspaceProvisioner {
+		if driver.Name != contract.Provisioner {
 			continue
 		}
 		matches++
 		keys := append([]string(nil), driver.TopologyKeys...)
 		sort.Strings(keys)
-		expectedKeys := []string{"kubernetes.io/hostname", lvmTopologyKey}
+		expectedKeys := []string{"kubernetes.io/hostname", contract.NodeTopologyKey}
 		if driver.NodeID != nodeName || !reflect.DeepEqual(keys, expectedKeys) {
 			return fmt.Errorf("OpenEBS LVM CSINode registration for %q does not match node/topology contract", nodeName)
 		}
@@ -294,7 +324,7 @@ func ValidateLVMCSINodeRegistration(data []byte, nodeName string) error {
 
 // ValidateManagedLVMStorageClass returns the exact recognized class name and
 // rejects any default/provisioner/VG/XFS/thick/shared/policy drift.
-func ValidateManagedLVMStorageClass(data []byte) (string, error) {
+func ValidateManagedLVMStorageClass(data []byte, contract LVMStorageContract) (string, error) {
 	var storageClass struct {
 		Metadata struct {
 			Name        string            `json:"name"`
@@ -309,14 +339,25 @@ func ValidateManagedLVMStorageClass(data []byte) (string, error) {
 	if err := json.Unmarshal(data, &storageClass); err != nil {
 		return "", fmt.Errorf("decode managed LVM StorageClass contract: %w", err)
 	}
-	shared := "no"
-	if storageClass.Metadata.Name == AgentPoolWorkspaceStorageClass {
-		shared = "yes"
-	} else if storageClass.Metadata.Name != PlatformDataStorageClass {
+	shared := ""
+	for _, expected := range contract.StorageClasses {
+		if storageClass.Metadata.Name == expected.Name {
+			if expected.Shared {
+				shared = "yes"
+			} else {
+				shared = "no"
+			}
+			break
+		}
+	}
+	if shared == "" {
 		return "", fmt.Errorf("unsupported managed StorageClass %q", storageClass.Metadata.Name)
 	}
-	expected := map[string]string{"storage": "lvm", "vgpattern": "^iterabase-data$", "fsType": "xfs", "thinProvision": "no", "shared": shared}
-	if storageClass.Provisioner != AgentPoolWorkspaceProvisioner || storageClass.ReclaimPolicy != "Delete" ||
+	expected := map[string]string{
+		"storage": "lvm", "vgpattern": "^" + contract.DataVolumeGroupName + "$",
+		"fsType": "xfs", "thinProvision": "no", "shared": shared,
+	}
+	if storageClass.Provisioner != contract.Provisioner || storageClass.ReclaimPolicy != "Delete" ||
 		storageClass.VolumeBindingMode != "WaitForFirstConsumer" || storageClass.AllowVolumeExpansion == nil || *storageClass.AllowVolumeExpansion ||
 		!reflect.DeepEqual(storageClass.Parameters, expected) || storageClass.Metadata.Annotations[defaultClassAnnotation] == "true" ||
 		storageClass.Metadata.Annotations[betaDefaultClassAnnotation] == "true" {

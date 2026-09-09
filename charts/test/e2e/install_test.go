@@ -10,7 +10,6 @@ import (
 	"time"
 
 	sharede2e "github.com/nunocgoncalves/iterabase-mono/testkit/e2e"
-	kindcluster "github.com/nunocgoncalves/iterabase-mono/testkit/e2e/kind"
 	"github.com/nunocgoncalves/iterabase-mono/testkit/e2e/poll"
 )
 
@@ -88,7 +87,7 @@ func installMinimalPlatformEdgeStage(t *testing.T, state *chartState) {
 func assertOpenEBSLVMClaimsStage(t *testing.T, state *chartState) {
 	t.Helper()
 	classes := strings.Fields(state.kubectl(t, 30*time.Second, "get", "storageclass", "-o", `jsonpath={range .items[*]}{.metadata.name}{"\n"}{end}`))
-	if len(classes) != 2 || !slices.Contains(classes, kindcluster.PlatformDataStorageClass) || !slices.Contains(classes, kindcluster.AgentPoolWorkspaceStorageClass) {
+	if len(classes) != 2 || !slices.Contains(classes, PlatformDataStorageClass) || !slices.Contains(classes, AgentPoolWorkspaceStorageClass) {
 		t.Fatalf("managed StorageClass set=%v", classes)
 	}
 	claims := strings.Fields(state.kubectl(t, 30*time.Second, "get", "pvc", "-A", "-o", `jsonpath={range .items[*]}{.metadata.namespace}/{.metadata.name}|{.spec.storageClassName}|{.status.phase}|{.spec.volumeName}{"\n"}{end}`))
@@ -97,7 +96,7 @@ func assertOpenEBSLVMClaimsStage(t *testing.T, state *chartState) {
 	}
 	for _, claim := range claims {
 		parts := strings.Split(claim, "|")
-		if len(parts) != 4 || parts[1] != kindcluster.PlatformDataStorageClass || parts[2] != "Bound" || parts[3] == "" {
+		if len(parts) != 4 || parts[1] != PlatformDataStorageClass || parts[2] != "Bound" || parts[3] == "" {
 			t.Fatalf("chart data claim is not explicitly Bound through the general LVM class: %s", claim)
 		}
 		pv := state.kubectl(t, 30*time.Second, "get", "pv/"+parts[3], "-o", `jsonpath={.spec.csi.driver}|{.spec.csi.fsType}|{.spec.csi.volumeAttributes.openebs\.io/volgroup}|{.spec.hostPath.path}`)
