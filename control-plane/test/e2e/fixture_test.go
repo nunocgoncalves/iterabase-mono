@@ -27,7 +27,27 @@ import (
 const (
 	controlPlaneNamespace = "iterabase-system"
 	controlPlaneRelease   = "iterabase"
+
+	// Control-plane-owned DES-HOR-545-01 storage expectations passed into the
+	// shared testkit helper as an LVMStorageContract (testkit/AGENTS.md).
+	lvmPlatformStorageClass  = "iterabase-lvm-xfs"
+	lvmAgentPoolStorageClass = "iterabase-agentpool-lvm-xfs"
+	lvmProvisioner           = "local.csi.openebs.io"
+	lvmDataVolumeGroupName   = "iterabase-data"
+	lvmNodeTopologyKey       = "openebs.io/nodename"
 )
+
+func lvmStorageContract() kindcluster.LVMStorageContract {
+	return kindcluster.LVMStorageContract{
+		DataVolumeGroupName: lvmDataVolumeGroupName,
+		Provisioner:         lvmProvisioner,
+		NodeTopologyKey:     lvmNodeTopologyKey,
+		StorageClasses: []kindcluster.StorageClassExpectation{
+			{Name: lvmPlatformStorageClass, Shared: false},
+			{Name: lvmAgentPoolStorageClass, Shared: true},
+		},
+	}
+}
 
 type requestEvidence struct {
 	At     time.Time      `json:"at"`
@@ -205,7 +225,7 @@ func createControlPlaneKindStage(t *testing.T, state *deployedState) {
 
 func installLVMStorageSubstrateStage(t *testing.T, state *deployedState) {
 	t.Helper()
-	if err := state.cluster.ConfigureLVMStorage(state.ctx, state.lvmSubstrate.LocalPath, controlPlaneNamespace, controlPlaneRelease+"-lvm-storage"); err != nil {
+	if err := state.cluster.ConfigureLVMStorage(state.ctx, state.lvmSubstrate.LocalPath, controlPlaneNamespace, controlPlaneRelease+"-lvm-storage", lvmStorageContract()); err != nil {
 		t.Fatalf("configure exact Kind OpenEBS LVM storage substrate: %v", err)
 	}
 }
