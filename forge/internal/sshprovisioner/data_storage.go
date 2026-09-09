@@ -557,6 +557,13 @@ csi_registered() {
   test "$csi_keys" = "$(printf 'kubernetes.io/hostname\nopenebs.io/nodename')"
 }
 observed_node=; observed_size=; observed_free=; observed_lv_count=; observed_pv_count=
+# OpenEBS LVMNode reports VG capacity that may differ from the Forge receipt's
+# vgs --units b value by LVM metadata reserve / rounding, but must never
+# contradict it. cap_ok allows a small absolute+relative tolerance so gross or
+# unit-scale contradiction is still rejected while agent rounding is tolerated.
+cap_ok() {
+  awk -v e="$1" -v o="$2" -v abs=67108864 -v rel=0.02 'BEGIN{d=o-e; if(d<0)d=-d; if(e<=0){print (o>0)?1:0; exit} limit=(e*rel>abs?e*rel:abs); print (d<=limit)?1:0}'
+}
 lvmnode_satisfies() {
   node_count=$(k3s kubectl get lvmnodes.local.openebs.io -n "$namespace" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | awk '{print NF}')
   test "$node_count" = 1 || return 1
@@ -567,7 +574,11 @@ lvmnode_satisfies() {
   test "$vg_name" = "$expected_vg" && test "$vg_uuid" = "$expected_uuid" || return 1
   test -n "$vg_size" && test -n "$vg_free" || return 1
   for number in "$lv_count" "$pv_count" "$missing_pv"; do case "$number" in ''|*[!0-9]*) return 1 ;; esac; done
-  test "$vg_size" = "$expected_size" && test "$vg_free" = "$expected_free" || return 1
+  # Capacity must be present, self-consistent (free<=size), and within tolerance
+  # of the Forge receipt; UUID and membership are always exact.
+  test "$(cap_ok "$expected_size" "$vg_size")" = 1 || return 1
+  test "$(cap_ok "$expected_free" "$vg_free")" = 1 || return 1
+  test "$vg_size" -ge "$vg_free" || return 1
   test "$pv_count" = "$expected_pv_count" || return 1
   test "$missing_pv" = 0 || return 1
   test -z "$thin_pools" || test "$thin_pools" = 0 || return 1
@@ -597,7 +608,7 @@ verify_class() {
 verify_class %s no
 verify_class %s yes
 test -n "$observed_node" || fail "LVMNode identity is missing"
-test "$observed_size" = "$expected_size" && test "$observed_free" = "$expected_free" || fail "LVMNode VG capacity differs from the Forge receipt"
+test "$(cap_ok \"$expected_size\" \"$observed_size\")" = 1 && test "$(cap_ok \"$expected_free\" \"$observed_free\")" = 1 || fail "LVMNode VG capacity contradicts the Forge receipt (expected size=$expected_size free=$expected_free, observed size=$observed_size free=$observed_free)"
 printf 'FORGE_LVM_STORAGE_READY\t%%s\t%%s\t%%s\t%%s\t%%s\t%%s\t%%s\n' "$observed_node" "$expected_vg" "$expected_uuid" "$observed_size" "$observed_free" "$observed_lv_count" "$observed_pv_count"
 `, shellQuote(namespace), shellQuote(host.VGName), shellQuote(host.VGUUID), shellQuote(strconv.FormatUint(host.SizeBytes, 10)), shellQuote(strconv.FormatUint(host.FreeBytes, 10)), shellQuote(strconv.Itoa(len(host.Devices))), shellQuote(provisioner.AgentPoolStorageClass+"\n"+provisioner.PlatformStorageClass), shellQuote(provisioner.PlatformStorageClass), shellQuote(provisioner.AgentPoolStorageClass))
 	out, err := p.run(ctx, "sudo bash -ceu "+shellQuote(script))
