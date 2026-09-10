@@ -69,15 +69,19 @@ Reconcile, status, and purge accept only the receipt-matching tag/device/PV/VG
 set. Purge records durable intent/completion around VG, each PV, and receipt
 removal so interruption resumes exactly. Forge creates no platform LV,
 filesystem, mount, or fstab entry; those belong to chart-owned OpenEBS LVM
-LocalPV dynamic PVC lifecycle. Storage snapshots remain fully disabled; OPP-005
-solely owns any future recovery mechanism.
+LocalPV dynamic PVC lifecycle. Storage snapshots remain fully disabled. The sole
+inert provider dependency is the `LVMSnapshot` CRD plus exact driver
+`list`/`watch`, protected by deny-all creation and a zero-instance readiness
+gate; every CSI/user snapshot surface remains absent. OPP-005 solely owns any
+future recovery mechanism.
 
 K3s is installed with `local-storage` disabled. Forge installs the same-version
 `cert-manager-substrate` and `lvm-storage-substrate` companions before the
-platform, then waits for the pinned OpenEBS `1.10.0` CRDs, controller, node
-plugin, CSI registration, exactly two managed non-default XFS/RWO classes, and
-receipt-matching VG discovery. No local-path/default/root storage fallback is
-reconciled.
+platform, then waits for the pinned OpenEBS `1.10.0` volume CRDs, inert
+`LVMSnapshot` CRD, deny-all creation policy, zero instances, exact read-only
+driver authority, controller, node plugin, CSI registration, exactly two managed
+non-default XFS/RWO classes, and receipt-matching VG discovery. No
+local-path/default/root storage fallback is reconciled.
 
 Ordinary `forge destroy` uninstalls platform/K3s but preserves the receipt,
 PVs, VG, LVs, and bytes. `--purge-data-storage` is separate explicit

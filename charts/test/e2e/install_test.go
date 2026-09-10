@@ -18,9 +18,9 @@ func freshInstallScenario() sharede2e.Definition {
 	return sharede2e.Define(sharede2e.Scenario[*chartState]{
 		Metadata: chartScenarioMetadata(
 			"fresh-install",
-			"Installs ordered certificate and pinned OpenEBS LVM volume-only substrates plus class-isolated public/private ingress planes, then proves exact classes, claims, complete snapshot-surface absence, manager, issuer, workload identity, fixed private allocation, route isolation, and verified gateway readiness.",
+			"Installs ordered certificate and pinned OpenEBS LVM volume-only substrates plus class-isolated public/private ingress planes, then proves exact classes, claims, the inert LVMSnapshot deletion-safety boundary, CSI/user snapshot absence, manager, issuer, workload identity, fixed private allocation, route isolation, and verified gateway readiness.",
 			"test-e2e-install", 45,
-			[]string{"HOR-408", "HOR-414", "HOR-416", "HOR-475", "HOR-545", "DES-HOR-545-01"},
+			[]string{"HOR-408", "HOR-414", "HOR-416", "HOR-475", "HOR-545", "DES-HOR-545-01", "DES-HOR-545-05"},
 			[]string{"control-plane-chart", "inference-gateway-chart", "iterabase-platform-chart"},
 		),
 		NewState: newChartState,
@@ -31,7 +31,7 @@ func freshInstallScenario() sharede2e.Definition {
 			{Name: "install-lvm-storage-substrate", DependsOn: []string{"install-certificate-substrate"}, Run: installLVMStorageStage},
 			{Name: "install-minimal-platform-edge", DependsOn: []string{"install-lvm-storage-substrate"}, Run: installMinimalPlatformEdgeStage},
 			{Name: "assert-openebs-lvm-claims", DependsOn: []string{"install-minimal-platform-edge"}, Run: assertOpenEBSLVMClaimsStage},
-			{Name: "assert-storage-snapshot-surface-absent", DependsOn: []string{"install-lvm-storage-substrate"}, Run: assertStorageSnapshotSurfaceAbsentStage},
+			{Name: "assert-storage-snapshot-boundary", DependsOn: []string{"assert-openebs-lvm-claims"}, Run: assertStorageSnapshotBoundaryStage},
 			{Name: "assert-manager-contract", DependsOn: []string{"assert-openebs-lvm-claims"}, Run: assertManagerContractStage},
 			{Name: "assert-certificate-issuer", DependsOn: []string{"install-minimal-platform-edge"}, Run: assertCertificateIssuerStage},
 			{Name: "assert-workload-identity", DependsOn: []string{"assert-certificate-issuer"}, Run: assertWorkloadIdentityStage},
@@ -47,26 +47,57 @@ func installCertificateSubstrateStage(t *testing.T, state *chartState) {
 	state.installSubstrate(t)
 }
 
-func assertStorageSnapshotSurfaceAbsentStage(t *testing.T, state *chartState) {
+func assertStorageSnapshotBoundaryStage(t *testing.T, state *chartState) {
 	t.Helper()
+	if got := strings.TrimSpace(state.kubectl(t, 30*time.Second, "get", "crd/lvmsnapshots.local.openebs.io", "-o", "name")); got != "customresourcedefinition.apiextensions.k8s.io/lvmsnapshots.local.openebs.io" {
+		t.Fatalf("inert LVMSnapshot CRD identity = %q", got)
+	}
+	if got := strings.TrimSpace(state.kubectl(t, 30*time.Second, "get", "lvmsnapshots.local.openebs.io", "-A", "-o", "name")); got != "" {
+		t.Fatalf("inert LVMSnapshot API contains forbidden instances: %s", got)
+	}
 	for _, name := range []string{
-		"lvmsnapshots.local.openebs.io",
 		"volumesnapshotclasses.snapshot.storage.k8s.io",
 		"volumesnapshotcontents.snapshot.storage.k8s.io",
 		"volumesnapshots.snapshot.storage.k8s.io",
 	} {
 		if got := strings.TrimSpace(state.kubectl(t, 30*time.Second, "get", "crd/"+name, "--ignore-not-found=true", "-o", "name")); got != "" {
-			t.Fatalf("volume-only runtime exposes forbidden storage snapshot CRD: %s", got)
+			t.Fatalf("volume-only runtime exposes forbidden CSI snapshot CRD: %s", got)
 		}
 	}
 	for _, resource := range []string{"clusterrole/openebs-lvm-snapshotter-role", "clusterrolebinding/openebs-lvm-snapshotter-binding"} {
 		if got := strings.TrimSpace(state.kubectl(t, 30*time.Second, "get", resource, "--ignore-not-found=true", "-o", "name")); got != "" {
-			t.Fatalf("volume-only runtime exposes forbidden storage snapshot RBAC: %s", got)
+			t.Fatalf("volume-only runtime exposes forbidden broad snapshot RBAC: %s", got)
 		}
+	}
+	policy := state.kubectl(t, 30*time.Second, "get", "validatingadmissionpolicy/iterabase-lvmsnapshot-create-deny", "-o", `jsonpath={.spec.failurePolicy}|{.spec.matchConstraints.resourceRules[0].apiGroups[0]}|{.spec.matchConstraints.resourceRules[0].apiVersions[0]}|{.spec.matchConstraints.resourceRules[0].operations[0]}|{.spec.matchConstraints.resourceRules[0].resources[0]}|{.spec.validations[0].expression}`)
+	if policy != "Fail|local.openebs.io|v1alpha1|CREATE|lvmsnapshots|false" {
+		t.Fatalf("LVMSnapshot deny policy contract = %q", policy)
+	}
+	binding := state.kubectl(t, 30*time.Second, "get", "validatingadmissionpolicybinding/iterabase-lvmsnapshot-create-deny", "-o", `jsonpath={.spec.policyName}|{.spec.validationActions[0]}`)
+	if binding != "iterabase-lvmsnapshot-create-deny|Deny" {
+		t.Fatalf("LVMSnapshot deny binding contract = %q", binding)
+	}
+	blocked := `apiVersion: local.openebs.io/v1alpha1
+kind: LVMSnapshot
+metadata:
+  name: forbidden-lvmsnapshot
+  namespace: ` + testNamespace + `
+spec:
+  ownerNodeID: forbidden
+  volGroup: iterabase-data
+status: {}
+`
+	blockedPath := state.writeManifest(t, "forbidden-lvmsnapshot.yaml", blocked)
+	out, err := state.kubectlResult(30*time.Second, "create", "-f", blockedPath)
+	if err == nil || !strings.Contains(out, "LVMSnapshot creation is disabled by DES-HOR-545-05") {
+		t.Fatalf("LVMSnapshot CREATE was not denied by the exact admission policy: err=%v output=%s", err, out)
+	}
+	if got := strings.TrimSpace(state.kubectl(t, 30*time.Second, "get", "lvmsnapshots.local.openebs.io", "-A", "-o", "name")); got != "" {
+		t.Fatalf("denied LVMSnapshot CREATE left instances: %s", got)
 	}
 	containers := strings.ToLower(state.kubectl(t, 30*time.Second, "get", "deployment", "-n", testNamespace, "-l", "app=openebs-lvm-controller", "-o", `jsonpath={range .items[*].spec.template.spec.containers[*]}{.name}{" "}{.image}{"\n"}{end}`))
 	if strings.Contains(containers, "snapshot") {
-		t.Fatalf("volume-only runtime exposes forbidden storage snapshot container: %s", containers)
+		t.Fatalf("volume-only runtime exposes forbidden CSI snapshot container: %s", containers)
 	}
 	node := strings.TrimSpace(state.process(t, 30*time.Second, "kind", "get", "nodes", "--name", state.cluster.Name))
 	state.process(t, 30*time.Second, "docker", "exec", node, "bash", "-ceu", `if grep -q '^dm_snapshot ' /proc/modules; then exit 42; fi`)

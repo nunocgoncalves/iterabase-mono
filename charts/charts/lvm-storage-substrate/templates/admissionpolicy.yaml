@@ -73,3 +73,36 @@ spec:
         apiVersions: ["v1"]
         operations: ["CREATE", "UPDATE"]
         resources: ["persistentvolumeclaims"]
+---
+# DES-HOR-545-05: OpenEBS 1.10.0 requires the LVMSnapshot schema and
+# list/watch-only driver access for its ordinary volume-deletion safety check.
+# The provider resource is inert: no caller may create an instance, and
+# readiness separately requires the cluster-wide instance set to remain empty.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: iterabase-lvmsnapshot-create-deny
+  annotations:
+    iterabase.com/architecture-decision: DES-HOR-545-05
+    iterabase.com/snapshot-boundary: inert-provider-schema
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["local.openebs.io"]
+        apiVersions: ["v1alpha1"]
+        operations: ["CREATE"]
+        resources: ["lvmsnapshots"]
+  validations:
+    - expression: "false"
+      message: "LVMSnapshot creation is disabled by DES-HOR-545-05"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: iterabase-lvmsnapshot-create-deny
+  annotations:
+    iterabase.com/architecture-decision: DES-HOR-545-05
+spec:
+  policyName: iterabase-lvmsnapshot-create-deny
+  validationActions: [Deny]

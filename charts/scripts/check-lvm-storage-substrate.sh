@@ -15,20 +15,25 @@ certificate_version=$(chart_version "$certificates")
 
 render=$(helm template release-lvm-storage "$substrate" -n iterabase-system --include-crds \
   --set-string agentpool.authorizedManagerIdentity=system:serviceaccount:iterabase-system:release-control-plane-manager)
-[[ $(grep -c '^kind: CustomResourceDefinition$' <<<"$render") -eq 2 ]]
-for crd in lvmnodes.local.openebs.io lvmvolumes.local.openebs.io; do
-  grep -Fq "name: $crd" <<<"$render" || { echo "missing $crd" >&2; exit 1; }
+[[ $(grep -c '^kind: CustomResourceDefinition$' <<<"$render") -eq 3 ]]
+for crd in lvmnodes.local.openebs.io lvmvolumes.local.openebs.io lvmsnapshots.local.openebs.io; do
+  [[ $(grep -Fc "name: $crd" <<<"$render") -eq 1 ]] || { echo "missing or duplicate $crd" >&2; exit 1; }
 done
 for forbidden in \
-  lvmsnapshots.local.openebs.io volumesnapshots.snapshot.storage.k8s.io \
+  volumesnapshots.snapshot.storage.k8s.io \
   volumesnapshotcontents.snapshot.storage.k8s.io volumesnapshotclasses.snapshot.storage.k8s.io \
   'kind: VolumeSnapshotClass' 'name: csi-snapshotter' 'name: snapshot-controller' \
   'name: openebs-lvm-snapshotter-role' 'sig-storage/csi-snapshotter' 'sig-storage/snapshot-controller'; do
   if grep -Fq "$forbidden" <<<"$render"; then
-    echo "error: volume-only LVM substrate rendered forbidden snapshot surface: $forbidden" >&2
+    echo "error: bounded LVM substrate rendered forbidden CSI/user snapshot surface: $forbidden" >&2
     exit 1
   fi
 done
+snapshot_rules=$(awk '/resources: \["lvmsnapshots"\]/{getline; sub(/^[[:space:]]+/, ""); if ($0 ~ /^verbs:/) print}' <<<"$render")
+[[ "$snapshot_rules" == $'verbs: ["list", "watch"]\nverbs: ["list", "watch"]' ]] || {
+  echo "error: LVMSnapshot authority must be exactly list/watch for controller and node drivers: $snapshot_rules" >&2
+  exit 1
+}
 grep -Fq 'value: "false"' <<<"$render"
 grep -Fq -- '--kubelet-dir=/var/lib/kubelet/' <<<"$render"
 grep -Fq '/var/lib/kubelet/plugins_registry/' <<<"$render"
@@ -57,13 +62,16 @@ done
 grep -A14 'name: iterabase-lvm-xfs' <<<"$render" | grep -Fq 'shared: "no"'
 grep -A15 'name: iterabase-agentpool-lvm-xfs' <<<"$render" | grep -Fq 'shared: "yes"'
 
-# The generated dependency itself must be the deterministic volume-only
-# derivative, not the untouched upstream archive with inactive snapshot files.
+# The generated dependency itself must be the deterministic bounded derivative,
+# not the untouched upstream archive with CSI snapshot files or broad authority.
 dependency="$substrate/charts/lvm-localpv-1.10.0.tgz"
 [[ -f "$dependency" ]]
 members=$(tar tzf "$dependency")
+grep -Fxq lvm-localpv/charts/crds/templates/lvmsnapshot.yaml <<<"$members" || {
+  echo "error: generated dependency omitted the inert LVMSnapshot CRD" >&2
+  exit 1
+}
 for removed in \
-  lvm-localpv/charts/crds/templates/lvmsnapshot.yaml \
   lvm-localpv/charts/crds/templates/csi-volume-snapshot-class.yaml \
   lvm-localpv/charts/crds/templates/csi-volume-snapshot-content.yaml \
   lvm-localpv/charts/crds/templates/csi-volume-snapshot.yaml; do
@@ -74,10 +82,12 @@ generated_runtime=$(for path in \
   lvm-localpv/templates/rbac.yaml \
   lvm-localpv/values.yaml \
   lvm-localpv/charts/crds/values.yaml; do tar xOzf "$dependency" "$path"; done)
-if grep -E -q 'csi-snapshotter|snapshot-controller|lvmsnapshots|snapshot[.]storage[.]k8s[.]io' <<<"$generated_runtime"; then
-  echo "error: generated dependency retained snapshot runtime authority" >&2
+if grep -E -q 'csi-snapshotter|snapshot-controller|snapshot[.]storage[.]k8s[.]io' <<<"$generated_runtime"; then
+  echo "error: generated dependency retained CSI/user snapshot runtime authority" >&2
   exit 1
 fi
+grep -Fq 'resources: ["lvmsnapshots"]' <<<"$generated_runtime"
+grep -A1 -F 'resources: ["lvmsnapshots"]' <<<"$generated_runtime" | grep -Fq 'verbs: ["list", "watch"]'
 
 # DES-HOR-545-01: the agentpool class must be gated by a fail-closed admission
 # policy bound to the exact control-plane manager service-account identity.
@@ -94,6 +104,17 @@ grep -Fq 'request.operation != '\''CREATE'\'' || request.userInfo.username' <<<"
 grep -Fq 'request.operation != '\''UPDATE'\'' || (has(oldObject.spec)' <<<"$render"
 grep -Fq 'object.spec.storageClassName == oldObject.spec.storageClassName' <<<"$render"
 grep -Fq 'resources: ["persistentvolumeclaims"]' <<<"$render"
+
+# DES-HOR-545-05: the inert provider schema is protected by a fail-closed,
+# cluster-wide deny-all CREATE admission policy. No identity is exempt.
+[[ $(grep -Fc 'name: iterabase-lvmsnapshot-create-deny' <<<"$render") -eq 2 ]]
+grep -Fq 'iterabase.com/architecture-decision: DES-HOR-545-05' <<<"$render"
+grep -Fq 'apiGroups: ["local.openebs.io"]' <<<"$render"
+grep -Fq 'apiVersions: ["v1alpha1"]' <<<"$render"
+grep -Fq 'operations: ["CREATE"]' <<<"$render"
+grep -Fq 'resources: ["lvmsnapshots"]' <<<"$render"
+grep -Fq 'expression: "false"' <<<"$render"
+grep -Fq 'policyName: iterabase-lvmsnapshot-create-deny' <<<"$render"
 
 for values in "" "-f values-observability.yaml"; do
   platform_render=$(helm template release "$platform" $values)
@@ -113,4 +134,4 @@ if helm template release-lvm-storage "$substrate" --set lvm-localpv.enabled=fals
   exit 1
 fi
 
-echo "OK: same-version pinned OpenEBS LVM LocalPV volume-only substrate, snapshot absence, narrowed RBAC, and exact managed classes"
+echo "OK: pinned OpenEBS volume authority, inert LVMSnapshot deny boundary, CSI/user snapshot absence, narrowed RBAC, and exact managed classes"

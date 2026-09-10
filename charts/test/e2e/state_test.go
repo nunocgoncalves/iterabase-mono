@@ -480,13 +480,29 @@ func (state *chartState) installLVMStorage(t *testing.T) {
 	if err := state.cluster.ConfigureLVMStorage(state.ctx, state.lvmSubstrate.LocalPath, testNamespace, testRelease+"-lvm-storage", lvmStorageContract()); err != nil {
 		t.Fatalf("install exact Kind OpenEBS LVM storage substrate: %v", err)
 	}
-	state.assertVolumeOnlyControllerRBAC(t)
+	state.assertLVMSnapshotDependencyRBAC(t)
 	state.lvmStorageReady = true
 }
 
-func (state *chartState) assertVolumeOnlyControllerRBAC(t *testing.T) {
+func (state *chartState) assertLVMSnapshotDependencyRBAC(t *testing.T) {
 	t.Helper()
-	as := "--as=system:serviceaccount:" + testNamespace + ":openebs-lvm-controller-sa"
+	checkCanI := func(subject, verb, resource string, allNamespaces bool, want string) {
+		t.Helper()
+		scope := "--namespace=" + testNamespace
+		if allNamespaces {
+			scope = "--all-namespaces"
+		}
+		state.process(t, 30*time.Second, "bash", "-ceu", `
+set +e
+out=$(kubectl --kubeconfig "$1" auth can-i "$2" "$3" "$4" "$5" 2>/dev/null)
+rc=$?
+set -e
+test "$out" = "$6"
+if test "$6" = yes; then test "$rc" = 0; else test "$rc" = 1; fi
+`, "bounded-lvmsnapshot-rbac-check", state.cluster.Kubeconfig, verb, resource, "--as="+subject, scope, want)
+	}
+
+	controller := "system:serviceaccount:" + testNamespace + ":openebs-lvm-controller-sa"
 	for _, check := range []struct {
 		verb, resource string
 		allNamespaces  bool
@@ -497,21 +513,20 @@ func (state *chartState) assertVolumeOnlyControllerRBAC(t *testing.T) {
 		{verb: "create", resource: "customresourcedefinitions.apiextensions.k8s.io", want: "no"},
 		{verb: "delete", resource: "customresourcedefinitions.apiextensions.k8s.io", want: "no"},
 		{verb: "get", resource: "lvmvolumes.local.openebs.io", want: "yes"},
-		{verb: "get", resource: "lvmsnapshots.local.openebs.io", want: "no"},
 		{verb: "get", resource: "volumesnapshotclasses.snapshot.storage.k8s.io", want: "no"},
 	} {
-		scope := "--namespace=" + testNamespace
-		if check.allNamespaces {
-			scope = "--all-namespaces"
+		checkCanI(controller, check.verb, check.resource, check.allNamespaces, check.want)
+	}
+	for _, subject := range []string{
+		controller,
+		"system:serviceaccount:" + testNamespace + ":openebs-lvm-node-sa",
+	} {
+		for _, verb := range []string{"list", "watch"} {
+			checkCanI(subject, verb, "lvmsnapshots.local.openebs.io", true, "yes")
 		}
-		state.process(t, 30*time.Second, "bash", "-ceu", `
-set +e
-out=$(kubectl --kubeconfig "$1" auth can-i "$2" "$3" "$4" "$5" 2>/dev/null)
-rc=$?
-set -e
-test "$out" = "$6"
-if test "$6" = yes; then test "$rc" = 0; else test "$rc" = 1; fi
-`, "volume-only-rbac-check", state.cluster.Kubeconfig, check.verb, check.resource, as, scope, check.want)
+		for _, verb := range []string{"get", "create", "update", "patch", "delete"} {
+			checkCanI(subject, verb, "lvmsnapshots.local.openebs.io", true, "no")
+		}
 	}
 }
 

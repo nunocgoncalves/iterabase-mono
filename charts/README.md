@@ -2,14 +2,14 @@
 
 > Canonical source: [`iterabase-mono/charts`](https://github.com/nunocgoncalves/iterabase-mono/tree/master/charts). The former standalone source repository is historical and read-only; the existing `ghcr.io/nunocgoncalves/iterabase-charts` package namespace remains the stable artifact identity.
 
-Helm charts for the [iterabase](https://iterabase.com) platform. The `cert-manager-substrate` release establishes certificate authority before the platform. The same-version `lvm-storage-substrate` release establishes content-pinned OpenEBS LVM LocalPV `1.10.0`, its volume-only CRDs/controller/node CSI authority, and the two managed non-default thick XFS/RWO classes. Storage snapshot surfaces remain disabled. [Forge](https://github.com/nunocgoncalves/iterabase-mono/tree/master/forge) prepares only the exact receipt-bound `iterabase-data` VG and disables K3s local storage before either chart runs.
+Helm charts for the [iterabase](https://iterabase.com) platform. The `cert-manager-substrate` release establishes certificate authority before the platform. The same-version `lvm-storage-substrate` release establishes content-pinned OpenEBS LVM LocalPV `1.10.0`, its volume authority, the inert `LVMSnapshot` deletion-safety schema with read-only driver access and deny-all creation, and the two managed non-default thick XFS/RWO classes. CSI and user snapshot surfaces remain disabled. [Forge](https://github.com/nunocgoncalves/iterabase-mono/tree/master/forge) prepares only the exact receipt-bound `iterabase-data` VG and disables K3s local storage before either chart runs.
 
 ## Charts
 
 | Chart | Description | Released individually |
 |---|---|---|
 | `cert-manager-substrate` | Ordered certificate operator, CRDs, webhook, and CSI substrate | ✅, alongside platform |
-| `lvm-storage-substrate` | Pinned OpenEBS LVM LocalPV volume-only CRDs/controller/node CSI plus exact managed storage classes | ✅, alongside platform |
+| `lvm-storage-substrate` | Pinned OpenEBS LVM LocalPV volume authority, inert deletion-safety schema, and exact managed storage classes | ✅, alongside platform |
 | `iterabase-platform` | Application umbrella — composes all platform components | ✅ |
 | `inference-gateway` | Model-access service | ✅ |
 | `control-plane` | Durable workflow/control APIs, operator, and immutable artifact service | ✅ |
@@ -189,10 +189,12 @@ default class, or root-backed fallback is supported.
 The same-platform-version `lvm-storage-substrate` companion wraps the reviewed
 OpenEBS LVM LocalPV `1.10.0` archive (SHA-256
 `3ad766c56d4a0ab0f3f2baaeb726a4554d1f51bb485f1cef00846cf1d82a179d`),
-derives a fail-closed volume-only dependency by removing upstream snapshot
-surfaces, pins every required runtime image by digest, disables analytics,
-configures K3s's actual `/var/lib/kubelet` CSI registration/mount root, and
-creates exactly:
+derives a fail-closed volume-only dependency by removing upstream CSI/user
+snapshot surfaces and snapshot write authority while retaining only the inert
+`lvmsnapshots.local.openebs.io` CRD plus exact driver `list`/`watch` required by
+ordinary volume deletion, pins every required runtime image by digest, disables
+analytics, configures K3s's actual `/var/lib/kubelet` CSI registration/mount
+root, and creates exactly:
 
 - `iterabase-lvm-xfs`: `shared: no`, used explicitly by every chart-generated
   platform data PVC;
@@ -218,9 +220,11 @@ report aggregate VG pressure and pending-claim exhaustion.
 Direct Helm installation does not replace Forge's receipt/VG safety gate. The
 companion must observe the exact `iterabase-data` VG before the platform creates
 claims. Multi-node/HA, RWX, default/BYO classes, Longhorn, local-path, thin
-provisioning, expansion, adoption, migration, and every storage snapshot
-CRD/class/controller/sidecar/RBAC/image/lifecycle remain unsupported and absent.
-OPP-005 solely owns any future recovery mechanism.
+provisioning, expansion, adoption, and migration remain unsupported. A
+fail-closed admission policy denies every `LVMSnapshot` creation and readiness
+requires zero instances. Apart from that inert schema and driver `list`/`watch`,
+every CSI/user snapshot CRD/class/controller/sidecar/RBAC/image/lifecycle remains
+unsupported and absent. OPP-005 solely owns any future recovery mechanism.
 
 ### Private control-plane ingress
 

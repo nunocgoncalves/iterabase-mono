@@ -1,6 +1,8 @@
-# DES-HOR-545-01: own the OpenEBS controller ServiceAccount and exact
-# volume-only role in this wrapper. The reviewed upstream chart combines volume
-# and unsupported snapshot authority, so its controller RBAC is disabled.
+# DES-HOR-545-01 / DES-HOR-545-05: own the OpenEBS controller
+# ServiceAccount and exact volume lifecycle role in this wrapper. The reviewed
+# upstream chart combines volume and unsupported snapshot authority, so its
+# controller RBAC is disabled. The sole snapshot-adjacent permission retained
+# below is list/watch for the inert LVMSnapshot deletion-safety dependency.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -52,6 +54,12 @@ rules:
   - apiGroups: ["local.openebs.io"]
     resources: ["lvmvolumes", "lvmnodes"]
     verbs: ["get", "list", "watch", "create", "delete", "update", "patch"]
+  # The pinned driver's DeleteVolume path checks that no LVMSnapshot references
+  # the volume. It may observe that inert resource but cannot read one by name or
+  # create, mutate, patch, or delete one.
+  - apiGroups: ["local.openebs.io"]
+    resources: ["lvmsnapshots"]
+    verbs: ["list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
