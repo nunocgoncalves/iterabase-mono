@@ -53,7 +53,7 @@ func TestE2E(t *testing.T) {
 			NewState: newPermanentCPUWorkspaceFixtureState,
 			Stages: []sharede2e.Stage[*permanentCPUFixtureState]{
 				{Name: "reset-permanent-cpu-fixture", Run: cpuDiagnosticStage(failureDomainFixtureReset, resetPermanentCPUFixtureStage)},
-				{Name: "refuse-process-held-raw-disk", DependsOn: []string{"reset-permanent-cpu-fixture"}, Run: cpuDiagnosticStage(failureDomainSubstrate, refuseProcessHeldWorkspaceDiskStage)},
+				{Name: "refuse-process-held-raw-disk", DependsOn: []string{"reset-permanent-cpu-fixture"}, Run: cpuDiagnosticStage(failureDomainSubstrate, refuseProcessHeldDataStorageDiskStage)},
 				{Name: "fresh-exact-head-install", DependsOn: []string{"refuse-process-held-raw-disk"}, Run: cpuDiagnosticStage(failureDomainForgeHandoff, runOverlayStage)},
 				{Name: "assert-pvs-vg-substrate-and-classes", DependsOn: []string{"fresh-exact-head-install"}, Run: cpuDiagnosticStage(failureDomainSubstrate, assertCurrentPlatformStage)},
 				{Name: "setup-two-worker-rwo-agentpool", DependsOn: []string{"assert-pvs-vg-substrate-and-classes"}, Run: cpuDiagnosticStage(failureDomainDependentSmoke, setupLVMSharedAgentPoolStage)},

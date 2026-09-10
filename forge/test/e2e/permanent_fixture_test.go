@@ -29,7 +29,7 @@ const (
 	permanentFixtureModelDeviceEnv       = "FORGE_E2E_MODEL_CACHE_DEVICE"
 	permanentFixtureModelUUIDEnv         = "FORGE_E2E_MODEL_CACHE_UUID"
 	permanentFixtureModelMount           = "/data/hf-cache"
-	permanentFixtureHarnessStatePaths    = "/tmp/edge-overlay /tmp/forge-secrets-overlay /tmp/iterabase-release-overlay-* /tmp/iterabase-release-charts-* /tmp/control-plane-image.tar /tmp/harness-image.tar /tmp/tool-runner-image.tar /tmp/inference-gateway-image.tar /tmp/runtime-fixture-image.tar /tmp/forge-e2e-workspace-consumer.pid /tmp/forge-e2e-workspace-consumer.log"
+	permanentFixtureHarnessStatePaths    = "/tmp/edge-overlay /tmp/forge-secrets-overlay /tmp/iterabase-release-overlay-* /tmp/iterabase-release-charts-* /tmp/control-plane-image.tar /tmp/harness-image.tar /tmp/tool-runner-image.tar /tmp/inference-gateway-image.tar /tmp/runtime-fixture-image.tar /tmp/forge-e2e-data-storage-consumer.pid /tmp/forge-e2e-data-storage-consumer.log"
 )
 
 var bootIDPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
@@ -111,7 +111,7 @@ func validatePermanentGPUStorage(dataStorageDevice, modelDevice, modelUUID strin
 		return fmt.Errorf("permanent GPU model cache requires fixed %s and %s", permanentFixtureModelDeviceEnv, permanentFixtureModelUUIDEnv)
 	}
 	if modelDevice == dataStorageDevice {
-		return fmt.Errorf("GPU model-cache device must be distinct from the Forge AgentPool data-storage device")
+		return fmt.Errorf("GPU model-cache device must be distinct from the Forge data-storage device")
 	}
 	return nil
 }
@@ -236,9 +236,49 @@ func (fixture *permanentFixture) releaseDataStorageConsumers() error {
 	return nil
 }
 
+const permanentFixtureConsumerHelmUninstallFunction = `uninstall_consumer_release() {
+  local release="$1"
+  local uninstall_output scheduled_crd expected_uninstall_error
+  local crd_observation crd_release crd_remainder crd_namespace crd_deletion instances
+  uninstall_output=
+  if uninstall_output=$(KUBECONFIG=/etc/rancher/k3s/k3s.yaml helm uninstall "$release" -n iterabase-system --wait --timeout 5m 2>&1); then
+    return 0
+  fi
+  scheduled_crd=$(printf "%s\n" "$uninstall_output" | sed -n 's#^Error: uninstallation completed with 1 error(s): resource CustomResourceDefinition//\([a-z0-9][a-z0-9.-]*\) still exists\. status: Terminating, message: Resource scheduled for deletion$#\1#p')
+  test -n "$scheduled_crd"
+  expected_uninstall_error="Error: uninstallation completed with 1 error(s): resource CustomResourceDefinition//$scheduled_crd still exists. status: Terminating, message: Resource scheduled for deletion
+context deadline exceeded"
+  test "$uninstall_output" = "$expected_uninstall_error"
+
+  crd_observation=
+  if ! crd_observation=$(k3s kubectl get crd "$scheduled_crd" --ignore-not-found=true -o 'jsonpath={.metadata.annotations.meta\.helm\.sh/release-name}|{.metadata.annotations.meta\.helm\.sh/release-namespace}|{.metadata.deletionTimestamp}'); then
+    echo "failed to observe scheduled CRD $scheduled_crd authoritatively" >&2
+    return 1
+  fi
+  if test -n "$crd_observation"; then
+    crd_release=${crd_observation%%|*}
+    crd_remainder=${crd_observation#*|}
+    test "$crd_remainder" != "$crd_observation"
+    crd_namespace=${crd_remainder%%|*}
+    crd_deletion=${crd_remainder#*|}
+    test "$crd_deletion" != "$crd_remainder"
+    case "$crd_deletion" in *"|"*) return 1 ;; esac
+    test "$crd_release" = "$release"
+    test "$crd_namespace" = iterabase-system
+    test -n "$crd_deletion"
+    instances=
+    if ! instances=$(k3s kubectl get "$scheduled_crd" -A -o name); then
+      echo "failed to observe instances for scheduled CRD $scheduled_crd" >&2
+      return 1
+    fi
+    test -z "$instances"
+  fi
+  echo "helm uninstall reported CRD $scheduled_crd scheduled for deletion; authoritative absence/ownership/deletion/zero-instance checks passed"
+}`
+
 func permanentFixtureConsumerReleaseScript(dataStorageDevice string) string {
-	return fmt.Sprintf(`sudo bash -ceu '
-data_storage_device=%s
+	return "sudo bash -ceu " + candidateShellQuote(fmt.Sprintf(`data_storage_device=%s
+%s
 if ! command -v k3s >/dev/null 2>&1 || ! k3s kubectl get --raw=/readyz >/dev/null 2>&1; then exit 0; fi
 k3s kubectl delete kustomizations.kustomize.toolkit.fluxcd.io --all -A --ignore-not-found=true --wait=true --timeout=2m || true
 if k3s kubectl get crd agentpools.platform.iterabase.com >/dev/null 2>&1; then
@@ -254,21 +294,7 @@ if command -v helm >/dev/null 2>&1; then
   while IFS= read -r release; do
     test -n "$release" || continue
     case "$release" in *-cert-manager|*-lvm-storage) continue ;; esac
-    uninstall_output=
-    if ! uninstall_output=$(KUBECONFIG=/etc/rancher/k3s/k3s.yaml helm uninstall "$release" -n iterabase-system --wait --timeout 5m 2>&1); then
-      scheduled_crd=$(printf "%%s\n" "$uninstall_output" | sed -n "s/^Error: uninstallation completed with 1 error(s): resource CustomResourceDefinition\/\/\([a-z0-9][a-z0-9.-]*\) still exists\. status: Terminating, message: Resource scheduled for deletion$/\1/p")
-      test -n "$scheduled_crd"
-      expected_uninstall_error="Error: uninstallation completed with 1 error(s): resource CustomResourceDefinition//$scheduled_crd still exists. status: Terminating, message: Resource scheduled for deletion
-context deadline exceeded"
-      test "$uninstall_output" = "$expected_uninstall_error"
-      if k3s kubectl get crd "$scheduled_crd" >/dev/null 2>&1; then
-        test "$(k3s kubectl get crd "$scheduled_crd" -o jsonpath="{.metadata.annotations.meta\\.helm\\.sh/release-name}")" = "$release"
-        test "$(k3s kubectl get crd "$scheduled_crd" -o jsonpath="{.metadata.annotations.meta\\.helm\\.sh/release-namespace}")" = iterabase-system
-        test -n "$(k3s kubectl get crd "$scheduled_crd" -o jsonpath="{.metadata.deletionTimestamp}")"
-        test -z "$(k3s kubectl get "$scheduled_crd" -A -o name)"
-      fi
-      echo "helm uninstall scheduled empty release-owned CRD $scheduled_crd for deletion; continuing bounded consumer reclamation"
-    fi
+    uninstall_consumer_release "$release"
   done < <(KUBECONFIG=/etc/rancher/k3s/k3s.yaml helm list -n iterabase-system -q)
 fi
 k3s kubectl delete jobs --all -n iterabase-system --ignore-not-found=true --wait=true --timeout=5m
@@ -290,7 +316,7 @@ for i in $(seq 1 150); do
   sleep 2
 done
 exit 42
-'`, candidateShellQuote(dataStorageDevice))
+`, candidateShellQuote(dataStorageDevice), permanentFixtureConsumerHelmUninstallFunction))
 }
 
 func (fixture *permanentFixture) bootID() (string, error) {
@@ -426,27 +452,108 @@ func (fixture *permanentFixture) recordEvidence(name, before, after string, auth
 	return sharede2e.RecordFixtureEvidence(evidence)
 }
 
-func TestPermanentFixtureConsumerReleaseScriptKeepsHelmFailureFailClosed(t *testing.T) {
+func TestPermanentFixtureConsumerReleaseScriptIsValid(t *testing.T) {
 	script := permanentFixtureConsumerReleaseScript("/dev/disk/by-id/test-data-storage")
 	command := exec.Command("bash", "-n")
 	command.Stdin = strings.NewReader(script)
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("consumer-release shell is invalid: %v\n%s", err, output)
 	}
-	for _, required := range []string{
-		"uninstallation completed with 1 error(s): resource CustomResourceDefinition//",
-		"status: Terminating, message: Resource scheduled for deletion",
-		"meta\\\\.helm\\\\.sh/release-name",
-		"meta\\\\.helm\\\\.sh/release-namespace",
-		"{.metadata.deletionTimestamp}",
-		`test -z "$(k3s kubectl get "$scheduled_crd" -A -o name)"`,
-	} {
-		if !strings.Contains(script, required) {
-			t.Fatalf("consumer-release shell lacks exact scheduled-CRD guard %q", required)
-		}
-	}
 	if strings.Contains(script, `helm uninstall "$release" -n iterabase-system --wait --timeout 5m || true`) {
 		t.Fatal("consumer-release shell must not broadly ignore Helm uninstall failures")
+	}
+}
+
+func TestPermanentFixtureConsumerHelmUninstallIsAuthoritative(t *testing.T) {
+	const (
+		release = "test-release"
+		crd     = "widgets.platform.iterabase.com"
+	)
+	terminating := "Error: uninstallation completed with 1 error(s): resource CustomResourceDefinition//" + crd + " still exists. status: Terminating, message: Resource scheduled for deletion\ncontext deadline exceeded"
+	for _, test := range []struct {
+		name                string
+		helmStatus          int
+		helmOutput          string
+		crdStatus           int
+		crdObservation      string
+		instanceStatus      int
+		instanceObservation string
+		wantError           bool
+		wantAcceptedMarker  bool
+	}{
+		{name: "ordinary successful uninstall", helmStatus: 0},
+		{name: "terminating owned empty CRD", helmStatus: 1, helmOutput: terminating, crdObservation: release + "|iterabase-system|2026-09-10T20:00:00Z", wantAcceptedMarker: true},
+		{name: "authoritatively absent CRD", helmStatus: 1, helmOutput: terminating, wantAcceptedMarker: true},
+		{name: "unrelated Helm error", helmStatus: 1, helmOutput: "Error: Kubernetes cluster unreachable", wantError: true},
+		{name: "CRD observation error", helmStatus: 1, helmOutput: terminating, crdStatus: 1, wantError: true},
+		{name: "foreign release owner", helmStatus: 1, helmOutput: terminating, crdObservation: "other-release|iterabase-system|2026-09-10T20:00:00Z", wantError: true},
+		{name: "foreign release namespace", helmStatus: 1, helmOutput: terminating, crdObservation: release + "|other-system|2026-09-10T20:00:00Z", wantError: true},
+		{name: "missing deletion timestamp", helmStatus: 1, helmOutput: terminating, crdObservation: release + "|iterabase-system|", wantError: true},
+		{name: "instance observation error", helmStatus: 1, helmOutput: terminating, crdObservation: release + "|iterabase-system|2026-09-10T20:00:00Z", instanceStatus: 1, wantError: true},
+		{name: "remaining instance", helmStatus: 1, helmOutput: terminating, crdObservation: release + "|iterabase-system|2026-09-10T20:00:00Z", instanceObservation: "widgets.platform.iterabase.com/remaining", wantError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fakeBin := t.TempDir()
+			writePermanentFixtureFakeCommand(t, fakeBin, "helm", `
+if test "$1" != uninstall; then exit 90; fi
+printf "%s" "${HOR545_FAKE_HELM_OUTPUT:-}"
+exit "${HOR545_FAKE_HELM_STATUS:-0}"
+`)
+			writePermanentFixtureFakeCommand(t, fakeBin, "k3s", `
+if test "$1" != kubectl; then exit 90; fi
+shift
+if test "$1" != get; then exit 91; fi
+shift
+if test "$1" = crd; then
+  shift
+  test "$1" = "$HOR545_FAKE_CRD_NAME"
+  shift
+  test "$1" = --ignore-not-found=true
+  shift
+  test "$1" = -o
+  shift
+  case "$1" in jsonpath=*) ;; *) exit 92 ;; esac
+  printf "%s" "${HOR545_FAKE_CRD_OBSERVATION:-}"
+  exit "${HOR545_FAKE_CRD_STATUS:-0}"
+fi
+test "$1" = "$HOR545_FAKE_CRD_NAME"
+shift
+test "$1" = -A
+shift
+test "$1" = -o
+shift
+test "$1" = name
+printf "%s" "${HOR545_FAKE_INSTANCE_OBSERVATION:-}"
+exit "${HOR545_FAKE_INSTANCE_STATUS:-0}"
+`)
+			command := exec.Command("bash", "-ceu", permanentFixtureConsumerHelmUninstallFunction+"\nuninstall_consumer_release "+release)
+			command.Env = []string{
+				"PATH=" + fakeBin + ":" + os.Getenv("PATH"),
+				"HOR545_FAKE_HELM_STATUS=" + fmt.Sprint(test.helmStatus),
+				"HOR545_FAKE_HELM_OUTPUT=" + test.helmOutput,
+				"HOR545_FAKE_CRD_NAME=" + crd,
+				"HOR545_FAKE_CRD_STATUS=" + fmt.Sprint(test.crdStatus),
+				"HOR545_FAKE_CRD_OBSERVATION=" + test.crdObservation,
+				"HOR545_FAKE_INSTANCE_STATUS=" + fmt.Sprint(test.instanceStatus),
+				"HOR545_FAKE_INSTANCE_OBSERVATION=" + test.instanceObservation,
+			}
+			output, err := command.CombinedOutput()
+			if (err != nil) != test.wantError {
+				t.Fatalf("uninstall error = %v, wantError=%t\n%s", err, test.wantError, output)
+			}
+			accepted := strings.Contains(string(output), "authoritative absence/ownership/deletion/zero-instance checks passed")
+			if accepted != test.wantAcceptedMarker {
+				t.Fatalf("accepted marker = %t, want %t\n%s", accepted, test.wantAcceptedMarker, output)
+			}
+		})
+	}
+}
+
+func writePermanentFixtureFakeCommand(t *testing.T, dir, name, body string) {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte("#!/usr/bin/env bash\nset -eu\n"+body), 0o755); err != nil {
+		t.Fatalf("write fake %s: %v", name, err)
 	}
 }
 
@@ -456,10 +563,15 @@ func TestPermanentFixtureCleanupCoversTransferredRunState(t *testing.T) {
 		"/tmp/iterabase-release-charts-*",
 		"/tmp/control-plane-image.tar",
 		"/tmp/runtime-fixture-image.tar",
+		"/tmp/forge-e2e-data-storage-consumer.pid",
+		"/tmp/forge-e2e-data-storage-consumer.log",
 	} {
 		if !strings.Contains(permanentFixtureHarnessStatePaths, path) {
 			t.Fatalf("permanent fixture cleanup does not cover %s", path)
 		}
+	}
+	if strings.Contains(permanentFixtureHarnessStatePaths, "workspace"+"-consumer") {
+		t.Fatal("raw data-storage consumer cleanup still uses superseded host-device terminology")
 	}
 }
 
@@ -498,15 +610,15 @@ func TestModelCacheAuthorityRejectsFloatingCorruptAndEscapingRecords(t *testing.
 	}
 }
 
-func TestPermanentGPUFixtureRejectsWorkspaceCacheSubstitution(t *testing.T) {
-	workspace := "/dev/disk/by-id/workspace"
-	if err := validatePermanentGPUStorage(workspace, workspace, "cache-uuid"); err == nil {
-		t.Fatal("AgentPool workspace unexpectedly passed as the model-cache device")
+func TestPermanentGPUFixtureRejectsDataStorageCacheSubstitution(t *testing.T) {
+	dataStorage := "/dev/disk/by-id/data-storage"
+	if err := validatePermanentGPUStorage(dataStorage, dataStorage, "cache-uuid"); err == nil {
+		t.Fatal("Forge data-storage device unexpectedly passed as the model-cache device")
 	}
-	if err := validatePermanentGPUStorage(workspace, "/dev/sdc", "cache-uuid"); err == nil {
+	if err := validatePermanentGPUStorage(dataStorage, "/dev/sdc", "cache-uuid"); err == nil {
 		t.Fatal("volatile model-cache device unexpectedly passed")
 	}
-	if err := validatePermanentGPUStorage(workspace, "/dev/disk/by-id/model-cache", ""); err == nil {
+	if err := validatePermanentGPUStorage(dataStorage, "/dev/disk/by-id/model-cache", ""); err == nil {
 		t.Fatal("missing model-cache UUID unexpectedly passed")
 	}
 }

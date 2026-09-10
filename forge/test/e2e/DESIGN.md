@@ -21,7 +21,7 @@ and exact-artifact cutover: `DES-HOR-540-01` and `DES-HOR-540-02`, approved
 
 F3 uses exactly one founder-provisioned CPU host and one founder-provisioned GPU
 host. Repository variables supply each fixed address, SSH user, pinned OpenSSH
-host public key, and Forge workspace `/dev/disk/by-id/...` identity. A separate
+host public key, and Forge data-storage `/dev/disk/by-id/...` identity. A separate
 repository secret supplies each fixture-scoped private key. These values are not
 workflow-dispatch inputs.
 
@@ -47,15 +47,16 @@ forge destroy --purge-data-storage --reboot --yes
 Ordinary `forge destroy` is unchanged and preserves AgentPool workspace state.
 The explicit purge runs only after the existing platform/K3s destroy path. It
 revalidates the configured stable whole disk, root/system exclusion, holders and
-active consumers, hardware identity, Forge receipt, filesystem UUID/label,
-mount, and fstab identity. Missing, ambiguous, wrong, in-use, or drifted state
-refuses. A clean second purge is idempotent only when the configured disk is
-blank and every Forge mount/receipt/fstab surface is absent. Reboot is last.
+active consumers, hardware identity, receipt, PV/VG UUIDs, ownership tag, and
+exact membership. Missing, ambiguous, wrong, in-use, or drifted state refuses.
+A clean second purge is idempotent only when the configured disk is blank and
+every Forge receipt/PV/VG authority surface is absent. Reboot is last.
 
 The harness requires strict host-key verification, observes SSH disconnect,
 requires reconnect with a changed `/proc/sys/kernel/random/boot_id`, and proves
-that K3s, workspace signatures/mount/receipt, run-scoped overlay/transferred
-state, and stale test processes cannot satisfy the next scenario. Failure is
+that K3s, data-storage receipt/PV/VG/signature state, run-scoped
+overlay/transferred state, and stale test processes cannot satisfy the next
+scenario. Failure is
 incomplete/failing, never a skip.
 
 ## GPU model cache

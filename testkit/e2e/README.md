@@ -70,8 +70,8 @@ results additionally bind the permanent fixture capacity, pinned host-key hash,
 configured data-storage by-id device, and pre/post-cleanup boot IDs. GPU results
 also bind the separate model-cache by-id device/mount/UUID plus the
 repository-pinned public model revision and content hash; that device may not
-alias the Forge workspace. Each retained scenario artifact includes the exact
-composer runtime bundle and post-import runtime-image observation map. The
+alias the Forge data-storage device. Each retained scenario artifact includes
+the exact composer runtime bundle and post-import runtime-image observation map. The
 workflow aggregate verifies the bundle hash, reconciles every plan-known and
 result identity with that bundle, checks each observed runtime digest against
 its map, and reconciles the complete result-artifact set against the generated
