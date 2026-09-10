@@ -1226,7 +1226,13 @@ func (p *SSHProvisioner) Status(ctx context.Context, release, namespace string) 
 	}
 	out, err := p.run(ctx, helmCmd("status", release, "-n", namespace, "-o", "json"))
 	if err != nil {
-		return &deployer.ChartState{Installed: false}, nil // release not found
+		// Only Helm's exact release-absence result is authoritative absence.
+		// Transport, API, RBAC, timeout, and all other observation errors must
+		// remain errors so clean-install guards cannot mutate under uncertainty.
+		if strings.TrimSpace(out) == "Error: release: not found" || strings.HasSuffix(strings.TrimSpace(err.Error()), "stderr: Error: release: not found") {
+			return &deployer.ChartState{Installed: false}, nil
+		}
+		return nil, fmt.Errorf("helm status %s/%s: %w", namespace, release, err)
 	}
 	state, err := parseHelmStatus(out)
 	if err != nil || state.Version != "" {

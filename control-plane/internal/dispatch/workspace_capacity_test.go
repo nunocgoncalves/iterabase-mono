@@ -63,6 +63,20 @@ func TestWorkspaceCapacityGateAppliesOnlyWithinPoolAndSurvivesReplacement(t *tes
 	assert.True(t, replacement.creditAdvertised)
 }
 
+func TestWorkspaceCapacityDeletionClearsGateAndRevivalStartsFailClosed(t *testing.T) {
+	workers := newWorkerPool()
+	workers.seedWorkspaceCapacity(map[string]WorkspaceCapacityState{
+		"pool-a": {PoolID: "pool-a", CreditGated: true},
+	})
+	removed := workers.syncWorkspaceCapacity(map[string]WorkspaceCapacityState{})
+	assert.Equal(t, []string{"pool-a"}, removed)
+	assert.NotContains(t, workers.workspaceGated, "pool-a")
+
+	revived := &workerConn{poolID: "pool-a", workerID: "worker-new"}
+	workers.add(revived)
+	assert.True(t, revived.workspaceGated, "same-UUID revival without a new PVC observation must start fail-closed")
+}
+
 func TestWorkspaceCapacityObservationAfterCreditConsumptionDoesNotRegrant(t *testing.T) {
 	w := &workerConn{}
 	w.updateWorkspaceStatus(30, 100, 0.30, false, false)

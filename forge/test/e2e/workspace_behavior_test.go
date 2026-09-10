@@ -50,7 +50,7 @@ func refuseProcessHeldWorkspaceDiskStage(t *testing.T, state *permanentCPUFixtur
 	defer client.Close()
 	const pidFile = "/tmp/forge-e2e-workspace-consumer.pid"
 	start := fmt.Sprintf(`sudo rm -f %[1]s; sudo nohup bash -c 'exec 9<>"$1"; printf "%%s\n" "$$" > "$2"; exec sleep 300' bash %[2]s %[1]s </dev/null >/tmp/forge-e2e-workspace-consumer.log 2>&1 &
-for i in $(seq 1 30); do test -s %[1]s && exit 0; sleep 1; done; exit 1`, pidFile, candidateShellQuote(state.workspaceDevice))
+for i in $(seq 1 30); do test -s %[1]s && exit 0; sleep 1; done; exit 1`, pidFile, candidateShellQuote(state.dataStorageDevice))
 	if output, startErr := sshOutput(client, start); startErr != nil {
 		t.Fatalf("start raw-device consumer: %v\n%s", startErr, output)
 	}
@@ -88,7 +88,7 @@ set -e
 test "$rc" = 2
 test -z "$signature"
 printf raw-consumer-refusal=pass
-'`, state.workspaceDevice))
+'`, state.dataStorageDevice))
 	if !strings.Contains(unchanged, "raw-consumer-refusal=pass") {
 		t.Fatalf("raw-consumer refusal did not preserve the blank pre-install boundary: %s", unchanged)
 	}

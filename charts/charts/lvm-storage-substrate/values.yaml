@@ -23,7 +23,7 @@ lvm-localpv:
       keep: true
     csi:
       volumeSnapshots:
-        enabled: false
+        enabled: true
         keep: true
   lvmNode:
     kubeletDir: /var/lib/kubelet
@@ -32,6 +32,13 @@ lvm-localpv:
         registry: ""
         repository: registry.k8s.io/sig-storage/csi-node-driver-registrar
         tag: v2.13.0@sha256:d7138bcc3aa5f267403d45ad4292c95397e421ea17a0035888850f424c7de25d
+  serviceAccount:
+    lvmController:
+      # The parent chart owns narrowed controller/snapshot RBAC. Disabling only
+      # the upstream RBAC rendering keeps the reviewed controller SA name while
+      # avoiding its unneeded cluster-wide Secret and CRD mutation privileges.
+      create: false
+      name: openebs-lvm-controller-sa
   lvmController:
     replicas: 1
     resizer:
@@ -45,7 +52,7 @@ lvm-localpv:
         repository: registry.k8s.io/sig-storage/csi-snapshotter
         tag: v8.2.0@sha256:dd788d79cf4c1b8edee6d9b80b8a1ebfc51a38a365c5be656986b129be9ac784
     snapshotController:
-      enabled: false
+      enabled: true
       image:
         registry: ""
         repository: registry.k8s.io/sig-storage/snapshot-controller

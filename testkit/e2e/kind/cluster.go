@@ -223,31 +223,43 @@ func (cluster *Cluster) ImportImageArchive(ctx context.Context, archive, image, 
 }
 
 // Delete tears down owned infrastructure and removes its temporary kubeconfig.
+// Best-effort LVM cleanup and mandatory Kind deletion receive independent
+// bounded contexts so one exhausted phase cannot suppress the next. A failed
+// Kind teardown remains retryable; terminal deletion is recorded only after the
+// cluster and temporary state are actually gone.
 func (cluster *Cluster) Delete(ctx context.Context) error {
 	cluster.mu.Lock()
 	defer cluster.mu.Unlock()
 	if cluster.deleted {
-		return cluster.deleteErr
+		return nil
 	}
-	cluster.deleted = true
+	base := context.WithoutCancel(ctx)
 	if cluster.owned {
 		if cluster.lvmPrepared {
-			cluster.deleteErr = cluster.cleanupLVMStorage(ctx)
+			cleanupCtx, cancelCleanup := context.WithTimeout(base, 10*time.Minute)
+			_ = cluster.cleanupLVMStorage(cleanupCtx)
+			cancelCleanup()
 		}
-		_, deleteErr := cluster.executor.Run(ctx, process.Command{
+		deleteCtx, cancelDelete := context.WithTimeout(base, 6*time.Minute)
+		_, deleteErr := cluster.executor.Run(deleteCtx, process.Command{
 			Name: "kind", Args: []string{"delete", "cluster", "--name", cluster.Name},
 			Timeout: 5 * time.Minute, OutputName: "kind-delete-" + cluster.Name + ".log",
 		})
-		if cluster.deleteErr == nil {
+		cancelDelete()
+		if deleteErr != nil {
 			cluster.deleteErr = deleteErr
+			return deleteErr
 		}
 	}
 	if cluster.tempDir != "" {
-		if err := os.RemoveAll(cluster.tempDir); cluster.deleteErr == nil && err != nil {
+		if err := os.RemoveAll(cluster.tempDir); err != nil {
 			cluster.deleteErr = err
+			return err
 		}
 	}
-	return cluster.deleteErr
+	cluster.deleted = true
+	cluster.deleteErr = nil
+	return nil
 }
 
 func (manager Manager) uniqueName(prefix string) (string, error) {

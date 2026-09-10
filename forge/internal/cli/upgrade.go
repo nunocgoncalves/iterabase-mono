@@ -35,7 +35,7 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 
 	to, _ := cmd.Flags().GetString("to")
 	log.Info("upgrading", "install", cfg.Metadata.Name, "to", to)
-	res, err := lifecycle.Upgrade(context.Background(), cfg, p, to, lifecycle.ApplyOpts{})
+	res, err := lifecycle.Upgrade(context.Background(), cfg, p, p, to, lifecycle.ApplyOpts{})
 	if err != nil {
 		return err
 	}

@@ -642,7 +642,7 @@ Coordinator requires only:
 
 The separate FreshClam updater pod requires only update-source HTTPS/DNS and the sole read-write signature PVC mount. Its NetworkPolicy cannot reach PostgreSQL, MinIO/artifact zones, API/gateway, scanner processing port, extractor, or customer systems; scanner pods cannot reach the updater or its update source.
 
-The chart must bind the signature claim to an fixed default local-path StorageClass with ReadWriteOnce on the one node and fail enablement when same-node RWO access, sole-writer/read-only mounts, or identity enforcement cannot be proved. The volume contains only signature versions and the current manifest. Capacity must cover one staged bundle, the current bundle, and the retained validated rollback bundle with headroom; usage and backend availability are monitored rather than allowing a partial publish.
+The chart must bind the signature claim explicitly to the non-default `iterabase-lvm-xfs` OpenEBS LVM LocalPV StorageClass with ReadWriteOnce on the one node and fail enablement when same-node RWO access, sole-writer/read-only mounts, or identity enforcement cannot be proved. The volume contains only signature versions and the current manifest. Capacity must cover one staged bundle, the current bundle, and the retained validated rollback bundle with headroom; usage and backend availability are monitored rather than allowing a partial publish.
 
 ### Reference resource profile
 
@@ -945,7 +945,7 @@ Fail V2 artifact enablement when any of the following is absent or ambiguous:
 - active V2 identity/action authority and owner/actor attribution;
 - supported PostgreSQL schema/index/procedure and object-store backup evidence;
 - distinct quarantine-write, cleared-read, and lifecycle credentials with no broad/default policy;
-- an fixed default local-path StorageClass with ReadWriteOnce on the one node and a dedicated signature PVC with exactly one updater read-write identity, scanner read-only mounts, sufficient monitored capacity for staging/current/rollback bundles, and no scanner/synchronizer network egress;
+- the explicit non-default `iterabase-lvm-xfs` OpenEBS LVM LocalPV StorageClass with ReadWriteOnce on the one node and a dedicated signature PVC with exactly one updater read-write identity, scanner read-only mounts, sufficient monitored capacity for staging/current/rollback bundles, and no scanner/synchronizer network egress;
 - scanner/extractor exact identities, protocols, images, licenses, resources, and NetworkPolicies;
 - fresh validated ClamAV signature set and EN/PT/OCR self-test;
 - format/malicious/resource corpus pass;

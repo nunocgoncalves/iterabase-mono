@@ -21,9 +21,9 @@ import (
 
 // GPUFixtureHost identifies the fixed GPU fixture surface consumed by the scenario.
 type GPUFixtureHost struct {
-	IP              string
-	PrivKeyPath     string
-	WorkspaceDevice string
+	IP                string
+	PrivKeyPath       string
+	DataStorageDevice string
 }
 
 type permanentGPUFixtureState struct {
@@ -47,7 +47,7 @@ func newPermanentGPUFixtureState(t *testing.T) *permanentGPUFixtureState {
 		fixture:             fixture,
 		runID:               fixture.installName(),
 		privKeyPath:         fixture.sshKeyPath,
-		host:                &GPUFixtureHost{IP: fixture.address, PrivKeyPath: fixture.sshKeyPath, WorkspaceDevice: fixture.workspaceDevice},
+		host:                &GPUFixtureHost{IP: fixture.address, PrivKeyPath: fixture.sshKeyPath, DataStorageDevice: fixture.dataStorageDevice},
 		forgeHome:           t.TempDir(),
 		chartVersion:        platformChartVersion(t, ""),
 		runtimeImageDigests: make(map[string]importedRuntimeIdentity),
@@ -59,8 +59,8 @@ func newPermanentGPUFixtureState(t *testing.T) *permanentGPUFixtureState {
 
 func resetPermanentGPUFixtureStage(t *testing.T, state *permanentGPUFixtureState) {
 	require.NoError(t, state.fixture.reset(t, state.forgeBin, state.forgeHome))
-	rememberWorkspaceDevice(state.host.IP, state.host.WorkspaceDevice)
-	t.Logf("permanent GPU fixture %s workspace=%s", state.host.IP, state.host.WorkspaceDevice)
+	rememberDataStorageDevice(state.host.IP, state.host.DataStorageDevice)
+	t.Logf("permanent GPU fixture %s data-storage=%s", state.host.IP, state.host.DataStorageDevice)
 }
 
 func applyGPUSubstrateStage(t *testing.T, state *permanentGPUFixtureState) {
@@ -150,7 +150,7 @@ func (state *permanentGPUFixtureState) resetAfterScenario(t *testing.T) {
 	t.Helper()
 	state.stopAPITunnel()
 	state.diagnostics.setDomain(failureDomainFixtureReset)
-	workspaceDevicesByAddress.Delete(state.host.IP)
+	dataStorageDevicesByAddress.Delete(state.host.IP)
 	if err := state.fixture.reset(t, state.forgeBin, state.forgeHome); err != nil {
 		t.Errorf("reset permanent GPU fixture after diagnostics: %v", err)
 	}

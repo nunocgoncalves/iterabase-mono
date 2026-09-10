@@ -343,12 +343,15 @@ func lvmStorageManagerIdentity(platformRelease, namespace string) string {
 // Forge mutates host packages, modules, PVs, or the VG. There is deliberately no
 // local-path-to-LVM chart/PVC migration path.
 func refusePreLVMPlatform(ctx context.Context, cfg *config.Cluster, d deployer.Deployer, plan *ReconcilePlan) error {
-	if d == nil || plan == nil || !plan.Installed || cfg.Spec.Chart.Version == "" {
+	if plan == nil || !plan.Installed || cfg.Spec.Chart.Version == "" {
 		return nil
 	}
 	required, err := lvmStorageSubstrateRequired(cfg.Spec.Chart.Version)
 	if err != nil || !required {
 		return err
+	}
+	if d == nil {
+		return fmt.Errorf("read installed platform before LVM storage reconciliation: deployer observation is unavailable")
 	}
 	state, err := d.Status(ctx, cfg.Spec.Chart.Release, cfg.Spec.Chart.Namespace)
 	if err != nil {
@@ -997,7 +1000,7 @@ func rebootHost(ctx context.Context, p provisioner.Provisioner) error {
 // Upgrade re-runs the k3s install script with a new version (in-place upgrade),
 // then refreshes the kubeconfig and waits for the node to be Ready. The host
 // must already have k3s installed (use apply first).
-func Upgrade(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner, to string, opts ApplyOpts) (*Result, error) {
+func Upgrade(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner, d deployer.Deployer, to string, opts ApplyOpts) (*Result, error) {
 	if opts.ReadyTimeout == 0 {
 		opts.ReadyTimeout = 120 * time.Second
 	}
@@ -1005,12 +1008,9 @@ func Upgrade(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner
 		opts.ReadyInterval = 2 * time.Second
 	}
 
-	st, err := p.ReadState(ctx)
+	plan, storage, err := validateUpgradeFoundation(ctx, cfg, p, d)
 	if err != nil {
-		return nil, fmt.Errorf("read state: %w", err)
-	}
-	if !st.Installed {
-		return nil, fmt.Errorf("k3s not installed; run 'forge apply' first")
+		return nil, err
 	}
 	if to == "" {
 		to = cfg.Spec.K3s.Version
@@ -1021,7 +1021,7 @@ func Upgrade(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner
 		return nil, err
 	}
 
-	res := &Result{}
+	res := &Result{Plan: plan, DataStorage: storage}
 	outPath, err := storeKubeconfig(ctx, cfg, p, opts.KubeconfigOut)
 	if err != nil {
 		auditFail(cfg, "upgrade", err)
@@ -1045,6 +1045,31 @@ func Upgrade(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner
 		Action: "upgrade", Result: "success", Version: version.String(),
 	})
 	return res, nil
+}
+
+func validateUpgradeFoundation(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner, d deployer.Deployer) (*ReconcilePlan, *provisioner.DataStorageState, error) {
+	st, err := p.ReadState(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read state: %w", err)
+	}
+	if !st.Installed {
+		return nil, nil, fmt.Errorf("k3s not installed; run 'forge apply' first")
+	}
+	if diff := immutableDiff(cfg, st); len(diff) > 0 {
+		return nil, nil, fmt.Errorf("refuse unsupported k3s upgrade: immutable field(s) differ: %s; HOR-545 supports clean install, never local-path migration", strings.Join(diff, ", "))
+	}
+	storage, err := inspectDataStorage(ctx, cfg, p)
+	if err != nil {
+		return nil, nil, fmt.Errorf("inspect data storage before upgrade: %w", err)
+	}
+	if storage == nil || storage.State != "complete" || storage.VGName != provisioner.DataVolumeGroupName || storage.VGUUID == "" {
+		return nil, nil, fmt.Errorf("refuse unsupported k3s upgrade: installed cluster lacks the complete receipt-bound OpenEBS LVM storage foundation; HOR-545 supports clean install, never local-path migration")
+	}
+	plan := &ReconcilePlan{Installed: true, WantVersion: cfg.Spec.K3s.Version, ChartVersion: cfg.Spec.Chart.Version, DataStorage: storage}
+	if err := refusePreLVMPlatform(ctx, cfg, d, plan); err != nil {
+		return nil, nil, err
+	}
+	return plan, storage, nil
 }
 
 // storeKubeconfig fetches the kubeconfig from the host, rewrites the server

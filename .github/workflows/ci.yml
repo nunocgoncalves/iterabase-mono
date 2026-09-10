@@ -319,14 +319,14 @@ jobs:
           cache-dependency-path: ${{ env.GO_CACHE_DEPENDENCIES }}
           cache-scope: forge
       - name: Install LVM toolchain for the privileged fault matrix
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends lvm2
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends lvm2 psmisc
       - name: Execute the executable fault-stage matrix (privileged, fail-closed)
         working-directory: forge
         run: |
           GOMODCACHE="$(go env GOMODCACHE)"
           sudo env "HOME=/tmp/forge-fx" "PATH=$PATH" "GOMODCACHE=$GOMODCACHE" \
             FORGE_FAULT_MATRIX_REQUIRED=1 go test -count=1 \
-            -run 'TestDataStorageFaultStageMatrixExecutable|TestDataStorageReapplyReceiptMonotonicExecutable|TestDataStorageLoopDevicesRejectedWithoutFixtureFlag' \
+            -run 'TestDataStorageFaultStageMatrixExecutable|TestDataStorageReapplyReceiptMonotonicExecutable|TestDataStoragePurgeFaultStageMatrixExecutable|TestDataStorageLoopDevicesRejectedWithoutFixtureFlag' \
             ./internal/sshprovisioner/
 
   charts:

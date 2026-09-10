@@ -248,6 +248,10 @@ func testLVMStorageContract() LVMStorageContract {
 			{Name: "iterabase-lvm-xfs", Shared: false},
 			{Name: "iterabase-agentpool-lvm-xfs", Shared: true},
 		},
+		SnapshotClassName:           "iterabase-lvm-snapshot",
+		SnapshotSize:                "100%",
+		SnapshotterContainer:        "csi-snapshotter",
+		SnapshotControllerContainer: "snapshot-controller",
 	}
 }
 
@@ -303,6 +307,66 @@ func TestMissingDownloadedRuntimeArtifactCannotReachClusterImport(t *testing.T) 
 	}
 	if len(executor.commands) != 0 {
 		t.Fatalf("missing archive executed import commands: %+v", executor.commands)
+	}
+}
+
+func TestDeleteUsesIndependentBoundedContextsAndRetriesFailedKindTeardown(t *testing.T) {
+	t.Parallel()
+	executor := &teardownExecutor{}
+	tmp := t.TempDir()
+	cluster := &Cluster{
+		Name: "retryable", Kubeconfig: filepath.Join(tmp, "kubeconfig"), executor: executor,
+		owned: true, lvmPrepared: true, tempDir: filepath.Join(tmp, "state"),
+	}
+	if err := os.MkdirAll(cluster.tempDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	caller, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := cluster.Delete(caller); err == nil {
+		t.Fatal("first Kind teardown failure was not returned")
+	}
+	if cluster.deleted {
+		t.Fatal("failed teardown was cached as terminal deletion")
+	}
+	if err := cluster.Delete(caller); err != nil {
+		t.Fatalf("retry Kind teardown: %v", err)
+	}
+	if !cluster.deleted {
+		t.Fatal("successful retry did not mark terminal deletion")
+	}
+	if executor.cleanupCalls != 2 || executor.kindCalls != 2 {
+		t.Fatalf("cleanup/kind calls = %d/%d, want 2/2", executor.cleanupCalls, executor.kindCalls)
+	}
+	if err := cluster.Delete(caller); err != nil {
+		t.Fatal(err)
+	}
+	if executor.kindCalls != 2 {
+		t.Fatal("terminal deletion executed Kind again")
+	}
+}
+
+type teardownExecutor struct {
+	cleanupCalls int
+	kindCalls    int
+}
+
+func (executor *teardownExecutor) Run(ctx context.Context, command process.Command) (process.Result, error) {
+	if err := ctx.Err(); err != nil {
+		return process.Result{}, fmt.Errorf("phase received canceled context: %w", err)
+	}
+	switch command.Name {
+	case "bash":
+		executor.cleanupCalls++
+		return process.Result{}, errors.New("best-effort LVM cleanup failed")
+	case "kind":
+		executor.kindCalls++
+		if executor.kindCalls == 1 {
+			return process.Result{}, errors.New("transient Kind teardown failure")
+		}
+		return process.Result{}, nil
+	default:
+		return process.Result{}, fmt.Errorf("unexpected command %s", command.Name)
 	}
 }
 

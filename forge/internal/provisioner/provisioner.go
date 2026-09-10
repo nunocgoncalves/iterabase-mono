@@ -177,7 +177,7 @@ type Provisioner interface {
 	// crash-resumably creates only receipt-bound PVs and iterabase-data.
 	ReconcileDataStorage(ctx context.Context, spec DataStorageSpec) (*DataStorageState, error)
 	// WaitForLVMStorageReady validates no local-path/default fallback exists and
-	// waits for exact CRDs, controller/node/CSI/classes, and VG discovery.
+	// waits for exact volume/snapshot CRDs, controllers, CSI/classes, and VG discovery.
 	WaitForLVMStorageReady(ctx context.Context, namespace string, host *DataStorageState) (*LVMStorageReadiness, error)
 	// ReadGPUReadiness returns one coherent ClusterPolicy/node observation,
 	// evaluated against the requested driver. Missing resources and transitional

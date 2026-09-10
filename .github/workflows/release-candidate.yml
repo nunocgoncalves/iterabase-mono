@@ -606,7 +606,7 @@ jobs:
           ssh-user: ${{ matrix.capacity == 'cpu' && vars.FORGE_E2E_CPU_SSH_USER || vars.FORGE_E2E_GPU_SSH_USER }}
           ssh-private-key: ${{ matrix.capacity == 'cpu' && secrets.FORGE_E2E_CPU_SSH_KEY || secrets.FORGE_E2E_GPU_SSH_KEY }}
           ssh-host-key: ${{ matrix.capacity == 'cpu' && vars.FORGE_E2E_CPU_SSH_HOST_KEY || vars.FORGE_E2E_GPU_SSH_HOST_KEY }}
-          workspace-device: ${{ matrix.capacity == 'cpu' && vars.FORGE_E2E_CPU_WORKSPACE_DEVICE || vars.FORGE_E2E_GPU_WORKSPACE_DEVICE }}
+          data-storage-device: ${{ matrix.capacity == 'cpu' && vars.FORGE_E2E_CPU_DATA_STORAGE_DEVICE || vars.FORGE_E2E_GPU_DATA_STORAGE_DEVICE }}
           model-cache-device: ${{ matrix.capacity == 'gpu' && vars.FORGE_E2E_GPU_MODEL_CACHE_DEVICE || '' }}
           model-cache-uuid: ${{ matrix.capacity == 'gpu' && vars.FORGE_E2E_GPU_MODEL_CACHE_UUID || '' }}
       - name: Compose and run every candidate scenario for this fixture serially

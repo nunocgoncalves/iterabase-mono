@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -26,7 +27,11 @@ import (
 // loop/logical devices and unsigned disks is fully retained. Only the privileged
 // forge-fault-matrix CI harness injects it when it executes the real script over
 // loop-backed by-id devices.
-const fixtureLoopEnv = "FORGE_DATA_STORAGE_FIXTURE_LOOP"
+const (
+	fixtureLoopEnv          = "FORGE_DATA_STORAGE_FIXTURE_LOOP"
+	fixtureStageBarrierEnv  = "FORGE_DATA_STORAGE_STAGE_BARRIER_DIR"
+	fixtureStageExpectedEnv = "FORGE_DATA_STORAGE_STAGE_BARRIER"
+)
 
 // fixtureRequiredEnv, when set to "1", makes lvmFaultMatrixEnv fail (not skip)
 // whenever the privileged environment is unavailable, so the required defect-matrix
@@ -57,7 +62,7 @@ func lvmFaultMatrixEnv(t *testing.T) (bool, string) {
 	if os.Geteuid() != 0 {
 		return unavailable("real-LVM reconcile fault matrix requires root (losetup/mknod/by-id alias)")
 	}
-	for _, tool := range []string{"losetup", "pvcreate", "vgcreate", "pvs", "vgs", "lvs", "vgremove", "pvremove", "mknod", "ln"} {
+	for _, tool := range []string{"losetup", "pvcreate", "vgcreate", "pvs", "vgs", "lvs", "vgremove", "pvremove", "fuser", "mknod", "ln"} {
 		if _, err := exec.LookPath(tool); err != nil {
 			return unavailable(fmt.Sprintf("real-LVM reconcile fault matrix requires %q", tool))
 		}
@@ -75,57 +80,75 @@ func writeFaultScript(t *testing.T, spec provisioner.DataStorageSpec, mode strin
 	return path
 }
 
+func writePurgeFaultScript(t *testing.T, spec provisioner.DataStorageSpec) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "purge.sh")
+	require.NoError(t, os.WriteFile(path, []byte("set -eu\n"+dataStoragePurgeScript(spec)+"\n"), 0o600))
+	return path
+}
+
 // runDataStorageBash executes an already-written reconcile script under the real
 // bash interpreter in the internal fixture mode (fixtureLoopEnv set) and returns
 // stdout together with a precise outcome tag: "ok" (exit 0, completed normally),
 // "crashed" (SIGKILL injected at the requested durable stage), or "error" (the
 // script refused/failed). This lets callers distinguish a clean success from an
 // injected crash and from a refusal, which a single boolean cannot.
-func runDataStorageBash(t *testing.T, path, killAfter string) (string, string) {
+func runDataStorageBash(t *testing.T, path, barrier string) (string, string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "bash", path)
+	cmd := exec.Command("bash", path)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Env = append(os.Environ(), fixtureLoopEnv+"=1")
+	barrierDir := ""
+	if barrier != "" {
+		barrierDir = t.TempDir()
+		cmd.Env = append(cmd.Env, fixtureStageBarrierEnv+"="+barrierDir, fixtureStageExpectedEnv+"="+barrier)
+	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Start(); err != nil {
-		t.Fatalf("start reconcile script: %v", err)
+		t.Fatalf("start data-storage script: %v", err)
 	}
-
-	if killAfter != "" {
-		go func() {
-			deadline := time.Now().Add(90 * time.Second)
-			for time.Now().Before(deadline) {
-				data, err := os.ReadFile(dataStorageReceiptPath)
-				if err == nil && strings.Contains(string(data), "status="+killAfter) {
-					_ = cmd.Process.Kill()
-					return
-				}
-				time.Sleep(2 * time.Millisecond)
-			}
-		}()
-	}
-
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
+
+	if barrier != "" {
+		reached := filepath.Join(barrierDir, barrier+".reached")
+		ticker := time.NewTicker(2 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case err := <-done:
+				return stdout.String() + "\nstderr: " + stderr.String() + fmt.Sprintf("\nprocess exited before barrier: %v", err), "error"
+			case <-ctx.Done():
+				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+				<-done
+				t.Fatalf("data-storage script never reached required barrier %s; stdout=%s stderr=%s", barrier, stdout.String(), stderr.String())
+			case <-ticker.C:
+				if _, err := os.Stat(reached); err != nil {
+					continue
+				}
+				require.NoError(t, syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL), "kill data-storage process group at %s", barrier)
+				err := <-done
+				var exitErr *exec.ExitError
+				require.True(t, errors.As(err, &exitErr), "barrier process did not exit by signal: %v", err)
+				require.Equal(t, syscall.SIGKILL, exitErr.ProcessState.Sys().(syscall.WaitStatus).Signal())
+				return stdout.String() + "\nstderr: " + stderr.String(), "crashed"
+			}
+		}
+	}
+
 	select {
 	case <-ctx.Done():
-		_ = cmd.Process.Kill()
-		t.Fatalf("reconcile script timed out; stdout=%s stderr=%s", stdout.String(), stderr.String())
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		<-done
+		t.Fatalf("data-storage script timed out; stdout=%s stderr=%s", stdout.String(), stderr.String())
 		return "", "error"
 	case err := <-done:
-		if ctx.Err() != nil {
-			_ = cmd.Process.Kill()
-		}
 		if err != nil {
-			var exitErr *exec.ExitError
-			if errors.As(err, &exitErr) && killAfter != "" && exitErr.ExitCode() == -1 {
-				// SIGKILL injected at the requested stage is the expected crash.
-				return stdout.String(), "crashed"
-			}
 			return stdout.String() + "\nstderr: " + stderr.String(), "error"
 		}
 		return stdout.String(), "ok"
@@ -211,7 +234,8 @@ func TestDataStorageFaultMatrixScriptCoversEveryDurableStage(t *testing.T) {
 	// DES-HOR-545-03 monotonic receipt: the pvs-created write is gated on an
 	// unbound VG UUID, so exact reapply of an already-complete receipt never
 	// regresses to pvs-created.
-	require.Contains(t, script, "if test -z \"$receipt_vg_uuid\"; then write_receipt pvs-created")
+	require.Contains(t, script, "if test -z \"$receipt_vg_uuid\"; then")
+	require.Contains(t, script, "write_receipt pvs-created \"$pv_done\" 0")
 
 	// The planned receipt precedes the first mutation and the VG-created receipt
 	// binds the complete PV set before the UUID is persisted.
@@ -241,6 +265,19 @@ func TestDataStorageFaultMatrixScriptCoversEveryDurableStage(t *testing.T) {
 // requireReceiptStatus asserts the durable receipt currently reports the given
 // status field, proving the on-disk stage survived (or was not regressed by)
 // the preceding run/crash.
+func receiptFields(t *testing.T) map[string]string {
+	t.Helper()
+	data, err := os.ReadFile(dataStorageReceiptPath)
+	require.NoError(t, err, "read durable receipt")
+	fields := map[string]string{}
+	for _, line := range strings.Split(string(data), "\n") {
+		if key, value, ok := strings.Cut(line, "="); ok {
+			fields[key] = value
+		}
+	}
+	return fields
+}
+
 func requireReceiptStatus(t *testing.T, want string) {
 	t.Helper()
 	data, err := os.ReadFile(dataStorageReceiptPath)
@@ -252,6 +289,71 @@ func requireReceiptStatus(t *testing.T, want string) {
 		}
 	}
 	t.Fatalf("receipt has no status field: %s", string(data))
+}
+
+func requireLiveVG(t *testing.T, present bool) {
+	t.Helper()
+	err := exec.Command("vgs", provisioner.DataVolumeGroupName).Run()
+	if present {
+		require.NoError(t, err, "receipt-owned VG must exist at this durable stage")
+	} else {
+		require.Error(t, err, "receipt-owned VG must be absent at this durable stage")
+	}
+}
+
+func requireLivePVPresence(t *testing.T, spec provisioner.DataStorageSpec, present ...bool) {
+	t.Helper()
+	require.Len(t, present, len(spec.Devices))
+	fields := map[string]string{}
+	for _, expected := range present {
+		if expected {
+			fields = receiptFields(t)
+			break
+		}
+	}
+	for i, device := range spec.Devices {
+		resolved, err := filepath.EvalSymlinks(device)
+		require.NoError(t, err)
+		out, err := exec.Command("pvs", "--noheadings", "--separator", "|", "-o", "pv_uuid,vg_name", "--", resolved).CombinedOutput()
+		if !present[i] {
+			require.Error(t, err, "PV %d unexpectedly exists: %s", i, out)
+			continue
+		}
+		require.NoError(t, err, "PV %d missing: %s", i, out)
+		parts := strings.Split(strings.TrimSpace(string(out)), "|")
+		require.Len(t, parts, 2)
+		require.Equal(t, fields[fmt.Sprintf("pv_uuid_%d", i)], strings.TrimSpace(parts[0]))
+	}
+}
+
+func requireReconcileBarrierState(t *testing.T, spec provisioner.DataStorageSpec, barrier string) {
+	t.Helper()
+	switch barrier {
+	case "receipt-planned":
+		requireReceiptStatus(t, "planned")
+		requireLiveVG(t, false)
+		requireLivePVPresence(t, spec, false, false)
+	case "pv-1-created":
+		requireReceiptStatus(t, "pvs-created")
+		require.Equal(t, "1", receiptFields(t)["pv_done"])
+		requireLiveVG(t, false)
+		requireLivePVPresence(t, spec, true, false)
+	case "pv-2-created":
+		requireReceiptStatus(t, "pvs-created")
+		require.Equal(t, "2", receiptFields(t)["pv_done"])
+		requireLiveVG(t, false)
+		requireLivePVPresence(t, spec, true, true)
+	case "vg-created":
+		requireReceiptStatus(t, "vg-created")
+		requireLiveVG(t, true)
+		requireLivePVPresence(t, spec, true, true)
+	case "complete", "reapply-inspected-complete":
+		requireReceiptStatus(t, "complete")
+		requireLiveVG(t, true)
+		requireLivePVPresence(t, spec, true, true)
+	default:
+		t.Fatalf("unknown reconcile barrier %q", barrier)
+	}
 }
 
 // requireReceiptPVIdentityMatchesLive proves the durable receipt's planned PV
@@ -342,20 +444,20 @@ func TestDataStorageFaultStageMatrixExecutable(t *testing.T) {
 
 	// Fault-stage matrix: crash after each durable receipt stage then resume.
 	for _, sc := range []struct {
-		name   string
-		marker string
+		name    string
+		barrier string
 	}{
-		// killAfter is a receipt status/field suffix; runDataStorageBash prepends
-		// "status=" when watching for it, so these markers carry no prefix.
-		{name: "planned", marker: "planned"},
-		{name: "after-pv0", marker: "pvs-created\npv_done=1"},
-		{name: "after-pv1", marker: "pvs-created\npv_done=2"},
-		{name: "after-vg", marker: "vg-created"},
+		{name: "planned", barrier: "receipt-planned"},
+		{name: "after-pv0", barrier: "pv-1-created"},
+		{name: "after-pv1", barrier: "pv-2-created"},
+		{name: "after-vg", barrier: "vg-created"},
+		{name: "complete", barrier: "complete"},
 	} {
 		t.Run("resume-after-"+sc.name, func(t *testing.T) {
 			rspec, fscript := newFixture(t, "opo1")
-			out, outcome := runDataStorageBash(t, fscript, sc.marker)
+			out, outcome := runDataStorageBash(t, fscript, sc.barrier)
 			require.Equal(t, "crashed", outcome, "expected SIGKILL crash at %s; out=%s", sc.name, out)
+			requireReconcileBarrierState(t, rspec, sc.barrier)
 			out2, outcome2 := runDataStorageBash(t, fscript, "")
 			require.Equal(t, "ok", outcome2, "resume failed after %s crash: %s", sc.name, out2)
 			require.Contains(t, out2, "FORGE_DATA_STORAGE_RESULT\tcomplete")
@@ -406,20 +508,110 @@ func TestDataStorageReapplyReceiptMonotonicExecutable(t *testing.T) {
 	// Exact reapply: with the monotonic guard the pvs-created marker is never
 	// re-emitted for an already-complete receipt, so the run completes normally
 	// (outcome "ok", not "crashed") and the receipt stays complete.
-	out, outcome = runDataStorageBash(t, script, "pvs-created")
+	out, outcome = runDataStorageBash(t, script, "")
 	require.Equal(t, "ok", outcome, "exact reapply regressed the receipt to pvs-created:\n%s", out)
 	require.Contains(t, out, "FORGE_DATA_STORAGE_RESULT\tcomplete")
 	requireReceiptStatus(t, "complete")
 	requireReceiptPVIdentityMatchesLive(t, spec)
 
-	// Crash during reapply (killed after loading the complete receipt) must leave
-	// a resumable, still-complete receipt; the next run completes without repair.
-	_, _ = runDataStorageBash(t, script, "complete") // best-effort SIGKILL mid-reapply
+	// Crash during reapply is synchronized after authoritative complete-receipt
+	// inspection. The injected process-group SIGKILL is mandatory, and exact
+	// receipt/live LVM state is asserted before resume.
+	crashOut, crashOutcome := runDataStorageBash(t, script, "reapply-inspected-complete")
+	require.Equal(t, "crashed", crashOutcome, "required reapply crash was not injected: %s", crashOut)
+	requireReconcileBarrierState(t, spec, "reapply-inspected-complete")
 	out2, outcome2 := runDataStorageBash(t, script, "")
 	require.Equal(t, "ok", outcome2, "reapply did not resume to complete after crash: %s", out2)
 	require.Contains(t, out2, "FORGE_DATA_STORAGE_RESULT\tcomplete")
 	requireReceiptStatus(t, "complete")
 	requireReceiptPVIdentityMatchesLive(t, spec)
+}
+
+func requirePurgeBarrierState(t *testing.T, spec provisioner.DataStorageSpec, barrier string) {
+	t.Helper()
+	switch barrier {
+	case "purge-vg-pending":
+		requireReceiptStatus(t, "purge-vg-pending")
+		requireLiveVG(t, true)
+		requireLivePVPresence(t, spec, true, true)
+	case "purge-vg-removed":
+		requireReceiptStatus(t, "purge-vg-removed")
+		requireLiveVG(t, false)
+		requireLivePVPresence(t, spec, true, true)
+	case "purge-pv-0-pending":
+		requireReceiptStatus(t, "purge-pv-pending")
+		require.Equal(t, "0", receiptFields(t)["purge_done"])
+		requireLiveVG(t, false)
+		requireLivePVPresence(t, spec, true, true)
+	case "purge-pv-0-removed":
+		requireReceiptStatus(t, "purge-pvs-removed")
+		require.Equal(t, "1", receiptFields(t)["purge_done"])
+		requireLiveVG(t, false)
+		requireLivePVPresence(t, spec, false, true)
+	case "purge-pv-1-pending":
+		requireReceiptStatus(t, "purge-pv-pending")
+		require.Equal(t, "1", receiptFields(t)["purge_done"])
+		requireLiveVG(t, false)
+		requireLivePVPresence(t, spec, false, true)
+	case "purge-pv-1-removed":
+		requireReceiptStatus(t, "purge-pvs-removed")
+		require.Equal(t, "2", receiptFields(t)["purge_done"])
+		requireLiveVG(t, false)
+		requireLivePVPresence(t, spec, false, false)
+	case "purge-receipt-pending":
+		requireReceiptStatus(t, "purge-receipt-pending")
+		require.Equal(t, "2", receiptFields(t)["purge_done"])
+		requireLiveVG(t, false)
+		requireLivePVPresence(t, spec, false, false)
+	case "receipt-removed":
+		_, err := os.Stat(dataStorageReceiptPath)
+		require.Error(t, err)
+		require.True(t, os.IsNotExist(err))
+		requireLiveVG(t, false)
+		requireLivePVPresence(t, spec, false, false)
+	default:
+		t.Fatalf("unknown purge barrier %q", barrier)
+	}
+}
+
+func TestDataStoragePurgeFaultStageMatrixExecutable(t *testing.T) {
+	ok, reason := lvmFaultMatrixEnv(t)
+	if !ok {
+		t.Skip(reason)
+	}
+	var curLoops, curAliases []string
+	t.Cleanup(func() { teardownFaultLoopDevices(t, curLoops, curAliases) })
+	newCompleteFixture := func(t *testing.T) (provisioner.DataStorageSpec, string) {
+		t.Helper()
+		teardownFaultLoopDevices(t, curLoops, curAliases)
+		resetFaultStorage(t)
+		aliases, loops := makeFaultLoopDevices(t, t.TempDir(), 2)
+		curLoops, curAliases = loops, aliases
+		spec := provisioner.DataStorageSpec{InstallName: "opo1", Devices: aliases}
+		out, outcome := runDataStorageBash(t, writeFaultScript(t, spec, "reconcile"), "")
+		require.Equal(t, "ok", outcome, "seed complete purge fixture: %s", out)
+		return spec, writePurgeFaultScript(t, spec)
+	}
+	for _, barrier := range []string{
+		"purge-vg-pending", "purge-vg-removed",
+		"purge-pv-0-pending", "purge-pv-0-removed",
+		"purge-pv-1-pending", "purge-pv-1-removed",
+		"purge-receipt-pending", "receipt-removed",
+	} {
+		t.Run("resume-after-"+barrier, func(t *testing.T) {
+			spec, purge := newCompleteFixture(t)
+			out, outcome := runDataStorageBash(t, purge, barrier)
+			require.Equal(t, "crashed", outcome, "required purge crash at %s was not injected: %s", barrier, out)
+			requirePurgeBarrierState(t, spec, barrier)
+			resumed, resumeOutcome := runDataStorageBash(t, purge, "")
+			require.Equal(t, "ok", resumeOutcome, "purge resume after %s: %s\n%s", barrier, resumed, lvmFaultDump())
+			require.Contains(t, resumed, "FORGE_DATA_STORAGE_PURGE_RESULT")
+			_, err := os.Stat(dataStorageReceiptPath)
+			require.True(t, os.IsNotExist(err), "purge resume retained receipt: %v", err)
+			requireLiveVG(t, false)
+			requireLivePVPresence(t, spec, false, false)
+		})
+	}
 }
 
 // TestDataStorageLoopDevicesRejectedWithoutFixtureFlag proves the ordinary

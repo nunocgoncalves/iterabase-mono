@@ -15,11 +15,13 @@ certificate_version=$(chart_version "$certificates")
 
 render=$(helm template release-lvm-storage "$substrate" -n iterabase-system \
   --set-string agentpool.authorizedManagerIdentity=system:serviceaccount:iterabase-system:release-control-plane-manager)
-for crd in lvmnodes.local.openebs.io lvmvolumes.local.openebs.io lvmsnapshots.local.openebs.io; do
+for crd in \
+  lvmnodes.local.openebs.io lvmvolumes.local.openebs.io lvmsnapshots.local.openebs.io \
+  volumesnapshots.snapshot.storage.k8s.io volumesnapshotcontents.snapshot.storage.k8s.io \
+  volumesnapshotclasses.snapshot.storage.k8s.io; do
   grep -Fq "name: $crd" <<<"$render" || { echo "missing $crd" >&2; exit 1; }
 done
-! grep -Fq 'volumesnapshots.snapshot.storage.k8s.io' <<<"$render"
-! grep -Fq 'name: snapshot-controller' <<<"$render"
+grep -Fq 'name: snapshot-controller' <<<"$render"
 grep -Fq 'value: "false"' <<<"$render"
 grep -Fq -- '--kubelet-dir=/var/lib/kubelet/' <<<"$render"
 grep -Fq '/var/lib/kubelet/plugins_registry/' <<<"$render"
@@ -30,6 +32,7 @@ for image in \
   'registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.13.0@sha256:d7138bcc3aa5f267403d45ad4292c95397e421ea17a0035888850f424c7de25d' \
   'registry.k8s.io/sig-storage/csi-resizer:v2.0.0@sha256:4a95d94e57ad82f6977cd8d4fdcfcfc0b83f02d990e4e7715b688c20970a906d' \
   'registry.k8s.io/sig-storage/csi-snapshotter:v8.2.0@sha256:dd788d79cf4c1b8edee6d9b80b8a1ebfc51a38a365c5be656986b129be9ac784' \
+  'registry.k8s.io/sig-storage/snapshot-controller:v8.2.0@sha256:9dade8f2f3ab29e3919c41b343f8d77b12178ac51f25574d7ed2d45a3e3ef69d' \
   'registry.k8s.io/sig-storage/csi-provisioner:v6.1.0@sha256:e5900dc98b0d02f317ea9572f3824983c47a2fb5d5fe2b160aedf1b99c14c9e4'; do
   grep -Fq "image: \"$image\"" <<<"$render" || { echo "missing exact image $image" >&2; exit 1; }
 done
@@ -48,6 +51,18 @@ done
 [[ $(grep -c 'storageclass.kubernetes.io/is-default-class: "false"' <<<"$render") -eq 2 ]]
 grep -A14 'name: iterabase-lvm-xfs' <<<"$render" | grep -Fq 'shared: "no"'
 grep -A15 'name: iterabase-agentpool-lvm-xfs' <<<"$render" | grep -Fq 'shared: "yes"'
+
+# DES-HOR-545-04: exactly one non-default full-origin thick snapshot class.
+[[ $(grep -c '^kind: VolumeSnapshotClass$' <<<"$render") -eq 1 ]]
+grep -A10 'name: iterabase-lvm-snapshot' <<<"$render" | grep -Fq 'snapshot.storage.kubernetes.io/is-default-class: "false"'
+grep -A10 'name: iterabase-lvm-snapshot' <<<"$render" | grep -Fq 'driver: local.csi.openebs.io'
+grep -A10 'name: iterabase-lvm-snapshot' <<<"$render" | grep -Fq 'deletionPolicy: Delete'
+grep -A10 'name: iterabase-lvm-snapshot' <<<"$render" | grep -Fq 'snapSize: 100%'
+# The managed class has no secret parameters, so its controller SA must not have
+# Secret read/list or CRD create/delete through the narrowed snapshot role.
+snapshot_role=$(awk '/name: openebs-lvm-snapshotter-role/{capture=1} capture{print} capture && /^---$/{exit}' <<<"$render")
+! grep -Fq 'resources: ["secrets"]' <<<"$snapshot_role"
+! grep -Fq 'resources: ["customresourcedefinitions"]' <<<"$snapshot_role"
 
 # DES-HOR-545-01: the agentpool class must be gated by a fail-closed admission
 # policy bound to the exact control-plane manager service-account identity.
@@ -83,4 +98,4 @@ if helm template release-lvm-storage "$substrate" --set lvm-localpv.enabled=fals
   exit 1
 fi
 
-echo "OK: same-version pinned OpenEBS LVM LocalPV substrate and exact thick XFS StorageClasses"
+echo "OK: same-version pinned OpenEBS LVM LocalPV volume/snapshot substrate, narrowed RBAC, and exact managed classes"

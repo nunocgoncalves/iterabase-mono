@@ -13,47 +13,47 @@ import (
 // forgeConfigSpec is the shared config fixture for cloud E2E stages. Scenario
 // writers vary only the fields relevant to the contract they exercise, so the
 // common k3s/host recipe cannot drift across files.
-const workspaceDeviceEnv = "FORGE_E2E_DATA_STORAGE_DEVICES"
+const dataStorageDeviceEnv = "FORGE_E2E_DATA_STORAGE_DEVICES"
 
-var workspaceDevicesByAddress sync.Map
+var dataStorageDevicesByAddress sync.Map
 
-func rememberWorkspaceDevice(address, device string) {
+func rememberDataStorageDevice(address, device string) {
 	if address != "" && device != "" {
-		workspaceDevicesByAddress.Store(address, device)
+		dataStorageDevicesByAddress.Store(address, device)
 	}
 }
 
 type forgeConfigSpec struct {
-	Name             string
-	Address          string
-	SSHUser          string
-	SSHKeyPath       string
-	SSHHostKey       string
-	WorkspaceDevice  string
-	RunLabel         bool
-	DualStack        bool
-	GPU              bool
-	GPUDriverVersion string
-	GPUDriverSHA256  string
-	ChartVersion     string
-	ChartRepository  string
-	ChartRelease     string
-	ChartNamespace   string
-	OverlayRepo      string
-	OverlayRef       string
-	Flux             bool
+	Name              string
+	Address           string
+	SSHUser           string
+	SSHKeyPath        string
+	SSHHostKey        string
+	DataStorageDevice string
+	RunLabel          bool
+	DualStack         bool
+	GPU               bool
+	GPUDriverVersion  string
+	GPUDriverSHA256   string
+	ChartVersion      string
+	ChartRepository   string
+	ChartRelease      string
+	ChartNamespace    string
+	OverlayRepo       string
+	OverlayRef        string
+	Flux              bool
 }
 
 func e2eK3sVersion() string { return "v1.34.10+k3s1" }
 
-func workspaceDevice(spec forgeConfigSpec) string {
-	if spec.WorkspaceDevice != "" {
-		return spec.WorkspaceDevice
+func dataStorageDevice(spec forgeConfigSpec) string {
+	if spec.DataStorageDevice != "" {
+		return spec.DataStorageDevice
 	}
-	if device := os.Getenv(workspaceDeviceEnv); device != "" {
+	if device := os.Getenv(dataStorageDeviceEnv); device != "" {
 		return device
 	}
-	if device, ok := workspaceDevicesByAddress.Load(spec.Address); ok {
+	if device, ok := dataStorageDevicesByAddress.Load(spec.Address); ok {
 		return device.(string)
 	}
 	return "/dev/disk/by-id/scsi-forge-e2e-workspaces"
@@ -77,7 +77,7 @@ spec:
   dataStorage:
     devices:
 `, spec.Name)
-	devices := strings.Split(workspaceDevice(spec), ",")
+	devices := strings.Split(dataStorageDevice(spec), ",")
 	for i := range devices {
 		devices[i] = strings.TrimSpace(devices[i])
 	}

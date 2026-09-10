@@ -12,7 +12,7 @@ func TestRecordFixtureEvidenceUpsertsCleanupIdentity(t *testing.T) {
 	t.Setenv(ResultOutputEnv, result)
 	evidence := FixtureEvidence{
 		Name: "lifecycle", Capacity: "cpu", HostKeySHA256: strings.Repeat("a", 64),
-		WorkspaceDevice: "/dev/disk/by-id/workspace", BootIDBefore: "boot-1", BootIDAfter: "boot-2",
+		DataStorageDevice: "/dev/disk/by-id/data-storage", BootIDBefore: "boot-1", BootIDAfter: "boot-2",
 	}
 	if err := RecordFixtureEvidence(evidence); err != nil {
 		t.Fatal(err)
@@ -35,12 +35,12 @@ func TestRecordFixtureEvidenceRejectsAliasedOrFloatingGPUCache(t *testing.T) {
 	t.Setenv(ResultOutputEnv, filepath.Join(t.TempDir(), "result.json"))
 	base := FixtureEvidence{
 		Name: "model-cache", Capacity: "gpu", HostKeySHA256: strings.Repeat("a", 64),
-		WorkspaceDevice: "/dev/disk/by-id/workspace", BootIDBefore: "boot-1", BootIDAfter: "boot-2",
+		DataStorageDevice: "/dev/disk/by-id/data-storage", BootIDBefore: "boot-1", BootIDAfter: "boot-2",
 		ModelCacheDevice: "/dev/disk/by-id/cache", ModelCacheMount: "/data/hf-cache", ModelCacheUUID: "uuid",
 		ModelID: "public/model", ModelRevision: strings.Repeat("b", 40), ModelContentSHA256: strings.Repeat("c", 64),
 	}
 	for name, mutate := range map[string]func(*FixtureEvidence){
-		"aliased":  func(value *FixtureEvidence) { value.ModelCacheDevice = value.WorkspaceDevice },
+		"aliased":  func(value *FixtureEvidence) { value.ModelCacheDevice = value.DataStorageDevice },
 		"floating": func(value *FixtureEvidence) { value.ModelRevision = "main" },
 		"corrupt":  func(value *FixtureEvidence) { value.ModelContentSHA256 = "corrupt" },
 		"same boot": func(value *FixtureEvidence) {

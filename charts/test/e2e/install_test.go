@@ -18,9 +18,9 @@ func freshInstallScenario() sharede2e.Definition {
 	return sharede2e.Define(sharede2e.Scenario[*chartState]{
 		Metadata: chartScenarioMetadata(
 			"fresh-install",
-			"Installs ordered certificate and pinned OpenEBS LVM substrates plus class-isolated public/private ingress planes, then proves exact storage classes/claims, manager, issuer, workload identity, fixed private allocation, route isolation, and verified gateway readiness.",
-			"test-e2e-install", 30,
-			[]string{"HOR-408", "HOR-414", "HOR-416", "HOR-475", "HOR-545", "DES-HOR-545-01"},
+			"Installs ordered certificate and pinned OpenEBS LVM volume/snapshot substrates plus class-isolated public/private ingress planes, then proves exact classes, claims, explicit local snapshot/restore/delete/capacity lifecycle, manager, issuer, workload identity, fixed private allocation, route isolation, and verified gateway readiness.",
+			"test-e2e-install", 45,
+			[]string{"HOR-408", "HOR-414", "HOR-416", "HOR-475", "HOR-545", "DES-HOR-545-01", "DES-HOR-545-04"},
 			[]string{"control-plane-chart", "inference-gateway-chart", "iterabase-platform-chart"},
 		),
 		NewState: newChartState,
@@ -31,6 +31,7 @@ func freshInstallScenario() sharede2e.Definition {
 			{Name: "install-lvm-storage-substrate", DependsOn: []string{"install-certificate-substrate"}, Run: installLVMStorageStage},
 			{Name: "install-minimal-platform-edge", DependsOn: []string{"install-lvm-storage-substrate"}, Run: installMinimalPlatformEdgeStage},
 			{Name: "assert-openebs-lvm-claims", DependsOn: []string{"install-minimal-platform-edge"}, Run: assertOpenEBSLVMClaimsStage},
+			{Name: "assert-openebs-lvm-snapshot-lifecycle", DependsOn: []string{"assert-openebs-lvm-claims"}, Run: assertOpenEBSLVMSnapshotLifecycleStage},
 			{Name: "assert-manager-contract", DependsOn: []string{"assert-openebs-lvm-claims"}, Run: assertManagerContractStage},
 			{Name: "assert-certificate-issuer", DependsOn: []string{"install-minimal-platform-edge"}, Run: assertCertificateIssuerStage},
 			{Name: "assert-workload-identity", DependsOn: []string{"assert-certificate-issuer"}, Run: assertWorkloadIdentityStage},

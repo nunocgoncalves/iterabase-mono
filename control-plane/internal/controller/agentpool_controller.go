@@ -219,23 +219,28 @@ func (r *AgentPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 	// Validate the fixed StorageClass before creating or mutating a claim. A
 	// missing/wrong/default/expandable class must fail without leaving a new PVC.
-	storagePreflight := r.assessAgentPoolStorage(ctx, &pool)
-	if !storagePreflight.CanMount {
-		// DES-HOR-545-01: class/PVC/PV/OpenEBS identity drift withdraws readiness
-		// AND quiesces established workers, or connected pods keep advertising
-		// dispatch credit after PV/LVMVolume/LVMNode drift. A scaled-to-zero or
-		// not-yet-created pool has no workers, so this is a no-op there while the
-		// no-PVC first-create path is preserved (assess returns CanMount for it).
+	storage := r.assessAgentPoolStorage(ctx, &pool)
+	if !storage.CanMount {
+		// Unknown API/cache/transport observations withdraw readiness and credit but
+		// do not destructively delete healthy workers. Only positively observed
+		// class/PVC/PV/OpenEBS drift authorizes quiescence. Publish the fail-closed
+		// status before any list/delete so a quiesce failure cannot leave Ready or
+		// live-credit state visible.
 		hadWorkers := r.countReadyWorkers(ctx, &pool) > 0 || storageWasOperationallyReady(&pool)
-		if err := r.quiesceWorkers(ctx, &pool); err != nil {
-			return ctrl.Result{}, err
+		if hadWorkers && storageQuiescenceRequired(storage) {
+			storage.ReplacementPending = true
+			storage.Message += "; existing workers are being removed to stop scheduling credit, and recovery requires healthy storage plus fresh workers without automatic turn/effect replay"
+		} else if storage.ObservationUnknown {
+			storage.Message += "; readiness and fresh credit are withdrawn, but existing workers are retained until storage identity can be observed authoritatively"
 		}
-		if hadWorkers {
-			storagePreflight.ReplacementPending = true
-			storagePreflight.Message += "; existing workers were removed to stop scheduling credit, and recovery requires healthy storage plus fresh workers without automatic turn/effect replay"
+		statusErr := r.patchStatus(ctx, &pool, false, 0, storage.Message, false, &storage)
+		if storage.ObservationUnknown {
+			return ctrl.Result{}, stderrors.Join(statusErr, fmt.Errorf("observe AgentPool storage: %w", storage.ObservationErr))
 		}
-		_ = r.patchStatus(ctx, &pool, false, 0, storagePreflight.Message, false, &storagePreflight)
-		return ctrl.Result{RequeueAfter: healthRequeueInterval}, nil
+		if storageQuiescenceRequired(storage) {
+			return ctrl.Result{RequeueAfter: healthRequeueInterval}, stderrors.Join(statusErr, r.quiesceWorkers(ctx, &pool))
+		}
+		return ctrl.Result{RequeueAfter: healthRequeueInterval}, statusErr
 	}
 	if err := r.ensurePVC(ctx, &pool); err != nil {
 		var mutationErr *agentPoolStorageMutationError
@@ -263,19 +268,6 @@ func (r *AgentPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, err
 	}
 
-	storage := r.assessAgentPoolStorage(ctx, &pool)
-	if !storage.CanMount {
-		hadWorkers := r.countReadyWorkers(ctx, &pool) > 0 || storageWasOperationallyReady(&pool)
-		if err := r.quiesceWorkers(ctx, &pool); err != nil {
-			return ctrl.Result{}, err
-		}
-		if hadWorkers {
-			storage.ReplacementPending = true
-			storage.Message += "; workers were removed to stop scheduling credit, and recovery requires healthy storage plus fresh workers without automatic turn/effect replay"
-		}
-		_ = r.patchStatus(ctx, &pool, false, 0, storage.Message, false, &storage)
-		return ctrl.Result{RequeueAfter: healthRequeueInterval}, nil
-	}
 	if err := r.ensureNetworkPolicy(ctx, &pool); err != nil {
 		_ = r.patchStatus(ctx, &pool, false, 0, fmt.Sprintf("ensure NetworkPolicy: %v", err), false, &storage)
 		return ctrl.Result{}, err
@@ -286,22 +278,19 @@ func (r *AgentPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 
 	readyReplicas := r.countReadyWorkers(ctx, &pool)
-	storage = r.assessAgentPoolStorage(ctx, &pool)
 	if !storage.Ready {
 		wasOperationallyReady := storageWasOperationallyReady(&pool)
 		if wasOperationallyReady || !storage.CanMount {
-			if err := r.quiesceWorkers(ctx, &pool); err != nil {
-				return ctrl.Result{}, err
-			}
 			if wasOperationallyReady || readyReplicas > 0 {
 				storage.ReplacementPending = true
 			}
 			readyReplicas = 0
 			storage.Reason = storageReasonRecoveryPending
-			storage.Message += "; existing workers were removed to stop scheduling credit and recovery requires healthy storage plus fresh workers"
+			storage.Message += "; existing workers are being removed to stop scheduling credit and recovery requires healthy storage plus fresh workers"
+			statusErr := r.patchStatus(ctx, &pool, false, readyReplicas, storage.Message, false, &storage)
+			return ctrl.Result{RequeueAfter: healthRequeueInterval}, stderrors.Join(statusErr, r.quiesceWorkers(ctx, &pool))
 		}
-		_ = r.patchStatus(ctx, &pool, false, readyReplicas, storage.Message, false, &storage)
-		return ctrl.Result{RequeueAfter: healthRequeueInterval}, nil
+		return ctrl.Result{RequeueAfter: healthRequeueInterval}, r.patchStatus(ctx, &pool, false, readyReplicas, storage.Message, false, &storage)
 	}
 	ready := readyReplicas > 0 || pool.Spec.Replicas == 0
 	msg := storage.Message
@@ -1181,7 +1170,7 @@ func setStorageWorkerReplacementCondition(pool *v1alpha1.AgentPool, replacementP
 			Type:               storageConditionWorkerReplacementPending,
 			Status:             metav1.ConditionFalse,
 			Reason:             storageReasonFreshWorkersReady,
-			Message:            "fresh replacement workers reached Ready after attached backend and share-manager health verification",
+			Message:            "fresh replacement workers reached Ready after OpenEBS LVM volume, node topology, and mount health verification",
 			ObservedGeneration: pool.Generation,
 		})
 	}

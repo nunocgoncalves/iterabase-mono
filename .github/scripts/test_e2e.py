@@ -862,7 +862,7 @@ class ResultReconciliationTests(unittest.TestCase):
                     "name": "lifecycle",
                     "capacity": "gpu",
                     "host_key_sha256": "1" * 64,
-                    "workspace_device": "/dev/disk/by-id/workspace",
+                    "data_storage_device": "/dev/disk/by-id/data-storage",
                     "boot_id_before": "boot-before",
                     "boot_id_after": "boot-after",
                 },
@@ -870,7 +870,7 @@ class ResultReconciliationTests(unittest.TestCase):
                     "name": "model-cache",
                     "capacity": "gpu",
                     "host_key_sha256": "1" * 64,
-                    "workspace_device": "/dev/disk/by-id/workspace",
+                    "data_storage_device": "/dev/disk/by-id/data-storage",
                     "boot_id_before": "boot-before",
                     "boot_id_after": "boot-after",
                     "model_cache_device": "/dev/disk/by-id/model-cache",
@@ -1093,7 +1093,7 @@ class ResultReconciliationTests(unittest.TestCase):
                 if mutation == "missing":
                     result["fixture_evidence"].remove(cache)
                 elif mutation == "aliased":
-                    cache["model_cache_device"] = cache["workspace_device"]
+                    cache["model_cache_device"] = cache["data_storage_device"]
                 elif mutation == "floating":
                     cache["model_revision"] = "main"
                 else:

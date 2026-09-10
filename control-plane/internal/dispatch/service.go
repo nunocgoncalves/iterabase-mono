@@ -79,14 +79,15 @@ func (c Config) defaults() Config {
 // bidi stream, worker fencing, one-credit dispatch, durable TurnEvent ACK/dedup,
 // cancellation and worker-loss semantics, and the dispatch reconciler.
 type Service struct {
-	store       *Store
-	work        *workstore.Store
-	cfg         Config
-	pool        *workerPool
-	gen         atomic.Uint64 // global monotonic fencing-generation counter
-	log         *slog.Logger
-	reconcileCh chan struct{}
-	metrics     *cpmetrics.Metrics
+	store             *Store
+	work              *workstore.Store
+	cfg               Config
+	pool              *workerPool
+	gen               atomic.Uint64 // global monotonic fencing-generation counter
+	log               *slog.Logger
+	reconcileCh       chan struct{}
+	metrics           *cpmetrics.Metrics
+	nextCapacitySweep time.Time
 }
 
 // NewService builds a dispatch Service. cfg is defaulted.
@@ -116,7 +117,10 @@ func (s *Service) SeedGeneration(ctx context.Context) error {
 		return fmt.Errorf("seed workspace capacity gates: %w", err)
 	}
 	s.gen.Store(max)
-	s.pool.seedWorkspaceCapacity(capacities)
+	for _, poolID := range s.pool.syncWorkspaceCapacity(capacities) {
+		s.deleteWorkspaceMetrics(poolID)
+	}
+	s.nextCapacitySweep = time.Now().Add(30 * time.Second)
 	for _, capacity := range capacities {
 		s.observeWorkspaceMetrics(capacity)
 	}
@@ -318,6 +322,39 @@ func (s *Service) Work(ctx context.Context, st *connect.BidiStream[v1.WorkerMess
 			}
 		}
 	}
+}
+
+func (s *Service) syncWorkspaceCapacityState(ctx context.Context) error {
+	capacities, err := s.store.LoadWorkspaceCapacityStates(ctx)
+	if err != nil {
+		return fmt.Errorf("sync active workspace capacity states: %w", err)
+	}
+	for _, poolID := range s.pool.syncWorkspaceCapacity(capacities) {
+		s.deleteWorkspaceMetrics(poolID)
+	}
+	return nil
+}
+
+func (s *Service) syncWorkspaceCapacityStateIfDue(ctx context.Context, now time.Time) {
+	if !s.nextCapacitySweep.IsZero() && now.Before(s.nextCapacitySweep) {
+		return
+	}
+	if err := s.syncWorkspaceCapacityState(ctx); err != nil {
+		s.log.Warn("sync workspace capacity state", "error", err)
+		return
+	}
+	s.nextCapacitySweep = now.Add(30 * time.Second)
+}
+
+func (s *Service) deleteWorkspaceMetrics(poolID string) {
+	if s.metrics == nil {
+		return
+	}
+	s.metrics.DispatchWorkspaceFreeBytes.DeleteLabelValues(poolID)
+	s.metrics.DispatchWorkspaceCapacity.DeleteLabelValues(poolID)
+	s.metrics.DispatchWorkspaceFreeRatio.DeleteLabelValues(poolID)
+	s.metrics.DispatchWorkspaceWarning.DeleteLabelValues(poolID)
+	s.metrics.DispatchWorkspaceGated.DeleteLabelValues(poolID)
 }
 
 func (s *Service) observeWorkspaceMetrics(state WorkspaceCapacityState) {
@@ -890,6 +927,7 @@ func (s *Service) expireLeases(ctx context.Context) {
 func (s *Service) reconcileOnce(ctx context.Context) {
 	started := time.Now()
 	result := "success"
+	s.syncWorkspaceCapacityStateIfDue(ctx, started)
 	if s.metrics != nil {
 		s.metrics.DispatchPendingWork.WithLabelValues().Set(0)
 	}
