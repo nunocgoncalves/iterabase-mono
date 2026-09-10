@@ -23,7 +23,10 @@ lvm-localpv:
       keep: true
     csi:
       volumeSnapshots:
-        enabled: true
+        # The parent chart ships these three CRDs from its crds/ directory so
+        # Helm installs them before REST-mapping the managed snapshot class.
+        # Disable the dependency's equivalent template-time CRD copies.
+        enabled: false
         keep: true
   lvmNode:
     kubeletDir: /var/lib/kubelet
