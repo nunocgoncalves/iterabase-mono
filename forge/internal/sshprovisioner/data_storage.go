@@ -567,17 +567,36 @@ to_bytes() {
 cap_ok() {
   awk -v e="$1" -v o="$2" -v abs=67108864 -v rel=0.02 'BEGIN{d=o-e; if(d<0)d=-d; if(e<=0){print (o>0)?1:0; exit} limit=(e*rel>abs?e*rel:abs); print (d<=limit)?1:0}'
 }
-snapshot_authority_absent() {
-  local observed crd resource
+auth_exact() {
+  local identity="$1" verb="$2" expected="$3" output rc
+  if output=$(k3s kubectl auth can-i "$verb" lvmsnapshots.local.openebs.io --all-namespaces --as="$identity" 2>/dev/null); then rc=0; else rc=$?; fi
+  test "$output" = "$expected" || return 1
+  if test "$expected" = yes; then test "$rc" = 0; else test "$rc" = 1; fi
+}
+snapshot_boundary_satisfies() {
+  local observed crd resource policy binding identity verb instances controller_containers
   test ! -e /etc/modules-load.d/iterabase-data.conf || return 1
   ! grep -q '^dm_snapshot ' /proc/modules || return 1
-  for crd in lvmsnapshots.local.openebs.io volumesnapshotclasses.snapshot.storage.k8s.io volumesnapshotcontents.snapshot.storage.k8s.io volumesnapshots.snapshot.storage.k8s.io; do
+  observed=$(k3s kubectl get crd lvmsnapshots.local.openebs.io -o name 2>/dev/null) || return 1
+  test "$observed" = customresourcedefinition.apiextensions.k8s.io/lvmsnapshots.local.openebs.io || return 1
+  test "$(k3s kubectl get crd lvmsnapshots.local.openebs.io -o jsonpath='{.status.conditions[?(@.type=="Established")].status}' 2>/dev/null)" = True || return 1
+  instances=$(k3s kubectl get lvmsnapshots.local.openebs.io -A -o name 2>/dev/null) || return 1
+  test -z "$instances" || return 1
+  for crd in volumesnapshotclasses.snapshot.storage.k8s.io volumesnapshotcontents.snapshot.storage.k8s.io volumesnapshots.snapshot.storage.k8s.io; do
     observed=$(k3s kubectl get crd "$crd" --ignore-not-found=true -o name 2>/dev/null) || return 1
     test -z "$observed" || return 1
   done
   for resource in clusterrole/openebs-lvm-snapshotter-role clusterrolebinding/openebs-lvm-snapshotter-binding; do
     observed=$(k3s kubectl get "$resource" --ignore-not-found=true -o name 2>/dev/null) || return 1
     test -z "$observed" || return 1
+  done
+  policy=$(k3s kubectl get validatingadmissionpolicy iterabase-lvmsnapshot-create-deny -o jsonpath='{.spec.failurePolicy}|{.spec.matchConstraints.resourceRules[0].apiGroups[0]}|{.spec.matchConstraints.resourceRules[0].apiVersions[0]}|{.spec.matchConstraints.resourceRules[0].operations[0]}|{.spec.matchConstraints.resourceRules[0].resources[0]}|{.spec.validations[0].expression}' 2>/dev/null) || return 1
+  test "$policy" = 'Fail|local.openebs.io|v1alpha1|CREATE|lvmsnapshots|false' || return 1
+  binding=$(k3s kubectl get validatingadmissionpolicybinding iterabase-lvmsnapshot-create-deny -o jsonpath='{.spec.policyName}|{.spec.validationActions[0]}' 2>/dev/null) || return 1
+  test "$binding" = 'iterabase-lvmsnapshot-create-deny|Deny' || return 1
+  for identity in "system:serviceaccount:$namespace:openebs-lvm-controller-sa" "system:serviceaccount:$namespace:openebs-lvm-node-sa"; do
+    for verb in list watch; do auth_exact "$identity" "$verb" yes || return 1; done
+    for verb in get create update patch delete; do auth_exact "$identity" "$verb" no || return 1; done
   done
   controller_containers=$(k3s kubectl get deployment -n "$namespace" -l app=openebs-lvm-controller -o jsonpath='{range .items[*].spec.template.spec.containers[*]}{.name}{" "}{.image}{"\n"}{end}' 2>/dev/null) || return 1
   ! printf '%%s\n' "$controller_containers" | grep -qi snapshot
@@ -619,10 +638,10 @@ for attempt in $(seq 1 150); do
      k3s kubectl wait --for=condition=Established crd/lvmnodes.local.openebs.io crd/lvmvolumes.local.openebs.io --timeout=10s >/dev/null 2>&1 &&
      k3s kubectl wait -n "$namespace" --for=condition=Available deployment -l app=openebs-lvm-controller --timeout=10s >/dev/null 2>&1 &&
      k3s kubectl rollout status -n "$namespace" daemonset -l app=openebs-lvm-node --timeout=10s >/dev/null 2>&1 &&
-     k3s kubectl get csidriver local.csi.openebs.io >/dev/null 2>&1 && csi_registered && snapshot_authority_absent && lvmnode_satisfies; then
+     k3s kubectl get csidriver local.csi.openebs.io >/dev/null 2>&1 && csi_registered && snapshot_boundary_satisfies && lvmnode_satisfies; then
     break
   fi
-  test "$attempt" -lt 150 || fail "OpenEBS LVM LocalPV volume-only CRDs/controller/node/CSI/classes, snapshot-surface absence, or receipt-matching iterabase-data VG discovery did not become Ready (last vg='$last_vg' missing='$last_missing' thin='$last_thin' obs_node='$observed_node')"
+  test "$attempt" -lt 150 || fail "OpenEBS LVM LocalPV volume CRDs/controller/node/CSI/classes, inert LVMSnapshot deny boundary, CSI/user snapshot absence, or receipt-matching iterabase-data VG discovery did not become Ready (last vg='$last_vg' missing='$last_missing' thin='$last_thin' obs_node='$observed_node')"
   sleep 2
 done
 classes=$(k3s kubectl get storageclass -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' | sort)

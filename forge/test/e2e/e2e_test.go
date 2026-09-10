@@ -128,12 +128,46 @@ func assertCurrentPlatformStage(t *testing.T, state *permanentCPUFixtureState) {
 		t.Fatal("K3s local-path provisioner exists despite local-storage disablement")
 	}
 	mustSSHOutput(t, sc, `sudo bash -ceu '
-for crd in lvmsnapshots.local.openebs.io volumesnapshotclasses.snapshot.storage.k8s.io volumesnapshotcontents.snapshot.storage.k8s.io volumesnapshots.snapshot.storage.k8s.io; do
+auth_exact() {
+  identity=$1 verb=$2 expected=$3
+  if output=$(k3s kubectl auth can-i "$verb" lvmsnapshots.local.openebs.io --all-namespaces --as="$identity" 2>/dev/null); then rc=0; else rc=$?; fi
+  test "$output" = "$expected"
+  if test "$expected" = yes; then test "$rc" = 0; else test "$rc" = 1; fi
+}
+test "$(k3s kubectl get crd lvmsnapshots.local.openebs.io -o name)" = customresourcedefinition.apiextensions.k8s.io/lvmsnapshots.local.openebs.io
+test -z "$(k3s kubectl get lvmsnapshots.local.openebs.io -A -o name)"
+for crd in volumesnapshotclasses.snapshot.storage.k8s.io volumesnapshotcontents.snapshot.storage.k8s.io volumesnapshots.snapshot.storage.k8s.io; do
   test -z "$(k3s kubectl get crd "$crd" --ignore-not-found=true -o name)"
 done
 for resource in clusterrole/openebs-lvm-snapshotter-role clusterrolebinding/openebs-lvm-snapshotter-binding; do
   test -z "$(k3s kubectl get "$resource" --ignore-not-found=true -o name)"
 done
+policy=$(k3s kubectl get validatingadmissionpolicy iterabase-lvmsnapshot-create-deny -o jsonpath="{.spec.failurePolicy}|{.spec.matchConstraints.resourceRules[0].apiGroups[0]}|{.spec.matchConstraints.resourceRules[0].apiVersions[0]}|{.spec.matchConstraints.resourceRules[0].operations[0]}|{.spec.matchConstraints.resourceRules[0].resources[0]}|{.spec.validations[0].expression}")
+test "$policy" = "Fail|local.openebs.io|v1alpha1|CREATE|lvmsnapshots|false"
+test "$(k3s kubectl get validatingadmissionpolicybinding iterabase-lvmsnapshot-create-deny -o jsonpath="{.spec.policyName}|{.spec.validationActions[0]}")" = "iterabase-lvmsnapshot-create-deny|Deny"
+for identity in system:serviceaccount:iterabase-system:openebs-lvm-controller-sa system:serviceaccount:iterabase-system:openebs-lvm-node-sa; do
+  for verb in list watch; do auth_exact "$identity" "$verb" yes; done
+  for verb in get create update patch delete; do auth_exact "$identity" "$verb" no; done
+done
+blocked=$(mktemp)
+trap "rm -f -- $blocked" EXIT
+if k3s kubectl create -f - >"$blocked" 2>&1 <<EOF
+apiVersion: local.openebs.io/v1alpha1
+kind: LVMSnapshot
+metadata:
+  name: forbidden-lvmsnapshot
+  namespace: iterabase-system
+spec:
+  ownerNodeID: forbidden
+  volGroup: iterabase-data
+status: {}
+EOF
+then
+  echo "LVMSnapshot creation unexpectedly succeeded" >&2
+  exit 42
+fi
+grep -Fq "LVMSnapshot creation is disabled by DES-HOR-545-05" "$blocked"
+test -z "$(k3s kubectl get lvmsnapshots.local.openebs.io -A -o name)"
 containers=$(k3s kubectl get deployment -n iterabase-system -l app=openebs-lvm-controller -o jsonpath="{range .items[*].spec.template.spec.containers[*]}{.name}{\" \"}{.image}{\"\\n\"}{end}")
 ! printf "%s\n" "$containers" | grep -qi snapshot
 test ! -e /etc/modules-load.d/iterabase-data.conf

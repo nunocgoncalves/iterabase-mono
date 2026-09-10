@@ -248,7 +248,7 @@ func (cluster *Cluster) validateLVMStorage(ctx context.Context, namespace, nodeN
 	if _, err := cluster.runKubectl(ctx, 30*time.Second, "kind-lvm-csidriver-"+cluster.Name+".json", "get", "csidriver", contract.Provisioner, "-o", "json"); err != nil {
 		return fmt.Errorf("read OpenEBS LVM CSIDriver: %w", err)
 	}
-	if err := cluster.validateNoLVMSnapshotAuthority(ctx, namespace); err != nil {
+	if err := cluster.validateLVMSnapshotDependencyBoundary(ctx, namespace); err != nil {
 		return err
 	}
 	csiNode, err := cluster.runKubectl(ctx, 30*time.Second, "kind-lvm-csinode-"+cluster.Name+".json", "get", "csinode", nodeName, "-o", "json")
@@ -287,28 +287,41 @@ func (cluster *Cluster) validateLVMStorage(ctx context.Context, namespace, nodeN
 	return fmt.Errorf("OpenEBS LVMNode has not discovered the exact thick %s VG", contract.DataVolumeGroupName)
 }
 
-func (cluster *Cluster) validateNoLVMSnapshotAuthority(ctx context.Context, namespace string) error {
+func (cluster *Cluster) validateLVMSnapshotDependencyBoundary(ctx context.Context, namespace string) error {
+	inertCRD, err := cluster.runKubectl(ctx, 30*time.Second, "kind-lvm-inert-lvmsnapshot-crd.log", "get", "crd", "lvmsnapshots.local.openebs.io", "-o", "name")
+	if err != nil {
+		return fmt.Errorf("observe inert LVMSnapshot CRD: %w", err)
+	}
+	if strings.TrimSpace(inertCRD.Output) != "customresourcedefinition.apiextensions.k8s.io/lvmsnapshots.local.openebs.io" {
+		return fmt.Errorf("inert LVMSnapshot CRD is missing or ambiguous")
+	}
+	instances, err := cluster.runKubectl(ctx, 30*time.Second, "kind-lvm-lvmsnapshot-instances.log", "get", "lvmsnapshots.local.openebs.io", "-A", "-o", "name")
+	if err != nil {
+		return fmt.Errorf("observe inert LVMSnapshot instances: %w", err)
+	}
+	if strings.TrimSpace(instances.Output) != "" {
+		return fmt.Errorf("inert LVMSnapshot API contains forbidden instances")
+	}
 	for _, name := range []string{
-		"lvmsnapshots.local.openebs.io",
 		"volumesnapshotclasses.snapshot.storage.k8s.io",
 		"volumesnapshotcontents.snapshot.storage.k8s.io",
 		"volumesnapshots.snapshot.storage.k8s.io",
 	} {
 		result, err := cluster.runKubectl(ctx, 30*time.Second, "kind-lvm-forbidden-crd-"+safeFileName(name)+".log", "get", "crd", name, "--ignore-not-found=true", "-o", "name")
 		if err != nil {
-			return fmt.Errorf("observe forbidden storage snapshot CRD %s: %w", name, err)
+			return fmt.Errorf("observe forbidden CSI snapshot CRD %s: %w", name, err)
 		}
 		if strings.TrimSpace(result.Output) != "" {
-			return fmt.Errorf("volume-only cluster exposes forbidden storage snapshot CRD %s", name)
+			return fmt.Errorf("volume-only cluster exposes forbidden CSI snapshot CRD %s", name)
 		}
 	}
 	for _, resource := range []string{"clusterrole/openebs-lvm-snapshotter-role", "clusterrolebinding/openebs-lvm-snapshotter-binding"} {
 		result, err := cluster.runKubectl(ctx, 30*time.Second, "kind-lvm-forbidden-rbac-"+safeFileName(resource)+".log", "get", resource, "--ignore-not-found=true", "-o", "name")
 		if err != nil {
-			return fmt.Errorf("observe forbidden storage snapshot RBAC %s: %w", resource, err)
+			return fmt.Errorf("observe forbidden broad snapshot RBAC %s: %w", resource, err)
 		}
 		if strings.TrimSpace(result.Output) != "" {
-			return fmt.Errorf("volume-only cluster exposes forbidden storage snapshot RBAC %s", resource)
+			return fmt.Errorf("volume-only cluster exposes forbidden broad snapshot RBAC %s", resource)
 		}
 	}
 	deployment, err := cluster.runKubectl(ctx, 30*time.Second, "kind-lvm-volume-controller-"+cluster.Name+".json", "get", "deployment", "-n", namespace, "-l", "app=openebs-lvm-controller", "-o", "json")
@@ -341,7 +354,7 @@ func (cluster *Cluster) validateNoLVMSnapshotAuthority(ctx context.Context, name
 	for _, container := range workloads.Items[0].Spec.Template.Spec.Containers {
 		identity := strings.ToLower(container.Name + " " + container.Image)
 		if strings.Contains(identity, "snapshot") {
-			return fmt.Errorf("volume-only OpenEBS controller exposes forbidden snapshot container %q", container.Name)
+			return fmt.Errorf("volume-only OpenEBS controller exposes forbidden CSI snapshot container %q", container.Name)
 		}
 	}
 	return nil

@@ -251,33 +251,47 @@ func testLVMStorageContract() LVMStorageContract {
 	}
 }
 
-func TestValidateNoLVMSnapshotAuthority(t *testing.T) {
+func TestValidateLVMSnapshotDependencyBoundary(t *testing.T) {
 	t.Parallel()
 	deployment := func(name, image string) string {
 		return fmt.Sprintf(`{"items":[{"spec":{"template":{"spec":{"containers":[{"name":%q,"image":%q}]}}},"status":{"availableReplicas":1}}]}`, name, image)
 	}
+	bounded := func(command process.Command) string {
+		args := strings.Join(command.Args, " ")
+		switch {
+		case strings.Contains(args, "get crd lvmsnapshots.local.openebs.io"):
+			return "customresourcedefinition.apiextensions.k8s.io/lvmsnapshots.local.openebs.io\n"
+		case strings.Contains(args, "get deployment"):
+			return deployment("openebs-lvm-plugin", "docker.io/openebs/lvm-driver:1.10.0@sha256:exact")
+		default:
+			return ""
+		}
+	}
 	for name, output := range map[string]func(process.Command) string{
-		"volume only": func(command process.Command) string {
+		"bounded volume only": bounded,
+		"missing inert CRD": func(command process.Command) string {
 			if strings.Contains(strings.Join(command.Args, " "), "get deployment") {
 				return deployment("openebs-lvm-plugin", "docker.io/openebs/lvm-driver:1.10.0@sha256:exact")
 			}
 			return ""
 		},
-		"forbidden CRD": func(command process.Command) string {
-			args := strings.Join(command.Args, " ")
-			if strings.Contains(args, "get crd lvmsnapshots.local.openebs.io") {
-				return "customresourcedefinition.apiextensions.k8s.io/lvmsnapshots.local.openebs.io\n"
+		"forbidden instance": func(command process.Command) string {
+			if strings.Contains(strings.Join(command.Args, " "), "get lvmsnapshots.local.openebs.io") {
+				return "lvmsnapshot.local.openebs.io/forbidden\n"
 			}
-			if strings.Contains(args, "get deployment") {
-				return deployment("openebs-lvm-plugin", "docker.io/openebs/lvm-driver:1.10.0@sha256:exact")
+			return bounded(command)
+		},
+		"forbidden CSI CRD": func(command process.Command) string {
+			if strings.Contains(strings.Join(command.Args, " "), "get crd volumesnapshots.snapshot.storage.k8s.io") {
+				return "customresourcedefinition.apiextensions.k8s.io/volumesnapshots.snapshot.storage.k8s.io\n"
 			}
-			return ""
+			return bounded(command)
 		},
 		"forbidden container": func(command process.Command) string {
 			if strings.Contains(strings.Join(command.Args, " "), "get deployment") {
 				return deployment("csi-snapshotter", "registry.k8s.io/sig-storage/csi-snapshotter:v8.2.0")
 			}
-			return ""
+			return bounded(command)
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -286,26 +300,26 @@ func TestValidateNoLVMSnapshotAuthority(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			err = cluster.validateNoLVMSnapshotAuthority(context.Background(), "iterabase-system")
-			if name == "volume only" && err != nil {
-				t.Fatalf("volume-only authority failed: %v", err)
+			err = cluster.validateLVMSnapshotDependencyBoundary(context.Background(), "iterabase-system")
+			if name == "bounded volume only" && err != nil {
+				t.Fatalf("bounded volume authority failed: %v", err)
 			}
-			if name != "volume only" && err == nil {
-				t.Fatalf("%s authority unexpectedly passed", name)
+			if name != "bounded volume only" && err == nil {
+				t.Fatalf("%s boundary unexpectedly passed", name)
 			}
 		})
 	}
 }
 
-func TestValidateNoLVMSnapshotAuthorityFailsOnObservationError(t *testing.T) {
+func TestValidateLVMSnapshotDependencyBoundaryFailsOnObservationError(t *testing.T) {
 	t.Parallel()
 	executor := &fakeExecutor{failNext: true}
 	cluster, err := Use("charts", filepath.Join(t.TempDir(), "kubeconfig"), executor)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := cluster.validateNoLVMSnapshotAuthority(context.Background(), "iterabase-system"); err == nil {
-		t.Fatal("snapshot-absence observation error unexpectedly passed")
+	if err := cluster.validateLVMSnapshotDependencyBoundary(context.Background(), "iterabase-system"); err == nil {
+		t.Fatal("LVMSnapshot dependency observation error unexpectedly passed")
 	}
 }
 

@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Derive the volume-only OpenEBS LVM chart from its reviewed archive.
+"""Derive the bounded volume-only OpenEBS LVM chart from its reviewed archive.
 
 The upstream 1.10.0 chart renders the CSI snapshotter unconditionally and
-bundles snapshot CRDs/RBAC even when its VolumeSnapshot CRD switch is disabled.
-HOR-545 deliberately exposes only dynamic LVM volume lifecycle, so this exact,
-fail-closed transform removes those upstream surfaces after archive checksum
-verification and before the dependency is packaged into the Iterabase wrapper.
+bundles broad snapshot CRDs/RBAC even when its VolumeSnapshot CRD switch is
+disabled. HOR-545 exposes only dynamic LVM volume lifecycle. DES-HOR-545-05
+retains the inert LVMSnapshot schema and exact driver list/watch needed by the
+pinned driver's ordinary deletion guard; this fail-closed transform removes all
+CSI/user snapshot surfaces and upstream write authority after archive checksum
+verification and before packaging into the Iterabase wrapper.
 """
 
 from __future__ import annotations
@@ -115,10 +117,26 @@ def transform(chart: Path) -> None:
         "{{- end }}\n\n{{- if .Values.serviceAccount.lvmNode.create }}\n",
         "snapshot RBAC",
     )
-    old_resources = '["lvmvolumes", "lvmsnapshots", "lvmnodes"]'
-    if rbac_text.count(old_resources) != 2:
-        raise TransformError("upstream LVMSnapshot RBAC references drifted")
-    rbac_text = rbac_text.replace(old_resources, '["lvmvolumes", "lvmnodes"]')
+    controller_resources = '''    resources: ["lvmvolumes", "lvmsnapshots", "lvmnodes"]
+    verbs: ["*"]'''
+    controller_volume_only = '''    resources: ["lvmvolumes", "lvmnodes"]
+    verbs: ["*"]'''
+    if rbac_text.count(controller_resources) != 1:
+        raise TransformError("upstream controller LVMSnapshot RBAC references drifted")
+    rbac_text = rbac_text.replace(controller_resources, controller_volume_only)
+
+    node_resources = '''    resources: ["lvmvolumes", "lvmsnapshots", "lvmnodes"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]'''
+    node_volume_only = '''    resources: ["lvmvolumes", "lvmnodes"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  # DES-HOR-545-05: the pinned node driver unconditionally starts an
+  # LVMSnapshot informer. It may only observe the inert schema.
+  - apiGroups: ["local.openebs.io"]
+    resources: ["lvmsnapshots"]
+    verbs: ["list", "watch"]'''
+    if rbac_text.count(node_resources) != 1:
+        raise TransformError("upstream node LVMSnapshot RBAC references drifted")
+    rbac_text = rbac_text.replace(node_resources, node_volume_only)
     write(rbac, rbac_text)
 
     values = chart / "values.yaml"
@@ -134,12 +152,15 @@ def transform(chart: Path) -> None:
         "charts/crds/templates/csi-volume-snapshot-class.yaml",
         "charts/crds/templates/csi-volume-snapshot-content.yaml",
         "charts/crds/templates/csi-volume-snapshot.yaml",
-        "charts/crds/templates/lvmsnapshot.yaml",
     ):
         path = chart / relative
         if not path.is_file():
-            raise TransformError(f"upstream snapshot CRD path drifted: {relative}")
+            raise TransformError(f"upstream CSI snapshot CRD path drifted: {relative}")
         path.unlink()
+
+    inert_snapshot_crd = chart / "charts/crds/templates/lvmsnapshot.yaml"
+    if not inert_snapshot_crd.is_file():
+        raise TransformError("upstream inert LVMSnapshot CRD path drifted")
 
     # Do not package upstream instructions for surfaces removed by this derived
     # volume-only dependency. The parent chart documents the supported contract.

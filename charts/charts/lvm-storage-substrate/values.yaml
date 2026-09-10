@@ -1,5 +1,8 @@
-# DES-HOR-545-01: fixed OpenEBS LVM LocalPV 1.10.0 substrate for K3s.
-# These values are release-owned, not an overlay-selectable storage backend.
+# DES-HOR-545-01 / DES-HOR-545-05: fixed OpenEBS LVM LocalPV 1.10.0
+# substrate for K3s. These values are release-owned, not an overlay-selectable
+# storage backend. The derived dependency retains only the inert LVMSnapshot CRD
+# and node-driver list/watch required by upstream; the wrapper owns the matching
+# controller permission and deny-all creation policy.
 #
 # agentpool.authorizedManagerIdentity is set by Forge on install (and by the
 # E2E harness) to the exact userInfo.username of the control-plane manager
@@ -30,9 +33,10 @@ lvm-localpv:
         tag: v2.13.0@sha256:d7138bcc3aa5f267403d45ad4292c95397e421ea17a0035888850f424c7de25d
   serviceAccount:
     lvmController:
-      # The parent chart owns exact volume-only controller RBAC. The reviewed
-      # dependency is deterministically stripped of unsupported snapshot
-      # surfaces before packaging, and its combined controller RBAC is disabled.
+      # The parent chart owns exact volume-lifecycle controller RBAC, including
+      # the sole inert LVMSnapshot list/watch exception. The reviewed dependency
+      # is deterministically stripped of CSI/user snapshot surfaces and write
+      # authority before packaging, and its combined controller RBAC is disabled.
       create: false
       name: openebs-lvm-controller-sa
   lvmController:
