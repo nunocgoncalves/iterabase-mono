@@ -253,14 +253,10 @@ while read -r namespace pod; do
   test -n "$namespace" && test -n "$pod" || continue
   k3s kubectl delete pod "$pod" -n "$namespace" --ignore-not-found=true --wait=true --timeout=5m
 done < <(k3s kubectl get pods -A -o go-template="{{range .items}}{{\$namespace := .metadata.namespace}}{{\$pod := .metadata.name}}{{range .spec.volumes}}{{if .persistentVolumeClaim}}{{\$namespace}} {{\$pod}}{{\"\\n\"}}{{end}}{{end}}{{end}}" | sort -u)
-if k3s kubectl get crd volumesnapshots.snapshot.storage.k8s.io >/dev/null 2>&1; then
-  k3s kubectl delete volumesnapshots.snapshot.storage.k8s.io --all -A --ignore-not-found=true --wait=true --timeout=5m
-fi
 k3s kubectl delete pvc --all -A --ignore-not-found=true --wait=true --timeout=5m
 for i in $(seq 1 150); do
   volumes=0
   if k3s kubectl get crd lvmvolumes.local.openebs.io >/dev/null 2>&1; then volumes=$((volumes + $(k3s kubectl get lvmvolumes.local.openebs.io -A --no-headers | awk "NF {n++} END {print n+0}"))); fi
-  if k3s kubectl get crd lvmsnapshots.local.openebs.io >/dev/null 2>&1; then volumes=$((volumes + $(k3s kubectl get lvmsnapshots.local.openebs.io -A --no-headers | awk "NF {n++} END {print n+0}"))); fi
   lvs_count=0
   if vgs iterabase-data >/dev/null 2>&1; then lvs_count=$(lvs --noheadings --select "vg_name=iterabase-data" -o lv_name | awk "NF {n++} END {print n+0}"); fi
   data_device=$(readlink -f -- "$data_storage_device")

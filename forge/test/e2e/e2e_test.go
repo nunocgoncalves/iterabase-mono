@@ -127,6 +127,18 @@ func assertCurrentPlatformStage(t *testing.T, state *permanentCPUFixtureState) {
 	if _, err := sshOutput(sc, "sudo k3s kubectl get deployment/local-path-provisioner -n kube-system"); err == nil {
 		t.Fatal("K3s local-path provisioner exists despite local-storage disablement")
 	}
+	mustSSHOutput(t, sc, `sudo bash -ceu '
+for crd in lvmsnapshots.local.openebs.io volumesnapshotclasses.snapshot.storage.k8s.io volumesnapshotcontents.snapshot.storage.k8s.io volumesnapshots.snapshot.storage.k8s.io; do
+  test -z "$(k3s kubectl get crd "$crd" --ignore-not-found=true -o name)"
+done
+for resource in clusterrole/openebs-lvm-snapshotter-role clusterrolebinding/openebs-lvm-snapshotter-binding; do
+  test -z "$(k3s kubectl get "$resource" --ignore-not-found=true -o name)"
+done
+containers=$(k3s kubectl get deployment -n iterabase-system -l app=openebs-lvm-controller -o jsonpath="{range .items[*].spec.template.spec.containers[*]}{.name}{\" \"}{.image}{\"\\n\"}{end}")
+! printf "%s\n" "$containers" | grep -qi snapshot
+test ! -e /etc/modules-load.d/iterabase-data.conf
+! grep -q "^dm_snapshot " /proc/modules
+'`)
 	classes := strings.Fields(mustSSHOutput(t, sc, `sudo k3s kubectl get storageclass -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'`))
 	if len(classes) != 2 || !slices.Contains(classes, "iterabase-lvm-xfs") || !slices.Contains(classes, "iterabase-agentpool-lvm-xfs") {
 		t.Fatalf("managed StorageClass set = %v, want exactly the two OpenEBS LVM classes", classes)

@@ -1736,7 +1736,7 @@ func TestParseDataStorageResultIncludesEveryPVAndVGCapacity(t *testing.T) {
 	assert.Equal(t, uint64(250), state.FreeBytes)
 }
 
-func TestEnsureDataStorageToolsInstallsAndPersistsModule(t *testing.T) {
+func TestEnsureDataStorageToolsConvergesSnapshotModuleToAbsence(t *testing.T) {
 	verifyCalls := 0
 	var commands []string
 	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
@@ -1750,7 +1750,7 @@ func TestEnsureDataStorageToolsInstallsAndPersistsModule(t *testing.T) {
 			return "", 0
 		case strings.Contains(cmd, "apt-get install -y lvm2 xfsprogs psmisc"):
 			return "", 0
-		case strings.Contains(cmd, "modprobe dm-snapshot"):
+		case strings.Contains(cmd, "config=/etc/modules-load.d/iterabase-data.conf"):
 			return "", 0
 		default:
 			return "", 1
@@ -1761,7 +1761,28 @@ func TestEnsureDataStorageToolsInstallsAndPersistsModule(t *testing.T) {
 	defer p.Close()
 	require.NoError(t, p.EnsureDataStorageTools(context.Background()))
 	assert.Equal(t, 2, verifyCalls)
-	assert.Contains(t, strings.Join(commands, "\n"), "/etc/modules-load.d/iterabase-data.conf")
+	all := strings.Join(commands, "\n")
+	assert.Contains(t, all, "/etc/modules-load.d/iterabase-data.conf")
+	assert.Contains(t, all, "modprobe -r dm-snapshot")
+	assert.NotContains(t, all, "modprobe dm-snapshot\n")
+}
+
+func TestEnsureDataStorageToolsFailsClosedWhenSnapshotModuleCannotBeRemoved(t *testing.T) {
+	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
+		switch {
+		case strings.Contains(cmd, "command -v pvcreate"):
+			return "", 0
+		case strings.Contains(cmd, "config=/etc/modules-load.d/iterabase-data.conf"):
+			return "module is in use", 1
+		default:
+			return "", 1
+		}
+	})
+	defer cleanup()
+	p := newProvisioner(t, addr, cfg)
+	defer p.Close()
+	err := p.EnsureDataStorageTools(context.Background())
+	require.ErrorContains(t, err, "converge unsupported dm-snapshot")
 }
 
 func TestWaitForLVMStorageReadyParsesBoundedVGIdentity(t *testing.T) {
@@ -1771,9 +1792,9 @@ func TestWaitForLVMStorageReadyParsesBoundedVGIdentity(t *testing.T) {
 		assert.Contains(t, cmd, "-o go-template=")
 		assert.Contains(t, cmd, "range .topologyKeys")
 		assert.Contains(t, cmd, "volumesnapshots.snapshot.storage.k8s.io")
-		assert.Contains(t, cmd, "iterabase-lvm-snapshot")
-		assert.Contains(t, cmd, "snapshot-controller")
-		assert.Contains(t, cmd, "csi-snapshotter")
+		assert.Contains(t, cmd, "snapshot_authority_absent")
+		assert.Contains(t, cmd, "--ignore-not-found=true")
+		assert.NotContains(t, cmd, "iterabase-lvm-snapshot")
 		assert.Contains(t, cmd, "openebs.io/nodename")
 		assert.Contains(t, cmd, "iterabase-agentpool-lvm-xfs")
 		assert.Contains(t, cmd, "K3s local-path provisioner still exists")

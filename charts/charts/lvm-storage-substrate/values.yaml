@@ -21,13 +21,6 @@ lvm-localpv:
     lvmLocalPv:
       enabled: true
       keep: true
-    csi:
-      volumeSnapshots:
-        # The parent chart ships these three CRDs from its crds/ directory so
-        # Helm installs them before REST-mapping the managed snapshot class.
-        # Disable the dependency's equivalent template-time CRD copies.
-        enabled: false
-        keep: true
   lvmNode:
     kubeletDir: /var/lib/kubelet
     driverRegistrar:
@@ -37,9 +30,9 @@ lvm-localpv:
         tag: v2.13.0@sha256:d7138bcc3aa5f267403d45ad4292c95397e421ea17a0035888850f424c7de25d
   serviceAccount:
     lvmController:
-      # The parent chart owns narrowed controller/snapshot RBAC. Disabling only
-      # the upstream RBAC rendering keeps the reviewed controller SA name while
-      # avoiding its unneeded cluster-wide Secret and CRD mutation privileges.
+      # The parent chart owns exact volume-only controller RBAC. The reviewed
+      # dependency is deterministically stripped of unsupported snapshot
+      # surfaces before packaging, and its combined controller RBAC is disabled.
       create: false
       name: openebs-lvm-controller-sa
   lvmController:
@@ -49,17 +42,6 @@ lvm-localpv:
         registry: ""
         repository: registry.k8s.io/sig-storage/csi-resizer
         tag: v2.0.0@sha256:4a95d94e57ad82f6977cd8d4fdcfcfc0b83f02d990e4e7715b688c20970a906d
-    snapshotter:
-      image:
-        registry: ""
-        repository: registry.k8s.io/sig-storage/csi-snapshotter
-        tag: v8.2.0@sha256:dd788d79cf4c1b8edee6d9b80b8a1ebfc51a38a365c5be656986b129be9ac784
-    snapshotController:
-      enabled: true
-      image:
-        registry: ""
-        repository: registry.k8s.io/sig-storage/snapshot-controller
-        tag: v8.2.0@sha256:9dade8f2f3ab29e3919c41b343f8d77b12178ac51f25574d7ed2d45a3e3ef69d
     provisioner:
       image:
         registry: ""

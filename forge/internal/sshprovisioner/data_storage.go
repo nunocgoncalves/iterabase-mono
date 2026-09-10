@@ -118,7 +118,8 @@ done | sort -u
 }
 
 // EnsureDataStorageTools installs/verifies the host-owned LVM/XFS tools and
-// loads and persists dm-snapshot without touching selected disks.
+// converges the superseded pre-release dm-snapshot configuration to absence
+// without touching selected disks.
 func (p *SSHProvisioner) EnsureDataStorageTools(ctx context.Context) error {
 	const verify = "command -v pvcreate >/dev/null && command -v pvremove >/dev/null && command -v vgcreate >/dev/null && command -v vgremove >/dev/null && command -v pvs >/dev/null && command -v vgs >/dev/null && command -v lvs >/dev/null && command -v mkfs.xfs >/dev/null && command -v xfs_info >/dev/null && command -v fuser >/dev/null"
 	if _, err := p.run(ctx, verify); err != nil {
@@ -141,19 +142,25 @@ func (p *SSHProvisioner) EnsureDataStorageTools(ctx context.Context) error {
 	if _, err := p.run(ctx, verify); err != nil {
 		return fmt.Errorf("verify required data-storage tooling: %w", err)
 	}
-	moduleScript := `sudo bash -ceu '
-modprobe dm-snapshot
-install -d -o root -g root -m 0755 /etc/modules-load.d
-tmp=$(mktemp /etc/modules-load.d/.iterabase-data.conf.XXXXXX)
-printf "dm-snapshot\n" > "$tmp"
-chown root:root "$tmp"; chmod 0644 "$tmp"; sync -f "$tmp"
-mv -f "$tmp" /etc/modules-load.d/iterabase-data.conf
-sync -f /etc/modules-load.d
-test "$(cat /etc/modules-load.d/iterabase-data.conf)" = dm-snapshot
-grep -q "^dm_snapshot " /proc/modules
+	disableSnapshotModule := `sudo bash -ceu '
+config=/etc/modules-load.d/iterabase-data.conf
+if test -e "$config"; then
+  test -f "$config" && test ! -L "$config"
+  test "$(cat "$config")" = dm-snapshot
+fi
+if grep -q "^dm_snapshot " /proc/modules; then
+  command -v modprobe >/dev/null
+  modprobe -r dm-snapshot
+fi
+if test -e "$config"; then
+  rm -f -- "$config"
+  sync -f /etc/modules-load.d
+fi
+test ! -e "$config"
+! grep -q "^dm_snapshot " /proc/modules
 '`
-	if _, err := p.run(ctx, moduleScript); err != nil {
-		return fmt.Errorf("load and persist dm-snapshot: %w", err)
+	if _, err := p.run(ctx, disableSnapshotModule); err != nil {
+		return fmt.Errorf("converge unsupported dm-snapshot module/configuration to absence: %w", err)
 	}
 	return nil
 }
@@ -483,8 +490,8 @@ if test "$vg_exists" = true; then
   test "$vg_tags" = "$ownership_tag" || fail "$vg_name ownership tag differs from the receipt"
   tag_owners=$(ownership_tag_owners)
   test "$tag_owners" = "$vg_name|$vg_uuid" || fail "$vg_name ownership tag is not globally unique"
-  unexpected_segments=$(lvs --noheadings --select "vg_name=$vg_name" -o segtype | awk '{$1=$1; if(NF && $1 != "linear" && $1 != "snapshot") print}')
-  test -z "$unexpected_segments" || fail "$vg_name contains unsupported thin/non-linear/non-snapshot logical volumes: $unexpected_segments"
+  unexpected_segments=$(lvs --noheadings --select "vg_name=$vg_name" -o segtype | awk '{$1=$1; if(NF && $1 != "linear") print}')
+  test -z "$unexpected_segments" || fail "$vg_name contains unsupported thin/snapshot/non-linear logical volumes: $unexpected_segments"
   test "$pv_count" = "$count" || fail "$vg_name PV membership count differs from the receipt"
   actual_members=$(pvs --noheadings --select "vg_name=$vg_name" -o pv_name | awk '{$1=$1; if(NF)print}' | sort)
   expected_members=$(printf '%%s\n' "${resolved[@]}" | sort)
@@ -560,17 +567,20 @@ to_bytes() {
 cap_ok() {
   awk -v e="$1" -v o="$2" -v abs=67108864 -v rel=0.02 'BEGIN{d=o-e; if(d<0)d=-d; if(e<=0){print (o>0)?1:0; exit} limit=(e*rel>abs?e*rel:abs); print (d<=limit)?1:0}'
 }
-snapshot_authority_ready() {
-  snapshot_crds=$(k3s kubectl get crd volumesnapshotclasses.snapshot.storage.k8s.io volumesnapshotcontents.snapshot.storage.k8s.io volumesnapshots.snapshot.storage.k8s.io -o name 2>/dev/null | sort) || return 1
-  test "$snapshot_crds" = "$(printf 'customresourcedefinition.apiextensions.k8s.io/volumesnapshotclasses.snapshot.storage.k8s.io\ncustomresourcedefinition.apiextensions.k8s.io/volumesnapshotcontents.snapshot.storage.k8s.io\ncustomresourcedefinition.apiextensions.k8s.io/volumesnapshots.snapshot.storage.k8s.io')" || return 1
-  k3s kubectl wait --for=condition=Established crd/volumesnapshotclasses.snapshot.storage.k8s.io crd/volumesnapshotcontents.snapshot.storage.k8s.io crd/volumesnapshots.snapshot.storage.k8s.io --timeout=10s >/dev/null 2>&1 || return 1
-  snapshot_classes=$(k3s kubectl get volumesnapshotclass.snapshot.storage.k8s.io -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null | sort) || return 1
-  test "$snapshot_classes" = iterabase-lvm-snapshot || return 1
-  snapshot_class=$(k3s kubectl get volumesnapshotclass.snapshot.storage.k8s.io iterabase-lvm-snapshot -o jsonpath='{.driver}|{.deletionPolicy}|{.parameters.snapSize}|{.metadata.annotations.snapshot\.storage\.kubernetes\.io/is-default-class}' 2>/dev/null) || return 1
-  test "$snapshot_class" = 'local.csi.openebs.io|Delete|100%%|false' || return 1
-  controller_containers=$(k3s kubectl get deployment -n "$namespace" -l app=openebs-lvm-controller -o jsonpath='{range .items[*].spec.template.spec.containers[*]}{.name}{"\n"}{end}' 2>/dev/null | sort) || return 1
-  printf '%%s\n' "$controller_containers" | grep -Fxq csi-snapshotter || return 1
-  printf '%%s\n' "$controller_containers" | grep -Fxq snapshot-controller || return 1
+snapshot_authority_absent() {
+  local observed crd resource
+  test ! -e /etc/modules-load.d/iterabase-data.conf || return 1
+  ! grep -q '^dm_snapshot ' /proc/modules || return 1
+  for crd in lvmsnapshots.local.openebs.io volumesnapshotclasses.snapshot.storage.k8s.io volumesnapshotcontents.snapshot.storage.k8s.io volumesnapshots.snapshot.storage.k8s.io; do
+    observed=$(k3s kubectl get crd "$crd" --ignore-not-found=true -o name 2>/dev/null) || return 1
+    test -z "$observed" || return 1
+  done
+  for resource in clusterrole/openebs-lvm-snapshotter-role clusterrolebinding/openebs-lvm-snapshotter-binding; do
+    observed=$(k3s kubectl get "$resource" --ignore-not-found=true -o name 2>/dev/null) || return 1
+    test -z "$observed" || return 1
+  done
+  controller_containers=$(k3s kubectl get deployment -n "$namespace" -l app=openebs-lvm-controller -o jsonpath='{range .items[*].spec.template.spec.containers[*]}{.name}{" "}{.image}{"\n"}{end}' 2>/dev/null) || return 1
+  ! printf '%%s\n' "$controller_containers" | grep -qi snapshot
 }
 lvmnode_satisfies() {
   node_count=$(k3s kubectl get lvmnodes.local.openebs.io -n "$namespace" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | awk '{print NF}')
@@ -605,14 +615,14 @@ lvmnode_satisfies() {
   return 0
 }
 for attempt in $(seq 1 150); do
-  if k3s kubectl get crd lvmnodes.local.openebs.io lvmvolumes.local.openebs.io lvmsnapshots.local.openebs.io >/dev/null 2>&1 &&
-     k3s kubectl wait --for=condition=Established crd/lvmnodes.local.openebs.io crd/lvmvolumes.local.openebs.io crd/lvmsnapshots.local.openebs.io --timeout=10s >/dev/null 2>&1 &&
+  if k3s kubectl get crd lvmnodes.local.openebs.io lvmvolumes.local.openebs.io >/dev/null 2>&1 &&
+     k3s kubectl wait --for=condition=Established crd/lvmnodes.local.openebs.io crd/lvmvolumes.local.openebs.io --timeout=10s >/dev/null 2>&1 &&
      k3s kubectl wait -n "$namespace" --for=condition=Available deployment -l app=openebs-lvm-controller --timeout=10s >/dev/null 2>&1 &&
      k3s kubectl rollout status -n "$namespace" daemonset -l app=openebs-lvm-node --timeout=10s >/dev/null 2>&1 &&
-     k3s kubectl get csidriver local.csi.openebs.io >/dev/null 2>&1 && csi_registered && snapshot_authority_ready && lvmnode_satisfies; then
+     k3s kubectl get csidriver local.csi.openebs.io >/dev/null 2>&1 && csi_registered && snapshot_authority_absent && lvmnode_satisfies; then
     break
   fi
-  test "$attempt" -lt 150 || fail "OpenEBS LVM LocalPV volume/snapshot CRDs/controllers/CSI registration/classes or receipt-matching iterabase-data VG discovery did not become Ready (last vg='$last_vg' missing='$last_missing' thin='$last_thin' obs_node='$observed_node')"
+  test "$attempt" -lt 150 || fail "OpenEBS LVM LocalPV volume-only CRDs/controller/node/CSI/classes, snapshot-surface absence, or receipt-matching iterabase-data VG discovery did not become Ready (last vg='$last_vg' missing='$last_missing' thin='$last_thin' obs_node='$observed_node')"
   sleep 2
 done
 classes=$(k3s kubectl get storageclass -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' | sort)

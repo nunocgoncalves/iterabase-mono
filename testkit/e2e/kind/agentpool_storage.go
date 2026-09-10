@@ -29,14 +29,10 @@ type StorageClassExpectation struct {
 // this contract so the exact product/chart expectations remain with the owning
 // suite (testkit/AGENTS.md). It is deliberately a value type with no behavior.
 type LVMStorageContract struct {
-	DataVolumeGroupName         string
-	Provisioner                 string
-	NodeTopologyKey             string
-	StorageClasses              []StorageClassExpectation
-	SnapshotClassName           string
-	SnapshotSize                string
-	SnapshotterContainer        string
-	SnapshotControllerContainer string
+	DataVolumeGroupName string
+	Provisioner         string
+	NodeTopologyKey     string
+	StorageClasses      []StorageClassExpectation
 }
 
 const (
@@ -59,8 +55,7 @@ func (cluster *Cluster) ConfigureLVMStorage(ctx context.Context, chart, namespac
 	if chart == "" || namespace == "" || release == "" {
 		return fmt.Errorf("kind LVM storage requires chart, namespace, and release identities")
 	}
-	if contract.DataVolumeGroupName == "" || contract.Provisioner == "" || contract.NodeTopologyKey == "" || len(contract.StorageClasses) == 0 ||
-		contract.SnapshotClassName == "" || contract.SnapshotSize == "" || contract.SnapshotterContainer == "" || contract.SnapshotControllerContainer == "" {
+	if contract.DataVolumeGroupName == "" || contract.Provisioner == "" || contract.NodeTopologyKey == "" || len(contract.StorageClasses) == 0 {
 		return fmt.Errorf("kind LVM storage requires a complete owner-supplied LVMStorageContract")
 	}
 	if info, err := os.Stat(chart); err != nil || (!info.IsDir() && !info.Mode().IsRegular()) {
@@ -89,11 +84,10 @@ func (cluster *Cluster) ConfigureLVMStorage(ctx context.Context, chart, namespac
 
 	prepare := `set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
-if ! command -v pvcreate >/dev/null || ! command -v mkfs.xfs >/dev/null || ! command -v losetup >/dev/null || ! command -v modprobe >/dev/null; then
+if ! command -v pvcreate >/dev/null || ! command -v mkfs.xfs >/dev/null || ! command -v losetup >/dev/null; then
   apt-get update
-  apt-get install -y lvm2 xfsprogs util-linux kmod
+  apt-get install -y lvm2 xfsprogs util-linux
 fi
-modprobe dm-snapshot
 if vgs "$1" >/dev/null 2>&1; then
   test "$(vgs --noheadings -o pv_count "$1" | awk '{$1=$1;print}')" = 1
 else
@@ -171,17 +165,11 @@ while IFS= read -r release; do
 done < <(helm list --kubeconfig "$kubeconfig" -n "$namespace" -q)
 kubectl --kubeconfig "$kubeconfig" delete pod -n "$namespace" -l 'app notin (openebs-lvm-node,openebs-lvm-controller)' --ignore-not-found=true --wait=true --timeout=3m
 kubectl --kubeconfig "$kubeconfig" delete job --all -n "$namespace" --ignore-not-found=true --wait=true --timeout=3m
-if kubectl --kubeconfig "$kubeconfig" get crd volumesnapshots.snapshot.storage.k8s.io >/dev/null 2>&1; then
-  kubectl --kubeconfig "$kubeconfig" delete volumesnapshots.snapshot.storage.k8s.io --all -A --ignore-not-found=true --wait=true --timeout=3m
-fi
 kubectl --kubeconfig "$kubeconfig" delete pvc --all -A --ignore-not-found=true --wait=true --timeout=3m
 for i in $(seq 1 90); do
   count=0
   if kubectl --kubeconfig "$kubeconfig" get crd lvmvolumes.local.openebs.io >/dev/null 2>&1; then
     count=$((count + $(kubectl --kubeconfig "$kubeconfig" get lvmvolumes.local.openebs.io -A --no-headers | awk 'NF {n++} END {print n+0}')))
-  fi
-  if kubectl --kubeconfig "$kubeconfig" get crd lvmsnapshots.local.openebs.io >/dev/null 2>&1; then
-    count=$((count + $(kubectl --kubeconfig "$kubeconfig" get lvmsnapshots.local.openebs.io -A --no-headers | awk 'NF {n++} END {print n+0}')))
   fi
   test "$count" = 0 && break
   test "$i" -lt 90 || exit 42
@@ -260,7 +248,7 @@ func (cluster *Cluster) validateLVMStorage(ctx context.Context, namespace, nodeN
 	if _, err := cluster.runKubectl(ctx, 30*time.Second, "kind-lvm-csidriver-"+cluster.Name+".json", "get", "csidriver", contract.Provisioner, "-o", "json"); err != nil {
 		return fmt.Errorf("read OpenEBS LVM CSIDriver: %w", err)
 	}
-	if err := cluster.validateLVMSnapshotAuthority(ctx, namespace, contract); err != nil {
+	if err := cluster.validateNoLVMSnapshotAuthority(ctx, namespace); err != nil {
 		return err
 	}
 	csiNode, err := cluster.runKubectl(ctx, 30*time.Second, "kind-lvm-csinode-"+cluster.Name+".json", "get", "csinode", nodeName, "-o", "json")
@@ -299,46 +287,33 @@ func (cluster *Cluster) validateLVMStorage(ctx context.Context, namespace, nodeN
 	return fmt.Errorf("OpenEBS LVMNode has not discovered the exact thick %s VG", contract.DataVolumeGroupName)
 }
 
-func (cluster *Cluster) validateLVMSnapshotAuthority(ctx context.Context, namespace string, contract LVMStorageContract) error {
+func (cluster *Cluster) validateNoLVMSnapshotAuthority(ctx context.Context, namespace string) error {
 	for _, name := range []string{
+		"lvmsnapshots.local.openebs.io",
 		"volumesnapshotclasses.snapshot.storage.k8s.io",
 		"volumesnapshotcontents.snapshot.storage.k8s.io",
 		"volumesnapshots.snapshot.storage.k8s.io",
 	} {
-		if _, err := cluster.runKubectl(ctx, 30*time.Second, "kind-lvm-snapshot-crd-"+safeFileName(name)+".json", "get", "crd", name, "-o", "json"); err != nil {
-			return fmt.Errorf("read CSI snapshot CRD %s: %w", name, err)
+		result, err := cluster.runKubectl(ctx, 30*time.Second, "kind-lvm-forbidden-crd-"+safeFileName(name)+".log", "get", "crd", name, "--ignore-not-found=true", "-o", "name")
+		if err != nil {
+			return fmt.Errorf("observe forbidden storage snapshot CRD %s: %w", name, err)
+		}
+		if strings.TrimSpace(result.Output) != "" {
+			return fmt.Errorf("volume-only cluster exposes forbidden storage snapshot CRD %s", name)
 		}
 	}
-	classes, err := cluster.runKubectl(ctx, 30*time.Second, "kind-lvm-snapshotclasses-"+cluster.Name+".json", "get", "volumesnapshotclass.snapshot.storage.k8s.io", "-o", "json")
+	for _, resource := range []string{"clusterrole/openebs-lvm-snapshotter-role", "clusterrolebinding/openebs-lvm-snapshotter-binding"} {
+		result, err := cluster.runKubectl(ctx, 30*time.Second, "kind-lvm-forbidden-rbac-"+safeFileName(resource)+".log", "get", resource, "--ignore-not-found=true", "-o", "name")
+		if err != nil {
+			return fmt.Errorf("observe forbidden storage snapshot RBAC %s: %w", resource, err)
+		}
+		if strings.TrimSpace(result.Output) != "" {
+			return fmt.Errorf("volume-only cluster exposes forbidden storage snapshot RBAC %s", resource)
+		}
+	}
+	deployment, err := cluster.runKubectl(ctx, 30*time.Second, "kind-lvm-volume-controller-"+cluster.Name+".json", "get", "deployment", "-n", namespace, "-l", "app=openebs-lvm-controller", "-o", "json")
 	if err != nil {
-		return fmt.Errorf("read managed VolumeSnapshotClass: %w", err)
-	}
-	var classList struct {
-		Items []struct {
-			Metadata struct {
-				Name        string            `json:"name"`
-				Annotations map[string]string `json:"annotations"`
-			} `json:"metadata"`
-			Driver         string            `json:"driver"`
-			DeletionPolicy string            `json:"deletionPolicy"`
-			Parameters     map[string]string `json:"parameters"`
-		} `json:"items"`
-	}
-	if err := json.Unmarshal([]byte(classes.Output), &classList); err != nil {
-		return fmt.Errorf("decode managed VolumeSnapshotClass: %w", err)
-	}
-	if len(classList.Items) != 1 {
-		return fmt.Errorf("managed cluster must have exactly one VolumeSnapshotClass, observed %d", len(classList.Items))
-	}
-	class := classList.Items[0]
-	if class.Metadata.Name != contract.SnapshotClassName || class.Driver != contract.Provisioner || class.DeletionPolicy != "Delete" ||
-		!reflect.DeepEqual(class.Parameters, map[string]string{"snapSize": contract.SnapshotSize}) ||
-		class.Metadata.Annotations["snapshot.storage.kubernetes.io/is-default-class"] == "true" {
-		return fmt.Errorf("VolumeSnapshotClass %q does not match the exact non-default full-origin Delete contract", class.Metadata.Name)
-	}
-	deployment, err := cluster.runKubectl(ctx, 30*time.Second, "kind-lvm-snapshot-controller-"+cluster.Name+".json", "get", "deployment", "-n", namespace, "-l", "app=openebs-lvm-controller", "-o", "json")
-	if err != nil {
-		return fmt.Errorf("read OpenEBS snapshot controller deployment: %w", err)
+		return fmt.Errorf("read OpenEBS volume controller deployment: %w", err)
 	}
 	var workloads struct {
 		Items []struct {
@@ -346,7 +321,8 @@ func (cluster *Cluster) validateLVMSnapshotAuthority(ctx context.Context, namesp
 				Template struct {
 					Spec struct {
 						Containers []struct {
-							Name string `json:"name"`
+							Name  string `json:"name"`
+							Image string `json:"image"`
 						} `json:"containers"`
 					} `json:"spec"`
 				} `json:"template"`
@@ -357,17 +333,16 @@ func (cluster *Cluster) validateLVMSnapshotAuthority(ctx context.Context, namesp
 		} `json:"items"`
 	}
 	if err := json.Unmarshal([]byte(deployment.Output), &workloads); err != nil {
-		return fmt.Errorf("decode OpenEBS snapshot controller deployment: %w", err)
+		return fmt.Errorf("decode OpenEBS volume controller deployment: %w", err)
 	}
 	if len(workloads.Items) != 1 || workloads.Items[0].Status.AvailableReplicas != 1 {
-		return fmt.Errorf("expected one Ready OpenEBS snapshot controller deployment")
+		return fmt.Errorf("expected one Ready OpenEBS volume controller deployment")
 	}
-	containers := map[string]bool{}
 	for _, container := range workloads.Items[0].Spec.Template.Spec.Containers {
-		containers[container.Name] = true
-	}
-	if !containers[contract.SnapshotterContainer] || !containers[contract.SnapshotControllerContainer] {
-		return fmt.Errorf("OpenEBS controller lacks the required CSI snapshotter/snapshot-controller containers")
+		identity := strings.ToLower(container.Name + " " + container.Image)
+		if strings.Contains(identity, "snapshot") {
+			return fmt.Errorf("volume-only OpenEBS controller exposes forbidden snapshot container %q", container.Name)
+		}
 	}
 	return nil
 }

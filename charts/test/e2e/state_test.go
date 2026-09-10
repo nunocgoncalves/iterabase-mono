@@ -48,10 +48,6 @@ func lvmStorageContract() kindcluster.LVMStorageContract {
 			{Name: PlatformDataStorageClass, Shared: false},
 			{Name: AgentPoolWorkspaceStorageClass, Shared: true},
 		},
-		SnapshotClassName:           "iterabase-lvm-snapshot",
-		SnapshotSize:                "100%",
-		SnapshotterContainer:        "csi-snapshotter",
-		SnapshotControllerContainer: "snapshot-controller",
 	}
 }
 
@@ -484,11 +480,11 @@ func (state *chartState) installLVMStorage(t *testing.T) {
 	if err := state.cluster.ConfigureLVMStorage(state.ctx, state.lvmSubstrate.LocalPath, testNamespace, testRelease+"-lvm-storage", lvmStorageContract()); err != nil {
 		t.Fatalf("install exact Kind OpenEBS LVM storage substrate: %v", err)
 	}
-	state.assertNarrowSnapshotRBAC(t)
+	state.assertVolumeOnlyControllerRBAC(t)
 	state.lvmStorageReady = true
 }
 
-func (state *chartState) assertNarrowSnapshotRBAC(t *testing.T) {
+func (state *chartState) assertVolumeOnlyControllerRBAC(t *testing.T) {
 	t.Helper()
 	as := "--as=system:serviceaccount:" + testNamespace + ":openebs-lvm-controller-sa"
 	for _, check := range []struct {
@@ -500,17 +496,22 @@ func (state *chartState) assertNarrowSnapshotRBAC(t *testing.T) {
 		{verb: "get", resource: "secrets", want: "no"},
 		{verb: "create", resource: "customresourcedefinitions.apiextensions.k8s.io", want: "no"},
 		{verb: "delete", resource: "customresourcedefinitions.apiextensions.k8s.io", want: "no"},
-		{verb: "get", resource: "volumesnapshotclasses.snapshot.storage.k8s.io", want: "yes"},
+		{verb: "get", resource: "lvmvolumes.local.openebs.io", want: "yes"},
+		{verb: "get", resource: "lvmsnapshots.local.openebs.io", want: "no"},
+		{verb: "get", resource: "volumesnapshotclasses.snapshot.storage.k8s.io", want: "no"},
 	} {
-		args := []string{"auth", "can-i", check.verb, check.resource, as}
+		scope := "--namespace=" + testNamespace
 		if check.allNamespaces {
-			args = append(args, "--all-namespaces")
-		} else {
-			args = append(args, "-n", testNamespace)
+			scope = "--all-namespaces"
 		}
-		if got := strings.TrimSpace(state.kubectl(t, 30*time.Second, args...)); got != check.want {
-			t.Fatalf("snapshot controller RBAC can-i %s %s = %q, want %q", check.verb, check.resource, got, check.want)
-		}
+		state.process(t, 30*time.Second, "bash", "-ceu", `
+set +e
+out=$(kubectl --kubeconfig "$1" auth can-i "$2" "$3" "$4" "$5" 2>/dev/null)
+rc=$?
+set -e
+test "$out" = "$6"
+if test "$6" = yes; then test "$rc" = 0; else test "$rc" = 1; fi
+`, "volume-only-rbac-check", state.cluster.Kubeconfig, check.verb, check.resource, as, scope, check.want)
 	}
 }
 
