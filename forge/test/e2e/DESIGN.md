@@ -62,7 +62,7 @@ incomplete/failing, never a skip.
 
 The GPU fixture has a harness-owned block volume mounted at `/data/hf-cache`.
 Its fixed by-id device and filesystem UUID must differ from the Forge AgentPool
-workspace device. Forge does not configure, authorize, purge, or claim this
+data-storage device. Forge does not configure, authorize, purge, or claim this
 volume.
 
 [`model-cache.json`](model-cache.json) pins the public
@@ -117,7 +117,7 @@ artifact is a failure.
 
 Each result binds plan, catalogue, source, stage graph, runtime bundle, exact
 artifact identities, terminal stage statuses, fixture capacity, pinned host-key
-hash, workspace device, and pre/post-cleanup boot IDs. GPU results additionally
+hash, data-storage device, and pre/post-cleanup boot IDs. GPU results additionally
 bind model-cache device/mount/UUID/model revision/hash. The aggregate requires
 exactly one result per planned scenario.
 

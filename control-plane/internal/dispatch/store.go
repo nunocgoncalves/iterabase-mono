@@ -40,6 +40,9 @@ import (
 var (
 	// ErrNotFound is returned when no row matches.
 	ErrNotFound = errors.New("dispatch: not found")
+	// ErrPoolStorageUnauthorized is returned when the manager has not positively
+	// authorized the assigned pool's current Kubernetes/OpenEBS storage identity.
+	ErrPoolStorageUnauthorized = errors.New("dispatch: AgentPool storage is not authorized for fresh work")
 	// ErrAlreadyAssigned is returned when a turn already has an active assignment.
 	ErrAlreadyAssigned = errors.New("dispatch: turn already actively assigned")
 	// ErrAssignmentNotActive is returned when an assignment exists but is not
@@ -726,21 +729,27 @@ func (s *Store) ReleaseSessionUID(ctx context.Context, sessionID string) error {
 
 // WorkspaceCapacityState is one AgentPool PVC's durable hysteresis state.
 type WorkspaceCapacityState struct {
-	PoolID        string
-	Observed      bool
-	FreeBytes     uint64
-	CapacityBytes uint64
-	FreeRatio     float64
-	Warning       bool
-	CreditGated   bool
-	ObservedAt    *time.Time
+	PoolID            string
+	Observed          bool
+	FreeBytes         uint64
+	CapacityBytes     uint64
+	FreeRatio         float64
+	Warning           bool
+	CreditGated       bool
+	StorageAuthorized bool
+	ObservedAt        *time.Time
+}
+
+func (s WorkspaceCapacityState) freshCreditGated() bool {
+	return s.CreditGated || !s.StorageAuthorized
 }
 
 // LoadWorkspaceCapacityStates restores every observed pool gate before dispatch
 // accepts worker streams. Pools with no row start fail-closed in memory.
 func (s *Store) LoadWorkspaceCapacityStates(ctx context.Context) (map[string]WorkspaceCapacityState, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT s.pool_id::text, s.observed, s.free_bytes, s.capacity_bytes, s.free_ratio, s.warning, s.credit_gated, s.observed_at
+		SELECT s.pool_id::text, s.observed, s.free_bytes, s.capacity_bytes, s.free_ratio,
+		       s.warning, s.credit_gated, s.storage_authorized, s.observed_at
 		FROM runtime.workspace_capacity_state s
 		JOIN toolgateway.pools p ON p.id = s.pool_id
 		WHERE p.deleted_at IS NULL`)
@@ -787,7 +796,8 @@ func (s *Store) ObserveWorkspaceCapacity(ctx context.Context, poolID string, fre
 		      ELSE runtime.workspace_capacity_state.credit_gated
 		    END,
 		    observed_at = now()
-		RETURNING pool_id::text, observed, free_bytes, capacity_bytes, free_ratio, warning, credit_gated, observed_at`,
+		RETURNING pool_id::text, observed, free_bytes, capacity_bytes, free_ratio,
+		          warning, credit_gated, storage_authorized, observed_at`,
 		poolID, int64(free), int64(capacity), ratio)
 	return scanWorkspaceCapacityState(row)
 }
@@ -795,7 +805,7 @@ func (s *Store) ObserveWorkspaceCapacity(ctx context.Context, poolID string, fre
 func scanWorkspaceCapacityState(row pgx.Row) (WorkspaceCapacityState, error) {
 	var state WorkspaceCapacityState
 	var free, capacity int64
-	if err := row.Scan(&state.PoolID, &state.Observed, &free, &capacity, &state.FreeRatio, &state.Warning, &state.CreditGated, &state.ObservedAt); err != nil {
+	if err := row.Scan(&state.PoolID, &state.Observed, &free, &capacity, &state.FreeRatio, &state.Warning, &state.CreditGated, &state.StorageAuthorized, &state.ObservedAt); err != nil {
 		return WorkspaceCapacityState{}, fmt.Errorf("read durable workspace capacity state: %w", err)
 	}
 	if state.PoolID == "" || free < 0 || capacity < 0 {
@@ -855,16 +865,25 @@ func (s *Store) AssignRunToPool(ctx context.Context, runID, poolID string) error
 	return nil
 }
 
-// PoolForRun returns the pool a run is assigned to, or ErrNotFound.
+// PoolForRun returns the pool a run is assigned to only when the manager has
+// positively authorized its current Kubernetes/OpenEBS storage identity. This
+// durable check occurs before an existing idle credit can be consumed.
 func (s *Store) PoolForRun(ctx context.Context, runID string) (string, error) {
 	var poolID string
+	var storageAuthorized bool
 	err := s.pool.QueryRow(ctx, `
-		SELECT pool_id::text FROM runtime.run_pool_assignments WHERE run_id = $1::uuid`, runID).Scan(&poolID)
+		SELECT a.pool_id::text, COALESCE(s.storage_authorized, false)
+		FROM runtime.run_pool_assignments a
+		LEFT JOIN runtime.workspace_capacity_state s ON s.pool_id = a.pool_id
+		WHERE a.run_id = $1::uuid`, runID).Scan(&poolID, &storageAuthorized)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", ErrNotFound
 	}
 	if err != nil {
 		return "", err
+	}
+	if !storageAuthorized {
+		return "", ErrPoolStorageUnauthorized
 	}
 	return poolID, nil
 }

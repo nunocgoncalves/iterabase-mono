@@ -297,6 +297,26 @@ func (s *Store) WorkspaceCapacityStatus(ctx context.Context, poolKey string) (Wo
 	return status, nil
 }
 
+// SetAgentPoolStorageAuthorized is the manager-to-dispatch fail-closed gate for
+// fresh work. Capacity observations cannot change this bit: only a successful
+// authoritative Kubernetes/OpenEBS storage assessment may reopen it.
+func (s *Store) SetAgentPoolStorageAuthorized(ctx context.Context, poolKey string, authorized bool) error {
+	result, err := s.pool.Exec(ctx, `
+		INSERT INTO runtime.workspace_capacity_state (pool_id, storage_authorized)
+		SELECT id, $2
+		FROM toolgateway.pools
+		WHERE key = $1 AND deleted_at IS NULL
+		ON CONFLICT (pool_id) DO UPDATE
+		SET storage_authorized = EXCLUDED.storage_authorized`, poolKey, authorized)
+	if err != nil {
+		return fmt.Errorf("set AgentPool storage authorization for %q: %w", poolKey, err)
+	}
+	if result.RowsAffected() != 1 {
+		return fmt.Errorf("set AgentPool storage authorization for %q: %w", poolKey, ErrNotFound)
+	}
+	return nil
+}
+
 // RegisterToolVersion inserts an immutable descriptor on first sight of a
 // (name, digest); re-registration of the same digest is a validated no-op that
 // returns the existing row WITHOUT mutating any descriptor field (ARCH-007).

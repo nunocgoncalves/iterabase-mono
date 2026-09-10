@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/dispatch"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/gateway"
 	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/runtime"
 	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/testutil"
 )
@@ -85,6 +86,9 @@ func TestStoreWorkspaceCapacityHysteresisIsDurableAndPerPool(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, initial, "unobserved pools start fail-closed in memory without a misleading row")
 
+	storageGate := gateway.NewStore(pool)
+	require.NoError(t, storageGate.SetAgentPoolStorageAuthorized(ctx, "ns/pool-a", true))
+	require.NoError(t, storageGate.SetAgentPoolStorageAuthorized(ctx, "ns/pool-b", true))
 	opened, err := store.ObserveWorkspaceCapacity(ctx, poolID, 30, 100, 0.30)
 	require.NoError(t, err)
 	assert.Equal(t, poolID, opened.PoolID)
@@ -140,6 +144,9 @@ func TestStore_AssignRunToPoolAndResolve(t *testing.T) {
 	runID, _, _ := seedRunTurn(t, rt, pool, "sess-1")
 	require.NoError(t, store.AssignRunToPool(ctx, runID, poolID))
 
+	_, err := store.PoolForRun(ctx, runID)
+	assert.ErrorIs(t, err, dispatch.ErrPoolStorageUnauthorized)
+	require.NoError(t, gateway.NewStore(pool).SetAgentPoolStorageAuthorized(ctx, "ns/pool-1", true))
 	got, err := store.PoolForRun(ctx, runID)
 	require.NoError(t, err)
 	assert.Equal(t, poolID, got)

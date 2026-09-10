@@ -237,7 +237,7 @@ func workerKey(poolID, workerID string) string { return poolID + "/" + workerID 
 func (p *workerPool) seedWorkspaceCapacity(states map[string]WorkspaceCapacityState) {
 	p.mu.Lock()
 	for poolID, state := range states {
-		p.workspaceGated[poolID] = state.CreditGated
+		p.workspaceGated[poolID] = state.freshCreditGated()
 	}
 	p.mu.Unlock()
 }
@@ -256,7 +256,7 @@ func (p *workerPool) syncWorkspaceCapacity(states map[string]WorkspaceCapacitySt
 		}
 	}
 	for poolID, state := range states {
-		p.workspaceGated[poolID] = state.CreditGated
+		p.workspaceGated[poolID] = state.freshCreditGated()
 	}
 	return removed
 }

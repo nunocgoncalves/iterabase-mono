@@ -20,6 +20,7 @@ import (
 	"golang.org/x/net/http2"
 
 	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/dispatch"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/gateway"
 	v1 "github.com/nunocgoncalves/iterabase-mono/control-plane/internal/harnessrpc/iterabase/harness/v1"
 	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/harnessrpc/iterabase/harness/v1/harnessv1connect"
 	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/runtime"
@@ -68,6 +69,7 @@ func newDispatchEnvWithReconciler(t *testing.T, startReconciler bool) *dispatchE
 	require.NoError(t, pgpool.QueryRow(ctx, `
 		INSERT INTO toolgateway.pools (key, name, spiffe_id_prefix)
 		VALUES ('ns/pool-1', 'pool-1', $1) RETURNING id::text`, dispatchPoolPref).Scan(&poolID))
+	require.NoError(t, gateway.NewStore(pgpool).SetAgentPoolStorageAuthorized(ctx, "ns/pool-1", true))
 
 	ca, err := testca.New()
 	require.NoError(t, err)
@@ -185,10 +187,14 @@ func (e *dispatchEnv) connectWorker(t *testing.T) *fakeWorker {
 	return w
 }
 
-func (w *fakeWorker) ready() error {
-	if err := w.stream.Send(&v1.WorkerMessage{Kind: &v1.WorkerMessage_WorkspaceStatus{WorkspaceStatus: &v1.WorkspaceStatus{
+func (w *fakeWorker) workspaceStatus() error {
+	return w.stream.Send(&v1.WorkerMessage{Kind: &v1.WorkerMessage_WorkspaceStatus{WorkspaceStatus: &v1.WorkspaceStatus{
 		FreeBytes: 30, CapacityBytes: 100, FreeRatio: 0.30,
-	}}}); err != nil {
+	}}})
+}
+
+func (w *fakeWorker) ready() error {
+	if err := w.workspaceStatus(); err != nil {
 		return err
 	}
 	return w.stream.Send(&v1.WorkerMessage{Kind: &v1.WorkerMessage_Ready{Ready: &v1.Ready{}}})
@@ -219,6 +225,72 @@ func (w *fakeWorker) recvControl(t *testing.T, want func(*v1.ControlMessage) boo
 func (w *fakeWorker) close() {
 	w.cancel()
 	_ = w.stream.CloseRequest()
+}
+
+func TestDispatchStorageAuthorityGateWithholdsAlreadyIdleCredit(t *testing.T) {
+	env := newDispatchEnvWithReconciler(t, false)
+	ctx := context.Background()
+	w := env.connectWorker(t)
+	defer w.close()
+	require.NoError(t, w.ready())
+
+	var firstObservation time.Time
+	require.Eventually(t, func() bool {
+		return env.pgpool.QueryRow(ctx, `
+			SELECT observed_at FROM runtime.workspace_capacity_state WHERE pool_id=$1::uuid`, env.poolID).Scan(&firstObservation) == nil
+	}, 2*time.Second, 10*time.Millisecond, "first workspace observation was not persisted")
+	time.Sleep(5 * time.Millisecond)
+	require.NoError(t, w.workspaceStatus())
+	require.Eventually(t, func() bool {
+		var observedAt time.Time
+		if err := env.pgpool.QueryRow(ctx, `
+			SELECT observed_at FROM runtime.workspace_capacity_state WHERE pool_id=$1::uuid`, env.poolID).Scan(&observedAt); err != nil {
+			return false
+		}
+		return observedAt.After(firstObservation)
+	}, 2*time.Second, 10*time.Millisecond, "ordered observation after Ready was not persisted")
+
+	storageGate := gateway.NewStore(env.pgpool)
+	require.NoError(t, storageGate.SetAgentPoolStorageAuthorized(ctx, "ns/pool-1", false))
+	runID := env.seedPendingRun(t)
+	reconcileCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	env.svc.StartReconciler(reconcileCtx)
+	require.Eventually(t, func() bool {
+		_, err := env.rt.ActiveTurn(ctx, runID)
+		return err == nil
+	}, 2*time.Second, 10*time.Millisecond, "pending run did not reach an assignable turn")
+	assert.Never(t, func() bool {
+		var assignments int
+		require.NoError(t, env.pgpool.QueryRow(ctx, `
+			SELECT count(*) FROM runtime.turn_assignments WHERE run_id=$1::uuid`, runID).Scan(&assignments))
+		return assignments != 0
+	}, 300*time.Millisecond, 10*time.Millisecond, "storage-unauthorized pool consumed an already-idle credit")
+
+	var beforeUnauthorizedObservation time.Time
+	require.NoError(t, env.pgpool.QueryRow(ctx, `
+		SELECT observed_at FROM runtime.workspace_capacity_state WHERE pool_id=$1::uuid`, env.poolID).Scan(&beforeUnauthorizedObservation))
+	require.NoError(t, w.workspaceStatus())
+	require.Eventually(t, func() bool {
+		var observedAt time.Time
+		var storageAuthorized bool
+		if err := env.pgpool.QueryRow(ctx, `
+			SELECT observed_at, storage_authorized FROM runtime.workspace_capacity_state WHERE pool_id=$1::uuid`, env.poolID).Scan(&observedAt, &storageAuthorized); err != nil {
+			return false
+		}
+		return observedAt.After(beforeUnauthorizedObservation) && !storageAuthorized
+	}, 2*time.Second, 10*time.Millisecond, "worker capacity observation must not reopen storage authority")
+	assert.Never(t, func() bool {
+		var assignments int
+		require.NoError(t, env.pgpool.QueryRow(ctx, `
+			SELECT count(*) FROM runtime.turn_assignments WHERE run_id=$1::uuid`, runID).Scan(&assignments))
+		return assignments != 0
+	}, 200*time.Millisecond, 10*time.Millisecond, "capacity-healthy report overrode the storage-identity gate")
+
+	require.NoError(t, storageGate.SetAgentPoolStorageAuthorized(ctx, "ns/pool-1", true))
+	require.NoError(t, w.workspaceStatus())
+	assigned := w.recvControl(t, func(c *v1.ControlMessage) bool { return c.GetAssignTurn() != nil }).GetAssignTurn()
+	require.Equal(t, runID, assigned.GetRunId())
 }
 
 // TestDispatch_AssignEventAckOutcome: a pending run is dispatched to a ready

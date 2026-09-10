@@ -303,12 +303,13 @@ func (s *Service) Work(ctx context.Context, st *connect.BidiStream[v1.WorkerMess
 				if err != nil {
 					return connect.NewError(connect.CodeUnavailable, fmt.Errorf("persist AgentPool workspace capacity gate: %w", err))
 				}
-				if s.pool.applyWorkspaceStatus(w, capacity.FreeBytes, capacity.CapacityBytes, capacity.FreeRatio, capacity.Warning, capacity.CreditGated) {
+				freshCreditGated := capacity.freshCreditGated()
+				if s.pool.applyWorkspaceStatus(w, capacity.FreeBytes, capacity.CapacityBytes, capacity.FreeRatio, capacity.Warning, freshCreditGated) {
 					s.kickReconciler()
 				}
 				s.observeWorkspaceMetrics(capacity)
-				if capacity.CreditGated {
-					s.log.Warn("workspace capacity gate is withholding fresh credit", "pool", w.poolID, "worker", w.workerID, "free_bytes", capacity.FreeBytes, "free_ratio", capacity.FreeRatio)
+				if freshCreditGated {
+					s.log.Warn("workspace or storage-identity gate is withholding fresh credit", "pool", w.poolID, "worker", w.workerID, "free_bytes", capacity.FreeBytes, "free_ratio", capacity.FreeRatio, "capacity_gated", capacity.CreditGated, "storage_authorized", capacity.StorageAuthorized)
 				}
 			case *v1.WorkerMessage_Heartbeat:
 				// Any message renews the lease; nothing else to do.
@@ -1022,7 +1023,11 @@ func (s *Service) dispatchGraphRun(ctx context.Context, run runtime.Run) {
 	}
 	poolID, err := s.store.PoolForRun(ctx, run.ID)
 	if err != nil {
-		s.log.Warn("graph run has no pool assignment", "run", run.ID, "error", err)
+		if errors.Is(err, ErrPoolStorageUnauthorized) {
+			s.log.Warn("graph run fresh credit withheld until AgentPool storage is authoritatively observed", "run", run.ID)
+		} else {
+			s.log.Warn("graph run has no pool assignment", "run", run.ID, "error", err)
+		}
 		return
 	}
 	w := s.pool.pickIdle(poolID, turn.ID)
@@ -1191,7 +1196,11 @@ func (s *Service) dispatchRun(ctx context.Context, run runtime.Run) {
 	// Assign to an idle worker in the run's pool.
 	poolID, err := s.store.PoolForRun(ctx, run.ID)
 	if err != nil {
-		s.log.Warn("run has no pool assignment", "run", run.ID, "error", err)
+		if errors.Is(err, ErrPoolStorageUnauthorized) {
+			s.log.Warn("run fresh credit withheld until AgentPool storage is authoritatively observed", "run", run.ID)
+		} else {
+			s.log.Warn("run has no pool assignment", "run", run.ID, "error", err)
+		}
 		return
 	}
 	w := s.pool.pickIdle(poolID, turn.ID)

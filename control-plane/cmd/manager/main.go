@@ -270,6 +270,7 @@ func run() int {
 		APIReader:      mgr.GetAPIReader(),
 		Store:          agentPoolStore,
 		CapacityReader: agentPoolStore,
+		StorageGate:    agentPoolStore,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to set up AgentPool reconciler")
 		return 1

@@ -56,7 +56,7 @@ func dataStorageDevice(spec forgeConfigSpec) string {
 	if device, ok := dataStorageDevicesByAddress.Load(spec.Address); ok {
 		return device.(string)
 	}
-	return "/dev/disk/by-id/scsi-forge-e2e-workspaces"
+	return "/dev/disk/by-id/scsi-forge-e2e-data-storage"
 }
 
 func writeForgeConfigSpec(t *testing.T, spec forgeConfigSpec) string {
