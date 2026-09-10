@@ -245,7 +245,21 @@ if command -v helm >/dev/null 2>&1; then
   while IFS= read -r release; do
     test -n "$release" || continue
     case "$release" in *-cert-manager|*-lvm-storage) continue ;; esac
-    KUBECONFIG=/etc/rancher/k3s/k3s.yaml helm uninstall "$release" -n iterabase-system --wait --timeout 5m
+    uninstall_output=
+    if ! uninstall_output=$(KUBECONFIG=/etc/rancher/k3s/k3s.yaml helm uninstall "$release" -n iterabase-system --wait --timeout 5m 2>&1); then
+      scheduled_crd=$(printf '%%s\n' "$uninstall_output" | sed -n 's/^Error: uninstallation completed with 1 error(s): resource CustomResourceDefinition\/\/\([a-z0-9][a-z0-9.-]*\) still exists\. status: Terminating, message: Resource scheduled for deletion$/\1/p')
+      test -n "$scheduled_crd"
+      expected_uninstall_error="Error: uninstallation completed with 1 error(s): resource CustomResourceDefinition//$scheduled_crd still exists. status: Terminating, message: Resource scheduled for deletion
+context deadline exceeded"
+      test "$uninstall_output" = "$expected_uninstall_error"
+      if k3s kubectl get crd "$scheduled_crd" >/dev/null 2>&1; then
+        test "$(k3s kubectl get crd "$scheduled_crd" -o jsonpath="{.metadata.annotations.meta\\.helm\\.sh/release-name}")" = "$release"
+        test "$(k3s kubectl get crd "$scheduled_crd" -o jsonpath="{.metadata.annotations.meta\\.helm\\.sh/release-namespace}")" = iterabase-system
+        test -n "$(k3s kubectl get crd "$scheduled_crd" -o jsonpath="{.metadata.deletionTimestamp}")"
+        test -z "$(k3s kubectl get "$scheduled_crd" -A -o name)"
+      fi
+      echo "helm uninstall scheduled empty release-owned CRD $scheduled_crd for deletion; continuing bounded consumer reclamation"
+    fi
   done < <(KUBECONFIG=/etc/rancher/k3s/k3s.yaml helm list -n iterabase-system -q)
 fi
 k3s kubectl delete jobs --all -n iterabase-system --ignore-not-found=true --wait=true --timeout=5m
