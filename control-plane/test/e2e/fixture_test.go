@@ -46,10 +46,6 @@ func lvmStorageContract() kindcluster.LVMStorageContract {
 			{Name: lvmPlatformStorageClass, Shared: false},
 			{Name: lvmAgentPoolStorageClass, Shared: true},
 		},
-		SnapshotClassName:           "iterabase-lvm-snapshot",
-		SnapshotSize:                "100%",
-		SnapshotterContainer:        "csi-snapshotter",
-		SnapshotControllerContainer: "snapshot-controller",
 	}
 }
 

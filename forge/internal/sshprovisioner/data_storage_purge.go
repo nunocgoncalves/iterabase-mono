@@ -105,7 +105,7 @@ if test "$vg_record_count" = 1; then
     test "$pv_uuid" = "${planned_pv_uuid[$i]}" && test "$pv_vg" = "$vg_name" || fail "${selected[$i]} PV identity/membership drift"
   done
   lv_count=$(lvs --noheadings --select "vg_name=$vg_name" -o lv_name | awk 'NF {n++} END {print n+0}')
-  test "$lv_count" = 0 || fail "$vg_name still contains $lv_count logical volumes; delete claims and release consumers, including snapshots, first"
+  test "$lv_count" = 0 || fail "$vg_name still contains $lv_count logical volumes; delete claims and release consumers first"
   if test "$normal_status" = true; then
     write_receipt purge-vg-pending "$pv_done" 0; status=purge-vg-pending; purge_done=0; storage_stage_barrier purge-vg-pending
   fi

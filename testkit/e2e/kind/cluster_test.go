@@ -248,10 +248,64 @@ func testLVMStorageContract() LVMStorageContract {
 			{Name: "iterabase-lvm-xfs", Shared: false},
 			{Name: "iterabase-agentpool-lvm-xfs", Shared: true},
 		},
-		SnapshotClassName:           "iterabase-lvm-snapshot",
-		SnapshotSize:                "100%",
-		SnapshotterContainer:        "csi-snapshotter",
-		SnapshotControllerContainer: "snapshot-controller",
+	}
+}
+
+func TestValidateNoLVMSnapshotAuthority(t *testing.T) {
+	t.Parallel()
+	deployment := func(name, image string) string {
+		return fmt.Sprintf(`{"items":[{"spec":{"template":{"spec":{"containers":[{"name":%q,"image":%q}]}}},"status":{"availableReplicas":1}}]}`, name, image)
+	}
+	for name, output := range map[string]func(process.Command) string{
+		"volume only": func(command process.Command) string {
+			if strings.Contains(strings.Join(command.Args, " "), "get deployment") {
+				return deployment("openebs-lvm-plugin", "docker.io/openebs/lvm-driver:1.10.0@sha256:exact")
+			}
+			return ""
+		},
+		"forbidden CRD": func(command process.Command) string {
+			args := strings.Join(command.Args, " ")
+			if strings.Contains(args, "get crd lvmsnapshots.local.openebs.io") {
+				return "customresourcedefinition.apiextensions.k8s.io/lvmsnapshots.local.openebs.io\n"
+			}
+			if strings.Contains(args, "get deployment") {
+				return deployment("openebs-lvm-plugin", "docker.io/openebs/lvm-driver:1.10.0@sha256:exact")
+			}
+			return ""
+		},
+		"forbidden container": func(command process.Command) string {
+			if strings.Contains(strings.Join(command.Args, " "), "get deployment") {
+				return deployment("csi-snapshotter", "registry.k8s.io/sig-storage/csi-snapshotter:v8.2.0")
+			}
+			return ""
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			executor := &fakeExecutor{outputFor: output}
+			cluster, err := Use("charts", filepath.Join(t.TempDir(), "kubeconfig"), executor)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = cluster.validateNoLVMSnapshotAuthority(context.Background(), "iterabase-system")
+			if name == "volume only" && err != nil {
+				t.Fatalf("volume-only authority failed: %v", err)
+			}
+			if name != "volume only" && err == nil {
+				t.Fatalf("%s authority unexpectedly passed", name)
+			}
+		})
+	}
+}
+
+func TestValidateNoLVMSnapshotAuthorityFailsOnObservationError(t *testing.T) {
+	t.Parallel()
+	executor := &fakeExecutor{failNext: true}
+	cluster, err := Use("charts", filepath.Join(t.TempDir(), "kubeconfig"), executor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cluster.validateNoLVMSnapshotAuthority(context.Background(), "iterabase-system"); err == nil {
+		t.Fatal("snapshot-absence observation error unexpectedly passed")
 	}
 }
 

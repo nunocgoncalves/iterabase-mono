@@ -1,6 +1,6 @@
 # Platform V2 OpenEBS LVM LocalPV storage
 
-Status: current repository implementation contract for HOR-545 and approved `DES-HOR-545-01` / `DES-HOR-545-02` / `DES-HOR-545-03` / `DES-HOR-545-04`, recorded canonically in Obsidian `Platform V2 — OpenEBS LVM LocalPV Storage`.
+Status: current repository implementation contract for HOR-545 and approved `DES-HOR-545-01` / `DES-HOR-545-02` / `DES-HOR-545-03`, recorded canonically in Obsidian `Platform V2 — OpenEBS LVM LocalPV Storage`. The same-day pre-release `DES-HOR-545-04` snapshot amendment is superseded historical evidence only.
 
 ## Supported topology
 
@@ -21,7 +21,7 @@ Before disk mutation and immediately before each `pvcreate`, Forge checks the co
 
 Forge never reads every device byte. Arbitrary non-signature bytes are not a secure-erasure proof and do not authorize adoption.
 
-After read-only preflight, Forge installs/verifies `lvm2` and XFS tools, loads `dm-snapshot`, and persists it in `/etc/modules-load.d/iterabase-data.conf`. A root-owned `0600`, atomic, file-and-directory-fsynced receipt at `/var/lib/iterabase/data-storage.receipt` binds contract `HOR-545/v2`, install, canonical paths, resolved identities, hardware/size, planned PV UUIDs, a unique Forge ownership tag, fixed VG name, completed PV count, observed VG UUID once created, and transaction stage.
+After read-only preflight, Forge installs/verifies `lvm2` and XFS tools without loading or persisting `dm-snapshot`; the superseded pre-release module configuration is converged safely to absence. A root-owned `0600`, atomic, file-and-directory-fsynced receipt at `/var/lib/iterabase/data-storage.receipt` binds contract `HOR-545/v2`, install, canonical paths, resolved identities, hardware/size, planned PV UUIDs, a unique Forge ownership tag, fixed VG name, completed PV count, observed VG UUID once created, and transaction stage.
 
 The receipt and ownership tag are durable before `pvcreate`. Planned PV UUIDs plus exact metadata make a crash after command success but before receipt advancement recognizable without adopting a foreign PV. Forge creates every PV with its planned UUID, then uses supported `vgcreate --addtag` to atomically create exactly one `iterabase-data` VG with the receipt-owned tag and its LVM-generated UUID. It verifies the exact tag/PV/member/name combination and fsyncs the observed UUID into the receipt before any later mutation or K3s/substrate/platform handoff. Reconcile, status, and purge accept only exact receipt tag/PV/VG UUID/name/membership. Forge reports bounded total/free capacity and never creates an LV, filesystem, mount, or fstab entry.
 
@@ -35,9 +35,9 @@ An installed K3s whose service does not include `--disable local-storage` is imm
 - URL: `https://openebs.github.io/lvm-localpv/lvm-localpv-1.10.0.tgz`;
 - SHA-256: `3ad766c56d4a0ab0f3f2baaeb726a4554d1f51bb485f1cef00846cf1d82a179d`.
 
-`.github/inputs/remote-content.json` is authority for that archive and every runtime image digest. The companion disables analytics, pins all controller/node/snapshot sidecars by digest, configures K3s's actual `/var/lib/kubelet` CSI registration/mount root, installs the three Kubernetes CSI VolumeSnapshot CRDs, and enables one cluster snapshot-controller plus the OpenEBS CSI snapshotter path. The wrapper replaces upstream controller RBAC so the managed no-secret snapshot class grants neither cluster-wide Secret read/list nor CRD create/delete.
+`.github/inputs/remote-content.json` is authority for that archive and every runtime image digest. A fail-closed deterministic packaging transform removes the upstream snapshot CRDs, CSI snapshotter/controller templates, snapshot values, and snapshot RBAC from the reviewed archive before the dependency enters the companion. The companion disables analytics, pins every required volume controller/node sidecar by digest, configures K3s's actual `/var/lib/kubelet` CSI registration/mount root, and renders only volume/node CRDs and authority. The wrapper replaces upstream combined controller RBAC with an exact volume-only role.
 
-Forge applies certificate substrate, LVM substrate, then platform. It waits boundedly for volume and snapshot CRDs, controller containers, node DaemonSet, `local.csi.openebs.io`, the exact one-node CSINode registration and topology keys, both StorageClasses, the one managed VolumeSnapshotClass, and one LVMNode reporting receipt-matching `iterabase-data`. Any local-path/default class, missing/extra class, contradictory VG, or unavailable volume/snapshot controller/node/CSI authority fails closed.
+Forge applies certificate substrate, LVM substrate, then platform. It waits boundedly for the volume/node CRDs, volume controller, node DaemonSet, `local.csi.openebs.io`, the exact one-node CSINode registration and topology keys, both StorageClasses, complete snapshot-surface absence, and one LVMNode reporting receipt-matching `iterabase-data`. Any local-path/default class, missing/extra class, snapshot surface, contradictory VG, or unavailable volume controller/node/CSI authority fails closed.
 
 ## Exact StorageClasses
 
@@ -53,11 +53,9 @@ thinProvision: "no"
 - `iterabase-lvm-xfs` adds `shared: "no"` and is explicit on every chart-generated data PVC: PostgreSQL, MinIO, persistent observability components, and any future enabled chart data claim.
 - `iterabase-agentpool-lvm-xfs` adds `shared: "yes"` and is authorized only for one claim per AgentPool. `shared: yes` allows multiple pods on the same node to mount the RWO filesystem; it does not create RWX or cross-node behavior.
 
-## Exact VolumeSnapshotClass
+## Snapshot surfaces are absent
 
-`iterabase-lvm-snapshot` is the only Iterabase-managed VolumeSnapshotClass. It is non-default, uses `local.csi.openebs.io`, `deletionPolicy: Delete`, and `snapSize: 100%`. An authorized operator may explicitly snapshot a managed LVM PVC, wait for both CSI `VolumeSnapshot` and OpenEBS `LVMSnapshot` Ready state, restore into a separate `iterabase-lvm-xfs` PVC, and delete restore/snapshot objects with leak-free LV reclamation while preserving the source.
-
-The snapshot is full-origin thick capacity in `iterabase-data`, shares the same node/disks/VG failure boundary, and is at most crash-consistent. Platform charts create no snapshot automatically. This primitive provides no application consistency, schedule, retention catalogue, remote/offsite copy, cross-store recovery point, customer recovery API/UI, backup, or DR; OPP-005 remains the sole recovery authority.
+Platform V2 installs no `dm-snapshot` module/configuration, CSI VolumeSnapshot or OpenEBS LVMSnapshot CRD, `VolumeSnapshotClass`, snapshot controller, CSI snapshotter sidecar, snapshot-specific RBAC/image/resource, or supported snapshot lifecycle. Static packaging, runtime readiness, reapply, and real-machine evidence fail if any such surface appears. OPP-005 remains the sole authority for any future recovery mechanism.
 
 ## AgentPool validation and isolation
 
@@ -84,16 +82,16 @@ The harness measures and performs real write/fsync/rename/unlink health against 
 
 Different AgentPool PVCs remain independent. Real I/O/fsync/mount/ownership failure fences without replay. Dispatch metrics carry a bounded `pool` label and manager conditions query only the matching pool.
 
-The OpenEBS node metric endpoint supplies `lvm_vg_free_size_bytes{name="iterabase-data"}` and `lvm_vg_total_size_bytes{name="iterabase-data"}`. Chart-owned monitoring reports aggregate VG pressure independently and alerts on a managed PVC that remains Pending. Thick-capacity exhaustion for a new claim or full-origin snapshot must fail visibly and actionably; there is no reduced snapshot, thin overcommit, alternate class, or root fallback. Soft-deleting a pool removes its durable capacity row, process-local hysteresis entry, and every per-pool Prometheus label series; a same-UUID revival starts fail-closed until its new PVC is observed.
+The OpenEBS node metric endpoint supplies `lvm_vg_free_size_bytes{name="iterabase-data"}` and `lvm_vg_total_size_bytes{name="iterabase-data"}`. Chart-owned monitoring reports aggregate VG pressure independently and alerts on a managed PVC that remains Pending. Thick-capacity exhaustion for a new claim must fail visibly and actionably; there is no thin overcommit, alternate class, or root fallback. Soft-deleting a pool removes its durable capacity row, process-local hysteresis entry, and every per-pool Prometheus label series; a same-UUID revival starts fail-closed until its new PVC is observed.
 
 ## Claim deletion, destroy, and purge
 
-A deleted claim uses `Delete` and must remove its PV, LVMVolume, and LV after consumers release it. An explicitly deleted snapshot uses its class's `Delete` policy and removes the VolumeSnapshotContent, LVMSnapshot, and snapshot LV without deleting the source. Platform uninstall and ordinary `forge destroy` preserve the receipt, selected PVs, VG, LVs, snapshots, and bytes.
+A deleted claim uses `Delete` and must remove its PV, LVMVolume, and LV after consumers release it. Platform uninstall and ordinary `forge destroy` preserve the receipt, selected PVs, VG, LVs, and bytes; no snapshot deletion lifecycle exists.
 
-`forge destroy --purge-data-storage --reboot --yes` is the explicit fixture/decommission path. Purge refuses unless the receipt, ownership tag, set/order, resolved hardware, PV UUIDs, VG UUID/name/membership, system safety, mounts, raw consumers, and empty LV/snapshot set all agree. A fsynced receipt records intent and completion around VG removal, every receipt PV removal, and receipt removal so interruption resumes only the same exact decommission transaction. It has no force path and does not securely erase media.
+`forge destroy --purge-data-storage --reboot --yes` is the explicit fixture/decommission path. Purge refuses unless the receipt, ownership tag, set/order, resolved hardware, PV UUIDs, VG UUID/name/membership, system safety, mounts, raw consumers, and empty LV set all agree. A fsynced receipt records intent and completion around VG removal, every receipt PV removal, and receipt removal so interruption resumes only the same exact decommission transaction. It has no force path and does not securely erase media.
 
 ## Release and acceptance
 
 The affected semantic target set is `control-plane`, `forge`, `control-plane-chart`, and `iterabase-platform-chart`; the platform target contains both same-version companions. HOR-538 artifacts remain immutable historical evidence.
 
-Required evidence includes focused owners, generated CRDs, static/render checks, real Kind OpenEBS provisioning/deletion and explicit snapshot/create/Ready/restore/hash/delete/source-preservation/full-origin-exhaustion/reapply/leak proof, permanent-fixture PV/VG receipt safety and deterministic reconcile/purge crash matrices, same-pool concurrency/isolation, separate pools, per-pool and aggregate capacity, worker replacement, reboot/reapply, MinIO Job identity, ordinary destroy/non-purge, explicit purge, exact-head CI/E2E, an exact-head explicit four-target candidate rehearsal, exact-source candidate, protected promotion, and fresh bare-metal Ubuntu 24.04 LTS OPO1 acceptance. Active F3 evidence uses only the provider-neutral `forge/permanent-fixture-cpu`, `forge/permanent-fixture-cpu-workspace`, and `forge/permanent-fixture-gpu` identities. Merge and publication do not complete HOR-545.
+Required evidence includes focused owners, generated CRDs, static/render and runtime snapshot-absence checks, real Kind OpenEBS volume provisioning/deletion/reapply/capacity proof, permanent-fixture PV/VG receipt safety and deterministic reconcile/purge crash matrices, same-pool concurrency/isolation, separate pools, per-pool and aggregate capacity, worker replacement, reboot/reapply, MinIO Job identity, ordinary destroy/non-purge, explicit purge, exact-head CI/E2E, an exact-head explicit four-target candidate rehearsal, exact-source candidate, protected promotion, and fresh bare-metal Ubuntu 24.04 LTS OPO1 acceptance. Active F3 evidence uses only the provider-neutral `forge/permanent-fixture-cpu`, `forge/permanent-fixture-cpu-workspace`, and `forge/permanent-fixture-gpu` identities. Merge and publication do not complete HOR-545.

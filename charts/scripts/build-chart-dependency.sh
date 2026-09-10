@@ -3,4 +3,18 @@ set -euo pipefail
 
 chart=${1:?usage: build-chart-dependency.sh CHART_DIR}
 repo_root=$(git rev-parse --show-toplevel)
+if [[ "$(basename "$chart")" == lvm-storage-substrate ]]; then
+  # The generated unpacked dependency contains upstream tag defaults and must
+  # not participate in source-authority scanning on a subsequent build.
+  rm -rf -- "$chart/charts/lvm-localpv" "$chart/charts"/.lvm-volume-only-*
+fi
 python3 "$repo_root/.github/scripts/remote_content.py" prepare-chart --chart "$chart"
+
+if [[ "$(basename "$chart")" == lvm-storage-substrate ]]; then
+  dependency_dir="$chart/charts"
+  archive="$dependency_dir/lvm-localpv-1.10.0.tgz"
+  python3 "$repo_root/charts/scripts/prepare-volume-only-lvm-chart.py" "$archive" "$dependency_dir"
+  rm -f -- "$archive"
+  helm package "$dependency_dir/lvm-localpv" --destination "$dependency_dir" >/dev/null
+  rm -rf -- "$dependency_dir/lvm-localpv"
+fi

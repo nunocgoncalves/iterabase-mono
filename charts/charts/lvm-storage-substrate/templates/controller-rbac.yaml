@@ -1,7 +1,6 @@
-# DES-HOR-545-04: own the OpenEBS controller ServiceAccount and exact narrowed
-# roles in this wrapper. Upstream's combined snapshot role can mutate CRDs and
-# list/read Secrets even though the one managed snapshot class has no secret
-# parameters; those permissions are deliberately absent here.
+# DES-HOR-545-01: own the OpenEBS controller ServiceAccount and exact
+# volume-only role in this wrapper. The reviewed upstream chart combines volume
+# and unsupported snapshot authority, so its controller RBAC is disabled.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -51,7 +50,7 @@ rules:
     resources: ["pods"]
     verbs: ["get", "list", "watch", "update", "patch"]
   - apiGroups: ["local.openebs.io"]
-    resources: ["lvmvolumes", "lvmsnapshots", "lvmnodes"]
+    resources: ["lvmvolumes", "lvmnodes"]
     verbs: ["get", "list", "watch", "create", "delete", "update", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -68,53 +67,4 @@ subjects:
 roleRef:
   kind: ClusterRole
   name: openebs-lvm-provisioner-role
-  apiGroup: rbac.authorization.k8s.io
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: openebs-lvm-snapshotter-role
-  labels:
-    app.kubernetes.io/managed-by: {{ .Release.Service }}
-    app.kubernetes.io/instance: {{ .Release.Name }}
-rules:
-  - apiGroups: [""]
-    resources: ["persistentvolumes", "persistentvolumeclaims"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: ["storage.k8s.io"]
-    resources: ["storageclasses"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: [""]
-    resources: ["events"]
-    verbs: ["list", "watch", "create", "update", "patch"]
-  - apiGroups: ["snapshot.storage.k8s.io"]
-    resources: ["volumesnapshotclasses"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: ["snapshot.storage.k8s.io"]
-    resources: ["volumesnapshotcontents"]
-    verbs: ["create", "get", "list", "watch", "update", "delete", "patch"]
-  - apiGroups: ["snapshot.storage.k8s.io"]
-    resources: ["volumesnapshots"]
-    verbs: ["get", "list", "watch", "update", "patch"]
-  - apiGroups: ["snapshot.storage.k8s.io"]
-    resources: ["volumesnapshotcontents/status"]
-    verbs: ["update", "patch"]
-  - apiGroups: ["snapshot.storage.k8s.io"]
-    resources: ["volumesnapshots/status"]
-    verbs: ["update"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: openebs-lvm-snapshotter-binding
-  labels:
-    app.kubernetes.io/managed-by: {{ .Release.Service }}
-    app.kubernetes.io/instance: {{ .Release.Name }}
-subjects:
-  - kind: ServiceAccount
-    name: openebs-lvm-controller-sa
-    namespace: {{ .Release.Namespace }}
-roleRef:
-  kind: ClusterRole
-  name: openebs-lvm-snapshotter-role
   apiGroup: rbac.authorization.k8s.io

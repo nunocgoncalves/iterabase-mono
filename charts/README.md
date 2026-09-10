@@ -2,14 +2,14 @@
 
 > Canonical source: [`iterabase-mono/charts`](https://github.com/nunocgoncalves/iterabase-mono/tree/master/charts). The former standalone source repository is historical and read-only; the existing `ghcr.io/nunocgoncalves/iterabase-charts` package namespace remains the stable artifact identity.
 
-Helm charts for the [iterabase](https://iterabase.com) platform. The `cert-manager-substrate` release establishes certificate authority before the platform. The same-version `lvm-storage-substrate` release establishes content-pinned OpenEBS LVM LocalPV `1.10.0`, its volume/snapshot CRDs/controller/node CSI authority, the two managed non-default thick XFS/RWO classes, and the one non-default full-origin snapshot class. [Forge](https://github.com/nunocgoncalves/iterabase-mono/tree/master/forge) prepares only the exact receipt-bound `iterabase-data` VG and disables K3s local storage before either chart runs.
+Helm charts for the [iterabase](https://iterabase.com) platform. The `cert-manager-substrate` release establishes certificate authority before the platform. The same-version `lvm-storage-substrate` release establishes content-pinned OpenEBS LVM LocalPV `1.10.0`, its volume-only CRDs/controller/node CSI authority, and the two managed non-default thick XFS/RWO classes. Storage snapshot surfaces remain disabled. [Forge](https://github.com/nunocgoncalves/iterabase-mono/tree/master/forge) prepares only the exact receipt-bound `iterabase-data` VG and disables K3s local storage before either chart runs.
 
 ## Charts
 
 | Chart | Description | Released individually |
 |---|---|---|
 | `cert-manager-substrate` | Ordered certificate operator, CRDs, webhook, and CSI substrate | ✅, alongside platform |
-| `lvm-storage-substrate` | Pinned OpenEBS LVM LocalPV volume/snapshot CRDs/controllers/CSI plus exact managed storage and snapshot classes | ✅, alongside platform |
+| `lvm-storage-substrate` | Pinned OpenEBS LVM LocalPV volume-only CRDs/controller/node CSI plus exact managed storage classes | ✅, alongside platform |
 | `iterabase-platform` | Application umbrella — composes all platform components | ✅ |
 | `inference-gateway` | Model-access service | ✅ |
 | `control-plane` | Durable workflow/control APIs, operator, and immutable artifact service | ✅ |
@@ -25,7 +25,7 @@ control-plane ships standalone and is enabled in the umbrella by default (it pro
 ## Install
 
 Install the same-version certificate substrate first and wait for its webhook;
-install the same-version LVM storage substrate and wait for volume/snapshot CSI plus
+install the same-version LVM storage substrate and wait for volume-only CSI plus
 `iterabase-data` discovery; then install the platform. The gateway is the only public endpoint, served over
 HTTPS by the platform edge (ingress-nginx + cert-manager-issued leaves). The
 edge is always a **LoadBalancer** Service —
@@ -187,10 +187,12 @@ entry. K3s's `local-storage` component is disabled; no local-path provisioner,
 default class, or root-backed fallback is supported.
 
 The same-platform-version `lvm-storage-substrate` companion wraps the reviewed
-OpenEBS LVM LocalPV `1.10.0` volume/snapshot archive (SHA-256
+OpenEBS LVM LocalPV `1.10.0` archive (SHA-256
 `3ad766c56d4a0ab0f3f2baaeb726a4554d1f51bb485f1cef00846cf1d82a179d`),
-pins every runtime image by digest, disables analytics, configures K3s's actual
-`/var/lib/kubelet` CSI registration/mount root, and creates exactly:
+derives a fail-closed volume-only dependency by removing upstream snapshot
+surfaces, pins every required runtime image by digest, disables analytics,
+configures K3s's actual `/var/lib/kubelet` CSI registration/mount root, and
+creates exactly:
 
 - `iterabase-lvm-xfs`: `shared: no`, used explicitly by every chart-generated
   platform data PVC;
@@ -216,10 +218,9 @@ report aggregate VG pressure and pending-claim exhaustion.
 Direct Helm installation does not replace Forge's receipt/VG safety gate. The
 companion must observe the exact `iterabase-data` VG before the platform creates
 claims. Multi-node/HA, RWX, default/BYO classes, Longhorn, local-path, thin
-provisioning, expansion, adoption, and migration remain unsupported. The one explicit
-`iterabase-lvm-snapshot` class provides only full-origin thick node-local create/restore/delete;
-automatic snapshots, application consistency, retention/remote copy, backup/DR authority, and
-root fallback are unsupported.
+provisioning, expansion, adoption, migration, and every storage snapshot
+CRD/class/controller/sidecar/RBAC/image/lifecycle remain unsupported and absent.
+OPP-005 solely owns any future recovery mechanism.
 
 ### Private control-plane ingress
 

@@ -170,14 +170,14 @@ type Provisioner interface {
 	// InspectDataStorage runs the complete read-only set-wide identity/topology/
 	// in-use/partition/signature or receipt/PV/VG preflight used by dry-run/status.
 	InspectDataStorage(ctx context.Context, spec DataStorageSpec) (*DataStorageState, error)
-	// EnsureDataStorageTools installs/verifies lvm2 and XFS tooling and loads and
-	// persists dm-snapshot. It never touches a selected disk.
+	// EnsureDataStorageTools installs/verifies lvm2 and XFS tooling and converges
+	// the superseded dm-snapshot module/configuration to absence. It never touches a selected disk.
 	EnsureDataStorageTools(ctx context.Context) error
 	// ReconcileDataStorage repeats complete-set safety before every pvcreate and
 	// crash-resumably creates only receipt-bound PVs and iterabase-data.
 	ReconcileDataStorage(ctx context.Context, spec DataStorageSpec) (*DataStorageState, error)
-	// WaitForLVMStorageReady validates no local-path/default fallback exists and
-	// waits for exact volume/snapshot CRDs, controllers, CSI/classes, and VG discovery.
+	// WaitForLVMStorageReady validates no local-path/default/snapshot surface
+	// exists and waits for exact volume CRDs, controller/node, CSI/classes, and VG discovery.
 	WaitForLVMStorageReady(ctx context.Context, namespace string, host *DataStorageState) (*LVMStorageReadiness, error)
 	// ReadGPUReadiness returns one coherent ClusterPolicy/node observation,
 	// evaluated against the requested driver. Missing resources and transitional
