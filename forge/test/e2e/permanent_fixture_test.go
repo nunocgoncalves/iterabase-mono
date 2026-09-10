@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -228,7 +229,15 @@ func (fixture *permanentFixture) releaseDataStorageConsumers() error {
 		return fmt.Errorf("connect for pre-purge claim release: %w", err)
 	}
 	defer client.Close()
-	script := fmt.Sprintf(`sudo bash -ceu '
+	script := permanentFixtureConsumerReleaseScript(fixture.dataStorageDevice)
+	if output, err := sshOutput(client, script); err != nil {
+		return fmt.Errorf("release platform consumers/claims before explicit data-storage purge: %w\n%s", err, output)
+	}
+	return nil
+}
+
+func permanentFixtureConsumerReleaseScript(dataStorageDevice string) string {
+	return fmt.Sprintf(`sudo bash -ceu '
 data_storage_device=%s
 if ! command -v k3s >/dev/null 2>&1 || ! k3s kubectl get --raw=/readyz >/dev/null 2>&1; then exit 0; fi
 k3s kubectl delete kustomizations.kustomize.toolkit.fluxcd.io --all -A --ignore-not-found=true --wait=true --timeout=2m || true
@@ -247,7 +256,7 @@ if command -v helm >/dev/null 2>&1; then
     case "$release" in *-cert-manager|*-lvm-storage) continue ;; esac
     uninstall_output=
     if ! uninstall_output=$(KUBECONFIG=/etc/rancher/k3s/k3s.yaml helm uninstall "$release" -n iterabase-system --wait --timeout 5m 2>&1); then
-      scheduled_crd=$(printf '%%s\n' "$uninstall_output" | sed -n 's/^Error: uninstallation completed with 1 error(s): resource CustomResourceDefinition\/\/\([a-z0-9][a-z0-9.-]*\) still exists\. status: Terminating, message: Resource scheduled for deletion$/\1/p')
+      scheduled_crd=$(printf "%%s\n" "$uninstall_output" | sed -n "s/^Error: uninstallation completed with 1 error(s): resource CustomResourceDefinition\/\/\([a-z0-9][a-z0-9.-]*\) still exists\. status: Terminating, message: Resource scheduled for deletion$/\1/p")
       test -n "$scheduled_crd"
       expected_uninstall_error="Error: uninstallation completed with 1 error(s): resource CustomResourceDefinition//$scheduled_crd still exists. status: Terminating, message: Resource scheduled for deletion
 context deadline exceeded"
@@ -281,11 +290,7 @@ for i in $(seq 1 150); do
   sleep 2
 done
 exit 42
-'`, candidateShellQuote(fixture.dataStorageDevice))
-	if output, err := sshOutput(client, script); err != nil {
-		return fmt.Errorf("release platform consumers/claims before explicit data-storage purge: %w\n%s", err, output)
-	}
-	return nil
+'`, candidateShellQuote(dataStorageDevice))
 }
 
 func (fixture *permanentFixture) bootID() (string, error) {
@@ -419,6 +424,30 @@ func (fixture *permanentFixture) recordEvidence(name, before, after string, auth
 		evidence.ModelContentSHA256 = authority.SHA256
 	}
 	return sharede2e.RecordFixtureEvidence(evidence)
+}
+
+func TestPermanentFixtureConsumerReleaseScriptKeepsHelmFailureFailClosed(t *testing.T) {
+	script := permanentFixtureConsumerReleaseScript("/dev/disk/by-id/test-data-storage")
+	command := exec.Command("bash", "-n")
+	command.Stdin = strings.NewReader(script)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("consumer-release shell is invalid: %v\n%s", err, output)
+	}
+	for _, required := range []string{
+		"uninstallation completed with 1 error(s): resource CustomResourceDefinition//",
+		"status: Terminating, message: Resource scheduled for deletion",
+		"meta\\\\.helm\\\\.sh/release-name",
+		"meta\\\\.helm\\\\.sh/release-namespace",
+		"{.metadata.deletionTimestamp}",
+		`test -z "$(k3s kubectl get "$scheduled_crd" -A -o name)"`,
+	} {
+		if !strings.Contains(script, required) {
+			t.Fatalf("consumer-release shell lacks exact scheduled-CRD guard %q", required)
+		}
+	}
+	if strings.Contains(script, `helm uninstall "$release" -n iterabase-system --wait --timeout 5m || true`) {
+		t.Fatal("consumer-release shell must not broadly ignore Helm uninstall failures")
+	}
 }
 
 func TestPermanentFixtureCleanupCoversTransferredRunState(t *testing.T) {
