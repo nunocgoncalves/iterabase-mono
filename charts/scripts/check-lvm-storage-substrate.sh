@@ -13,7 +13,7 @@ certificate_version=$(chart_version "$certificates")
   exit 1
 }
 
-render=$(helm template release-lvm-storage "$substrate" -n iterabase-system \
+render=$(helm template release-lvm-storage "$substrate" -n iterabase-system --include-crds \
   --set-string agentpool.authorizedManagerIdentity=system:serviceaccount:iterabase-system:release-control-plane-manager)
 for crd in \
   lvmnodes.local.openebs.io lvmvolumes.local.openebs.io lvmsnapshots.local.openebs.io \
