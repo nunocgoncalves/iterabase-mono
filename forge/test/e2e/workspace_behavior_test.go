@@ -41,15 +41,15 @@ type workspaceModelStats struct {
 	CapacityWaiting int64 `json:"capacity_waiting"`
 }
 
-func refuseProcessHeldWorkspaceDiskStage(t *testing.T, state *permanentCPUFixtureState) {
+func refuseProcessHeldDataStorageDiskStage(t *testing.T, state *permanentCPUFixtureState) {
 	t.Helper()
 	client, err := sshDial(state.ip, state.privKeyPath)
 	if err != nil {
 		t.Fatalf("ssh dial %s: %v", state.ip, err)
 	}
 	defer client.Close()
-	const pidFile = "/tmp/forge-e2e-workspace-consumer.pid"
-	start := fmt.Sprintf(`sudo rm -f %[1]s; sudo nohup bash -c 'exec 9<>"$1"; printf "%%s\n" "$$" > "$2"; exec sleep 300' bash %[2]s %[1]s </dev/null >/tmp/forge-e2e-workspace-consumer.log 2>&1 &
+	const pidFile = "/tmp/forge-e2e-data-storage-consumer.pid"
+	start := fmt.Sprintf(`sudo rm -f %[1]s; sudo nohup bash -c 'exec 9<>"$1"; printf "%%s\n" "$$" > "$2"; exec sleep 300' bash %[2]s %[1]s </dev/null >/tmp/forge-e2e-data-storage-consumer.log 2>&1 &
 for i in $(seq 1 30); do test -s %[1]s && exit 0; sleep 1; done; exit 1`, pidFile, candidateShellQuote(state.dataStorageDevice))
 	if output, startErr := sshOutput(client, start); startErr != nil {
 		t.Fatalf("start raw-device consumer: %v\n%s", startErr, output)
@@ -76,7 +76,7 @@ rm -f %[1]s
 		t.Fatalf("Forge created a PV on a process-held raw data disk:\n%s", output)
 	}
 	if !strings.Contains(output, "held open as a raw block device") {
-		t.Fatalf("process-held raw workspace refusal was not actionable:\n%s", output)
+		t.Fatalf("process-held raw data-storage refusal was not actionable:\n%s", output)
 	}
 	unchanged := mustSSHOutput(t, client, fmt.Sprintf(`sudo bash -ceu '
 test ! -e /var/lib/iterabase/data-storage.receipt

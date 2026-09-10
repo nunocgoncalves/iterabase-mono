@@ -47,6 +47,23 @@ _FORBIDDEN_PROVIDER_TERMS = (
 )
 _FORBIDDEN_PROVIDER_RE = re.compile("|".join(_FORBIDDEN_PROVIDER_TERMS), re.IGNORECASE)
 
+# DES-HOR-545-01/02 superseded the old host-device/filesystem terminology while
+# preserving legitimate AgentPool workspace behavior and named scenario history.
+_FORBIDDEN_DATA_STORAGE_TERMS = (
+    "forge-e2e-" + "workspace-consumer",
+    "refuseProcessHeld" + "WorkspaceDiskStage",
+    "Rejects" + "WorkspaceCacheSubstitution",
+    "Forge workspace `" + "/dev/disk/by-id/",
+    "workspace signatures/" + "mount/receipt",
+    "filesystem UUID/" + "label",
+    "Forge mount/" + "receipt/fstab",
+    "alias the Forge " + "workspace",
+)
+_FORBIDDEN_DATA_STORAGE_RE = re.compile(
+    "|".join(re.escape(term) for term in _FORBIDDEN_DATA_STORAGE_TERMS),
+    re.IGNORECASE,
+)
+
 
 class E2EPlanTests(unittest.TestCase):
     @classmethod
@@ -1141,6 +1158,26 @@ class WorkflowContractTests(unittest.TestCase):
         for path in paths:
             with self.subTest(path=path.relative_to(ROOT)):
                 self.assertNotRegex(path.read_text(encoding="utf-8"), forbidden)
+
+    def test_active_data_storage_naming_excludes_superseded_device_terms(self) -> None:
+        paths = [
+            ROOT / ".github/scripts/test_e2e.py",
+            ROOT / "docs/release.md",
+            ROOT / "docs/runbooks/permanent-e2e-fixtures.md",
+            ROOT / "docs/architecture/v2-openebs-lvm-storage.md",
+            ROOT / "testkit/e2e/README.md",
+        ]
+        paths.extend(
+            path
+            for path in (ROOT / "forge/test/e2e").rglob("*")
+            if path.is_file() and (path.suffix in {".go", ".md"} or path.name == "Makefile")
+        )
+        for path in paths:
+            with self.subTest(path=path.relative_to(ROOT)):
+                self.assertNotRegex(
+                    path.read_text(encoding="utf-8"),
+                    _FORBIDDEN_DATA_STORAGE_RE,
+                )
 
     def test_workflows_use_one_planner_composer_and_result_validator(self) -> None:
         for workflow in ("e2e.yml", "release-candidate.yml"):
