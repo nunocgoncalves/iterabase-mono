@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -17,6 +18,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -128,6 +130,18 @@ type staticWorkspaceCapacityReader struct {
 func (r *staticWorkspaceCapacityReader) WorkspaceCapacityStatus(_ context.Context, poolKey string) (gateway.WorkspaceCapacityStatus, error) {
 	r.poolKey = poolKey
 	return r.status, r.err
+}
+
+type recordingWorkspaceStorageGate struct {
+	poolKeys  []string
+	decisions []bool
+	err       error
+}
+
+func (g *recordingWorkspaceStorageGate) SetAgentPoolStorageAuthorized(_ context.Context, poolKey string, authorized bool) error {
+	g.poolKeys = append(g.poolKeys, poolKey)
+	g.decisions = append(g.decisions, authorized)
+	return g.err
 }
 
 func TestWorkspaceCapacityConditionTransitionsPerPoolAndSurvivesReplacementBand(t *testing.T) {
@@ -254,6 +268,74 @@ func TestStorageObservationErrorFailsClosedWithoutAuthorizingQuiescence(t *testi
 	unsafe.ObservationUnknown = false
 	unsafe.ConfirmedUnsafe = true
 	assert.True(t, storageQuiescenceRequired(unsafe), "positively observed drift must quiesce")
+}
+
+func TestStorageObservationErrorWithdrawsDispatchAuthorizationWithoutDeletingWorkers(t *testing.T) {
+	pool := validAgentPool("pool", "iterabase-system")
+	pool.UID = types.UID("pool-uid")
+	pool.Finalizers = []string{agentPoolFinalizer}
+	pool.Status.Ready = true
+	pool.Status.ReadyReplicas = 1
+	pool.Status.Conditions = []metav1.Condition{{
+		Type: storageConditionOperationalReadinessReached, Status: metav1.ConditionTrue,
+		Reason: storageReasonOperationalReadinessReached, LastTransitionTime: metav1.Now(),
+	}}
+	worker := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "pool-worker-0", Namespace: pool.Namespace, Labels: poolLabels(pool)},
+		Status:     corev1.PodStatus{Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}},
+	}
+	objects := []client.Object{
+		pool,
+		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "platform-ca", Namespace: pool.Namespace}, Data: map[string][]byte{"tls.crt": []byte("c"), "tls.key": []byte("k")}},
+		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "graph-creds", Namespace: pool.Namespace}, Data: map[string][]byte{"token": []byte("v")}},
+		worker,
+	}
+	objects = append(objects, boundWorkspaceObjects(pool)...)
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, storagev1.AddToScheme(scheme))
+	require.NoError(t, v1alpha1.AddToScheme(scheme))
+	base := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&v1alpha1.AgentPool{}).WithObjects(objects...).Build()
+	injected := errors.New("cache transport unavailable")
+	queries := &storageQueryClient{
+		Client: base, getByKind: map[string]int{}, listByKind: map[string]int{},
+		failKind: "LVMVolume", failErr: injected,
+	}
+	gate := &recordingWorkspaceStorageGate{}
+	r := &AgentPoolReconciler{Client: queries, APIReader: base, Scheme: scheme, StorageGate: gate}
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: pool.Name, Namespace: pool.Namespace}})
+	require.ErrorIs(t, err, injected)
+	assert.Equal(t, []string{"iterabase-system/pool"}, gate.poolKeys)
+	assert.Equal(t, []bool{false}, gate.decisions, "unknown storage must close fresh dispatch credit")
+	var retained corev1.Pod
+	require.NoError(t, base.Get(context.Background(), types.NamespacedName{Name: worker.Name, Namespace: worker.Namespace}, &retained))
+}
+
+func TestHealthyStorageObservationAuthorizesDispatch(t *testing.T) {
+	pool := validAgentPool("pool", "iterabase-system")
+	pool.UID = types.UID("pool-uid")
+	pool.Finalizers = []string{agentPoolFinalizer}
+	objects := []client.Object{
+		pool,
+		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "platform-ca", Namespace: pool.Namespace}, Data: map[string][]byte{"tls.crt": []byte("c"), "tls.key": []byte("k")}},
+		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "graph-creds", Namespace: pool.Namespace}, Data: map[string][]byte{"token": []byte("v")}},
+	}
+	objects = append(objects, boundWorkspaceObjects(pool)...)
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, networkingv1.AddToScheme(scheme))
+	require.NoError(t, storagev1.AddToScheme(scheme))
+	require.NoError(t, v1alpha1.AddToScheme(scheme))
+	base := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&v1alpha1.AgentPool{}).WithObjects(objects...).Build()
+	gate := &recordingWorkspaceStorageGate{}
+	r := &AgentPoolReconciler{Client: base, APIReader: base, Scheme: scheme, StorageGate: gate}
+
+	result, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: pool.Name, Namespace: pool.Namespace}})
+	require.NoError(t, err)
+	assert.Equal(t, healthRequeueInterval, result.RequeueAfter)
+	assert.Equal(t, []string{"iterabase-system/pool"}, gate.poolKeys)
+	assert.Equal(t, []bool{true}, gate.decisions, "only a complete authoritative storage assessment may reopen fresh credit")
 }
 
 func TestAssessAgentPoolStorageRejectsCSIAndOpenEBSIdentityDrift(t *testing.T) {

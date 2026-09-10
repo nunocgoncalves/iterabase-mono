@@ -105,6 +105,10 @@ type AgentPoolReconciler struct {
 	// authorization materializer contract so isolated controller tests may
 	// supply only the capability under test.
 	CapacityReader WorkspaceCapacityReader
+	// StorageGate records whether the latest authoritative Kubernetes/OpenEBS
+	// assessment permits fresh dispatch credit. It does not quiesce workers or
+	// alter the independent capacity hysteresis state.
+	StorageGate WorkspaceStorageGate
 }
 
 // +kubebuilder:rbac:groups=platform.iterabase.com,resources=agentpools,verbs=get;list;watch;create;update;patch;delete
@@ -136,6 +140,22 @@ type PoolMaterializer interface {
 // durable per-AgentPool-PVC observation to the matching operator status.
 type WorkspaceCapacityReader interface {
 	WorkspaceCapacityStatus(ctx context.Context, poolKey string) (gateway.WorkspaceCapacityStatus, error)
+}
+
+// WorkspaceStorageGate is the existing Postgres bridge used to stop dispatch
+// from consuming a retained Ready credit while storage identity is unknown.
+type WorkspaceStorageGate interface {
+	SetAgentPoolStorageAuthorized(ctx context.Context, poolKey string, authorized bool) error
+}
+
+func (r *AgentPoolReconciler) setDispatchStorageAuthorized(ctx context.Context, pool *v1alpha1.AgentPool, authorized bool) error {
+	if r.StorageGate == nil {
+		return nil
+	}
+	if err := r.StorageGate.SetAgentPoolStorageAuthorized(ctx, agentPoolKey(pool), authorized); err != nil {
+		return fmt.Errorf("set AgentPool dispatch storage authorization: %w", err)
+	}
+	return nil
 }
 
 // Reconcile handles AgentPool create/update/delete events.
@@ -220,6 +240,13 @@ func (r *AgentPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	// Validate the fixed StorageClass before creating or mutating a claim. A
 	// missing/wrong/default/expandable class must fail without leaving a new PVC.
 	storage := r.assessAgentPoolStorage(ctx, &pool)
+	var storageGateErr error
+	if !storage.Ready {
+		storageGateErr = r.setDispatchStorageAuthorized(ctx, &pool, false)
+		if storageGateErr != nil {
+			storage.Message += fmt.Sprintf("; failed to withdraw fresh dispatch credit through the durable storage gate: %v", storageGateErr)
+		}
+	}
 	if !storage.CanMount {
 		// Unknown API/cache/transport observations withdraw readiness and credit but
 		// do not destructively delete healthy workers. Only positively observed
@@ -235,12 +262,16 @@ func (r *AgentPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		}
 		statusErr := r.patchStatus(ctx, &pool, false, 0, storage.Message, false, &storage)
 		if storage.ObservationUnknown {
-			return ctrl.Result{}, stderrors.Join(statusErr, fmt.Errorf("observe AgentPool storage: %w", storage.ObservationErr))
+			return ctrl.Result{}, stderrors.Join(statusErr, storageGateErr, fmt.Errorf("observe AgentPool storage: %w", storage.ObservationErr))
 		}
 		if storageQuiescenceRequired(storage) {
-			return ctrl.Result{RequeueAfter: healthRequeueInterval}, stderrors.Join(statusErr, r.quiesceWorkers(ctx, &pool))
+			return ctrl.Result{RequeueAfter: healthRequeueInterval}, stderrors.Join(statusErr, storageGateErr, r.quiesceWorkers(ctx, &pool))
 		}
-		return ctrl.Result{RequeueAfter: healthRequeueInterval}, statusErr
+		return ctrl.Result{RequeueAfter: healthRequeueInterval}, stderrors.Join(statusErr, storageGateErr)
+	}
+	if storageGateErr != nil {
+		statusErr := r.patchStatus(ctx, &pool, false, 0, storage.Message, false, &storage)
+		return ctrl.Result{}, stderrors.Join(statusErr, storageGateErr)
 	}
 	if err := r.ensurePVC(ctx, &pool); err != nil {
 		var mutationErr *agentPoolStorageMutationError
@@ -254,12 +285,16 @@ func (r *AgentPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			if hadWorkers {
 				assessment.Message += "; scheduling credit was removed before worker quiescing, and recovery requires a reviewed storage migration or a corrected declarative value without automatic turn/effect replay"
 			}
+			gateErr := r.setDispatchStorageAuthorized(ctx, &pool, false)
+			if gateErr != nil {
+				assessment.Message += fmt.Sprintf("; failed to withdraw fresh dispatch credit through the durable storage gate: %v", gateErr)
+			}
 			// Publish the fail-closed condition independently of pod deletion. A
 			// transient list/delete error must not leave Ready or StorageReady=True
 			// visible while the immutable storage mutation is being rejected.
 			statusErr := r.patchStatus(ctx, &pool, false, 0, assessment.Message, true, assessment)
 			quiesceErr := r.quiesceWorkers(ctx, &pool)
-			if err := stderrors.Join(statusErr, quiesceErr); err != nil {
+			if err := stderrors.Join(statusErr, gateErr, quiesceErr); err != nil {
 				return ctrl.Result{}, err
 			}
 			return ctrl.Result{}, nil
@@ -305,6 +340,11 @@ func (r *AgentPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		} else {
 			msg = "storage predicates pass; waiting for worker pods to mount, validate root ownership/mode, and become Ready"
 		}
+	}
+	if err := r.setDispatchStorageAuthorized(ctx, &pool, storage.Ready); err != nil {
+		msg += fmt.Sprintf("; failed to publish the durable fresh-credit storage gate: %v", err)
+		statusErr := r.patchStatus(ctx, &pool, false, readyReplicas, msg, false, &storage)
+		return ctrl.Result{}, stderrors.Join(statusErr, err)
 	}
 	if err := r.patchStatus(ctx, &pool, ready, readyReplicas, msg, true, &storage); err != nil {
 		return ctrl.Result{}, err

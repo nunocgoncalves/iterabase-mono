@@ -95,6 +95,13 @@ func TestMigrations(t *testing.T) {
 	var workspaceGateCount int
 	require.NoError(t, pool.QueryRow(ctx, `SELECT count(*) FROM runtime.workspace_capacity_state`).Scan(&workspaceGateCount))
 	assert.Zero(t, workspaceGateCount)
+	var storageAuthorizedNullable, storageAuthorizedDefault string
+	require.NoError(t, pool.QueryRow(ctx, `
+		SELECT is_nullable, column_default FROM information_schema.columns
+		WHERE table_schema='runtime' AND table_name='workspace_capacity_state' AND column_name='storage_authorized'`).Scan(
+		&storageAuthorizedNullable, &storageAuthorizedDefault))
+	assert.Equal(t, "NO", storageAuthorizedNullable)
+	assert.Equal(t, "false", storageAuthorizedDefault, "fresh pools must start unauthorized for dispatch")
 
 	// HOR-489: fresh installs grant only the durable workload-authorization
 	// reads. A migration-22 OPO1 database already has this exact ACL, so moving

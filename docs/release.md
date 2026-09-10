@@ -162,7 +162,7 @@ and skipped; conflicts fail closed.
 ## Permanent fixtures and incomplete candidates
 
 Every selected F3 scenario is mandatory. Candidate execution uses the same fixed
-CPU/GPU addresses, pinned SSH identities, workspace devices, explicit
+CPU/GPU addresses, pinned SSH identities, data-storage devices, explicit
 pre/post-test purge/reboot lifecycle, and GPU model-cache authority as source
 execution. The active scenario IDs are `forge/permanent-fixture-cpu`,
 `forge/permanent-fixture-cpu-workspace`, and
