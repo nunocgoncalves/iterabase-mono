@@ -54,6 +54,9 @@ const workspaceCapacityObservationFreshness = time.Minute
 type agentPoolStorageAssessment struct {
 	Ready              bool
 	CanMount           bool
+	ConfirmedUnsafe    bool
+	ObservationUnknown bool
+	ObservationErr     error
 	Reason             string
 	Message            string
 	Mode               string
@@ -61,6 +64,10 @@ type agentPoolStorageAssessment struct {
 	PVName             string
 	VolumeHandle       string
 	ReplacementPending bool
+}
+
+func storageQuiescenceRequired(assessment agentPoolStorageAssessment) bool {
+	return assessment.ConfirmedUnsafe && !assessment.ObservationUnknown
 }
 
 // assessAgentPoolStorage validates the fixed chart-owned OpenEBS LVM contract.
@@ -74,6 +81,7 @@ func (r *AgentPoolReconciler) assessAgentPoolStorage(ctx context.Context, pool *
 		Mode: storageModeOpenEBSLVMRWO, ClassName: pool.Spec.Sandbox.StorageClassName,
 	}
 	if assessment.ClassName != agentPoolWorkspaceStorageClass || pool.Spec.Sandbox.AccessMode != corev1.ReadWriteOnce {
+		assessment.ConfirmedUnsafe = true
 		assessment.Reason = storageReasonClassMismatch
 		assessment.Message = fmt.Sprintf("AgentPool storage must remain class=%s access=ReadWriteOnce (observed class=%s access=%s); alternate/default/RWX storage has no V2 fallback", agentPoolWorkspaceStorageClass, assessment.ClassName, pool.Spec.Sandbox.AccessMode)
 		return assessment
@@ -82,13 +90,18 @@ func (r *AgentPoolReconciler) assessAgentPoolStorage(ctx context.Context, pool *
 	var class storagev1.StorageClass
 	if err := r.Get(ctx, types.NamespacedName{Name: assessment.ClassName}, &class); err != nil {
 		assessment.Reason = storageReasonClassMissing
-		assessment.Message = fmt.Sprintf("StorageClass %q is unavailable; reapply the pinned LVM storage substrate before reconciling AgentPools", assessment.ClassName)
-		if !errors.IsNotFound(err) {
+		if errors.IsNotFound(err) {
+			assessment.ConfirmedUnsafe = true
+			assessment.Message = fmt.Sprintf("StorageClass %q is unavailable; reapply the pinned LVM storage substrate before reconciling AgentPools", assessment.ClassName)
+		} else {
+			assessment.ObservationUnknown = true
+			assessment.ObservationErr = err
 			assessment.Message = fmt.Sprintf("read StorageClass %q: %v", assessment.ClassName, err)
 		}
 		return assessment
 	}
 	if failure := validateAgentPoolStorageClass(&class); failure != "" {
+		assessment.ConfirmedUnsafe = true
 		assessment.Reason = storageReasonClassMismatch
 		assessment.Message = failure
 		return assessment
@@ -99,7 +112,14 @@ func (r *AgentPoolReconciler) assessAgentPoolStorage(ctx context.Context, pool *
 	pvcName := sandboxPVCName(pool)
 	if err := r.Get(ctx, types.NamespacedName{Namespace: pool.Namespace, Name: pvcName}, &pvc); err != nil {
 		assessment.Reason = storageReasonPVCProvisioning
-		assessment.Message = fmt.Sprintf("PVC %s/%s has not been created yet", pool.Namespace, pvcName)
+		if errors.IsNotFound(err) {
+			assessment.Message = fmt.Sprintf("PVC %s/%s has not been created yet", pool.Namespace, pvcName)
+		} else {
+			assessment.CanMount = false
+			assessment.ObservationUnknown = true
+			assessment.ObservationErr = err
+			assessment.Message = fmt.Sprintf("read PVC %s/%s: %v", pool.Namespace, pvcName, err)
+		}
 		return assessment
 	}
 	pvcVolumeMode := corev1.PersistentVolumeFilesystem
@@ -108,6 +128,7 @@ func (r *AgentPoolReconciler) assessAgentPoolStorage(ctx context.Context, pool *
 	}
 	if pvc.Spec.StorageClassName == nil || *pvc.Spec.StorageClassName != assessment.ClassName || len(pvc.Spec.AccessModes) != 1 || pvc.Spec.AccessModes[0] != corev1.ReadWriteOnce || pvc.Spec.VolumeMode == nil || pvcVolumeMode != corev1.PersistentVolumeFilesystem {
 		assessment.CanMount = false
+		assessment.ConfirmedUnsafe = true
 		assessment.Reason = storageReasonClassMismatch
 		assessment.Message = fmt.Sprintf("PVC %s/%s must retain class=%s access=ReadWriteOnce volumeMode=Filesystem; bound identity changes require explicit settlement and recreation", pool.Namespace, pvcName, assessment.ClassName)
 		return assessment
@@ -149,16 +170,26 @@ func (r *AgentPoolReconciler) assessAgentPoolStorage(ctx context.Context, pool *
 		assessment.CanMount = false
 		assessment.Reason = storageReasonPVCUnavailable
 		assessment.Message = fmt.Sprintf("bound PVC %s/%s references unavailable PV %q: %v", pool.Namespace, pvcName, assessment.PVName, err)
+		if errors.IsNotFound(err) {
+			assessment.ConfirmedUnsafe = true
+		} else {
+			assessment.ObservationUnknown = true
+			assessment.ObservationErr = err
+		}
 		return assessment
 	}
 	if failure := validateAgentPoolPV(&pv, assessment.ClassName); failure != "" {
 		assessment.CanMount = false
+		assessment.ConfirmedUnsafe = true
 		assessment.Reason = storageReasonPVCUnavailable
 		assessment.Message = failure
 		return assessment
 	}
-	if failure := r.validateAgentPoolLVMVolume(ctx, &pv); failure != "" {
+	if failure, unknown, err := r.validateAgentPoolLVMVolume(ctx, pool.Namespace, &pv); failure != "" {
 		assessment.CanMount = false
+		assessment.ConfirmedUnsafe = !unknown
+		assessment.ObservationUnknown = unknown
+		assessment.ObservationErr = err
 		assessment.Reason = storageReasonPVCUnavailable
 		assessment.Message = failure
 		return assessment
@@ -166,6 +197,7 @@ func (r *AgentPoolReconciler) assessAgentPoolStorage(ctx context.Context, pool *
 	pvCapacity := pv.Spec.Capacity[corev1.ResourceStorage]
 	if pvCapacity.Cmp(requested) < 0 {
 		assessment.CanMount = false
+		assessment.ConfirmedUnsafe = true
 		assessment.Reason = storageReasonCapacity
 		assessment.Message = fmt.Sprintf("PV %s planning capacity %s is below PVC request %s", pv.Name, pvCapacity.String(), requested.String())
 		return assessment
@@ -222,24 +254,15 @@ func validateAgentPoolPV(pv *corev1.PersistentVolume, className string) string {
 }
 
 //nolint:gocyclo // exact OpenEBS identity predicates retain distinct actionable failures.
-func (r *AgentPoolReconciler) validateAgentPoolLVMVolume(ctx context.Context, pv *corev1.PersistentVolume) string {
-	volumes := &unstructured.UnstructuredList{}
-	volumes.SetGroupVersionKind(schema.GroupVersionKind{Group: "local.openebs.io", Version: "v1alpha1", Kind: "LVMVolumeList"})
-	if err := r.List(ctx, volumes); err != nil {
-		return fmt.Sprintf("list OpenEBS LVMVolumes for PV %s: %v", pv.Name, err)
-	}
-	var volume *unstructured.Unstructured
-	for i := range volumes.Items {
-		if volumes.Items[i].GetName() != pv.Spec.CSI.VolumeHandle {
-			continue
+func (r *AgentPoolReconciler) validateAgentPoolLVMVolume(ctx context.Context, namespace string, pv *corev1.PersistentVolume) (failure string, observationUnknown bool, observationErr error) {
+	volume := &unstructured.Unstructured{}
+	volume.SetGroupVersionKind(schema.GroupVersionKind{Group: "local.openebs.io", Version: "v1alpha1", Kind: "LVMVolume"})
+	if err := r.Get(ctx, types.NamespacedName{Namespace: namespace, Name: pv.Spec.CSI.VolumeHandle}, volume); err != nil {
+		message := fmt.Sprintf("PV %s OpenEBS LVMVolume %s is unavailable: %v", pv.Name, pv.Spec.CSI.VolumeHandle, err)
+		if errors.IsNotFound(err) {
+			return message, false, nil
 		}
-		if volume != nil {
-			return fmt.Sprintf("OpenEBS volume handle %s is ambiguous across namespaces", pv.Spec.CSI.VolumeHandle)
-		}
-		volume = &volumes.Items[i]
-	}
-	if volume == nil {
-		return fmt.Sprintf("PV %s OpenEBS LVMVolume %s is unavailable", pv.Name, pv.Spec.CSI.VolumeHandle)
+		return message, true, err
 	}
 	volGroup, _, _ := unstructured.NestedString(volume.Object, "spec", "volGroup")
 	vgPattern, _, _ := unstructured.NestedString(volume.Object, "spec", "vgPattern")
@@ -248,41 +271,39 @@ func (r *AgentPoolReconciler) validateAgentPoolLVMVolume(ctx context.Context, pv
 	ownerNode, _, _ := unstructured.NestedString(volume.Object, "spec", "ownerNodeID")
 	state, _, _ := unstructured.NestedString(volume.Object, "status", "state")
 	if volGroup != agentPoolWorkspaceVolumeGroup || vgPattern != "^iterabase-data$" || shared != "yes" || thin != "no" || ownerNode == "" || state != "Ready" {
-		return fmt.Sprintf("LVMVolume %s/%s must be Ready thick shared=yes vg=%s pattern=^iterabase-data$ with one owner node (observed state=%s vg=%s pattern=%s shared=%s thin=%s node=%s)", volume.GetNamespace(), volume.GetName(), agentPoolWorkspaceVolumeGroup, state, volGroup, vgPattern, shared, thin, ownerNode)
+		return fmt.Sprintf("LVMVolume %s/%s must be Ready thick shared=yes vg=%s pattern=^iterabase-data$ with one owner node (observed state=%s vg=%s pattern=%s shared=%s thin=%s node=%s)", volume.GetNamespace(), volume.GetName(), agentPoolWorkspaceVolumeGroup, state, volGroup, vgPattern, shared, thin, ownerNode), false, nil
 	}
 	if !pvHasExactNodeTopology(pv, ownerNode) {
-		return fmt.Sprintf("PV %s node topology does not match LVMVolume owner node %s", pv.Name, ownerNode)
+		return fmt.Sprintf("PV %s node topology does not match LVMVolume owner node %s", pv.Name, ownerNode), false, nil
 	}
 
-	nodes := &unstructured.UnstructuredList{}
-	nodes.SetGroupVersionKind(schema.GroupVersionKind{Group: "local.openebs.io", Version: "v1alpha1", Kind: "LVMNodeList"})
-	if err := r.List(ctx, nodes, client.InNamespace(volume.GetNamespace())); err != nil {
-		return fmt.Sprintf("list OpenEBS LVMNodes for volume %s: %v", volume.GetName(), err)
+	node := &unstructured.Unstructured{}
+	node.SetGroupVersionKind(schema.GroupVersionKind{Group: "local.openebs.io", Version: "v1alpha1", Kind: "LVMNode"})
+	if err := r.Get(ctx, types.NamespacedName{Namespace: volume.GetNamespace(), Name: ownerNode}, node); err != nil {
+		message := fmt.Sprintf("OpenEBS LVMNode %s is unavailable in namespace %s: %v", ownerNode, volume.GetNamespace(), err)
+		if errors.IsNotFound(err) {
+			return message, false, nil
+		}
+		return message, true, err
 	}
-	for i := range nodes.Items {
-		if nodes.Items[i].GetName() != ownerNode {
+	groups, found, err := unstructured.NestedSlice(node.Object, "volumeGroups")
+	if err != nil || !found {
+		return fmt.Sprintf("LVMNode %s/%s has no readable volumeGroups", node.GetNamespace(), ownerNode), false, nil
+	}
+	for _, raw := range groups {
+		group, ok := raw.(map[string]any)
+		if !ok || group["name"] != agentPoolWorkspaceVolumeGroup {
 			continue
 		}
-		groups, found, err := unstructured.NestedSlice(nodes.Items[i].Object, "volumeGroups")
-		if err != nil || !found {
-			return fmt.Sprintf("LVMNode %s/%s has no readable volumeGroups", nodes.Items[i].GetNamespace(), ownerNode)
+		uuid, _ := group["uuid"].(string)
+		missing := nestedNumber(group["missingPvCount"])
+		thinPools, _ := group["thinPools"].([]any)
+		if uuid == "" || missing != 0 || len(thinPools) != 0 {
+			return fmt.Sprintf("LVMNode %s/%s VG %s must have a UUID, no missing PVs, and no thin pools", node.GetNamespace(), ownerNode, agentPoolWorkspaceVolumeGroup), false, nil
 		}
-		for _, raw := range groups {
-			group, ok := raw.(map[string]any)
-			if !ok || group["name"] != agentPoolWorkspaceVolumeGroup {
-				continue
-			}
-			uuid, _ := group["uuid"].(string)
-			missing := nestedNumber(group["missingPvCount"])
-			thinPools, _ := group["thinPools"].([]any)
-			if uuid == "" || missing != 0 || len(thinPools) != 0 {
-				return fmt.Sprintf("LVMNode %s/%s VG %s must have a UUID, no missing PVs, and no thin pools", nodes.Items[i].GetNamespace(), ownerNode, agentPoolWorkspaceVolumeGroup)
-			}
-			return ""
-		}
-		return fmt.Sprintf("LVMNode %s/%s does not report VG %s", nodes.Items[i].GetNamespace(), ownerNode, agentPoolWorkspaceVolumeGroup)
+		return "", false, nil
 	}
-	return fmt.Sprintf("OpenEBS LVMNode %s is unavailable in namespace %s", ownerNode, volume.GetNamespace())
+	return fmt.Sprintf("LVMNode %s/%s does not report VG %s", node.GetNamespace(), ownerNode, agentPoolWorkspaceVolumeGroup), false, nil
 }
 
 // OpenEBS publishes PV accessible topology with its driver key; the additional

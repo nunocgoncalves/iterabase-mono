@@ -65,8 +65,10 @@ bind exact planned-UUID PVs, a unique ownership tag, and the fixed thick VG name
 `iterabase-data` before mutation. Forge creates the VG atomically with that tag
 and LVM-generated UUID, then fsyncs the observed UUID before any handoff.
 Reconcile, status, and purge accept only the receipt-matching tag/device/PV/VG
-set. Forge creates no platform LV, filesystem, mount, or fstab entry; those
-belong to chart-owned OpenEBS LVM LocalPV dynamic PVC lifecycle.
+set. Purge records durable intent/completion around VG, each PV, and receipt
+removal so interruption resumes exactly. Forge creates no platform LV,
+filesystem, mount, or fstab entry; those belong to chart-owned OpenEBS LVM
+LocalPV dynamic PVC and explicit local snapshot lifecycle.
 
 K3s is installed with `local-storage` disabled. Forge installs the same-version
 `cert-manager-substrate` and `lvm-storage-substrate` companions before the

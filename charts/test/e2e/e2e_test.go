@@ -54,8 +54,18 @@ func chartScenarioMetadata(name, description, makeTarget string, minutes int, re
 		Name: name, Description: description, Tier: tier,
 		References: references, ReleaseTargets: targets, RequiredArtifacts: artifacts,
 		Intents:      []sharede2e.ExecutionIntent{sharede2e.IntentPR, sharede2e.IntentCandidate},
-		FixtureModes: []sharede2e.FixtureMode{sharede2e.FixtureSource, sharede2e.FixtureCandidate, sharede2e.FixturePublished},
+		FixtureModes: []sharede2e.FixtureMode{sharede2e.FixtureSource, sharede2e.FixtureCandidate},
 		MakeTarget:   makeTarget, TimeoutMinutes: minutes,
+	}
+}
+
+func TestCurrentChartScenarioDoesNotAdvertiseIncompletePublishedLVMRuntime(t *testing.T) {
+	metadata := chartScenarioMetadata("fresh-install", "test", "test-e2e-install", 45, nil, nil)
+	if slices.Contains(metadata.FixtureModes, sharede2e.FixturePublished) {
+		t.Fatal("current chart scenarios advertise published mode before a same-version LVM storage companion exists")
+	}
+	if !slices.Contains(metadata.FixtureModes, sharede2e.FixtureSource) || !slices.Contains(metadata.FixtureModes, sharede2e.FixtureCandidate) {
+		t.Fatalf("current chart fixture modes lost source/candidate coverage: %v", metadata.FixtureModes)
 	}
 }
 

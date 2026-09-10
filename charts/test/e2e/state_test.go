@@ -48,6 +48,10 @@ func lvmStorageContract() kindcluster.LVMStorageContract {
 			{Name: PlatformDataStorageClass, Shared: false},
 			{Name: AgentPoolWorkspaceStorageClass, Shared: true},
 		},
+		SnapshotClassName:           "iterabase-lvm-snapshot",
+		SnapshotSize:                "100%",
+		SnapshotterContainer:        "csi-snapshotter",
+		SnapshotControllerContainer: "snapshot-controller",
 	}
 }
 
@@ -157,9 +161,8 @@ func resolveCharts(t *testing.T, _ string) (kube.Chart, kube.Chart, kube.Chart) 
 		lvmSubstrate := filepath.Join(filepath.Dir(platform), "lvm-storage-substrate")
 		return kube.Chart{Mode: mode, LocalPath: platform}, kube.Chart{Mode: mode, LocalPath: substrate}, kube.Chart{Mode: mode, LocalPath: lvmSubstrate}
 	case sharede2e.FixturePublished:
-		version := publishedPlatformVersion(t)
-		return kube.Chart{Mode: mode, Reference: "oci://ghcr.io/nunocgoncalves/iterabase-charts/iterabase-platform", Version: version},
-			kube.Chart{Mode: mode, Reference: "oci://ghcr.io/nunocgoncalves/iterabase-charts/cert-manager-substrate", Version: version}, kube.Chart{}
+		t.Fatal("current chart scenarios do not advertise published mode until the same-version LVM storage companion is published")
+		return kube.Chart{}, kube.Chart{}, kube.Chart{}
 	default:
 		t.Fatalf("unsupported charts fixture mode %q", mode)
 		return kube.Chart{}, kube.Chart{}, kube.Chart{}
@@ -475,13 +478,40 @@ func (state *chartState) installSubstrate(t *testing.T, valueFiles ...string) {
 
 func (state *chartState) installLVMStorage(t *testing.T) {
 	t.Helper()
-	if state.lvmStorageReady || state.lvmSubstrate.LocalPath == "" {
+	if state.lvmStorageReady {
 		return
 	}
 	if err := state.cluster.ConfigureLVMStorage(state.ctx, state.lvmSubstrate.LocalPath, testNamespace, testRelease+"-lvm-storage", lvmStorageContract()); err != nil {
 		t.Fatalf("install exact Kind OpenEBS LVM storage substrate: %v", err)
 	}
+	state.assertNarrowSnapshotRBAC(t)
 	state.lvmStorageReady = true
+}
+
+func (state *chartState) assertNarrowSnapshotRBAC(t *testing.T) {
+	t.Helper()
+	as := "--as=system:serviceaccount:" + testNamespace + ":openebs-lvm-controller-sa"
+	for _, check := range []struct {
+		verb, resource string
+		allNamespaces  bool
+		want           string
+	}{
+		{verb: "list", resource: "secrets", allNamespaces: true, want: "no"},
+		{verb: "get", resource: "secrets", want: "no"},
+		{verb: "create", resource: "customresourcedefinitions.apiextensions.k8s.io", want: "no"},
+		{verb: "delete", resource: "customresourcedefinitions.apiextensions.k8s.io", want: "no"},
+		{verb: "get", resource: "volumesnapshotclasses.snapshot.storage.k8s.io", want: "yes"},
+	} {
+		args := []string{"auth", "can-i", check.verb, check.resource, as}
+		if check.allNamespaces {
+			args = append(args, "--all-namespaces")
+		} else {
+			args = append(args, "-n", testNamespace)
+		}
+		if got := strings.TrimSpace(state.kubectl(t, 30*time.Second, args...)); got != check.want {
+			t.Fatalf("snapshot controller RBAC can-i %s %s = %q, want %q", check.verb, check.resource, got, check.want)
+		}
+	}
 }
 
 func (state *chartState) installPlatform(t *testing.T, timeout time.Duration, valueFiles ...string) {

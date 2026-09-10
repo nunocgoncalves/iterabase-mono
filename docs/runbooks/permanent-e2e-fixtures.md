@@ -32,7 +32,7 @@ active selector, catalogue, plan, result, or release authority.
   guarantee.
 - The founder alone provisions, quarantines, power-cycles, rescues, reimages,
   replaces, or deletes fixtures through the provider.
-- The CPU and GPU Forge workspace disks contain disposable test state. The GPU
+- The CPU and GPU Forge data-storage disks contain disposable test state. The GPU
   model-cache disk contains only the reviewed public model below. No customer
   secrets or data may be placed on any fixture disk.
 
@@ -94,7 +94,7 @@ verifies that the rendered master/worker image is
 `-resync-period=30s` before accepting the scenario.
 
 The GPU host additionally receives a second non-root whole disk, physically and
-logically distinct from the Forge workspace disk:
+logically distinct from the Forge data-storage disk:
 
 ```bash
 # Example only: substitute the founder-verified model-cache by-id device.
@@ -131,7 +131,7 @@ Set these repository **variables** from founder-verified values:
 | `FORGE_E2E_CPU_ADDRESS` | `FORGE_E2E_GPU_ADDRESS` |
 | `FORGE_E2E_CPU_SSH_USER` | `FORGE_E2E_GPU_SSH_USER` |
 | `FORGE_E2E_CPU_SSH_HOST_KEY` | `FORGE_E2E_GPU_SSH_HOST_KEY` |
-| `FORGE_E2E_CPU_WORKSPACE_DEVICE` | `FORGE_E2E_GPU_WORKSPACE_DEVICE` |
+| `FORGE_E2E_CPU_DATA_STORAGE_DEVICE` | `FORGE_E2E_GPU_DATA_STORAGE_DEVICE` |
 | — | `FORGE_E2E_GPU_MODEL_CACHE_DEVICE` |
 | — | `FORGE_E2E_GPU_MODEL_CACHE_UUID` |
 
@@ -242,7 +242,7 @@ If SSH, purge, or reboot cannot recover the host:
    host key, and (GPU) separately mounted/cache-verified public model.
 6. Run the next selected required PR or candidate lifecycle for that capacity
    before resuming unrelated changes. Record source SHA, workflow/job, boot IDs,
-   workspace identity, and model revision/hash in the operational ticket.
+   data-storage identity, and model revision/hash in the operational ticket.
 
 Never attach customer disks, restore customer snapshots, or copy customer data
 to a fixture.

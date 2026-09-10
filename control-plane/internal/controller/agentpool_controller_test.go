@@ -17,6 +17,7 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -492,11 +493,14 @@ func TestAgentPoolTransientSecretReadRecovery(t *testing.T) {
 	recorder.mu.Unlock()
 
 	// Once the API reader recovers, the same generation installs its finalizer
-	// and then materializes exactly once rather than being skipped by the gate.
+	// and materializes idempotently while the one-assessment passes observe the
+	// newly created PVC rather than being skipped by the generation gate.
 	result, err = r.Reconcile(ctx, req)
 	require.NoError(t, err)
 	assert.True(t, result.Requeue)
 	_, err = r.Reconcile(ctx, req)
+	require.NoError(t, err)
+	_, err = r.Reconcile(ctx, req) // observe the PVC created by the prior single-assessment pass
 	require.NoError(t, err)
 
 	var recovered v1alpha1.AgentPool
@@ -504,8 +508,9 @@ func TestAgentPoolTransientSecretReadRecovery(t *testing.T) {
 	assert.Equal(t, int64(9), recovered.Status.ObservedGeneration)
 	assert.True(t, recovered.Status.Ready)
 	recorder.mu.Lock()
-	require.Len(t, recorder.calls, 1)
+	require.Len(t, recorder.calls, 2)
 	assert.Equal(t, "default/transient-secret-read", recorder.calls[0].key)
+	assert.Equal(t, recorder.calls[0].key, recorder.calls[1].key)
 	recorder.mu.Unlock()
 }
 
@@ -553,6 +558,8 @@ func TestAgentPoolLateSecretRecovery(t *testing.T) {
 	assert.True(t, result.Requeue)
 	_, err = r.Reconcile(ctx, req)
 	require.NoError(t, err)
+	_, err = r.Reconcile(ctx, req) // observe the PVC created by the prior single-assessment pass
+	require.NoError(t, err)
 
 	var recovered v1alpha1.AgentPool
 	require.NoError(t, c.Get(ctx, req.NamespacedName, &recovered))
@@ -561,8 +568,9 @@ func TestAgentPoolLateSecretRecovery(t *testing.T) {
 	assert.Equal(t, pool.UID, recovered.UID)
 	assert.Equal(t, int64(7), recovered.Generation)
 	recorder.mu.Lock()
-	require.Len(t, recorder.calls, 1)
+	require.Len(t, recorder.calls, 2)
 	assert.Equal(t, "default/late-secret-pool", recorder.calls[0].key)
+	assert.Equal(t, recorder.calls[0].key, recorder.calls[1].key)
 	require.Len(t, recorder.calls[0].grants, 1)
 	require.Len(t, recorder.calls[0].bindings, 1)
 	recorder.mu.Unlock()
@@ -1024,4 +1032,63 @@ func TestAgentPoolLVMSizeMutationPreservesPVC(t *testing.T) {
 		return pvc.UID == firstUID && current.Cmp(resource.MustParse("10Gi")) == 0 &&
 			strings.Contains(got.Status.Message, "size is immutable")
 	}, 15*time.Second, 200*time.Millisecond, "PVC must not be recreated or expanded; the immutable size error is surfaced")
+}
+
+type quiesceFailureClient struct {
+	client.Client
+	statusPatched bool
+}
+
+func (c *quiesceFailureClient) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	if _, ok := list.(*corev1.PodList); ok {
+		return fmt.Errorf("worker list unavailable")
+	}
+	return c.Client.List(ctx, list, opts...)
+}
+
+func (c *quiesceFailureClient) Status() client.SubResourceWriter {
+	return &recordingStatusWriter{SubResourceWriter: c.Client.Status(), patched: &c.statusPatched}
+}
+
+type recordingStatusWriter struct {
+	client.SubResourceWriter
+	patched *bool
+}
+
+func (w *recordingStatusWriter) Patch(ctx context.Context, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+	*w.patched = true
+	return w.SubResourceWriter.Patch(ctx, obj, patch, opts...)
+}
+
+func TestAgentPoolPublishesFailClosedStatusBeforeQuiesceFailure(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, clientgoscheme.AddToScheme(scheme))
+	require.NoError(t, v1alpha1.AddToScheme(scheme))
+	pool := validAgentPool("quiesce-order", "default")
+	pool.Finalizers = []string{agentPoolFinalizer}
+	pool.Status.Ready = true
+	pool.Status.ReadyReplicas = 1
+	pool.Status.Conditions = []metav1.Condition{{
+		Type: storageConditionOperationalReadinessReached, Status: metav1.ConditionTrue,
+		Reason: storageReasonOperationalReadinessReached, LastTransitionTime: metav1.Now(),
+	}}
+	badClass := lvmAgentPoolClass()
+	badClass.Provisioner = "foreign.example"
+	base := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&v1alpha1.AgentPool{}).WithObjects(
+		pool,
+		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "platform-ca", Namespace: "default"}, Data: map[string][]byte{"tls.crt": []byte("c"), "tls.key": []byte("k")}},
+		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "graph-creds", Namespace: "default"}, Data: map[string][]byte{"token": []byte("v")}},
+		badClass,
+	).Build()
+	observed := &quiesceFailureClient{Client: base}
+	r := &AgentPoolReconciler{Client: observed, APIReader: base, Scheme: scheme}
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: pool.Name, Namespace: pool.Namespace}})
+	require.ErrorContains(t, err, "worker list unavailable")
+	assert.True(t, observed.statusPatched, "fail-closed status must be published before quiesce list/delete")
+	var got v1alpha1.AgentPool
+	require.NoError(t, base.Get(context.Background(), types.NamespacedName{Name: pool.Name, Namespace: pool.Namespace}, &got))
+	assert.False(t, got.Status.Ready)
+	condition := meta.FindStatusCondition(got.Status.Conditions, storageConditionReady)
+	require.NotNil(t, condition)
+	assert.Equal(t, metav1.ConditionFalse, condition.Status)
 }

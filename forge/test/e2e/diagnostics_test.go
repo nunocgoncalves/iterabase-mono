@@ -276,7 +276,7 @@ func collectCPUDiagnostics(t *testing.T, state *permanentCPUFixtureState) {
 		"fixture-state":  "cloud-init status --long 2>&1; systemctl --no-pager --full status k3s 2>&1 || true",
 		"forge-state":    fmt.Sprintf("sudo ls -la /var/lib/forge/overlay/%s 2>&1 || true; sudo k3s kubectl get gitrepositories,kustomizations -A -o wide 2>&1 || true", state.runID),
 		"platform-state": "sudo k3s kubectl get nodes -o wide 2>&1 || true; sudo k3s kubectl get deployments,statefulsets,daemonsets,pods,jobs,pvc -A -o wide 2>&1 || true; sudo k3s kubectl get events -A --sort-by=.metadata.creationTimestamp 2>&1 | tail -300 || true",
-		"storage-state":  storageStateDiagnosticCommand(state.workspaceDevice),
+		"storage-state":  storageStateDiagnosticCommand(state.dataStorageDevice),
 	})
 	if safeClusterLogs {
 		state.diagnostics.collectSharedCluster(t, filepath.Join(state.forgeHome, state.runID, "kubeconfig.yaml"))
@@ -294,7 +294,7 @@ func collectGPUDiagnostics(t *testing.T, state *permanentGPUFixtureState) {
 		"fixture-state": "cloud-init status --long 2>&1; systemctl --no-pager --full status k3s 2>&1 || true",
 		"gpu-policy":    "sudo k3s kubectl get clusterpolicy -o yaml 2>&1 || true; sudo k3s kubectl get nodes -o wide --show-labels 2>&1 || true",
 		"gpu-workload":  "sudo k3s kubectl get daemonsets,pods -n gpu-operator -o wide 2>&1 || true; sudo k3s kubectl get deployment,pods,pvc -n forge-gpu-upgrade -o wide 2>&1 || true",
-		"storage-state": storageStateDiagnosticCommand(state.host.WorkspaceDevice),
+		"storage-state": storageStateDiagnosticCommand(state.host.DataStorageDevice),
 	})
 	dumpGPUDiagnostics(t, state.host.IP, state.privKeyPath)
 	if safeClusterLogs {

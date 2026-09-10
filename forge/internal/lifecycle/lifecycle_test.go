@@ -66,6 +66,7 @@ type fakeProv struct {
 	ensureDepsErr         error
 	ensureDepsCalls       int
 	workspaceInspectErr   error
+	workspaceInspectState *provisioner.DataStorageState
 	workspaceReconcileErr error
 	workspaceInspectCalls int
 	workspaceToolsErr     error
@@ -129,6 +130,11 @@ func (f *fakeProv) InspectDataStorage(_ context.Context, spec provisioner.DataSt
 	f.workspaceInspectCalls++
 	if f.workspaceInspectErr != nil {
 		return nil, f.workspaceInspectErr
+	}
+	if f.workspaceInspectState != nil {
+		state := *f.workspaceInspectState
+		state.Devices = append([]provisioner.DataStorageDevice(nil), f.workspaceInspectState.Devices...)
+		return &state, nil
 	}
 	devices := make([]provisioner.DataStorageDevice, len(spec.Devices))
 	for i, device := range spec.Devices {
@@ -315,9 +321,10 @@ func TestApply_KubeconfigOut(t *testing.T) {
 
 func TestUpgrade(t *testing.T) {
 	useTempHome(t)
-	p := &fakeProv{pf: readyPf(), state: inSyncState(), kubeconfig: []byte(minKubeconfig), ready: true}
+	p := &fakeProv{pf: readyPf(), state: inSyncState(), kubeconfig: []byte(minKubeconfig), ready: true,
+		workspaceInspectState: &provisioner.DataStorageState{State: "complete", VGName: provisioner.DataVolumeGroupName, VGUUID: "vg-uuid"}}
 	p.pf.Installed = true
-	res, err := Upgrade(context.Background(), testConfig(), p, "v1.32.0+k3s1", ApplyOpts{
+	res, err := Upgrade(context.Background(), testConfig(), p, &fakeDeployer{}, "v1.32.0+k3s1", ApplyOpts{
 		ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
 	})
 	require.NoError(t, err)
@@ -329,9 +336,48 @@ func TestUpgrade(t *testing.T) {
 func TestUpgrade_NotInstalled(t *testing.T) {
 	useTempHome(t)
 	p := &fakeProv{pf: readyPf()} // not installed
-	_, err := Upgrade(context.Background(), testConfig(), p, "v1.32.0", ApplyOpts{})
+	_, err := Upgrade(context.Background(), testConfig(), p, &fakeDeployer{}, "v1.32.0", ApplyOpts{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not installed")
+}
+
+func TestUpgradeRefusesIncompatibleOrUnknownPreLVMStateWithoutMutation(t *testing.T) {
+	complete := &provisioner.DataStorageState{State: "complete", VGName: provisioner.DataVolumeGroupName, VGUUID: "vg-uuid"}
+	for _, tt := range []struct {
+		name      string
+		mutate    func(*config.Cluster, *fakeProv, *fakeDeployer)
+		wantError string
+	}{
+		{name: "local-storage-enabled", wantError: "k3s.disable[local-storage]", mutate: func(_ *config.Cluster, p *fakeProv, _ *fakeDeployer) {
+			p.workspaceInspectState = complete
+			p.state.LocalStorageDisabled = false
+		}},
+		{name: "storage-observation-failed", wantError: "inspect data storage", mutate: func(_ *config.Cluster, p *fakeProv, _ *fakeDeployer) {
+			p.workspaceInspectErr = errors.New("receipt unavailable")
+		}},
+		{name: "receipt-not-complete", wantError: "clean install", mutate: func(_ *config.Cluster, _ *fakeProv, _ *fakeDeployer) {}},
+		{name: "pre-lvm-platform", wantError: "predates the OpenEBS LVM", mutate: func(cfg *config.Cluster, p *fakeProv, d *fakeDeployer) {
+			p.workspaceInspectState = complete
+			cfg.Spec.Chart = config.Chart{Release: "opo1", Namespace: "iterabase-system", Version: "0.4.0"}
+			d.statusStates["opo1"] = deployer.ChartState{Installed: true, Version: "0.3.23"}
+		}},
+		{name: "platform-observation-failed", wantError: "read installed platform", mutate: func(cfg *config.Cluster, p *fakeProv, d *fakeDeployer) {
+			p.workspaceInspectState = complete
+			cfg.Spec.Chart = config.Chart{Release: "opo1", Namespace: "iterabase-system", Version: "0.4.0"}
+			d.statusErr = errors.New("helm transport unavailable")
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			useTempHome(t)
+			cfg := testConfig()
+			p := &fakeProv{pf: readyPf(), state: inSyncState()}
+			d := &fakeDeployer{statusStates: map[string]deployer.ChartState{}}
+			tt.mutate(cfg, p, d)
+			_, err := Upgrade(context.Background(), cfg, p, d, "v1.34.10+k3s1", ApplyOpts{})
+			require.ErrorContains(t, err, tt.wantError)
+			assert.Empty(t, p.installs, "upgrade/install provisioner mutation must not run on refusal")
+		})
+	}
 }
 
 type applyCall struct {
@@ -363,6 +409,7 @@ type fakeDeployer struct {
 	restarts                        []restartCall
 	order                           []string // ordered op log for phase-ordering assertions
 	statusStates                    map[string]deployer.ChartState
+	statusErr                       error
 	crdsOwnedByTarget               bool
 	crdsMigrationComplete           bool
 	applyErr                        error
@@ -410,6 +457,9 @@ func (f *fakeDeployer) EnsureRepo(_ context.Context, name, url string) error {
 	return nil
 }
 func (f *fakeDeployer) Status(_ context.Context, release, _ string) (*deployer.ChartState, error) {
+	if f.statusErr != nil {
+		return nil, f.statusErr
+	}
 	s := f.statusStates[release]
 	return &s, nil
 }

@@ -19,16 +19,16 @@ import (
 )
 
 const (
-	permanentFixtureEnabledEnv         = "FORGE_E2E_PERMANENT_FIXTURE"
-	permanentFixtureAddressEnv         = "FORGE_E2E_FIXTURE_ADDRESS"
-	permanentFixtureSSHUserEnv         = "FORGE_E2E_FIXTURE_SSH_USER"
-	permanentFixtureSSHKeyPathEnv      = "FORGE_E2E_FIXTURE_SSH_KEY_PATH"
-	permanentFixtureHostKeyEnv         = "FORGE_E2E_FIXTURE_SSH_HOST_KEY"
-	permanentFixtureWorkspaceDeviceEnv = "FORGE_E2E_FIXTURE_DATA_STORAGE_DEVICES"
-	permanentFixtureModelDeviceEnv     = "FORGE_E2E_MODEL_CACHE_DEVICE"
-	permanentFixtureModelUUIDEnv       = "FORGE_E2E_MODEL_CACHE_UUID"
-	permanentFixtureModelMount         = "/data/hf-cache"
-	permanentFixtureHarnessStatePaths  = "/tmp/edge-overlay /tmp/forge-secrets-overlay /tmp/iterabase-release-overlay-* /tmp/iterabase-release-charts-* /tmp/control-plane-image.tar /tmp/harness-image.tar /tmp/tool-runner-image.tar /tmp/inference-gateway-image.tar /tmp/runtime-fixture-image.tar /tmp/forge-e2e-workspace-consumer.pid /tmp/forge-e2e-workspace-consumer.log"
+	permanentFixtureEnabledEnv           = "FORGE_E2E_PERMANENT_FIXTURE"
+	permanentFixtureAddressEnv           = "FORGE_E2E_FIXTURE_ADDRESS"
+	permanentFixtureSSHUserEnv           = "FORGE_E2E_FIXTURE_SSH_USER"
+	permanentFixtureSSHKeyPathEnv        = "FORGE_E2E_FIXTURE_SSH_KEY_PATH"
+	permanentFixtureHostKeyEnv           = "FORGE_E2E_FIXTURE_SSH_HOST_KEY"
+	permanentFixtureDataStorageDeviceEnv = "FORGE_E2E_FIXTURE_DATA_STORAGE_DEVICES"
+	permanentFixtureModelDeviceEnv       = "FORGE_E2E_MODEL_CACHE_DEVICE"
+	permanentFixtureModelUUIDEnv         = "FORGE_E2E_MODEL_CACHE_UUID"
+	permanentFixtureModelMount           = "/data/hf-cache"
+	permanentFixtureHarnessStatePaths    = "/tmp/edge-overlay /tmp/forge-secrets-overlay /tmp/iterabase-release-overlay-* /tmp/iterabase-release-charts-* /tmp/control-plane-image.tar /tmp/harness-image.tar /tmp/tool-runner-image.tar /tmp/inference-gateway-image.tar /tmp/runtime-fixture-image.tar /tmp/forge-e2e-workspace-consumer.pid /tmp/forge-e2e-workspace-consumer.log"
 )
 
 var bootIDPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
@@ -45,14 +45,14 @@ type modelCacheAuthority struct {
 }
 
 type permanentFixture struct {
-	capacity        string
-	address         string
-	sshUser         string
-	sshKeyPath      string
-	sshHostKey      string
-	workspaceDevice string
-	modelDevice     string
-	modelUUID       string
+	capacity          string
+	address           string
+	sshUser           string
+	sshKeyPath        string
+	sshHostKey        string
+	dataStorageDevice string
+	modelDevice       string
+	modelUUID         string
 }
 
 func fixtureSSHUser() string {
@@ -68,19 +68,19 @@ func requirePermanentFixture(t *testing.T, capacity string) *permanentFixture {
 		t.Fatalf("mandatory permanent %s fixture is disabled — %s must be true", capacity, permanentFixtureEnabledEnv)
 	}
 	values := map[string]string{
-		permanentFixtureAddressEnv:         strings.TrimSpace(os.Getenv(permanentFixtureAddressEnv)),
-		permanentFixtureSSHUserEnv:         strings.TrimSpace(os.Getenv(permanentFixtureSSHUserEnv)),
-		permanentFixtureSSHKeyPathEnv:      strings.TrimSpace(os.Getenv(permanentFixtureSSHKeyPathEnv)),
-		permanentFixtureHostKeyEnv:         strings.TrimSpace(os.Getenv(permanentFixtureHostKeyEnv)),
-		permanentFixtureWorkspaceDeviceEnv: strings.TrimSpace(os.Getenv(permanentFixtureWorkspaceDeviceEnv)),
+		permanentFixtureAddressEnv:           strings.TrimSpace(os.Getenv(permanentFixtureAddressEnv)),
+		permanentFixtureSSHUserEnv:           strings.TrimSpace(os.Getenv(permanentFixtureSSHUserEnv)),
+		permanentFixtureSSHKeyPathEnv:        strings.TrimSpace(os.Getenv(permanentFixtureSSHKeyPathEnv)),
+		permanentFixtureHostKeyEnv:           strings.TrimSpace(os.Getenv(permanentFixtureHostKeyEnv)),
+		permanentFixtureDataStorageDeviceEnv: strings.TrimSpace(os.Getenv(permanentFixtureDataStorageDeviceEnv)),
 	}
 	for name, value := range values {
 		if value == "" {
 			t.Fatalf("mandatory permanent %s fixture is incomplete — %s is empty", capacity, name)
 		}
 	}
-	if !strings.HasPrefix(values[permanentFixtureWorkspaceDeviceEnv], "/dev/disk/by-id/") {
-		t.Fatalf("%s must be a fixed /dev/disk/by-id data-storage identity", permanentFixtureWorkspaceDeviceEnv)
+	if !strings.HasPrefix(values[permanentFixtureDataStorageDeviceEnv], "/dev/disk/by-id/") {
+		t.Fatalf("%s must be a fixed /dev/disk/by-id data-storage identity", permanentFixtureDataStorageDeviceEnv)
 	}
 	if _, _, _, rest, err := ssh.ParseAuthorizedKey([]byte(values[permanentFixtureHostKeyEnv] + "\n")); err != nil || len(strings.TrimSpace(string(rest))) != 0 {
 		t.Fatalf("%s is not exactly one pinned OpenSSH host public key", permanentFixtureHostKeyEnv)
@@ -93,24 +93,24 @@ func requirePermanentFixture(t *testing.T, capacity string) *permanentFixture {
 	fixture := &permanentFixture{
 		capacity: capacity, address: values[permanentFixtureAddressEnv], sshUser: values[permanentFixtureSSHUserEnv],
 		sshKeyPath: values[permanentFixtureSSHKeyPathEnv], sshHostKey: values[permanentFixtureHostKeyEnv],
-		workspaceDevice: values[permanentFixtureWorkspaceDeviceEnv],
+		dataStorageDevice: values[permanentFixtureDataStorageDeviceEnv],
 	}
 	if capacity == "gpu" {
 		fixture.modelDevice = strings.TrimSpace(os.Getenv(permanentFixtureModelDeviceEnv))
 		fixture.modelUUID = strings.TrimSpace(os.Getenv(permanentFixtureModelUUIDEnv))
-		if err := validatePermanentGPUStorage(fixture.workspaceDevice, fixture.modelDevice, fixture.modelUUID); err != nil {
+		if err := validatePermanentGPUStorage(fixture.dataStorageDevice, fixture.modelDevice, fixture.modelUUID); err != nil {
 			t.Fatal(err)
 		}
 	}
 	return fixture
 }
 
-func validatePermanentGPUStorage(workspaceDevice, modelDevice, modelUUID string) error {
+func validatePermanentGPUStorage(dataStorageDevice, modelDevice, modelUUID string) error {
 	if !strings.HasPrefix(modelDevice, "/dev/disk/by-id/") || modelUUID == "" {
 		return fmt.Errorf("permanent GPU model cache requires fixed %s and %s", permanentFixtureModelDeviceEnv, permanentFixtureModelUUIDEnv)
 	}
-	if modelDevice == workspaceDevice {
-		return fmt.Errorf("GPU model-cache device must be distinct from the Forge AgentPool workspace device")
+	if modelDevice == dataStorageDevice {
+		return fmt.Errorf("GPU model-cache device must be distinct from the Forge AgentPool data-storage device")
 	}
 	return nil
 }
@@ -127,7 +127,7 @@ func (fixture *permanentFixture) reset(t *testing.T, forgeBin, forgeHome string)
 	}
 	configPath := writeForgeConfigSpec(t, forgeConfigSpec{
 		Name: fixture.installName(), Address: fixture.address, SSHUser: fixture.sshUser,
-		SSHKeyPath: fixture.sshKeyPath, SSHHostKey: fixture.sshHostKey, WorkspaceDevice: fixture.workspaceDevice,
+		SSHKeyPath: fixture.sshKeyPath, SSHHostKey: fixture.sshHostKey, DataStorageDevice: fixture.dataStorageDevice,
 		GPU: fixture.capacity == "gpu",
 	})
 	if err := fixture.releaseDataStorageConsumers(); err != nil {
@@ -152,7 +152,7 @@ func (fixture *permanentFixture) reset(t *testing.T, forgeBin, forgeHome string)
 		return fmt.Errorf("wait for post-reboot host readiness: %w", err)
 	}
 	defer client.Close()
-	if err := fixture.waitForWorkspaceDevice(client); err != nil {
+	if err := fixture.waitForDataStorageDevice(client); err != nil {
 		return err
 	}
 	if err := fixture.cleanHarnessState(client); err != nil {
@@ -181,7 +181,7 @@ func (fixture *permanentFixture) reset(t *testing.T, forgeBin, forgeHome string)
 	if err := fixture.waitForSSHStable(); err != nil {
 		return err
 	}
-	t.Logf("permanent %s fixture reset: boot %s -> %s workspace=%s", fixture.capacity, before, after, fixture.workspaceDevice)
+	t.Logf("permanent %s fixture reset: boot %s -> %s data-storage=%s", fixture.capacity, before, after, fixture.dataStorageDevice)
 	return nil
 }
 
@@ -229,7 +229,7 @@ func (fixture *permanentFixture) releaseDataStorageConsumers() error {
 	}
 	defer client.Close()
 	script := fmt.Sprintf(`sudo bash -ceu '
-workspace_device=%s
+data_storage_device=%s
 if ! command -v k3s >/dev/null 2>&1 || ! k3s kubectl get --raw=/readyz >/dev/null 2>&1; then exit 0; fi
 k3s kubectl delete kustomizations.kustomize.toolkit.fluxcd.io --all -A --ignore-not-found=true --wait=true --timeout=2m || true
 if k3s kubectl get crd agentpools.platform.iterabase.com >/dev/null 2>&1; then
@@ -253,21 +253,25 @@ while read -r namespace pod; do
   test -n "$namespace" && test -n "$pod" || continue
   k3s kubectl delete pod "$pod" -n "$namespace" --ignore-not-found=true --wait=true --timeout=5m
 done < <(k3s kubectl get pods -A -o go-template="{{range .items}}{{\$namespace := .metadata.namespace}}{{\$pod := .metadata.name}}{{range .spec.volumes}}{{if .persistentVolumeClaim}}{{\$namespace}} {{\$pod}}{{\"\\n\"}}{{end}}{{end}}{{end}}" | sort -u)
+if k3s kubectl get crd volumesnapshots.snapshot.storage.k8s.io >/dev/null 2>&1; then
+  k3s kubectl delete volumesnapshots.snapshot.storage.k8s.io --all -A --ignore-not-found=true --wait=true --timeout=5m
+fi
 k3s kubectl delete pvc --all -A --ignore-not-found=true --wait=true --timeout=5m
 for i in $(seq 1 150); do
   volumes=0
-  if k3s kubectl get crd lvmvolumes.local.openebs.io >/dev/null 2>&1; then volumes=$(k3s kubectl get lvmvolumes.local.openebs.io -A --no-headers | awk "NF {n++} END {print n+0}"); fi
+  if k3s kubectl get crd lvmvolumes.local.openebs.io >/dev/null 2>&1; then volumes=$((volumes + $(k3s kubectl get lvmvolumes.local.openebs.io -A --no-headers | awk "NF {n++} END {print n+0}"))); fi
+  if k3s kubectl get crd lvmsnapshots.local.openebs.io >/dev/null 2>&1; then volumes=$((volumes + $(k3s kubectl get lvmsnapshots.local.openebs.io -A --no-headers | awk "NF {n++} END {print n+0}"))); fi
   lvs_count=0
   if vgs iterabase-data >/dev/null 2>&1; then lvs_count=$(lvs --noheadings --select "vg_name=iterabase-data" -o lv_name | awk "NF {n++} END {print n+0}"); fi
-  workspace=$(readlink -f -- "$workspace_device")
-  kernel=$(lsblk -dnro KNAME -- "$workspace")
+  data_device=$(readlink -f -- "$data_storage_device")
+  kernel=$(lsblk -dnro KNAME -- "$data_device")
   holders=0
   if test -d "/sys/class/block/$kernel/holders"; then holders=$(find "/sys/class/block/$kernel/holders" -mindepth 1 -maxdepth 1 | awk "NF {n++} END {print n+0}"); fi
   test "$volumes" = 0 && test "$lvs_count" = 0 && test "$holders" = 0 && exit 0
   sleep 2
 done
 exit 42
-'`, candidateShellQuote(fixture.workspaceDevice))
+'`, candidateShellQuote(fixture.dataStorageDevice))
 	if output, err := sshOutput(client, script); err != nil {
 		return fmt.Errorf("release platform consumers/claims before explicit data-storage purge: %w\n%s", err, output)
 	}
@@ -315,9 +319,9 @@ func bootIDFromClient(client *ssh.Client) (string, error) {
 	return bootID, nil
 }
 
-func (fixture *permanentFixture) waitForWorkspaceDevice(client *ssh.Client) error {
+func (fixture *permanentFixture) waitForDataStorageDevice(client *ssh.Client) error {
 	deadline := time.Now().Add(2 * time.Minute)
-	command := "test -L " + candidateShellQuote(fixture.workspaceDevice) + " && test -b \"$(readlink -f " + candidateShellQuote(fixture.workspaceDevice) + ")\""
+	command := "test -L " + candidateShellQuote(fixture.dataStorageDevice) + " && test -b \"$(readlink -f " + candidateShellQuote(fixture.dataStorageDevice) + ")\""
 	var lastErr error
 	for time.Now().Before(deadline) {
 		if _, lastErr = sshOutput(client, command); lastErr == nil {
@@ -325,7 +329,7 @@ func (fixture *permanentFixture) waitForWorkspaceDevice(client *ssh.Client) erro
 		}
 		time.Sleep(2 * time.Second)
 	}
-	return fmt.Errorf("dedicated workspace device %s did not appear on %s: %w", fixture.workspaceDevice, fixture.address, lastErr)
+	return fmt.Errorf("dedicated data-storage device %s did not appear on %s: %w", fixture.dataStorageDevice, fixture.address, lastErr)
 }
 
 func (fixture *permanentFixture) cleanHarnessState(client *ssh.Client) error {
@@ -335,11 +339,11 @@ rm -rf -- %s %s
 test ! -e /var/lib/iterabase/data-storage.receipt
 ! vgs iterabase-data >/dev/null 2>&1
 ! pvs "$(readlink -f -- %s)" >/dev/null 2>&1
-workspace=$(readlink -f -- %s)
-test -b "$workspace"
-test -z "$(wipefs -n --noheadings --output TYPE -- "$workspace" | awk 'NF')"
+data_device=$(readlink -f -- %s)
+test -b "$data_device"
+test -z "$(wipefs -n --noheadings --output TYPE -- "$data_device" | awk 'NF')"
 test ! -e /var/lib/rancher/k3s
-`, permanentFixtureHarnessStatePaths, candidateShellQuote("/var/lib/forge/overlay/"+fixture.installName()), candidateShellQuote(fixture.workspaceDevice), candidateShellQuote(fixture.workspaceDevice))
+`, permanentFixtureHarnessStatePaths, candidateShellQuote("/var/lib/forge/overlay/"+fixture.installName()), candidateShellQuote(fixture.dataStorageDevice), candidateShellQuote(fixture.dataStorageDevice))
 	if output, err := sshOutput(client, "sudo bash -ceu "+candidateShellQuote(script)); err != nil {
 		return fmt.Errorf("permanent fixture clean-baseline assertion failed: %w\n%s", err, output)
 	}
@@ -370,9 +374,9 @@ func (fixture *permanentFixture) validateModelCache(client *ssh.Client) (modelCa
 	}
 	weightPath := filepath.Join(permanentFixtureModelMount, authority.WeightPath)
 	script := fmt.Sprintf(`
-workspace=$(readlink -f -- %s)
+data_device=$(readlink -f -- %s)
 cache=$(readlink -f -- %s)
-test -b "$workspace" && test -b "$cache" && test "$workspace" != "$cache"
+test -b "$data_device" && test -b "$cache" && test "$data_device" != "$cache"
 source=$(findmnt -n -o SOURCE --mountpoint %s)
 source=${source%%%%[*}
 test "$(readlink -f -- "$source")" = "$cache"
@@ -383,7 +387,7 @@ weight_source=$(findmnt -n -o SOURCE --target "$weight")
 weight_source=${weight_source%%%%[*}
 test "$(readlink -f -- "$weight_source")" = "$cache"
 test "$(sha256sum -- "$weight" | awk '{print $1}')" = %s
-`, candidateShellQuote(fixture.workspaceDevice), candidateShellQuote(fixture.modelDevice), candidateShellQuote(permanentFixtureModelMount), candidateShellQuote(fixture.modelUUID), candidateShellQuote(weightPath), candidateShellQuote(permanentFixtureModelMount), candidateShellQuote(authority.SHA256))
+`, candidateShellQuote(fixture.dataStorageDevice), candidateShellQuote(fixture.modelDevice), candidateShellQuote(permanentFixtureModelMount), candidateShellQuote(fixture.modelUUID), candidateShellQuote(weightPath), candidateShellQuote(permanentFixtureModelMount), candidateShellQuote(authority.SHA256))
 	if output, err := sshOutput(client, "sudo bash -ceu "+candidateShellQuote(script)); err != nil {
 		return authority, fmt.Errorf("GPU model-cache identity/revision/hash validation failed: %w\n%s", err, output)
 	}
@@ -394,7 +398,7 @@ func (fixture *permanentFixture) recordEvidence(name, before, after string, auth
 	hostKeyHash := sha256.Sum256([]byte(fixture.sshHostKey))
 	evidence := sharede2e.FixtureEvidence{
 		Name: name, Capacity: fixture.capacity, HostKeySHA256: hex.EncodeToString(hostKeyHash[:]),
-		WorkspaceDevice: fixture.workspaceDevice, BootIDBefore: before, BootIDAfter: after,
+		DataStorageDevice: fixture.dataStorageDevice, BootIDBefore: before, BootIDAfter: after,
 	}
 	if name == "model-cache" {
 		evidence.ModelCacheDevice = fixture.modelDevice

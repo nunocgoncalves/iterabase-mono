@@ -446,13 +446,8 @@ func (t Taint) validate() error {
 }
 
 func (k K3s) validate() error {
-	for _, arg := range k.ExtraArgs {
-		if arg == "--disable" || strings.HasPrefix(arg, "--disable=") {
-			return fmt.Errorf("k3s.extraArgs must not override component disablement; use k3s.disable (local-storage is always disabled)")
-		}
-		if arg == "--data-dir" || strings.HasPrefix(arg, "--data-dir=") || strings.Contains(arg, "kubelet-arg=root-dir") {
-			return fmt.Errorf("k3s.extraArgs must not change the fixed K3s data/kubelet directory required by the LVM storage substrate")
-		}
+	if err := validateK3sExtraArgs(k.ExtraArgs); err != nil {
+		return err
 	}
 	if k.Version == "" {
 		return fmt.Errorf("k3s.version is required")
@@ -475,6 +470,38 @@ func (k K3s) validate() error {
 		if err := validateCIDR(k.ServiceCIDRv6, true, "serviceCIDRv6"); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+//nolint:gocyclo // ordered token-stream validation keeps split/joined security cases explicit.
+func validateK3sExtraArgs(args []string) error {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--disable" || strings.HasPrefix(arg, "--disable=") {
+			return fmt.Errorf("k3s.extraArgs must not override component disablement; use k3s.disable (local-storage is always disabled)")
+		}
+		if arg == "--data-dir" || strings.HasPrefix(arg, "--data-dir=") {
+			return fmt.Errorf("k3s.extraArgs must not change the fixed K3s data/kubelet directory required by the LVM storage substrate")
+		}
+		if strings.HasPrefix(arg, "--kubelet-arg=") {
+			value := strings.TrimPrefix(arg, "--kubelet-arg=")
+			if value == "" || value == "root-dir" || strings.HasPrefix(value, "root-dir=") {
+				return fmt.Errorf("k3s.extraArgs must not change the fixed K3s data/kubelet directory required by the LVM storage substrate")
+			}
+			continue
+		}
+		if arg != "--kubelet-arg" {
+			continue
+		}
+		if i+1 >= len(args) || args[i+1] == "" || strings.HasPrefix(args[i+1], "--") {
+			return fmt.Errorf("k3s.extraArgs --kubelet-arg requires one following kubelet argument token")
+		}
+		value := args[i+1]
+		if value == "root-dir" || strings.HasPrefix(value, "root-dir=") {
+			return fmt.Errorf("k3s.extraArgs must not change the fixed K3s data/kubelet directory required by the LVM storage substrate")
+		}
+		i++
 	}
 	return nil
 }

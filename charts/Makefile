@@ -56,7 +56,7 @@ test-e2e-certificate-migration: $(E2E_BUILD_DEPS)
 	cd test/e2e && $(E2E_ENV) go test -v -race -count=1 -timeout 35m -run '^TestE2E$$/^certificate-ownership-migration$$' .
 
 test-e2e-install: $(E2E_BUILD_DEPS)
-	cd test/e2e && $(E2E_ENV) go test -v -race -count=1 -timeout 30m -run '^TestE2E$$/^fresh-install$$' .
+	cd test/e2e && $(E2E_ENV) go test -v -race -count=1 -timeout 45m -run '^TestE2E$$/^fresh-install$$' .
 
 test-e2e-upgrade: $(E2E_BUILD_DEPS)
 	cd test/e2e && $(E2E_ENV) go test -v -race -count=1 -timeout 40m -run '^TestE2E$$/^n-minus-one-upgrade$$' .

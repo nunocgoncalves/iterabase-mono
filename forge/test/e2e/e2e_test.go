@@ -40,7 +40,7 @@ type permanentCPUFixtureState struct {
 	forgeBin            string
 	forgeHome           string
 	chartVersion        string
-	workspaceDevice     string
+	dataStorageDevice   string
 	freshInstall        bool
 	storagePVCUID       string
 	storagePV           string
@@ -69,7 +69,7 @@ func newPermanentCPUFixtureStateForScenario(t *testing.T, scenario string) *perm
 		privKeyPath:         fixture.sshKeyPath,
 		ip:                  fixture.address,
 		forgeHome:           t.TempDir(),
-		workspaceDevice:     fixture.workspaceDevice,
+		dataStorageDevice:   fixture.dataStorageDevice,
 		freshInstall:        true,
 		runtimeImageDigests: make(map[string]importedRuntimeIdentity),
 		diagnostics:         newForgeDiagnostics(t, scenario),
@@ -88,8 +88,8 @@ func resetPermanentCPUFixtureStage(t *testing.T, state *permanentCPUFixtureState
 	if err := state.fixture.reset(t, state.forgeBin, state.forgeHome); err != nil {
 		t.Fatal(err)
 	}
-	rememberWorkspaceDevice(state.ip, state.workspaceDevice)
-	t.Logf("permanent CPU fixture %s workspace=%s", state.ip, state.workspaceDevice)
+	rememberDataStorageDevice(state.ip, state.dataStorageDevice)
+	t.Logf("permanent CPU fixture %s data-storage=%s", state.ip, state.dataStorageDevice)
 }
 
 func rejectGPUOnCPUStage(t *testing.T, state *permanentCPUFixtureState) {
@@ -146,7 +146,7 @@ device=$(readlink -f -- "$selected")
 pv=$(pvs --noheadings --separator "|" -o pv_uuid,vg_name -- "$device" | awk -F"|" "{\$1=\$1;\$2=\$2;print \$1 \"|\" \$2}")
 vg=$(vgs --noheadings --separator "|" --units b --nosuffix -o vg_uuid,vg_size,vg_free,pv_count,lv_count iterabase-data | awk -F"|" "BEGIN{OFS=\"|\"} {for(i=1;i<=NF;i++){gsub(/^ +| +$/,\"\",\$i)}; print}")
 printf "%%s|%%s\n" "$pv" "$vg"
-'`, candidateShellQuote(state.workspaceDevice))))
+'`, candidateShellQuote(state.dataStorageDevice))))
 	parts := strings.Split(lvm, "|")
 	if len(parts) != 7 || parts[0] == "" || parts[1] != "iterabase-data" || parts[2] == "" || parts[5] != "1" {
 		t.Fatalf("receipt-bound PV/VG evidence is malformed: %q", lvm)
@@ -327,7 +327,7 @@ test "$(vgs --noheadings -o vg_name iterabase-data | awk "{\$1=\$1;print}")" = i
 device=$(readlink -f -- %s)
 test "$(pvs --noheadings -o vg_name "$device" | awk "{\$1=\$1;print}")" = iterabase-data
 printf ordinary-destroy-vg-preserved=pass
-'`, candidateShellQuote(state.workspaceDevice)))
+'`, candidateShellQuote(state.dataStorageDevice)))
 	if !strings.Contains(preserved, "ordinary-destroy-vg-preserved=pass") {
 		t.Fatalf("ordinary destroy did not preserve receipt-matching VG: %s", preserved)
 	}
@@ -588,7 +588,7 @@ func assertApplyMarkers(t *testing.T, out string, markers ...string) {
 func (state *permanentCPUFixtureState) resetAfterScenario(t *testing.T) {
 	t.Helper()
 	state.diagnostics.setDomain(failureDomainFixtureReset)
-	workspaceDevicesByAddress.Delete(state.ip)
+	dataStorageDevicesByAddress.Delete(state.ip)
 	if err := state.fixture.reset(t, state.forgeBin, state.forgeHome); err != nil {
 		t.Errorf("reset permanent CPU fixture after diagnostics: %v", err)
 	}

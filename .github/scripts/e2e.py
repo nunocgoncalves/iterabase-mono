@@ -1592,7 +1592,7 @@ def validate_result(
             if (
                 evidence.get("capacity") != scenario.get("capacity")
                 or not SHA256.fullmatch(str(evidence.get("host_key_sha256", "")))
-                or not str(evidence.get("workspace_device", "")).startswith("/dev/disk/by-id/")
+                or not str(evidence.get("data_storage_device", "")).startswith("/dev/disk/by-id/")
                 or not evidence.get("boot_id_before")
                 or not evidence.get("boot_id_after")
                 or evidence.get("boot_id_before") == evidence.get("boot_id_after")
@@ -1602,7 +1602,7 @@ def validate_result(
             cache = fixtures["model-cache"]
             if (
                 not str(cache.get("model_cache_device", "")).startswith("/dev/disk/by-id/")
-                or cache.get("model_cache_device") == cache.get("workspace_device")
+                or cache.get("model_cache_device") == cache.get("data_storage_device")
                 or cache.get("model_cache_mount") != "/data/hf-cache"
                 or not cache.get("model_cache_uuid")
                 or not cache.get("model_id")

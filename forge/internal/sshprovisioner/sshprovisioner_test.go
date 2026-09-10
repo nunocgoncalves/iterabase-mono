@@ -888,7 +888,7 @@ func TestDeployer_Apply_MetalLBBootstrapConverges(t *testing.T) {
 		case strings.Contains(cmd, "'kubectl' 'wait'"):
 			return "customresourcedefinition.apiextensions.k8s.io/ipaddresspools.metallb.io condition met\n", 0
 		case strings.Contains(cmd, "'status'"):
-			return "", 1 // release not found => fresh install => bootstrap
+			return "Error: release: not found\n", 1 // exact Helm absence => fresh install => bootstrap
 		case strings.Contains(cmd, "validatingwebhookconfiguration"):
 			// pre-bootstrap probe: no webhook yet => ""; final probe: converged Fail.
 			return "Fail", 0
@@ -938,7 +938,7 @@ func TestDeployer_Apply_MetalLBBootstrapTimeout(t *testing.T) {
 		case strings.Contains(cmd, "'kubectl' 'apply'"), strings.Contains(cmd, "'kubectl' 'wait'"):
 			return "", 0
 		case strings.Contains(cmd, "'status'"):
-			return "", 1
+			return "Error: release: not found\n", 1
 		case strings.Contains(cmd, "validatingwebhookconfiguration"):
 			// Fresh install: the webhook configuration is absent (NotFound), not a
 			// read failure, so the bootstrap proceeds and then times out.
@@ -1248,23 +1248,41 @@ func TestDeployer_Status_Helm4RejectsMissingMetadataVersion(t *testing.T) {
 	require.ErrorContains(t, err, "chart version is empty")
 }
 
-func TestDeployer_Status_NotInstalled(t *testing.T) {
-	addr, cfg, cleanup := startFakeSSH(t, func(cmd string) (string, int) {
-		switch {
-		case cmd == helmVerifyCommand:
-			return "/usr/local/bin/helm\n", 0
-		case strings.Contains(cmd, "status"):
-			return "", 1 // release not found
-		default:
-			return "", 1
-		}
-	})
-	defer cleanup()
-	p := newProvisioner(t, addr, cfg)
-	defer p.Close()
-	st, err := p.Status(context.Background(), "opo1", "iterabase-system")
-	require.NoError(t, err)
-	assert.False(t, st.Installed)
+func TestDeployerStatusDistinguishesReleaseAbsenceFromObservationFailure(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		stderr    string
+		wantError string
+	}{
+		{name: "release-not-found", stderr: "Error: release: not found\n"},
+		{name: "api-unavailable", stderr: "Error: Kubernetes cluster unreachable\n", wantError: "helm status"},
+		{name: "rbac-denied", stderr: "Error: forbidden: cannot get secrets\n", wantError: "helm status"},
+		{name: "timeout", stderr: "Error: context deadline exceeded\n", wantError: "helm status"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			addr, cfg, cleanup := startFakeSSHWithResult(t, func(cmd string) sshCommandResult {
+				switch {
+				case cmd == helmVerifyCommand:
+					return sshCommandResult{stdout: "/usr/local/bin/helm\n"}
+				case strings.Contains(cmd, "status"):
+					return sshCommandResult{stderr: tt.stderr, code: 1}
+				default:
+					return sshCommandResult{code: 1}
+				}
+			})
+			defer cleanup()
+			p := newProvisioner(t, addr, cfg)
+			defer p.Close()
+			st, err := p.Status(context.Background(), "opo1", "iterabase-system")
+			if tt.wantError != "" {
+				require.ErrorContains(t, err, tt.wantError)
+				assert.Nil(t, st)
+				return
+			}
+			require.NoError(t, err)
+			assert.False(t, st.Installed)
+		})
+	}
 }
 
 func TestDeployer_CRDOwnedBy(t *testing.T) {
@@ -1752,6 +1770,10 @@ func TestWaitForLVMStorageReadyParsesBoundedVGIdentity(t *testing.T) {
 		assert.Contains(t, cmd, "get csinode")
 		assert.Contains(t, cmd, "-o go-template=")
 		assert.Contains(t, cmd, "range .topologyKeys")
+		assert.Contains(t, cmd, "volumesnapshots.snapshot.storage.k8s.io")
+		assert.Contains(t, cmd, "iterabase-lvm-snapshot")
+		assert.Contains(t, cmd, "snapshot-controller")
+		assert.Contains(t, cmd, "csi-snapshotter")
 		assert.Contains(t, cmd, "openebs.io/nodename")
 		assert.Contains(t, cmd, "iterabase-agentpool-lvm-xfs")
 		assert.Contains(t, cmd, "K3s local-path provisioner still exists")

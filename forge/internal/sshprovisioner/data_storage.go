@@ -239,7 +239,7 @@ selected=(%s)
 
 fail() { printf 'data-storage refusal: %%s\n' "$*" >&2; exit 42; }
 need() { command -v "$1" >/dev/null 2>&1 || fail "required probe/tool $1 is unavailable"; }
-for tool in readlink lsblk findmnt blkid wipefs awk grep stat base64 sync find tr head sort dirname mktemp mv chown chmod cat; do need "$tool"; done
+for tool in readlink lsblk findmnt blkid wipefs awk grep stat base64 sync find tr head sort dirname mktemp mv chown chmod cat seq sleep; do need "$tool"; done
 %s
 
 list_process_ids() {
@@ -371,29 +371,13 @@ ownership_tag_owners() {
     {for(i=1;i<=3;i++) gsub(/^[[:space:]]+|[[:space:]]+$/, "", $i); n=split($3, tags, ","); for(i=1;i<=n;i++) if(tags[i] == wanted) {print $1 "|" $2; break}}
   ' | sort
 }
-write_receipt() {
-  local status_value=$1 pv_done_value=$2 receipt_dir tmp
-  receipt_dir=$(dirname "$receipt")
-  install -d -o root -g root -m 0700 "$receipt_dir"
-  umask 077; tmp=$(mktemp "$receipt_dir/.data-storage.receipt.XXXXXX")
-  {
-    printf 'contract=%%s\nstatus=%%s\npv_done=%%s\n' "$contract" "$status_value" "$pv_done_value"
-    printf 'install_b64=%%s\n' "$(printf '%%s' "$install_name" | base64 -w0)"
-    printf 'device_count=%%s\nvg_name=%%s\nownership_tag=%%s\nvg_uuid=%%s\n' "$count" "$vg_name" "$ownership_tag" "$receipt_vg_uuid"
-    for ((r=0; r<count; r++)); do
-      printf 'device_%%s_b64=%%s\n' "$r" "$(printf '%%s' "${selected[$r]}" | base64 -w0)"
-      printf 'resolved_%%s_b64=%%s\n' "$r" "$(printf '%%s' "${resolved[$r]}" | base64 -w0)"
-      printf 'model_%%s_b64=%%s\n' "$r" "$(printf '%%s' "${model[$r]}" | base64 -w0)"
-      printf 'serial_%%s_b64=%%s\n' "$r" "$(printf '%%s' "${serial[$r]}" | base64 -w0)"
-      printf 'wwn_%%s_b64=%%s\n' "$r" "$(printf '%%s' "${wwn[$r]}" | base64 -w0)"
-      printf 'transport_%%s_b64=%%s\n' "$r" "$(printf '%%s' "${transport[$r]}" | base64 -w0)"
-      printf 'size_%%s=%%s\npv_uuid_%%s=%%s\n' "$r" "${size[$r]}" "$r" "${planned_pv_uuid[$r]}"
-    done
-  } > "$tmp"
-  chown root:root "$tmp"; chmod 0600 "$tmp"; sync -f "$tmp"; mv -f "$tmp" "$receipt"; sync -f "$receipt_dir"
-}
-
 %s
+%s
+%s
+if test "$receipt_present" = 1 && test "$mode" = reconcile; then
+  case "$status" in purge-*) fail "data-storage purge is in progress; resume explicit destroy --purge-data-storage before apply" ;; esac
+  if test "$status" = complete; then storage_stage_barrier reapply-inspected-complete; fi
+fi
 if test "$receipt_present" = 0; then
   for ((i=0; i<count; i++)); do probe_blank "$i"; done
   if command -v vgs >/dev/null 2>&1 && vgs "$vg_name" >/dev/null 2>&1; then fail "fixed VG $vg_name already exists without the Forge receipt"; fi
@@ -405,7 +389,7 @@ if test "$receipt_present" = 0; then
   for ((i=0; i<count; i++)); do planned_pv_uuid[$i]=$(lvm_uuid); done
   ownership_tag=$(new_ownership_tag)
   test -z "$(ownership_tag_owners)" || fail "generated data-storage ownership tag already belongs to a VG"
-  write_receipt planned 0; status=planned
+  purge_done=0; write_receipt planned 0 0; status=planned; storage_stage_barrier receipt-planned
 fi
 
 need pvs; need vgs; need lvs
@@ -462,7 +446,9 @@ else
     # a pvs-created stage with a non-empty vg_uuid is invalid and would brick
     # the next run. The pvs-created marker is only meaningful during the PV
     # creation transaction, before vgcreate (DES-HOR-545-03).
-    if test -z "$receipt_vg_uuid"; then write_receipt pvs-created "$pv_done"; status=pvs-created; fi
+    if test -z "$receipt_vg_uuid"; then
+      write_receipt pvs-created "$pv_done" 0; status=pvs-created; storage_stage_barrier "pv-$pv_done-created"
+    fi
   done
 fi
 
@@ -497,8 +483,8 @@ if test "$vg_exists" = true; then
   test "$vg_tags" = "$ownership_tag" || fail "$vg_name ownership tag differs from the receipt"
   tag_owners=$(ownership_tag_owners)
   test "$tag_owners" = "$vg_name|$vg_uuid" || fail "$vg_name ownership tag is not globally unique"
-  unexpected_segments=$(lvs --noheadings --select "vg_name=$vg_name" -o segtype | awk '{$1=$1; if(NF && $1 != "linear") print}')
-  test -z "$unexpected_segments" || fail "$vg_name contains unsupported thin/snapshot/non-linear logical volumes: $unexpected_segments"
+  unexpected_segments=$(lvs --noheadings --select "vg_name=$vg_name" -o segtype | awk '{$1=$1; if(NF && $1 != "linear" && $1 != "snapshot") print}')
+  test -z "$unexpected_segments" || fail "$vg_name contains unsupported thin/non-linear/non-snapshot logical volumes: $unexpected_segments"
   test "$pv_count" = "$count" || fail "$vg_name PV membership count differs from the receipt"
   actual_members=$(pvs --noheadings --select "vg_name=$vg_name" -o pv_name | awk '{$1=$1; if(NF)print}' | sort)
   expected_members=$(printf '%%s\n' "${resolved[@]}" | sort)
@@ -512,16 +498,18 @@ if test "$vg_exists" = true; then
   else
     test "$status" = pvs-created || fail "$vg_name exists before a valid receipt stage"
     if test "$mode" = reconcile; then
-      receipt_vg_uuid=$vg_uuid; write_receipt vg-created "$count"; status=vg-created
+      receipt_vg_uuid=$vg_uuid; write_receipt vg-created "$count" 0; status=vg-created; storage_stage_barrier vg-created
     fi
   fi
-  if test "$mode" = reconcile && test "$status" != complete; then write_receipt complete "$count"; status=complete; fi
+  if test "$mode" = reconcile && test "$status" != complete; then
+    write_receipt complete "$count" 0; status=complete; storage_stage_barrier complete
+  fi
   if test "$status" = complete; then final_state=complete; else final_state="resumable-$status"; fi
 fi
 
 for ((i=0; i<count; i++)); do printf 'FORGE_DATA_STORAGE_DEVICE_RESULT\t%%s\t%%s\t%%s\t%%s\t%%s\t%%s\t%%s\t%%s\n' "${selected[$i]}" "${resolved[$i]}" "${model[$i]}" "${serial[$i]}" "${wwn[$i]}" "${planned_pv_uuid[$i]}" "${size[$i]}" "${transport[$i]}"; done
 printf 'FORGE_DATA_STORAGE_RESULT\t%%s\t%%s\t%%s\t%%s\t%%s\t%%s\n' "$final_state" "$vg_name" "${vg_uuid:-}" "${vg_size:-0}" "${vg_free:-0}" "$count"
-`, shellQuote(spec.InstallName), shellQuote(mode), shellQuote(dataStorageContractVersion), shellQuote(dataStorageReceiptPath), shellQuote(provisioner.DataVolumeGroupName), strings.Join(quoted, " "), dataStorageDeviceResolutionPrelude(), dataStorageReceiptPrelude())
+`, shellQuote(spec.InstallName), shellQuote(mode), shellQuote(dataStorageContractVersion), shellQuote(dataStorageReceiptPath), shellQuote(provisioner.DataVolumeGroupName), strings.Join(quoted, " "), dataStorageDeviceResolutionPrelude(), dataStorageReceiptWriterPrelude(), dataStorageStageBarrierPrelude(), dataStorageReceiptPrelude())
 }
 
 // WaitForLVMStorageReady validates the chart-owned substrate and exact VG
@@ -572,6 +560,18 @@ to_bytes() {
 cap_ok() {
   awk -v e="$1" -v o="$2" -v abs=67108864 -v rel=0.02 'BEGIN{d=o-e; if(d<0)d=-d; if(e<=0){print (o>0)?1:0; exit} limit=(e*rel>abs?e*rel:abs); print (d<=limit)?1:0}'
 }
+snapshot_authority_ready() {
+  snapshot_crds=$(k3s kubectl get crd volumesnapshotclasses.snapshot.storage.k8s.io volumesnapshotcontents.snapshot.storage.k8s.io volumesnapshots.snapshot.storage.k8s.io -o name 2>/dev/null | sort) || return 1
+  test "$snapshot_crds" = "$(printf 'customresourcedefinition.apiextensions.k8s.io/volumesnapshotclasses.snapshot.storage.k8s.io\ncustomresourcedefinition.apiextensions.k8s.io/volumesnapshotcontents.snapshot.storage.k8s.io\ncustomresourcedefinition.apiextensions.k8s.io/volumesnapshots.snapshot.storage.k8s.io')" || return 1
+  k3s kubectl wait --for=condition=Established crd/volumesnapshotclasses.snapshot.storage.k8s.io crd/volumesnapshotcontents.snapshot.storage.k8s.io crd/volumesnapshots.snapshot.storage.k8s.io --timeout=10s >/dev/null 2>&1 || return 1
+  snapshot_classes=$(k3s kubectl get volumesnapshotclass.snapshot.storage.k8s.io -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null | sort) || return 1
+  test "$snapshot_classes" = iterabase-lvm-snapshot || return 1
+  snapshot_class=$(k3s kubectl get volumesnapshotclass.snapshot.storage.k8s.io iterabase-lvm-snapshot -o jsonpath='{.driver}|{.deletionPolicy}|{.parameters.snapSize}|{.metadata.annotations.snapshot\.storage\.kubernetes\.io/is-default-class}' 2>/dev/null) || return 1
+  test "$snapshot_class" = 'local.csi.openebs.io|Delete|100%%|false' || return 1
+  controller_containers=$(k3s kubectl get deployment -n "$namespace" -l app=openebs-lvm-controller -o jsonpath='{range .items[*].spec.template.spec.containers[*]}{.name}{"\n"}{end}' 2>/dev/null | sort) || return 1
+  printf '%%s\n' "$controller_containers" | grep -Fxq csi-snapshotter || return 1
+  printf '%%s\n' "$controller_containers" | grep -Fxq snapshot-controller || return 1
+}
 lvmnode_satisfies() {
   node_count=$(k3s kubectl get lvmnodes.local.openebs.io -n "$namespace" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | awk '{print NF}')
   test "$node_count" = 1 || return 1
@@ -609,10 +609,10 @@ for attempt in $(seq 1 150); do
      k3s kubectl wait --for=condition=Established crd/lvmnodes.local.openebs.io crd/lvmvolumes.local.openebs.io crd/lvmsnapshots.local.openebs.io --timeout=10s >/dev/null 2>&1 &&
      k3s kubectl wait -n "$namespace" --for=condition=Available deployment -l app=openebs-lvm-controller --timeout=10s >/dev/null 2>&1 &&
      k3s kubectl rollout status -n "$namespace" daemonset -l app=openebs-lvm-node --timeout=10s >/dev/null 2>&1 &&
-     k3s kubectl get csidriver local.csi.openebs.io >/dev/null 2>&1 && csi_registered && lvmnode_satisfies; then
+     k3s kubectl get csidriver local.csi.openebs.io >/dev/null 2>&1 && csi_registered && snapshot_authority_ready && lvmnode_satisfies; then
     break
   fi
-  test "$attempt" -lt 150 || fail "OpenEBS LVM LocalPV controller/node/CRD/CSI registration or receipt-matching iterabase-data VG discovery did not become Ready (last vg='$last_vg' missing='$last_missing' thin='$last_thin' obs_node='$observed_node')"
+  test "$attempt" -lt 150 || fail "OpenEBS LVM LocalPV volume/snapshot CRDs/controllers/CSI registration/classes or receipt-matching iterabase-data VG discovery did not become Ready (last vg='$last_vg' missing='$last_missing' thin='$last_thin' obs_node='$observed_node')"
   sleep 2
 done
 classes=$(k3s kubectl get storageclass -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' | sort)
@@ -659,6 +659,60 @@ printf 'FORGE_LVM_STORAGE_READY\t%%s\t%%s\t%%s\t%%s\t%%s\t%%s\t%%s\n' "$observed
 	return nil, fmt.Errorf("LVM storage readiness returned no bounded result")
 }
 
+// dataStorageReceiptWriterPrelude emits the one atomic+fsynced receipt writer
+// shared by reconcile and purge. purge_done is an explicit monotonic count used
+// only by the purge transaction; ordinary reconcile always writes zero.
+func dataStorageReceiptWriterPrelude() string {
+	return `
+write_receipt() {
+  local status_value=$1 pv_done_value=$2 purge_done_value=$3 receipt_dir tmp r
+  receipt_dir=$(dirname "$receipt")
+  install -d -o root -g root -m 0700 "$receipt_dir"
+  umask 077; tmp=$(mktemp "$receipt_dir/.data-storage.receipt.XXXXXX")
+  {
+    printf 'contract=%s\nstatus=%s\npv_done=%s\npurge_done=%s\n' "$contract" "$status_value" "$pv_done_value" "$purge_done_value"
+    printf 'install_b64=%s\n' "$(printf '%s' "$install_name" | base64 -w0)"
+    printf 'device_count=%s\nvg_name=%s\nownership_tag=%s\nvg_uuid=%s\n' "$count" "$vg_name" "$ownership_tag" "$receipt_vg_uuid"
+    for ((r=0; r<count; r++)); do
+      printf 'device_%s_b64=%s\n' "$r" "$(printf '%s' "${selected[$r]}" | base64 -w0)"
+      printf 'resolved_%s_b64=%s\n' "$r" "$(printf '%s' "${resolved[$r]}" | base64 -w0)"
+      printf 'model_%s_b64=%s\n' "$r" "$(printf '%s' "${model[$r]}" | base64 -w0)"
+      printf 'serial_%s_b64=%s\n' "$r" "$(printf '%s' "${serial[$r]}" | base64 -w0)"
+      printf 'wwn_%s_b64=%s\n' "$r" "$(printf '%s' "${wwn[$r]}" | base64 -w0)"
+      printf 'transport_%s_b64=%s\n' "$r" "$(printf '%s' "${transport[$r]}" | base64 -w0)"
+      printf 'size_%s=%s\npv_uuid_%s=%s\n' "$r" "${size[$r]}" "$r" "${planned_pv_uuid[$r]}"
+    done
+  } > "$tmp"
+  chown root:root "$tmp"; chmod 0600 "$tmp"; sync -f "$tmp"; mv -f "$tmp" "$receipt"; sync -f "$receipt_dir"
+}
+`
+}
+
+// dataStorageStageBarrierPrelude is inert in every production invocation. The
+// privileged executable fault harness supplies both internal fixture variables
+// to stop synchronously after an exact durable stage, inspect receipt/live LVM
+// state, and kill the whole process group without polling transient strings.
+func dataStorageStageBarrierPrelude() string {
+	return `
+storage_stage_barrier() {
+  local stage=$1 reached release attempt
+  test "${FORGE_DATA_STORAGE_FIXTURE_LOOP:-}" = 1 || return 0
+  test -n "${FORGE_DATA_STORAGE_STAGE_BARRIER_DIR:-}" || return 0
+  test "$stage" = "${FORGE_DATA_STORAGE_STAGE_BARRIER:-}" || return 0
+  printf '%s' "$stage" | grep -Eq '^[a-z0-9-]+$' || fail "invalid internal storage stage barrier"
+  test -d "$FORGE_DATA_STORAGE_STAGE_BARRIER_DIR" || fail "internal storage stage barrier directory is unavailable"
+  reached="$FORGE_DATA_STORAGE_STAGE_BARRIER_DIR/$stage.reached"
+  release="$FORGE_DATA_STORAGE_STAGE_BARRIER_DIR/$stage.release"
+  umask 077; printf '%s\n' "$stage" > "$reached"; sync -f "$reached"; sync -f "$FORGE_DATA_STORAGE_STAGE_BARRIER_DIR"
+  for attempt in $(seq 1 9000); do
+    test ! -e "$release" || return 0
+    sleep 0.01
+  done
+  fail "internal storage stage barrier $stage timed out"
+}
+`
+}
+
 // dataStorageReceiptPrelude emits the shared read-only receipt-parsing and
 // identity-validation prelude used by both exact reconcile and explicit purge
 // (DES-HOR-545-03). It defines the receipt accessors, loads the durable receipt
@@ -673,15 +727,17 @@ receipt_value() { awk -F= -v wanted="$1" '$1 == wanted {sub(/^[^=]*=/, ""); prin
 decode_receipt() { receipt_value "$1" | base64 -d; }
 valid_lvm_uuid() { case "$1" in ??????-????-????-????-????-????-??????) return 0 ;; *) return 1 ;; esac; }
 valid_ownership_tag() { printf '%s' "$1" | grep -Eq '^iterabase[.]hor545[.][0-9a-f]{32}$'; }
-status=; pv_done=0; receipt_vg_uuid=; ownership_tag=; planned_pv_uuid=(); receipt_present=0
+status=; pv_done=0; purge_done=0; receipt_vg_uuid=; ownership_tag=; planned_pv_uuid=(); receipt_present=0
 if test -e "$receipt"; then
   receipt_present=1
   test -f "$receipt" && test ! -L "$receipt" || fail "data-storage receipt is not a regular file"
   test "$(stat -c '%u:%g:%a' "$receipt")" = 0:0:600 || fail "data-storage receipt ownership/mode drift"
   test "$(receipt_value contract)" = "$contract" || fail "data-storage receipt contract mismatch"
-  status=$(receipt_value status); case "$status" in planned|pvs-created|vg-created|complete) ;; *) fail "data-storage receipt status is invalid" ;; esac
+  status=$(receipt_value status); case "$status" in planned|pvs-created|vg-created|complete|purge-vg-pending|purge-vg-removed|purge-pv-pending|purge-pvs-removed|purge-receipt-pending) ;; *) fail "data-storage receipt status is invalid" ;; esac
   pv_done=$(receipt_value pv_done); case "$pv_done" in ''|*[!0-9]*) fail "data-storage receipt pv_done is invalid" ;; esac
+  purge_done=$(receipt_value purge_done 2>/dev/null || printf 0); case "$purge_done" in ''|*[!0-9]*) fail "data-storage receipt purge_done is invalid" ;; esac
   test "$pv_done" -le "$count" || fail "data-storage receipt pv_done exceeds device count"
+  test "$purge_done" -le "$count" || fail "data-storage receipt purge_done exceeds device count"
   test "$(decode_receipt install_b64)" = "$install_name" || fail "data-storage receipt install mismatch"
   test "$(receipt_value device_count)" = "$count" || fail "data-storage configured device-set size differs from the receipt"
   test "$(receipt_value vg_name)" = "$vg_name" || fail "data-storage VG name mismatch"
@@ -690,16 +746,21 @@ if test -e "$receipt"; then
   receipt_vg_uuid=$(receipt_value vg_uuid)
   case "$status" in
     planned)
-      test "$pv_done" = 0 || fail "data-storage planned receipt has completed PV stages"
+      test "$pv_done" = 0 && test "$purge_done" = 0 || fail "data-storage planned receipt has completed transaction stages"
       test -z "$receipt_vg_uuid" || fail "data-storage receipt records a VG UUID before the VG-created stage"
       ;;
     pvs-created)
-      test "$pv_done" -gt 0 || fail "data-storage pvs-created receipt has no completed PV"
+      test "$pv_done" -gt 0 && test "$purge_done" = 0 || fail "data-storage pvs-created receipt has invalid transaction progress"
       test -z "$receipt_vg_uuid" || fail "data-storage receipt records a VG UUID before the VG-created stage"
       ;;
     vg-created|complete)
-      test "$pv_done" = "$count" || fail "data-storage VG receipt does not bind the complete PV set"
+      test "$pv_done" = "$count" && test "$purge_done" = 0 || fail "data-storage VG receipt does not bind the complete PV set"
       valid_lvm_uuid "$receipt_vg_uuid" || fail "data-storage receipt VG UUID is invalid"
+      ;;
+    purge-vg-pending|purge-vg-removed|purge-pv-pending|purge-pvs-removed|purge-receipt-pending)
+      test -z "$receipt_vg_uuid" || valid_lvm_uuid "$receipt_vg_uuid" || fail "data-storage purge receipt VG UUID is invalid"
+      test "$status" != purge-vg-pending && test "$status" != purge-vg-removed || test "$purge_done" = 0 || fail "data-storage VG purge stage has removed PV progress"
+      test "$status" != purge-receipt-pending || test "$purge_done" = "$pv_done" || fail "data-storage receipt removal stage precedes PV removal"
       ;;
   esac
   for ((i=0; i<count; i++)); do

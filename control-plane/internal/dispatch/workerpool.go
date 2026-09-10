@@ -242,6 +242,25 @@ func (p *workerPool) seedWorkspaceCapacity(states map[string]WorkspaceCapacitySt
 	p.mu.Unlock()
 }
 
+// syncWorkspaceCapacity converges process-local gate state to the active
+// durable rows. Soft-deleted pools have no capacity row and are removed so a
+// later same-UUID revival starts fail-closed rather than inheriting the old PVC.
+func (p *workerPool) syncWorkspaceCapacity(states map[string]WorkspaceCapacityState) []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	removed := make([]string, 0)
+	for poolID := range p.workspaceGated {
+		if _, active := states[poolID]; !active {
+			delete(p.workspaceGated, poolID)
+			removed = append(removed, poolID)
+		}
+	}
+	for poolID, state := range states {
+		p.workspaceGated[poolID] = state.CreditGated
+	}
+	return removed
+}
+
 // applyWorkspaceStatus publishes the durable decision only to workers mounting
 // the same AgentPool PVC. Other pools remain independently eligible.
 func (p *workerPool) applyWorkspaceStatus(source *workerConn, free, capacity uint64, ratio float64, warning, gated bool) bool {

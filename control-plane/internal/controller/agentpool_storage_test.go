@@ -16,6 +16,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -195,6 +196,64 @@ func TestAssessAgentPoolStorageAcceptsBoundOpenEBSLVMVolume(t *testing.T) {
 	assert.Equal(t, "pvc-volume-1", assessment.VolumeHandle)
 	assert.Contains(t, assessment.Message, "shared=yes")
 	assert.Contains(t, assessment.Message, "vg=iterabase-data")
+}
+
+type storageQueryClient struct {
+	client.Client
+	getByKind  map[string]int
+	listByKind map[string]int
+	failKind   string
+	failErr    error
+}
+
+func (c *storageQueryClient) Get(ctx context.Context, key types.NamespacedName, object client.Object, opts ...client.GetOption) error {
+	kind := object.GetObjectKind().GroupVersionKind().Kind
+	c.getByKind[kind]++
+	if c.failKind != "" && kind == c.failKind {
+		return c.failErr
+	}
+	return c.Client.Get(ctx, key, object, opts...)
+}
+
+func (c *storageQueryClient) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	kind := list.GetObjectKind().GroupVersionKind().Kind
+	c.listByKind[kind]++
+	return c.Client.List(ctx, list, opts...)
+}
+
+func TestAssessAgentPoolStorageUsesDirectSingleOpenEBSObservations(t *testing.T) {
+	pool := storagePool()
+	r := storageReconciler(t, boundWorkspaceObjects(pool)...)
+	queries := &storageQueryClient{Client: r.Client, getByKind: map[string]int{}, listByKind: map[string]int{}}
+	r.Client = queries
+	assessment := r.assessAgentPoolStorage(context.Background(), pool)
+	require.True(t, assessment.Ready, "%+v", assessment)
+	assert.Equal(t, 1, queries.getByKind["LVMVolume"])
+	assert.Equal(t, 1, queries.getByKind["LVMNode"])
+	assert.Zero(t, queries.listByKind["LVMVolumeList"])
+	assert.Zero(t, queries.listByKind["LVMNodeList"])
+}
+
+func TestStorageObservationErrorFailsClosedWithoutAuthorizingQuiescence(t *testing.T) {
+	pool := storagePool()
+	r := storageReconciler(t, boundWorkspaceObjects(pool)...)
+	queries := &storageQueryClient{
+		Client: r.Client, getByKind: map[string]int{}, listByKind: map[string]int{},
+		failKind: "LVMVolume", failErr: errors.New("cache transport unavailable"),
+	}
+	r.Client = queries
+	assessment := r.assessAgentPoolStorage(context.Background(), pool)
+	assert.False(t, assessment.Ready)
+	assert.False(t, assessment.CanMount)
+	assert.True(t, assessment.ObservationUnknown)
+	assert.False(t, assessment.ConfirmedUnsafe)
+	assert.False(t, storageQuiescenceRequired(assessment), "unknown observations must retain healthy workers while withdrawing readiness")
+	assert.ErrorIs(t, assessment.ObservationErr, queries.failErr)
+
+	unsafe := assessment
+	unsafe.ObservationUnknown = false
+	unsafe.ConfirmedUnsafe = true
+	assert.True(t, storageQuiescenceRequired(unsafe), "positively observed drift must quiesce")
 }
 
 func TestAssessAgentPoolStorageRejectsCSIAndOpenEBSIdentityDrift(t *testing.T) {

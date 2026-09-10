@@ -87,12 +87,29 @@ func TestParse_RejectsUnreviewedK3sVersion(t *testing.T) {
 }
 
 func TestParseRejectsK3sStorageAuthorityOverrides(t *testing.T) {
-	for _, arg := range []string{"--disable=", "--data-dir=/srv/k3s", "--kubelet-arg=root-dir=/srv/kubelet"} {
-		t.Run(arg, func(t *testing.T) {
-			_, err := Parse(yamlFor(t, func(c *Cluster) { c.Spec.K3s.ExtraArgs = []string{arg} }))
+	for _, args := range [][]string{
+		{"--disable="},
+		{"--data-dir=/srv/k3s"},
+		{"--kubelet-arg=root-dir=/srv/kubelet"},
+		{"--kubelet-arg", "root-dir=/srv/kubelet"},
+		{"--kubelet-arg"},
+		{"--kubelet-arg", "--node-label=role=worker"},
+	} {
+		t.Run(strings.Join(args, "_"), func(t *testing.T) {
+			_, err := Parse(yamlFor(t, func(c *Cluster) { c.Spec.K3s.ExtraArgs = args }))
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), "k3s.extraArgs")
 		})
+	}
+}
+
+func TestParseAcceptsReviewedNonRootKubeletArgForms(t *testing.T) {
+	for _, args := range [][]string{
+		{"--kubelet-arg=serialize-image-pulls=false"},
+		{"--kubelet-arg", "serialize-image-pulls=false", "--node-label=role=worker"},
+	} {
+		_, err := Parse(yamlFor(t, func(c *Cluster) { c.Spec.K3s.ExtraArgs = args }))
+		require.NoError(t, err)
 	}
 }
 

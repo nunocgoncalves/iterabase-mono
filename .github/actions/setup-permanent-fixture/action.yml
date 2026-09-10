@@ -18,9 +18,9 @@ inputs:
   ssh-host-key:
     required: true
     description: Pinned OpenSSH public host key
-  workspace-device:
+  data-storage-device:
     required: true
-    description: Exact Forge AgentPool workspace by-id device
+    description: Exact Forge data-storage by-id device
   model-cache-device:
     required: false
     description: Exact GPU model-cache by-id device
@@ -39,20 +39,20 @@ runs:
         SSH_USER: ${{ inputs.ssh-user }}
         SSH_PRIVATE_KEY: ${{ inputs.ssh-private-key }}
         SSH_HOST_KEY: ${{ inputs.ssh-host-key }}
-        WORKSPACE_DEVICE: ${{ inputs.workspace-device }}
+        DATA_STORAGE_DEVICE: ${{ inputs.data-storage-device }}
         MODEL_CACHE_DEVICE: ${{ inputs.model-cache-device }}
         MODEL_CACHE_UUID: ${{ inputs.model-cache-uuid }}
       run: |
         set -euo pipefail
         case "$CAPACITY" in cpu|gpu) ;; *) echo "invalid permanent fixture capacity" >&2; exit 1 ;; esac
-        for value in "$ADDRESS" "$SSH_USER" "$SSH_PRIVATE_KEY" "$SSH_HOST_KEY" "$WORKSPACE_DEVICE"; do
+        for value in "$ADDRESS" "$SSH_USER" "$SSH_PRIVATE_KEY" "$SSH_HOST_KEY" "$DATA_STORAGE_DEVICE"; do
           test -n "$value"
         done
-        case "$WORKSPACE_DEVICE" in /dev/disk/by-id/*) ;; *) echo "workspace device is not a stable by-id identity" >&2; exit 1 ;; esac
+        case "$DATA_STORAGE_DEVICE" in /dev/disk/by-id/*) ;; *) echo "data-storage device is not a stable by-id identity" >&2; exit 1 ;; esac
         if [ "$CAPACITY" = gpu ]; then
           test -n "$MODEL_CACHE_DEVICE" && test -n "$MODEL_CACHE_UUID"
           case "$MODEL_CACHE_DEVICE" in /dev/disk/by-id/*) ;; *) echo "model-cache device is not a stable by-id identity" >&2; exit 1 ;; esac
-          test "$MODEL_CACHE_DEVICE" != "$WORKSPACE_DEVICE"
+          test "$MODEL_CACHE_DEVICE" != "$DATA_STORAGE_DEVICE"
         else
           test -z "$MODEL_CACHE_DEVICE" && test -z "$MODEL_CACHE_UUID"
         fi
@@ -70,7 +70,7 @@ runs:
           printf 'FORGE_E2E_FIXTURE_SSH_USER=%s\n' "$SSH_USER"
           printf 'FORGE_E2E_FIXTURE_SSH_KEY_PATH=%s\n' "$key"
           printf 'FORGE_E2E_FIXTURE_SSH_HOST_KEY=%s\n' "$SSH_HOST_KEY"
-          printf 'FORGE_E2E_FIXTURE_DATA_STORAGE_DEVICES=%s\n' "$WORKSPACE_DEVICE"
+          printf 'FORGE_E2E_FIXTURE_DATA_STORAGE_DEVICES=%s\n' "$DATA_STORAGE_DEVICE"
           printf 'FORGE_E2E_MODEL_CACHE_DEVICE=%s\n' "$MODEL_CACHE_DEVICE"
           printf 'FORGE_E2E_MODEL_CACHE_UUID=%s\n' "$MODEL_CACHE_UUID"
         } >> "$GITHUB_ENV"

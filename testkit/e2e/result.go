@@ -54,7 +54,7 @@ type FixtureEvidence struct {
 	Name               string `json:"name"`
 	Capacity           string `json:"capacity"`
 	HostKeySHA256      string `json:"host_key_sha256"`
-	WorkspaceDevice    string `json:"workspace_device"`
+	DataStorageDevice  string `json:"data_storage_device"`
 	BootIDBefore       string `json:"boot_id_before"`
 	BootIDAfter        string `json:"boot_id_after"`
 	ModelCacheDevice   string `json:"model_cache_device,omitempty"`
@@ -73,11 +73,11 @@ func RecordFixtureEvidence(evidence FixtureEvidence) error {
 		return nil
 	}
 	if evidence.Name == "" || evidence.Capacity == "" || !canonicalHash.MatchString(evidence.HostKeySHA256) ||
-		evidence.WorkspaceDevice == "" || evidence.BootIDBefore == "" || evidence.BootIDAfter == "" ||
+		evidence.DataStorageDevice == "" || evidence.BootIDBefore == "" || evidence.BootIDAfter == "" ||
 		evidence.BootIDBefore == evidence.BootIDAfter {
 		return fmt.Errorf("permanent fixture evidence is incomplete: %+v", evidence)
 	}
-	if evidence.Name == "model-cache" && (evidence.ModelCacheDevice == "" || evidence.ModelCacheDevice == evidence.WorkspaceDevice ||
+	if evidence.Name == "model-cache" && (evidence.ModelCacheDevice == "" || evidence.ModelCacheDevice == evidence.DataStorageDevice ||
 		evidence.ModelCacheMount != "/data/hf-cache" || evidence.ModelCacheUUID == "" || evidence.ModelID == "" ||
 		!fullSHA.MatchString(evidence.ModelRevision) || !canonicalHash.MatchString(evidence.ModelContentSHA256)) {
 		return fmt.Errorf("GPU model-cache evidence is incomplete: %+v", evidence)
