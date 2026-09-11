@@ -108,7 +108,7 @@ The tables below validate trust-boundary continuity. They do not approve a defer
 | `REQ-FND-QDP-016` | Items 6, 12 keep cancellation fenced with honest effect retention. |
 | `REQ-FND-QDP-017` | Item 8 limits adaptive work to isolated candidate lanes and Item 12 enforces budgets server-side; the exact first-loop prompt/skill-only mutation allowlist and budget/plateau stop mechanics remain the approved first-QDP slice (HOR-524). |
 | `REQ-FND-QDP-018` | Items 7, 8, 11 separate candidate, evaluator, coordinator, publisher, and promoter authority. |
-| `REQ-FND-QDP-024` | Items 1, 10 require content-addressed evidence/decision references and immutable evidence policy; the exact single-cell qualification-code digest and evidence-policy mechanics remain HOR-524/HOR-526 implementation. |
+| `REQ-FND-QDP-024` | Item 1 requires immutable content-addressed evidence identity and Item 10 binds immutable proposal/decision references; the exactly-one `qualification-cell` reference and the immutable evidence-policy contract are **Not decided here** and remain HOR-524/HOR-526. |
 | `REQ-FND-QDP-025` | Item 11 keeps qualification distinct from support/publication; exact QDP issuance-only-from-a-passing-decision and limitations/envelope/requalification-trigger mechanics remain HOR-524. |
 | `REQ-FND-QDP-026` | Item 11 keeps `qualified`, `supported`, `published`, and `promoted` separate. |
 | `REQ-FND-QDP-028` | Items 7, 10, 14 permit immutable proposals/references but no overlay, registry, or runtime mutation. |
@@ -117,9 +117,9 @@ The tables below validate trust-boundary continuity. They do not approve a defer
 
 | Requirements | Boundary continuity proved by this decision |
 | --- | --- |
-| `REQ-FND-CAND-001` | Items 1, 10 require coupled immutable/content-addressed candidate evidence, including reference resolution before admission. |
-| `REQ-FND-CAND-002` | Item 6 keeps attempts immutable with parent/rationale via receipts; Item 11 prevents any candidate from approving or deploying itself. Exact candidate-lineage persistence remains a follow-on implementation gate. |
-| `REQ-FND-CAND-003` | Item 6 binds attempts to Foundry receipts and authoritative control-plane evidence. |
+| `REQ-FND-CAND-001` | Item 1 requires immutable content-addressed identity; the coupled all-primitive candidate binding and reference-resolution-before-admission are inherited from `DES-HOR-525-01` (items 5, 10, 16 candidate/lineage owners) and remain implementation. |
+| `REQ-FND-CAND-002` | Item 6 keeps attempts immutable and Item 11 prevents self-approval/deploy; candidate parent/rationale receipt content is inherited from `DES-HOR-525-01` (items 2, 10 immutable candidate/attempt lineage) and exact persistence remains implementation. |
+| `REQ-FND-CAND-003` | Item 6 ties attempts to receipts and evidence integrity; the complete authoritative execution receipt and its control-plane binding are inherited from `DES-HOR-525-01` (item 11 `FoundryExecutionService` receipts) and exact content remains implementation. |
 | `REQ-FND-CAND-004` | Items 6, 12 retain failed/rejected evidence and prohibit pass-on-retry rewriting. |
 | `REQ-FND-CAND-005` | Alias-to-identity resolution is inherited from `DES-HOR-525-01` (book importer resolves commit/tree/blob digests, aliases, and external references) and bound through Item 1's immutable identity rule; exact per-domain alias-resolution mechanics remain implementation. |
 | `REQ-FND-CAND-006` | Items 7, 10, 11 keep candidate/evaluation authority separate from merge, publication, support, deployment, and self-promotion. |
@@ -169,13 +169,13 @@ The tables below validate trust-boundary continuity. They do not approve a defer
 | `REQ-FND-INF-011` | Foundry stores immutable candidate/reference lineage; candidate cannot forge receipts. | Exact digest and generated-state identity. |
 | `REQ-FND-INF-012` | Candidate cannot choose hidden cases/gates or alter protected controls; campaign mutation authority stays out of candidate reach. | Exact mutation allowlist and protected-controls enforcement. |
 | `REQ-FND-INF-013` | Trusted builder is separate from untrusted candidate; candidate cannot acquire publisher credentials. | Reproducibility and AOT/JIT/generated-artifact contract. |
-| `REQ-FND-INF-014` | Independent dispatch/fallback evidence is required; candidate logs/labels alone are not proof. | Dispatch/fallback instrumentation and gates. |
+| `REQ-FND-INF-014` | Candidate cannot author or claim its own dispatch/fallback path, and candidate logs/labels are not authoritative; independent dispatch/fallback proof is **Not decided here** and remains HOR-536. | Dispatch/fallback instrumentation and gates. |
 | `REQ-FND-INF-015` | Candidate cannot clear quarantine or control recovery; trusted broker/health authority is separate. | Lease/fence/health/reset/reboot/clearance. |
 | `REQ-FND-INF-016` | Correctness and every decision/gate lie outside candidate authority; candidate cannot decide or override. | Numerical/serving-semantic reference tolerances and correctness/serving gates. |
-| `REQ-FND-INF-017` | Safety/cleanup gates are separate; candidate cannot hide faults. | Exact accelerator safety cases. |
+| `REQ-FND-INF-017` | Candidate cannot conceal or clear its own faults; accelerator safety/cleanup gate mechanics are **Not decided here** and remain HOR-536. | Exact accelerator safety cases. |
 | `REQ-FND-INF-018` | Envelope evidence is owned by Foundry; candidate cannot overclaim. | Exact envelope schema and fallback boundary. |
 | `REQ-FND-INF-019` | Proposal/qualification/QDP/support authority is separate from candidate; candidate cannot select or promote itself, including on earlier failure. | Ordered evaluator implementations and gates. |
-| `REQ-FND-INF-020` | Evidence is retained raw and independently; candidate cannot fabricate results. | Workload/metrics/memory/long-context/speculation mechanics. |
+| `REQ-FND-INF-020` | Candidate cannot fabricate or overclaim its own results; retained raw service/capacity evidence mechanics are **Not decided here** and remain HOR-536. | Workload/metrics/memory/long-context/speculation mechanics. |
 | `REQ-FND-INF-021` | Evaluation and selection authority lie outside candidate authority; candidate cannot review, select, or stop on its own. | Comparison/stopping/selection policy and Pareto review. |
 | `REQ-FND-INF-022` | Foundry emits proposal only; candidate cannot choose destinations or use production/publisher/deployer/support credentials. | Trusted rebuild/publication/deployed-identity proof. |
 
@@ -190,8 +190,8 @@ The tables below validate trust-boundary continuity. They do not approve a defer
 | `SCN-FND-QDP-006` | Operator disconnect/reconnect resumes from durable cursors with re-introspection; no local state or replay. |
 | `SCN-FND-QDP-007` | Coordinator restart, worker loss, evaluator failure, and finalization failure each produce typed durable state; unsafe work is not silently retried. |
 | `SCN-FND-QDP-008` | The adaptive researcher uses development feedback but cannot retrieve hidden cases, answer-bearing traces, or hidden aggregate results. |
-| `SCN-FND-QDP-009` | A broken tool, invalid credential, flaky reset, and incorrect evaluator are each classified and routed without training around the defect. |
-| `SCN-FND-QDP-010` | Bounded prompt/skill loop creates immutable children, retains rejected attempts, and stops on budget/plateau. |
+| `SCN-FND-QDP-009` | A broken tool, invalid credential, flaky reset, and incorrect evaluator each stay out of candidate refinement and receive no production authority (Items 3, 4, 8); exact failure classification and routing mechanics remain a follow-on failure-router gate. |
+| `SCN-FND-QDP-010` | The bounded loop creates immutable children and retains rejected attempts (Item 6) without silent pass-on-retry; exact prompt/skill-only mutation allowlist, budget, and plateau-stop mechanics remain the approved first-QDP slice (HOR-524). |
 | `SCN-FND-QDP-012` | A development winner that fails hidden qualification receives a failed decision and no QDP; evidence is retained. |
 
 ### 4.2 Programme scenarios
@@ -200,11 +200,11 @@ The tables below validate trust-boundary continuity. They do not approve a defer
 | --- | --- |
 | `SCN-FND-TOOL-003` | A write that may have completed and then throws/times out/is cancelled/loses stream stays `outcome_unknown`, is not automatically repeated, and exposes reconciliation evidence without rewriting original state. |
 | `SCN-FND-TOOL-004` | Candidate tool code attempting hidden cases, credentials, Kubernetes, Docker socket, customer networks, or publisher tokens is blocked and the security failure retained. |
-| `SCN-FND-RSCH-001` | A bounded campaign mutates only allowlisted surfaces, cannot access hidden qualification, and stops on its preregistered budget/plateau. |
+| `SCN-FND-RSCH-001` | A bounded campaign runs in an isolated lane, cannot access hidden qualification, and cannot self-promote (Items 3, 8, 11); exact mutation allowlist, pinned controls, and budget/plateau-stop mechanics remain HOR-524/HOR-532. |
 | `SCN-FND-RSCH-002` | A visible-set winner that fails hidden qualification yields no QDP or deployment claim. |
 | `SCN-FND-DEP-001` | Foundry emits an exact deployment and rollback proposal but cannot change Git, registries, Linear, HF, OCI, or the target cluster. |
 | `SCN-FND-DEP-002` | The deployed customer configuration does not resolve to the evaluated digests; acceptance stops and the mismatch becomes a qualification delta. |
-| `SCN-FND-ACC-001` | The exact deployed configuration runs preregistered cases/traffic in the customer environment, producing an accepted/conditional/rejected decision with retained business-state and SLO evidence. |
+| `SCN-FND-ACC-001` | The exact deployed configuration produces an immutable accepted/conditional/rejected decision bound to exact deployed identity with no catalogue widening (Item 10); exact preregistered case/verifier/threshold freeze, customer-environment execution, and business-state/SLO evidence mechanics remain HOR-533/HOR-534. |
 | `SCN-FND-ACC-002` | A customer accepts an engagement-specific limitation; Foundry records the decision without silently widening the reusable QDP/support catalogue. |
 | `SCN-FND-LEARN-001` | Eligible production evidence is scoped, redacted or privately retained, verified, versioned, and used only to create an offline candidate that must pass the normal gates. |
 
