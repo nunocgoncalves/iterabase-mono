@@ -130,7 +130,7 @@ The tables below validate trust-boundary continuity. They do not approve a defer
 | `REQ-FND-RSCH-001` | Items 3, 4 partition calibration/discovery/validation/hidden/security/production data. |
 | `REQ-FND-RSCH-002` | Items 3, 4 protect hidden cases, evaluator secrets, and final decision policy from researchers. |
 | `REQ-FND-RSCH-003` | Items 3, 4, 8 deny candidate access to disallowed/hidden feedback and isolate candidate work from production mutation; the exact failure-classification/failure-router mechanics remain a follow-on gate. |
-| `REQ-FND-RSCH-004` | Items 3, 4, 8 deny candidate access to hidden/loading feedback and production authority; exact tool/environment defect exclusion, classification, and routing are **Not decided here** and remain the first-QDP/tool/environment gate. |
+| `REQ-FND-RSCH-004` | Items 3, 4, 8 deny candidate access to hidden feedback and production authority; exact tool/environment defect exclusion, classification, and routing are **Not decided here** and remain the first-QDP/tool/environment gate. |
 | `REQ-FND-RSCH-005` | Item 12 enforces budgets server-side; exact mutation-allowlist, protected-surface, and plateau enforcement mechanics remain a follow-on campaign gate (HOR-524). |
 | `REQ-FND-RSCH-006` | Item 6's no-pass-on-retry/immutable-attempt boundary and Item 11's separated selection authority apply; exact pinned-control, repeated/paired comparison, raw-sample, and uncertainty mechanics are **Not decided here** and remain HOR-524. |
 | `REQ-FND-RSCH-007` | Item 11 keeps selection/decision authority separate from candidate output; exact multi-objective visibility and no-scalar regression rules remain deferred to HOR-524. |
@@ -190,7 +190,7 @@ The tables below validate trust-boundary continuity. They do not approve a defer
 | `SCN-FND-QDP-006` | Operator disconnect/reconnect resumes from durable cursors with re-introspection; no local state or replay. |
 | `SCN-FND-QDP-007` | Coordinator restart, worker loss, evaluator failure, and finalization failure each produce typed durable state; unsafe work is not silently retried. |
 | `SCN-FND-QDP-008` | The adaptive researcher uses development feedback but cannot retrieve hidden cases, answer-bearing traces, or hidden aggregate results. |
-| `SCN-FND-QDP-009` | A broken tool, invalid credential, flaky reset, and incorrect evaluator receive no production authority and cannot leak hidden/loading feedback to adaptive work (Items 3, 4, 8); exact defect classification and routing mechanics are **Not decided here** and remain the failure-router gate. |
+| `SCN-FND-QDP-009` | A broken tool, invalid credential, flaky reset, and incorrect evaluator receive no production authority and cannot leak hidden feedback to adaptive work (Items 3, 4, 8); exact defect classification and routing mechanics are **Not decided here** and remain the failure-router gate. |
 | `SCN-FND-QDP-010` | Rejected attempts are retained and no pass-on-retry result is fabricated (Item 6); exact immutable child-lineage, prompt/skill-only mutation allowlist, budget, and plateau-stop mechanics are **Not decided here** and remain the approved first-QDP slice (HOR-524). |
 | `SCN-FND-QDP-012` | A development winner that fails hidden qualification receives a failed decision and no QDP; evidence is retained. |
 
