@@ -1,15 +1,18 @@
 # Build-once affected-target bundles and protected promotion
 
 `master` is an integration branch, not a publication trigger. Publication uses
-three manual workflows:
+four manual workflows:
 
-- **Release candidate** builds and validates an explicit affected-target bundle
-  from one exact SHA contained in `master`.
-- **Promote release** verifies a successful candidate run and publishes its
-  unchanged members after one founder approval in the protected `release`
-  environment.
-- **Release immutability gate** verifies the one retained, non-semantic
-  draft-first publication against its exact tag, assets, and release attestation.
+- **Release candidate** resolves one complete published baseline, then builds and
+  validates an explicit affected-target bundle from one exact SHA contained in
+  `master` (or from an exact branch head in rehearsal mode).
+- **Promote release** verifies a successful candidate run, publishes its unchanged
+  members non-Latest, and performs one final complete-cohort Latest handoff after
+  founder approval in the protected `release` environment.
+- **Roll back complete release baseline** verifies and selects one exact whole-snapshot
+  ancestor without editing any immutable Release, tag, manifest, or artifact.
+- **Release immutability gate** verifies the retained, non-semantic draft-first
+  publication against its exact tag, assets, and release attestation.
 
 No push to `master`, tag push, merge, acceptance step, or rehearsal implicitly
 publishes a semantic artifact.
@@ -44,6 +47,37 @@ Tags remain namespaced (`control-plane-v<version>`,
 `inference-gateway-v<version>`, `forge-v<version>`, and `<chart>-<version>`).
 Targets keep independent versions even when validated and promoted together.
 
+## Latest-anchored complete baseline authority
+
+Per `DES-HOR-554-01`, the repository-wide GitHub Latest full Release is the sole
+active published-baseline selection authority. Latest is only a mutable,
+founder-controlled pointer: a consumer resolves it once, then pins the exact
+Release ID/tag/source, canonical snapshot hash, target Release IDs/manifests,
+asset retrieval identities/digests, annotated tag objects, and attestations. Release listings,
+registry listings, semver maxima, mutable aliases, filenames, source versions,
+and `release/targets.json` cannot infer a baseline.
+
+`baseline-snapshot.json` schema v1 contains exactly all six target cohorts in
+repository order: four product images; control-plane, inference-gateway, platform,
+certificate, and LVM charts; all four Forge OS/architecture archives; and all
+named migration/predecessor fixtures. A target cohort has one version/source/run
+and cannot mix manifests or provenance. Every image is digest-qualified; every
+chart carries exact OCI digest plus archive filename/size/SHA-256; Forge carries
+all four exact protected-Release URLs and byte identities. Validation is complete,
+not scenario-filtered.
+
+The hard-bounded bootstrap accepts only immutable Latest Release ID `386705918`
+and exact sibling Releases `386705747`, `386705816`, and `386705691`, all from
+candidate `34541902001` and source
+`b4b32b14d6ab89a85db24fc198879fdfe9621d2a`. It verifies the exact v2 manifests,
+all bytes and attestations, inherited inference identities, and historical
+fixtures in memory. Any other legacy Latest fails. Bootstrap creates or mutates
+nothing; the first later promotion establishes schema-v3 snapshot-bearing
+Releases.
+
+See [`architecture/release-baseline-snapshots.md`](architecture/release-baseline-snapshots.md)
+for schema, verification, failure, retry, and trust-boundary details.
+
 ## Single artifact and E2E authority
 
 `release/targets.json` owns target/version identity and every reviewed production
@@ -62,8 +96,10 @@ fallback, or duplicate candidate planner.
 
 Dispatch **Release candidate** from `master` with:
 
-- a non-empty comma-separated target set; and
-- one full SHA contained in `master`.
+- a non-empty comma-separated target set;
+- one full SHA contained in `master`; and
+- `baseline_anchor_release_id`, the exact numeric GitHub Latest Release ID the
+  candidate must use as its parent.
 
 The workflow trims, validates, deduplicates, and canonicalizes targets in
 repository order. Versions are read from source authority; callers cannot supply
@@ -78,9 +114,11 @@ successful candidate workflow whose recorded head branch is `master` and whose
 source is contained in `master`. Rehearsal does not publish or promote semantic
 artifacts.
 
-1. **Preflight** verifies exact checkout/membership, recipes, version authorities,
-   candidate alias uniqueness, semantic destination availability, compiled
-   candidate routing, and immutable published baselines.
+1. **Preflight** resolves `GET /releases/latest` exactly once and requires its
+   exact ID to equal `baseline_anchor_release_id`. It then verifies the complete
+   snapshot, exact checkout/membership, recipes, version authorities, candidate
+   alias uniqueness, semantic destination availability, and compiled candidate
+   routing before emitting any build matrix. No downstream job re-resolves Latest.
 2. **Build once.** Selected product images are pushed by digest and receive one
    immutable run-scoped alias `<source-sha>-<run-id>-<run-attempt>`. Selected
    chart/companion and Forge outputs remain retained Actions artifacts. Every
@@ -113,12 +151,18 @@ artifacts.
    path, manual event, workflow-control SHA, run ID, and run attempt in addition
    to the independently selected source SHA.
 
-Selected targets may never resolve to baselines. Unselected dependencies use
-only explicit published references whose image digests, chart checksums, or
-Forge archive checksum are resolved into the plan before execution. A bumped but
-unpublished repository version is not inferred as an available baseline.
+Selected targets may never resolve to baselines. Every unselected release-capable
+artifact comes from the one pinned complete snapshot, including all images,
+charts/companions, all four Forge variants, and named transition fixtures. A
+missing row fails planning; it never creates `selected-temporary`, `version:
+"source"`, a source filename, registry lookup, or per-artifact Latest inference.
+`selected-temporary` remains valid only for an intentionally affected PR artifact
+or a recipe explicitly marked `temporary_only`.
 
 Temporary and candidate artifact custody differs; recipes and assertions do not.
+The retained candidate contains complete candidate and planned-final snapshots;
+unselected target cohorts and fixtures are inherited byte-for-byte from the
+pinned parent.
 Temporary artifacts expire and have no semantic names. Candidate identities are
 immutable and retained for no-rebuild promotion.
 
@@ -145,13 +189,18 @@ protected-tag authority; and preflights every semantic image, chart, tag, and
 GitHub Release destination—including governed published metadata, complete bytes,
 and immutable state—before the first mutation. It then:
 
+- rechecks that the candidate's exact parent Release ID is still Latest;
 - adds semantic image tags to the exact tested digests;
 - pushes unchanged chart/companion archives;
-- creates or verifies protected namespaced tags at the exact source SHA; and
-- stages each target's exact files plus a manifest binding target, version, tag,
-  source SHA, candidate run, release title/body/target/prerelease state, filename,
-  size, and SHA-256 as an unpublished draft, verifies all metadata and the complete
-  draft, and publishes it exactly once.
+- creates or verifies protected namespaced tags at the exact source SHA;
+- creates all selected Release drafts explicitly non-Latest, captures their exact
+  database IDs, derives the final complete snapshot, and uploads each target's
+  exact files, identical `baseline-snapshot.json`, and schema-v3 manifest;
+- verifies and publishes every complete draft with REST `make_latest: "false"`;
+- rechecks the parent immediately before visibility changes; and
+- performs one REST `make_latest: "true"` update on the highest selected target
+  in repository target order, then re-resolves and fully verifies the exact new
+  anchor and cohort.
 
 Nothing is rebuilt. An unpublished draft may be replaced in full on retry. An
 existing published Release is verification-only: its governed metadata,
@@ -251,14 +300,24 @@ test "$(gh api repos/nunocgoncalves/iterabase-mono/keys \
 ```
 
 Repository default workflow permissions remain read-only. Only candidate image
-jobs receive package write, and only approved promotion/rehearsal jobs receive
-publication permissions.
+jobs receive package write. Publication and Latest mutation permissions remain
+scoped to founder-approved promotion, protected whole-snapshot rollback, and the
+retained immutability rehearsal boundary.
 
-## Rollback
+## Complete-snapshot rollback
 
-No overlay deploys automatically. Consumers continue pinning immutable versions.
-Disable or revert manual workflows to stop publication. Never overwrite,
-retarget, or delete immutable candidate aliases or production releases to roll
-back behavior; publish a corrected version and update consumers deliberately.
-If publication stops between members, resume the exact verified candidate rather
-than rebuilding it.
+Normal promotion and rollback share the literal, non-canceling
+`release-promotion` concurrency group. Dispatch **Roll back complete release
+baseline** from `master` with exact current and destination anchor Release IDs, a
+Linear identifier, and a reason. After founder approval, it verifies both
+complete immutable snapshots and follows exact parent links without a Release
+listing. The destination must be a whole-snapshot ancestor; partial target
+rollback is denied and requires a new candidate.
+
+Rollback changes only the GitHub Latest selection pointer with one
+`make_latest: "true"` update and a complete post-update re-verification. It never
+edits, deletes, retags, overwrites, or rebuilds Releases, tags, manifests, assets,
+or historical evidence. No overlay deploys automatically. If publication stops
+between members, retry the same exact candidate: completed immutable members are
+verification-only, drafts are replaced in full, and no build or E2E execution is
+repeated during promotion.

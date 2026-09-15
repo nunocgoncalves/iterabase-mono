@@ -13,6 +13,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+import release_baseline
 from e2e import (
     E2EError,
     PLAN_SCHEMA_VERSION,
@@ -70,6 +71,7 @@ class E2EPlanTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.catalogue = load_catalogue(ROOT)
         cls.contract = load_contract(ROOT)
+        cls.baseline = release_baseline.test_snapshot(cls.contract)
 
     def plan(self, paths: list[str]) -> dict:
         return make_plan(
@@ -79,6 +81,7 @@ class E2EPlanTests(unittest.TestCase):
             intent="pr",
             source_sha=SOURCE_SHA,
             paths=paths,
+            resolved_baseline=self.baseline,
         )
 
     def test_compiled_contract_is_complete(self) -> None:
@@ -90,6 +93,7 @@ class E2EPlanTests(unittest.TestCase):
             intent="pr",
             source_sha=SOURCE_SHA,
             paths=[".github/workflows/e2e.yml"],
+            resolved_baseline=self.baseline,
         )
         runnable = [
             scenario
@@ -212,11 +216,13 @@ class E2EPlanTests(unittest.TestCase):
             ROOT, self.catalogue, self.contract,
             intent="pr", source_sha=SOURCE_SHA,
             paths=[".github/workflows/e2e.yml"],
+            resolved_baseline=self.baseline,
         )
         candidate = make_plan(
             ROOT, self.catalogue, self.contract,
             intent="candidate", source_sha=SOURCE_SHA,
             targets=list(self.contract["targets"]),
+            resolved_baseline=self.baseline,
         )
         for plan in (pull_request, candidate):
             groups = {item["capacity"]: item for item in plan["real_machine_matrix"]}
@@ -247,6 +253,7 @@ class E2EPlanTests(unittest.TestCase):
             intent="candidate",
             source_sha=SOURCE_SHA,
             targets=["control-plane", "iterabase-platform-chart"],
+            resolved_baseline=self.baseline,
         )
         pull_request = make_plan(
             ROOT,
@@ -255,6 +262,7 @@ class E2EPlanTests(unittest.TestCase):
             intent="pr",
             source_sha=SOURCE_SHA,
             paths=[".github/workflows/e2e.yml"],
+            resolved_baseline=self.baseline,
         )
         pull_request_by_id = {item["id"]: item for item in pull_request["scenario_matrix"]}
         for scenario in candidate["scenario_matrix"]:
@@ -331,11 +339,12 @@ class E2EPlanTests(unittest.TestCase):
         with self.assertRaisesRegex(E2EError, "OpenEBS LVM substrate"):
             validate_catalogue_contract(catalogue, self.contract)
 
-    def test_unselected_baseline_is_explicit_not_bumped_repository_version(self) -> None:
+    def test_unselected_baseline_comes_only_from_the_pinned_snapshot(self) -> None:
         plan = make_plan(
             ROOT, self.catalogue, self.contract,
             intent="candidate", source_sha=SOURCE_SHA,
             targets=["control-plane-chart"],
+            resolved_baseline=self.baseline,
         )
         control = next(
             artifact
@@ -343,81 +352,58 @@ class E2EPlanTests(unittest.TestCase):
             for artifact in scenario["artifacts"]
             if artifact["name"] == "control-plane-image"
         )
+        baseline = release_baseline.artifact_map(self.baseline, self.contract)["control-plane-image"]
         self.assertEqual("published-baseline", control["custody"])
-        self.assertEqual(
-            self.contract["published_baselines"]["control-plane-image"],
-            control["reference"],
-        )
-        self.assertNotIn(
-            (ROOT / "control-plane/VERSION").read_text().strip(),
-            control["reference"],
-        )
+        self.assertEqual(baseline["reference"], control["reference"])
+        self.assertEqual(self.baseline["snapshot_sha256"], control["baseline_snapshot_sha256"])
 
-    def test_control_plane_only_candidate_resolves_corrected_published_baselines(self) -> None:
+    def test_forge_only_plan_uses_exact_lvm_snapshot_row_and_never_builds_source(self) -> None:
+        baseline = copy.deepcopy(self.baseline)
+        artifact = release_baseline.artifact_map(baseline, self.contract)["lvm-storage-substrate-chart"]
+        artifact.update(
+            {
+                "version": "0.4.0",
+                "reference": "oci://ghcr.io/nunocgoncalves/iterabase-charts/lvm-storage-substrate:0.4.0",
+                "filename": "lvm-storage-substrate-0.4.0.tgz",
+                "size": 14569,
+                "sha256": "6b1233c2c27cab8597f0a1b77de1d445f5a77ea696df75d30de7bc1747eda7dd",
+            }
+        )
+        cohort = next(item for item in baseline["snapshot"]["targets"] if item["target"] == "iterabase-platform-chart")
+        cohort["version"] = "0.4.0"
+        for item in cohort["artifacts"]:
+            item["version"] = "0.4.0"
+            if item["name"] != "lvm-storage-substrate-chart":
+                item["reference"] = item["reference"].rsplit(":", 1)[0] + ":0.4.0"
+                item["filename"] = f"{item['chart']}-0.4.0.tgz"
+        baseline = release_baseline.envelope(baseline["snapshot"])
         plan = make_plan(
             ROOT, self.catalogue, self.contract,
             intent="candidate", source_sha=SOURCE_SHA,
-            targets=["control-plane"],
+            targets=["forge"], resolved_baseline=baseline,
         )
-        resolved = {}
-        for scenario in plan["scenario_matrix"]:
-            for artifact in scenario["artifacts"]:
-                resolved.setdefault(artifact["name"], artifact)
-
-        # The selected image target is built as the candidate, never a stale
-        # published baseline or the previous control-plane release version.
-        for name in ("control-plane-image", "harness-image", "tool-runner-image"):
-            self.assertEqual("selected-candidate", resolved[name]["custody"])
-
-        # Every unselected chart dependency resolves to the corrected, already-
-        # published baseline bundle rather than a stale version or the current
-        # unpublished chart source identity.
-        corrected = {
-            "control-plane-chart": ("0.4.13", "0.4.12"),
-            "iterabase-platform-chart": ("0.3.23", "0.3.22"),
-            "cert-manager-substrate-chart": ("0.3.23", "0.3.22"),
-        }
-        for name, (version, stale) in corrected.items():
-            artifact = resolved[name]
-            self.assertEqual("published-baseline", artifact["custody"])
-            self.assertEqual(
-                self.contract["published_baselines"][name],
-                artifact["reference"],
-            )
-            self.assertTrue(artifact["reference"].endswith(f":{version}"))
-            self.assertNotIn(f":{stale}", artifact["reference"])
-
-        # Unchanged dependencies keep their published identities.
-        for name in ("inference-gateway-image", "inference-gateway-chart", "forge-binary"):
-            self.assertEqual(
-                self.contract["published_baselines"][name],
-                resolved[name]["reference"],
-            )
-
-    def test_control_plane_forge_baseline_uses_authoritative_tarball_checksum(self) -> None:
-        # A control-plane-only candidate leaves forge non-selected, so forge-binary
-        # must resolve as a published baseline whose authoritative checksum is the
-        # released Forge tarball (the recipe checksum), not the extracted binary.
-        plan = make_plan(
-            ROOT, self.catalogue, self.contract,
-            intent="candidate", source_sha=SOURCE_SHA,
-            targets=["control-plane"],
-        )
-        forge = next(
-            artifact
+        resolved = {
+            item["name"]: item
             for scenario in plan["scenario_matrix"]
-            for artifact in scenario["artifacts"]
-            if artifact["name"] == "forge-binary"
-        )
-        self.assertEqual("published-baseline", forge["custody"])
-        self.assertEqual(
-            self.contract["published_baselines"]["forge-binary"],
-            forge["reference"],
-        )
-        self.assertEqual(
-            self.contract["artifact_recipes"]["forge-binary"]["checksum"],
-            forge["checksum"],
-        )
+            for item in scenario["artifacts"]
+        }
+        self.assertEqual("published-baseline", resolved["lvm-storage-substrate-chart"]["custody"])
+        self.assertEqual("lvm-storage-substrate-0.4.0.tgz", resolved["lvm-storage-substrate-chart"]["filename"])
+        self.assertEqual("6b1233c2c27cab8597f0a1b77de1d445f5a77ea696df75d30de7bc1747eda7dd", resolved["lvm-storage-substrate-chart"]["checksum"])
+        self.assertNotIn("lvm-storage-substrate-chart", {item["artifact"] for item in plan["artifact_build_matrix"]})
+        self.assertNotIn("lvm-storage-substrate-source.tgz", json.dumps(plan))
+
+    def test_missing_snapshot_row_fails_before_any_build_matrix(self) -> None:
+        baseline = copy.deepcopy(self.baseline)
+        cohort = next(item for item in baseline["snapshot"]["targets"] if item["target"] == "iterabase-platform-chart")
+        cohort["artifacts"] = [item for item in cohort["artifacts"] if item["name"] != "lvm-storage-substrate-chart"]
+        baseline = release_baseline.envelope(baseline["snapshot"])
+        with self.assertRaisesRegex(E2EError, "artifact membership"):
+            make_plan(
+                ROOT, self.catalogue, self.contract,
+                intent="candidate", source_sha=SOURCE_SHA,
+                targets=["forge"], resolved_baseline=baseline,
+            )
 
     def test_selected_artifact_never_substitutes_a_baseline(self) -> None:
         plan = self.plan(["control-plane/internal/api/handler.go"])
@@ -796,6 +782,7 @@ class ResultReconciliationTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.catalogue = load_catalogue(ROOT)
         cls.contract = load_contract(ROOT)
+        cls.baseline = release_baseline.test_snapshot(cls.contract)
 
     def fixture(self, directory: Path) -> tuple[Path, Path, dict]:
         plan = make_plan(
@@ -805,6 +792,7 @@ class ResultReconciliationTests(unittest.TestCase):
             intent="pr",
             source_sha=SOURCE_SHA,
             paths=["forge/internal/lifecycle/lifecycle.go"],
+            resolved_baseline=self.baseline,
         )
         # Keep one scenario so result fixtures remain small and exact.
         selected = next(item for item in plan["scenario_matrix"] if item["id"] == "forge/permanent-fixture-gpu")
@@ -831,14 +819,16 @@ class ResultReconciliationTests(unittest.TestCase):
                 "name": artifact["name"],
                 "kind": artifact["kind"],
                 "custody": artifact["custody"],
+                "version": artifact.get("version"),
+                "baseline_provenance": artifact.get("baseline_provenance"),
                 "reference": artifact.get("reference", artifact["name"]),
                 "recipe_sha256": artifact["recipe_sha256"],
                 "path": "/runtime/" + artifact["name"],
             }
-            for field in ("reference", "digest", "checksum"):
+            for field in ("reference", "digest", "checksum", "oci_digest", "filename", "size", "baseline_snapshot_sha256"):
                 if field in artifact:
                     record[f"planned_{field}"] = artifact[field]
-            if artifact["name"] in {"iterabase-platform-chart", "cert-manager-substrate-chart"}:
+            if artifact["name"] in {"iterabase-platform-chart", "cert-manager-substrate-chart", "lvm-storage-substrate-chart"}:
                 record["reference"] += "#composed-runtime"
             if artifact["custody"] != "published-baseline":
                 record["source_sha"] = SOURCE_SHA

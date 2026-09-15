@@ -69,8 +69,10 @@ both temporary validation and immutable candidates. It defines:
 - Docker context, Dockerfile, build arguments, OCI labels, repository, and
   target/version authority for every product and validation image;
 - Helm dependency-build and package inputs, including the platform companion;
-- the pinned GoReleaser version/config and Forge platform contract; and
-- explicit immutable published baselines and chart transition inputs.
+- the pinned GoReleaser version/config and Forge platform contract.
+
+Published identities and transition inputs come only from the once-resolved
+complete Release snapshot, not from this recipe contract.
 
 PR builders create each affected image, chart, companion, Forge binary,
 and source-only runtime fixture once. Candidate builders use the same recipe
@@ -93,9 +95,11 @@ URL and prove verification fails before materialization, extraction, packaging,
 or execution.
 
 An affected PR artifact or founder-selected candidate target may never resolve
-to a published baseline. Unselected dependencies may use only the explicit
-published baseline in the recipe contract. Baseline resolution records and
-later verifies image digests, chart checksums, and Forge archive checksums;
+to a published baseline. Every unselected release-capable dependency must map
+exactly once to the complete snapshot pinned from GitHub Latest before matrices
+are emitted. Resolution verifies exact Release/tag/manifest/attestation identity,
+image and chart OCI digests, chart filename/size/SHA-256, and all Forge variants.
+Missing rows fail planning and never become source custody;
 bumped-but-unpublished repository versions are not inferred as baselines.
 
 ## One runtime composer

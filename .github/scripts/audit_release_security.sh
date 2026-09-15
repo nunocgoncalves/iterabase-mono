@@ -125,6 +125,25 @@ if find "$repo_root/forge/cmd" "$repo_root/forge/internal" -type f -name '*.go' 
 fi
 ! grep -q 'pull_request_target:' "$repo_root/.github/workflows/e2e.yml" || fail "fork fixture workflow must remain secretless"
 
+promotion_workflow="$repo_root/.github/workflows/release-promote.yml"
+rollback_workflow="$repo_root/.github/workflows/release-rollback.yml"
+for workflow in "$promotion_workflow" "$rollback_workflow"; do
+  grep -q '^  group: release-promotion$' "$workflow" || fail "promotion and rollback must share the literal release-promotion concurrency group"
+  grep -q '^  cancel-in-progress: false$' "$workflow" || fail "promotion and rollback concurrency must be non-canceling"
+  grep -q '^    environment: release$' "$workflow" || fail "Latest mutation workflow lacks protected release environment"
+done
+mapfile -t latest_writers < <(
+  grep -RIl --include='*.sh' --include='*.py' 'make_latest=true' "$repo_root/.github/scripts" |
+    grep -vE '/(audit_release_security|test_[^/]+)\.(sh|py)$' | sort
+)
+expected_latest_writers=(
+  "$repo_root/.github/scripts/publish_github_releases.sh"
+  "$repo_root/.github/scripts/release_baseline.py"
+)
+[[ "${latest_writers[*]}" == "${expected_latest_writers[*]}" ]] || fail "make_latest:true exists outside final promotion or protected rollback"
+[[ $(grep -c 'make_latest=true' "$repo_root/.github/scripts/publish_github_releases.sh") == 1 ]] || fail "promotion must have exactly one Latest handoff"
+[[ $(grep -c 'make_latest=true' "$repo_root/.github/scripts/release_baseline.py") == 1 ]] || fail "rollback must have exactly one Latest handoff"
+
 printf 'release security audit passed for %s\n' "$repository"
 printf 'write deploy key: %s\n' "$write_key_title"
 printf 'release ruleset id: %s\n' "$ruleset_id"

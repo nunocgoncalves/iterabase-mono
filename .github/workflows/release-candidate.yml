@@ -11,6 +11,10 @@ on:
         description: Full source SHA (contained in master unless rehearsal)
         required: true
         type: string
+      baseline_anchor_release_id:
+        description: Exact numeric GitHub Latest Release ID to pin as the complete parent baseline
+        required: true
+        type: string
       rehearsal:
         description: Validate an exact branch head without creating a promotable candidate
         required: false
@@ -112,6 +116,7 @@ jobs:
         run: echo "$GH_TOKEN" | helm registry login ghcr.io -u '${{ github.actor }}' --password-stdin
       - name: Validate and compile one candidate execution plan
         env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REQUESTED_TARGETS: ${{ inputs.targets }}
           REQUESTED_SHA: ${{ inputs.master_sha }}
           RUN_ID: ${{ github.run_id }}
@@ -137,6 +142,7 @@ jobs:
             --workflow "$workflow_path" \
             --event "$CANDIDATE_EVENT" \
             --control-sha "$CANDIDATE_CONTROL_SHA" \
+            --baseline-anchor-release-id '${{ inputs.baseline_anchor_release_id }}' \
             --output candidate-plan.json
       - name: Reject existing protected production tags
         if: inputs.rehearsal != true
@@ -147,7 +153,7 @@ jobs:
       - name: Reject existing semantic artifacts before candidate validation
         if: inputs.rehearsal != true
         run: .github/scripts/check_release_availability.sh candidate-plan.json '${{ github.repository_owner }}'
-      - name: Resolve every immutable published baseline identity
+      - name: Verify the one pinned complete published baseline snapshot
         run: |
           python3 .github/scripts/e2e.py resolve-baselines --plan candidate-plan.json
           jq -cS . candidate-plan.json > candidate-plan.normalized.json
@@ -754,6 +760,9 @@ jobs:
             --plan candidate/candidate-plan.json \
             --assets candidate/assets \
             --output candidate/candidate-evidence.json
+          test -f candidate/candidate-snapshot.json
+          test -f candidate/planned-final-snapshot.json
+          test "$(find candidate/planned-release-manifests -name 'release-manifest-*.json' -type f | wc -l | tr -d ' ')" = "$(jq '.targets | length' candidate/candidate-plan.json)"
           python3 .github/scripts/release.py verify-candidate --directory candidate
       - uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.3.0
         with: {subject-path: candidate/candidate-evidence.json}

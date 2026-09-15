@@ -25,9 +25,9 @@ Required CI sets:
 
 The runtime bundle must bind the exact source, plan and catalogue hashes, and the
 scenario's exact artifact set. Selected temporary/candidate artifacts carry the
-planned source SHA and recipe hash. Published baselines carry an immutable
-reference plus verified digest/checksum and cannot claim selected-source
-custody. Digest-qualified published baselines are pulled, inspected, and saved
+planned source SHA and recipe hash. Published baselines carry the one pinned
+complete snapshot hash plus immutable reference, OCI digest and/or archive
+identity and cannot claim selected-source custody. Digest-qualified published baselines are pulled, inspected, and saved
 by their exact reference without looking up a mutable daemon tag. Unqualified
 selected-candidate aliases are pulled and inspected as aliases to prove their
 planned digest binding, then saved by the resulting exact reference. The
