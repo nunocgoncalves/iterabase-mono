@@ -59,9 +59,19 @@ LVM/RAID/crypt, partition/signature, and `/proc` raw-consumer checks. Missing
 probes, read errors, descriptor races, ambiguity, or drift fail before K3s,
 charts, workloads, or claims. Forge never scans every byte.
 
-After a read-only preflight, Forge installs/verifies `lvm2` and XFS tooling,
-converges the superseded pre-release `dm-snapshot` module/configuration to
-absence, then uses a root-owned fsynced staged receipt to
+After a read-only preflight, a fresh install first disables every active host
+swap device with `swapoff --all` and atomically comments every uncommented
+`/etc/fstab` entry whose filesystem type is `swap` (including Ubuntu's default
+`/swap.img`). The rewrite preserves every unrelated/commented line plus the
+file's owner and mode, leaves inactive swap files in place, and is skipped when
+already converged. Forge immediately re-reads `/proc/swaps` and `/etc/fstab` and
+fails before package, disk, or k3s artifact/service mutation unless both are
+swap-free. Dry-run, installed-cluster reapply, and upgrade remain read-only with
+respect to this fresh-install hardening operation.
+
+Forge then installs/verifies `lvm2` and XFS tooling, converges the superseded
+pre-release `dm-snapshot` module/configuration to absence, and uses a root-owned
+fsynced staged receipt to
 bind exact planned-UUID PVs, a unique ownership tag, and the fixed thick VG name
 `iterabase-data` before mutation. Forge creates the VG atomically with that tag
 and LVM-generated UUID, then fsyncs the observed UUID before any handoff.

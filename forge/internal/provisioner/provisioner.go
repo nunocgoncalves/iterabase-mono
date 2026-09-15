@@ -164,6 +164,10 @@ type Provisioner interface {
 	// via the GPU operator's driver container (installs matching linux-headers,
 	// build-essential, and dkms on Ubuntu). Idempotent. Only called when GPU is enabled.
 	EnsureDriverBuildDeps(ctx context.Context) error
+	// EnsureHostSwapDisabled disables active host swap, comments every active
+	// /etc/fstab swap entry, and verifies both authoritative states. It is called
+	// only for a fresh install, before package, disk, or k3s mutation.
+	EnsureHostSwapDisabled(ctx context.Context) error
 	// ListDataStorageDevices returns stable non-removable whole-disk identities
 	// for interactive selection. It is strictly read-only.
 	ListDataStorageDevices(ctx context.Context) ([]DataStorageDevice, error)
