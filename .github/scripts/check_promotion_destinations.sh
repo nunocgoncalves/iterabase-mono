@@ -1,14 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-candidate=${1:?usage: check_promotion_destinations.sh CANDIDATE REPOSITORY_OWNER REPOSITORY MANIFESTS}
-repository_owner=${2:?usage: check_promotion_destinations.sh CANDIDATE REPOSITORY_OWNER REPOSITORY MANIFESTS}
+candidate=${1:?usage: check_promotion_destinations.sh CANDIDATE REPOSITORY_OWNER REPOSITORY}
+repository_owner=${2:?usage: check_promotion_destinations.sh CANDIDATE REPOSITORY_OWNER REPOSITORY}
 github_repository=${3:-${GITHUB_REPOSITORY:-}}
-manifests=${4:-}
 docker_bin=${DOCKER_BIN:-docker}
 helm_bin=${HELM_BIN:-helm}
 gh_bin=${GH_BIN:-gh}
-
 plan="$candidate/candidate-plan.json"
 
 for metadata in "$candidate"/assets/images/candidate-*.json; do
@@ -62,71 +60,25 @@ done < <(
 )
 
 [[ -n "$github_repository" ]] || { echo "GitHub repository is required for Release preflight" >&2; exit 1; }
-[[ -d "$manifests" ]] || { echo "complete Release manifests are required for preflight" >&2; exit 1; }
-python3 "$(git rev-parse --show-toplevel)/.github/scripts/release.py" verify-release-manifests \
-  --candidate "$candidate" --directory "$manifests" >/dev/null
-
-# Published Releases are verification-only and must already contain exactly the
-# manifest-complete member set. Unpublished drafts may be replaced atomically by
-# the publication step; no existing draft member is trusted.
-while IFS= read -r manifest; do
-  tag=$(jq -r '.tag' "$manifest")
+# Exact tags are the only lookup key. A draft is replaceable in full; a published
+# immutable Release is accepted only as a retry candidate and is verified against
+# the generated schema-v3 manifest by publish_github_releases.sh before mutation.
+while IFS=$'\t' read -r target tag source; do
   set +e
-  release_json=$($gh_bin release view "$tag" --repo "$github_repository" --json tagName,targetCommitish,name,body,isDraft,isPrerelease,assets 2>&1)
+  release_json=$($gh_bin api "repos/$github_repository/releases/tags/$tag" 2>&1)
   status=$?
   set -e
   if [[ $status -ne 0 ]]; then
-    if [[ $status -eq 1 ]] && grep -Eqi '^release not found([:.]|$)' <<<"$release_json"; then
-      continue
-    fi
+    [[ $status -eq 1 ]] && grep -Eqi '(^|[^0-9])404([^0-9]|$)|not found' <<<"$release_json" && continue
     echo "could not preflight GitHub Release $tag:" >&2
     printf '%s\n' "$release_json" >&2
     exit 1
   fi
-  [[ $(jq -r '.tagName' <<<"$release_json") == "$tag" ]] || {
-    echo "GitHub Release $tag resolved to a conflicting tag" >&2
-    exit 1
-  }
-  [[ $(jq -r '.isDraft' <<<"$release_json") == false ]] || continue
-  jq -e --slurpfile expected "$manifest" '
-    .tagName == $expected[0].tag and
-    .targetCommitish == $expected[0].release_metadata.target_commitish and
-    .name == $expected[0].release_metadata.title and
-    .body == $expected[0].release_metadata.notes and
-    .isPrerelease == $expected[0].release_metadata.prerelease
+  jq -e --arg tag "$tag" --arg source "$source" '
+    .tag_name == $tag and .target_commitish == $source and
+    ((.draft == true) or (.draft == false and .prerelease == false and .immutable == true))
   ' <<<"$release_json" >/dev/null || {
-    echo "published GitHub Release $tag metadata conflicts with the governed manifest" >&2
+    echo "GitHub Release $tag conflicts with the selected candidate target $target" >&2
     exit 1
   }
-  [[ $($gh_bin api "repos/$github_repository/releases/tags/$tag" --jq '.immutable') == true ]] || {
-    echo "published GitHub Release $tag is not immutable" >&2
-    exit 1
-  }
-
-  mapfile -t expected_names < <(jq -r '.assets[].name' "$manifest"; basename "$manifest")
-  mapfile -t actual_names < <(jq -r '.assets[].name' <<<"$release_json" | sort)
-  mapfile -t expected_sorted < <(printf '%s\n' "${expected_names[@]}" | sort)
-  [[ "${actual_names[*]}" == "${expected_sorted[*]}" ]] || {
-    echo "published GitHub Release $tag is not manifest-complete" >&2
-    exit 1
-  }
-  for name in "${expected_names[@]}"; do
-    expected_path="$manifests/$(basename "$manifest")"
-    if [[ "$name" != "$(basename "$manifest")" ]]; then
-      relative=$(jq -r --arg name "$name" '.assets[] | select(.name == $name) | .path' "$manifest")
-      expected_path="$candidate/$relative"
-    fi
-    destination=$(mktemp -d)
-    $gh_bin release download "$tag" --repo "$github_repository" --pattern "$name" --dir "$destination"
-    cmp "$expected_path" "$destination/$name" || {
-      echo "published GitHub Release $tag asset $name conflicts with the complete manifest" >&2
-      exit 1
-    }
-    actual_size=$(jq -r --arg name "$name" '.assets[] | select(.name == $name) | .size' <<<"$release_json")
-    expected_size=$(wc -c < "$expected_path" | tr -d ' ')
-    [[ "$actual_size" == "$expected_size" ]] || {
-      echo "published GitHub Release $tag asset $name has a conflicting size" >&2
-      exit 1
-    }
-  done
-done < <(find "$manifests" -maxdepth 1 -name 'release-manifest-*.json' -type f | sort)
+done < <(jq -r '.source_sha as $source | .releases[] | [.target,.production_tag,$source] | @tsv' "$plan")

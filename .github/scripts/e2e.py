@@ -21,6 +21,7 @@ from typing import Any, Iterable
 from urllib.parse import urlparse
 
 import select_ci as ci_selection
+import release_baseline
 
 PLAN_SCHEMA_VERSION = 2
 CATALOGUE_SCHEMA_VERSION = 2
@@ -46,6 +47,8 @@ SHARED_PR_PATHS = (
     ".github/scripts/install_node_tool.sh",
     ".github/scripts/install_playwright.sh",
     ".github/scripts/remote_content.py",
+    ".github/scripts/release_baseline.py",
+    ".github/scripts/test_release_baseline.py",
     ".github/scripts/select_ci.py",
     ".github/scripts/test_remote_content.py",
     ".github/scripts/test_select_ci.py",
@@ -54,6 +57,8 @@ SHARED_PR_PATHS = (
     ".github/workflows/ci.yml",
     ".github/workflows/e2e.yml",
     ".github/workflows/release-candidate.yml",
+    ".github/workflows/release-promote.yml",
+    ".github/workflows/release-rollback.yml",
     ".github/tools/**",
     "testkit/e2e/**",
     "Makefile",
@@ -193,9 +198,10 @@ def load_contract(root: Path) -> dict[str, Any]:
         raise E2EError("release target and artifact recipe contract must use schema_version 4")
     recipes = contract.get("artifact_recipes")
     targets = contract.get("targets")
-    baselines = contract.get("published_baselines")
-    if not isinstance(recipes, dict) or not isinstance(targets, dict) or not isinstance(baselines, dict):
-        raise E2EError("release target contract is missing recipes, targets, or baselines")
+    if not isinstance(recipes, dict) or not isinstance(targets, dict):
+        raise E2EError("release target contract is missing recipes or targets")
+    if "published_baselines" in contract:
+        raise E2EError("release target contract must not contain hand-maintained published baselines")
     for name, recipe in recipes.items():
         if not NAME.fullmatch(name) or not isinstance(recipe, dict) or not isinstance(recipe.get("kind"), str):
             raise E2EError(f"invalid artifact recipe {name!r}")
@@ -439,6 +445,8 @@ def select_scenarios(
 def expected_artifact(
     root: Path,
     contract: dict[str, Any],
+    baseline_artifacts: dict[str, dict[str, Any]],
+    baseline_sha256: str,
     artifact: str,
     intent: str,
     source_sha: str,
@@ -448,7 +456,6 @@ def expected_artifact(
     recipe = contract["artifact_recipes"][artifact]
     kind = recipe["kind"]
     target = recipe.get("target")
-    buildable = kind in {"image", "chart", "chart-companion", "forge"}
     selected_candidate = intent == "candidate" and target in selected_targets
     temporary = (intent == "pr" and artifact in affected) or recipe.get("temporary_only") is True
     if kind == "published-chart":
@@ -470,19 +477,42 @@ def expected_artifact(
         "recipe_sha256": recipe_hash(recipe),
     }
     if custody == "published-baseline":
-        reference = recipe.get("reference") or contract["published_baselines"].get(artifact)
-        if not reference:
-            if buildable:
-                # Validation-only fixtures have no semantic publication and must
-                # therefore be built from the exact source in every selected run.
-                expected["custody"] = "selected-temporary"
-                expected["source_sha"] = source_sha
-            else:
-                raise E2EError(f"artifact {artifact} has no immutable published baseline")
+        baseline = baseline_artifacts.get(artifact)
+        if baseline is None:
+            raise E2EError(
+                f"artifact {artifact} has no entry in pinned complete baseline snapshot {baseline_sha256}; "
+                "published-baseline absence cannot select source custody"
+            )
+        if baseline.get("kind") != kind:
+            raise E2EError(f"published baseline {artifact} kind disagrees with its recipe")
+        expected.update(
+            {
+                "reference": baseline["reference"] if kind != "forge" else next(
+                    item["url"] for item in baseline["variants"] if item["platform"] == "linux_amd64"
+                ),
+                "version": baseline["version"],
+                "baseline_snapshot_sha256": baseline_sha256,
+                "baseline_provenance": baseline["provenance"],
+            }
+        )
+        if kind == "image":
+            expected["digest"] = baseline["digest"]
+        elif kind in {"chart", "chart-companion", "published-chart"}:
+            expected.update(
+                {
+                    "checksum": baseline["sha256"],
+                    "oci_digest": baseline["oci_digest"],
+                    "filename": baseline["filename"],
+                    "size": baseline["size"],
+                }
+            )
+        elif kind == "forge":
+            variant = next(item for item in baseline["variants"] if item["platform"] == "linux_amd64")
+            expected.update(
+                {"checksum": variant["sha256"], "filename": variant["filename"], "size": variant["size"]}
+            )
         else:
-            expected["reference"] = reference
-            if recipe.get("checksum"):
-                expected["checksum"] = recipe["checksum"]
+            raise E2EError(f"artifact {artifact} has unsupported published baseline kind {kind!r}")
     else:
         expected["source_sha"] = source_sha
         expected["version"] = target_version(root, contract, target)
@@ -499,12 +529,24 @@ def make_plan(
     paths: list[str] | None = None,
     targets: list[str] | None = None,
     path_selection: dict[str, Any] | None = None,
+    resolved_baseline: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if intent not in INTENTS:
         raise E2EError(f"unsupported E2E intent {intent!r}")
     if not SHA.fullmatch(source_sha):
         raise E2EError("E2E source SHA must be a full lowercase commit SHA")
     validate_catalogue_contract(catalogue, contract)
+    if resolved_baseline is None:
+        raise E2EError("planning requires one pinned complete published-baseline snapshot")
+    try:
+        release_baseline.validate_snapshot(resolved_baseline, contract)
+        # Freeze one canonical copy into the plan. Pointer movement or caller
+        # mutation after this point cannot alter the already-running plan.
+        resolved_baseline = json.loads(compact(resolved_baseline))
+        baseline_artifacts = release_baseline.artifact_map(resolved_baseline, contract)
+    except release_baseline.BaselineError as exc:
+        raise E2EError(f"published baseline snapshot is invalid: {exc}") from exc
+    baseline_sha256 = resolved_baseline["snapshot_sha256"]
     paths = paths or []
     targets = targets or []
     selection_metadata: dict[str, Any] = {}
@@ -549,6 +591,8 @@ def make_plan(
             expected_artifact(
                 root,
                 contract,
+                baseline_artifacts,
+                baseline_sha256,
                 artifact,
                 intent,
                 source_sha,
@@ -601,6 +645,8 @@ def make_plan(
         "schema_version": PLAN_SCHEMA_VERSION,
         "intent": intent,
         "source_sha": source_sha,
+        "resolved_baseline": resolved_baseline,
+        "baseline_snapshot_sha256": baseline_sha256,
         "catalogue_schema_version": catalogue["schema_version"],
         "catalogue_sha256": hash_json(catalogue),
         "changed_paths": paths if intent == "pr" else [],
@@ -1010,8 +1056,22 @@ def pull_image(reference: str, expected_digest: str | None = None) -> tuple[str,
     return repository, tag, digest, config_digest, temporary
 
 
-def pull_chart(reference: str, destination: Path, checksum: str | None = None) -> tuple[Path, str]:
+def pull_chart(
+    reference: str,
+    destination: Path,
+    checksum: str | None = None,
+    oci_digest: str | None = None,
+) -> tuple[Path, str]:
     repository, chart, version = split_chart(reference)
+    if oci_digest is not None:
+        if not IMMUTABLE_SHA256.fullmatch(oci_digest):
+            raise E2EError(f"chart {reference} has an invalid planned OCI digest")
+        actual_digest = run(
+            ["docker", "buildx", "imagetools", "inspect", reference.removeprefix("oci://"), "--format", "{{json .Manifest.Digest}}"],
+            capture=True,
+        ).strip('"')
+        if actual_digest != oci_digest:
+            raise E2EError(f"chart {reference} OCI digest {actual_digest} != {oci_digest}")
     destination.mkdir(parents=True, exist_ok=True)
     run(["helm", "pull", repository, "--version", version, "--destination", str(destination)])
     archive = destination / f"{chart}-{version}.tgz"
@@ -1020,6 +1080,13 @@ def pull_chart(reference: str, destination: Path, checksum: str | None = None) -
     actual = hash_file(archive)
     if checksum and actual != checksum.removeprefix("sha256:"):
         raise E2EError(f"chart {reference} checksum {actual} != {checksum}")
+    if oci_digest is not None:
+        after_digest = run(
+            ["docker", "buildx", "imagetools", "inspect", reference.removeprefix("oci://"), "--format", "{{json .Manifest.Digest}}"],
+            capture=True,
+        ).strip('"')
+        if after_digest != oci_digest:
+            raise E2EError(f"chart {reference} OCI identity moved during retrieval")
     return archive, actual
 
 
@@ -1149,10 +1216,12 @@ def compose_runtime(plan_path: Path, scenario_id: str, artifacts: Path, output: 
             "name": name,
             "kind": kind,
             "custody": custody,
+            "version": expected.get("version"),
+            "baseline_provenance": expected.get("baseline_provenance"),
             "reference": expected.get("reference", name),
             "recipe_sha256": expected["recipe_sha256"],
         }
-        for field in ("reference", "digest", "checksum"):
+        for field in ("reference", "digest", "checksum", "oci_digest", "filename", "size", "baseline_snapshot_sha256"):
             if field in expected:
                 record[f"planned_{field}"] = expected[field]
         if custody != "published-baseline":
@@ -1224,7 +1293,9 @@ def compose_runtime(plan_path: Path, scenario_id: str, artifacts: Path, output: 
                 if not archive.is_file() or hash_file(archive) != checksum:
                     raise E2EError(f"selected chart {name} archive checksum mismatch")
             else:
-                archive, checksum = pull_chart(expected["reference"], runtime / "published", expected.get("checksum"))
+                archive, checksum = pull_chart(
+                    expected["reference"], runtime / "published", expected.get("checksum"), expected.get("oci_digest")
+                )
             local_archive = runtime / archive.name
             shutil.copy2(archive, local_archive)
             record.update({"reference": expected.get("reference", archive.name), "checksum": checksum, "path": str(local_archive)})
@@ -1390,87 +1461,16 @@ def compose_runtime(plan_path: Path, scenario_id: str, artifacts: Path, output: 
 
 
 def resolve_baselines(plan_path: Path, contract: dict[str, Any]) -> None:
+    """Validate the already-pinned snapshot without any live rediscovery."""
     plan = read_object(plan_path)
     execution = plan.get("execution_plan", plan)
-    scenarios = execution.get("scenario_matrix")
-    if not isinstance(scenarios, list):
-        raise E2EError("execution plan has no scenario matrix")
-    resolved: dict[str, dict[str, str]] = {}
-    with tempfile.TemporaryDirectory(prefix="iterabase-e2e-baselines-") as value:
-        directory = Path(value)
-        for scenario in scenarios:
-            for artifact in scenario.get("artifacts", []):
-                if artifact.get("custody") != "published-baseline":
-                    continue
-                name = artifact["name"]
-                recipe = contract["artifact_recipes"][name]
-                prior = resolved.get(name)
-                if prior is not None:
-                    artifact.update(prior)
-                    continue
-                kind = recipe["kind"]
-                reference = artifact.get("reference")
-                if not isinstance(reference, str):
-                    raise E2EError(f"published baseline {name} has no reference")
-                identity: dict[str, str]
-                if kind == "image":
-                    _, _, digest, _, _ = pull_image(reference, artifact.get("digest"))
-                    identity = {"digest": digest, "reference": reference.split("@", 1)[0] + "@" + digest}
-                elif kind in {"chart", "chart-companion", "published-chart"}:
-                    _, checksum = pull_chart(reference, directory / name, artifact.get("checksum"))
-                    identity = {"checksum": checksum}
-                elif kind == "forge":
-                    parsed = urlparse(reference)
-                    if parsed.scheme != "https":
-                        raise E2EError("published Forge baseline must use HTTPS")
-                    archive = directory / Path(parsed.path).name
-                    run(["curl", "--fail", "--location", "--output", str(archive), reference])
-                    identity = {"checksum": hash_file(archive)}
-                else:
-                    raise E2EError(f"unsupported published baseline kind {kind!r}")
-                artifact.update(identity)
-                resolved[name] = identity
-    baseline_images: list[dict[str, Any]] = []
-    baseline_charts: list[dict[str, Any]] = []
-    baseline_forge: list[dict[str, Any]] = []
-    transition_charts: list[dict[str, Any]] = []
-    for name, identity in sorted(resolved.items()):
-        recipe = contract["artifact_recipes"][name]
-        reference = next(
-            artifact["reference"]
-            for scenario in scenarios
-            for artifact in scenario["artifacts"]
-            if artifact["name"] == name
-        )
-        if recipe["kind"] == "image":
-            repository, version = split_image(reference)
-            baseline_images.append(
-                {
-                    "name": recipe["name"], "artifact": name,
-                    "target": recipe.get("target", ""), "repository": repository,
-                    "version": version, "digest": identity["digest"],
-                    "immutable_reference": reference,
-                }
-            )
-        elif recipe["kind"] in {"chart", "chart-companion", "published-chart"}:
-            repository, chart, version = split_chart(reference)
-            item = {
-                "name": name, "chart": chart, "repository": repository,
-                "version": version, "sha256": identity["checksum"],
-            }
-            if name in TRANSITION_ENV:
-                transition_charts.append(item)
-            else:
-                baseline_charts.append(item)
-        elif recipe["kind"] == "forge":
-            baseline_forge.append(
-                {"name": name, "reference": reference, "sha256": identity["checksum"]}
-            )
-    plan["baseline_dependencies"] = {
-        "images": baseline_images, "charts": baseline_charts, "forge": baseline_forge,
-    }
-    plan["transition_baselines"] = {"charts": transition_charts}
-    plan_path.write_text(compact(plan) + "\n", encoding="utf-8")
+    baseline = execution.get("resolved_baseline") if isinstance(execution, dict) else None
+    if not isinstance(baseline, dict):
+        raise E2EError("execution plan has no pinned resolved baseline")
+    try:
+        release_baseline.validate_snapshot(baseline, contract)
+    except release_baseline.BaselineError as exc:
+        raise E2EError(f"execution plan baseline snapshot is invalid: {exc}") from exc
 
 
 def result_runtime_bundle_path(result_path: Path) -> Path:
@@ -1510,13 +1510,13 @@ def validate_retained_runtime_bundle(
         raise E2EError(f"runtime bundle for {scenario_id} has missing, extra, or duplicate artifacts")
     for name, expected in expected_artifacts.items():
         actual = actual_artifacts[name]
-        for field in ("kind", "custody", "recipe_sha256"):
-            if actual.get(field) != expected[field]:
+        for field in ("kind", "custody", "version", "baseline_provenance", "recipe_sha256"):
+            if actual.get(field) != expected.get(field):
                 raise E2EError(f"runtime bundle for {scenario_id} has wrong {field} for {name}")
         expected_source = execution["source_sha"] if expected["custody"] != "published-baseline" else None
         if actual.get("source_sha") != expected_source:
             raise E2EError(f"runtime bundle for {scenario_id} has wrong source custody for {name}")
-        for field in ("reference", "digest", "checksum"):
+        for field in ("reference", "digest", "checksum", "oci_digest", "filename", "size", "baseline_snapshot_sha256"):
             planned_field = f"planned_{field}"
             if field in expected and actual.get(planned_field) != expected[field]:
                 raise E2EError(
@@ -1625,9 +1625,10 @@ def validate_result(
     if set(actual_artifacts) != set(expected_artifacts) or len(actual_artifacts) != len(artifacts):
         raise E2EError(f"result for {scenario_id} has missing, extra, or duplicate artifacts")
     static_identity_fields = (
-        "name", "kind", "custody", "source_sha", "reference", "digest",
+        "name", "kind", "custody", "version", "baseline_provenance", "source_sha", "reference", "digest",
         "config_digest", "checksum", "path", "recipe_sha256",
-        "planned_reference", "planned_digest", "planned_checksum",
+        "planned_reference", "planned_digest", "planned_checksum", "planned_oci_digest",
+        "planned_filename", "planned_size", "planned_baseline_snapshot_sha256",
     )
     image_names: set[str] = set()
     for name, expected in expected_artifacts.items():
@@ -1771,6 +1772,10 @@ def main() -> int:
             if not isinstance(paths, list):
                 raise E2EError("changed-path selection record paths must be a list")
             targets = parse_targets(args.targets) if args.targets else []
+            try:
+                baseline = release_baseline.resolve_latest(contract)
+            except release_baseline.BaselineError as exc:
+                raise E2EError(str(exc)) from exc
             plan = make_plan(
                 root,
                 load_catalogue(root),
@@ -1780,6 +1785,7 @@ def main() -> int:
                 paths=paths,
                 targets=targets,
                 path_selection=path_selection,
+                resolved_baseline=baseline,
             )
             args.output.write_text(compact(plan) + "\n", encoding="utf-8")
             if args.github_output:

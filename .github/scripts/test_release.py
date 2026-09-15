@@ -12,6 +12,7 @@ import tempfile
 import unittest
 
 import release
+import release_baseline
 import retained_release
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -23,6 +24,7 @@ class ReleaseContractTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.contract = release.load_json(ROOT / "release" / "targets.json")
         cls.catalogue = release.load_scenario_catalogue(ROOT)
+        cls.baseline = release_baseline.test_snapshot(cls.contract)
 
     def test_target_and_recipe_contract_is_valid(self) -> None:
         release.validate_contract(self.contract, ROOT, self.catalogue)
@@ -36,6 +38,11 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertEqual(
             "v2.12.7", recipes["forge-binary"]["goreleaser_version"]
         )
+        self.assertNotIn("published_baselines", self.contract)
+        self.assertNotIn("checksum", recipes["forge-binary"])
+        for recipe in recipes.values():
+            if recipe["kind"] == "published-chart":
+                self.assertEqual({"kind": "published-chart"}, recipe)
 
     def test_unknown_duplicate_and_empty_release_intent_fails(self) -> None:
         for value in ("", "control-plane,control-plane", "unknown"):
@@ -59,6 +66,8 @@ class ReleaseContractTests(unittest.TestCase):
             ROOT,
             self.catalogue,
             run_attempt="2",
+            resolved_baseline=self.baseline,
+            baseline_anchor_release_id=self.baseline["snapshot"]["anchor"]["release_id"],
         )
         self.assertEqual(4, plan["schema_version"])
         self.assertEqual(release.CANDIDATE_REPOSITORY, plan["candidate_repository"])
@@ -99,6 +108,8 @@ class ReleaseContractTests(unittest.TestCase):
                     "1",
                     ROOT,
                     self.catalogue,
+                    resolved_baseline=self.baseline,
+                    baseline_anchor_release_id=self.baseline["snapshot"]["anchor"]["release_id"],
                 )
                 self.assertTrue(plan["selected_scenarios"])
                 self.assertEqual(
@@ -144,6 +155,8 @@ class ReleaseContractTests(unittest.TestCase):
                     "123",
                     ROOT,
                     self.catalogue,
+                    resolved_baseline=self.baseline,
+                    baseline_anchor_release_id=self.baseline["snapshot"]["anchor"]["release_id"],
                     **{field: value},
                 )
 
@@ -238,6 +251,7 @@ class CandidateJobTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.contract = release.load_json(ROOT / "release" / "targets.json")
         cls.catalogue = release.load_scenario_catalogue(ROOT)
+        cls.baseline = release_baseline.test_snapshot(cls.contract)
         cls.plan = release.make_plan(
             cls.contract,
             ["control-plane", "forge", "iterabase-platform-chart"],
@@ -245,6 +259,8 @@ class CandidateJobTests(unittest.TestCase):
             "123",
             ROOT,
             cls.catalogue,
+            resolved_baseline=cls.baseline,
+            baseline_anchor_release_id=cls.baseline["snapshot"]["anchor"]["release_id"],
         )
 
     def needs(self) -> dict[str, dict[str, str]]:
@@ -307,6 +323,7 @@ class CandidateAssetTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.contract = release.load_json(ROOT / "release" / "targets.json")
         cls.catalogue = release.load_scenario_catalogue(ROOT)
+        cls.baseline = release_baseline.test_snapshot(cls.contract)
 
     def test_image_metadata_binds_source_alias_recipe_and_digest(self) -> None:
         plan = release.make_plan(
@@ -316,6 +333,8 @@ class CandidateAssetTests(unittest.TestCase):
             "123",
             ROOT,
             self.catalogue,
+            resolved_baseline=self.baseline,
+            baseline_anchor_release_id=self.baseline["snapshot"]["anchor"]["release_id"],
         )
         with tempfile.TemporaryDirectory() as value:
             assets = Path(value)
@@ -337,6 +356,7 @@ class CandidateAssetTests(unittest.TestCase):
                 (images / f"candidate-{image['name']}.json").write_text(
                     json.dumps(metadata) + "\n", encoding="utf-8"
                 )
+                (images / f"candidate-{image['name']}.spdx.json").write_text("{}\n")
             release.validate_candidate_assets(plan, assets)
             metadata_path = images / "candidate-control-plane.json"
             metadata = json.loads(metadata_path.read_text())
@@ -353,6 +373,8 @@ class CandidateAssetTests(unittest.TestCase):
             "123",
             ROOT,
             self.catalogue,
+            resolved_baseline=self.baseline,
+            baseline_anchor_release_id=self.baseline["snapshot"]["anchor"]["release_id"],
         )
         chart_plan = plan["chart_matrix"][0]
         with tempfile.TemporaryDirectory() as value:
@@ -393,11 +415,21 @@ class ReleaseManifestTests(unittest.TestCase):
         candidate = directory / "candidate"
         images = candidate / "assets/images"
         images.mkdir(parents=True)
+        contract = release.load_json(ROOT / "release" / "targets.json")
+        snapshot = release_baseline.test_snapshot(contract)
+        body = snapshot["snapshot"]
+        cohort = next(item for item in body["targets"] if item["target"] == "control-plane")
+        body["selected_targets"] = ["control-plane"]
+        body["anchor_target"] = "control-plane"
+        body["anchor"] = {"target": "control-plane", "release_id": cohort["release"]["id"], "tag": cohort["release"]["tag"], "source_sha": SOURCE_SHA}
+        snapshot = release_baseline.envelope(body)
+        (candidate / "baseline-snapshot.json").write_text(release.compact(snapshot) + "\n")
         plan = {
             "source_sha": SOURCE_SHA,
             "run_id": "123",
+            "run_attempt": "1",
             "targets": ["control-plane"],
-            "releases": [{"target": "control-plane", "version": "1.2.3", "production_tag": "control-plane-v1.2.3", "artifact_types": ["image"]}],
+            "releases": [{"target": "control-plane", "version": "1.0.0", "production_tag": cohort["release"]["tag"], "artifact_types": ["image"]}],
             "image_matrix": [{"target": "control-plane", "name": "control-plane"}],
             "chart_matrix": [],
         }
@@ -411,15 +443,19 @@ class ReleaseManifestTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as value:
             plan, candidate = self.fixture(Path(value))
             manifest = release.release_manifest(plan, candidate, "control-plane")
-            self.assertEqual(2, manifest["schema_version"])
+            self.assertEqual(3, manifest["schema_version"])
             self.assertEqual("123", manifest["candidate_run_id"])
             self.assertEqual(SOURCE_SHA, manifest["source_sha"])
-            self.assertEqual("control-plane-v1.2.3", manifest["release_metadata"]["title"])
+            self.assertEqual("control-plane-1.0.0", manifest["release_metadata"]["title"])
             self.assertIn("candidate run `123`", manifest["release_metadata"]["notes"])
             self.assertEqual(SOURCE_SHA, manifest["release_metadata"]["target_commitish"])
             self.assertFalse(manifest["release_metadata"]["prerelease"])
+            self.assertFalse(manifest["release_metadata"]["make_latest"])
+            self.assertEqual("test-1", manifest["cohort_id"])
+            self.assertEqual(plan["run_attempt"], manifest["candidate_run_attempt"])
+            self.assertRegex(manifest["baseline_snapshot_sha256"], r"^[0-9a-f]{64}$")
             self.assertEqual(
-                {"candidate-plan.json", "candidate-evidence.json", "candidate-control-plane.json", "candidate-control-plane.spdx.json"},
+                {"candidate-plan.json", "candidate-evidence.json", "baseline-snapshot.json", "candidate-control-plane.json", "candidate-control-plane.spdx.json"},
                 {item["name"] for item in manifest["assets"]},
             )
             release.validate_release_manifest(manifest, candidate, plan)
@@ -977,6 +1013,9 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             "python3 .github/scripts/e2e.py resolve-baselines",
             "python3 .github/scripts/e2e.py compose",
             "python3 .github/scripts/e2e.py validate-results",
+            "candidate-snapshot.json",
+            "planned-final-snapshot.json",
+            "planned-release-manifests",
             "candidate-result-${{ matrix.artifact }}",
             "candidate-result-permanent-fixture-${{ matrix.capacity }}",
             "candidate-diagnostics-permanent-fixture-${{ matrix.capacity }}",
@@ -1038,7 +1077,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             "verify_candidate_run.sh",
             "git merge-base --is-ancestor \"$SOURCE_SHA\" origin/master",
             "audit_release_security.sh",
-            "verify-release-manifests",
+            "baseline_anchor_release_id",
             "publish_github_releases.sh",
             "check_promotion_destinations.sh",
         ):
@@ -1068,42 +1107,44 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             self.assertIn(value, audit)
         self.assertIn("awk '{print $1 \" \" $2}'", audit)
 
-    def test_release_publication_is_complete_draft_first_and_published_verification_only(self) -> None:
+    def test_release_publication_is_complete_draft_first_non_latest_and_verification_only(self) -> None:
         script = (ROOT / ".github/scripts/publish_github_releases.sh").read_text()
-        self.assertNotIn("gh release upload", script)
-        for field in (
-            "targetCommitish",
-            ".name == $expected[0].release_metadata.title",
-            ".body == $expected[0].release_metadata.notes",
-            ".isPrerelease == $expected[0].release_metadata.prerelease",
-            ".immutable",
-        ):
-            self.assertIn(field, script)
-        self.assertIn("jq -j '.release_metadata.notes'", script)
-        self.assertIn("published release $tag already matches exactly; verification-only", script)
-        create = script.index("gh release create")
-        verify_draft = script.index("verify_release \"$tag\" \"$manifest\" \"$stage\"", create)
-        publish = script.index("--draft=false", verify_draft)
-        verify_published = script.index("verify_release \"$tag\" \"$manifest\" \"$stage\"", publish)
-        self.assertLess(create, verify_draft)
-        self.assertLess(verify_draft, publish)
-        self.assertLess(publish, verify_published)
-
-    def test_destination_preflight_verifies_governed_release_metadata_and_immutability(self) -> None:
-        script = (ROOT / ".github/scripts/check_promotion_destinations.sh").read_text()
         for value in (
-            "targetCommitish,name,body,isDraft,isPrerelease,assets",
-            ".targetCommitish == $expected[0].release_metadata.target_commitish",
-            ".name == $expected[0].release_metadata.title",
-            ".body == $expected[0].release_metadata.notes",
-            ".isPrerelease == $expected[0].release_metadata.prerelease",
-            "releases/tags/$tag\" --jq '.immutable'",
-            "actual_size=",
+            "--draft --latest=false",
+            "final-snapshot",
+            "baseline-snapshot.json",
+            "verify-release-manifests",
+            "gh release upload",
+            "-F draft=false -F prerelease=false -f make_latest=false",
+            "verification-only",
+            "release_baseline.py\" resolve",
         ):
             self.assertIn(value, script)
+        self.assertEqual(1, script.count("make_latest=true"))
+        create = script.index("gh release create")
+        final_snapshot = script.index("final-snapshot", create)
+        upload = script.index("gh release upload", final_snapshot)
+        verify_draft = script.index('verify_release "$release_id" "$manifest" "$stage" true', upload)
+        publish = script.index("-F draft=false", verify_draft)
+        handoff = script.index("make_latest=true", publish)
+        final_verify = script.index("release_baseline.py\" resolve", handoff)
+        self.assertEqual([create, final_snapshot, upload, verify_draft, publish, handoff, final_verify], sorted([create, final_snapshot, upload, verify_draft, publish, handoff, final_verify]))
+
+    def test_destination_preflight_rejects_conflicts_without_inventing_final_manifests(self) -> None:
+        script = (ROOT / ".github/scripts/check_promotion_destinations.sh").read_text()
+        for value in (
+            "imagetools inspect",
+            "helm_bin pull",
+            "releases/tags/$tag",
+            ".target_commitish == $source",
+            ".immutable == true",
+            "publish_github_releases.sh",
+        ):
+            self.assertIn(value, script)
+        self.assertNotIn("release-manifests", script)
 
     def test_protected_release_callers_use_only_non_admin_audits(self) -> None:
-        for name in ("release-rehearsal.yml", "release-promote.yml"):
+        for name in ("release-rehearsal.yml", "release-promote.yml", "release-rollback.yml"):
             workflow = (ROOT / ".github/workflows" / name).read_text()
             with self.subTest(workflow=name):
                 self.assertEqual(2, workflow.count("audit_release_security.sh"))
@@ -1212,8 +1253,26 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertNotIn("bounded, affirmative denial", runbook)
         self.assertNotIn("immutable_releases:true", workflow)
 
+    def test_latest_handoffs_are_protected_deterministic_and_rollback_is_whole_vector(self) -> None:
+        candidate = (ROOT / ".github/workflows/release-candidate.yml").read_text()
+        promotion = (ROOT / ".github/workflows/release-promote.yml").read_text()
+        rollback = (ROOT / ".github/workflows/release-rollback.yml").read_text()
+        baseline_script = (ROOT / ".github/scripts/release_baseline.py").read_text()
+        audit = (ROOT / ".github/scripts/audit_release_security.sh").read_text()
+        self.assertIn("baseline_anchor_release_id:", candidate)
+        self.assertIn("--baseline-anchor-release-id '${{ inputs.baseline_anchor_release_id }}'", candidate)
+        self.assertNotIn("make_latest=true", candidate)
+        for workflow in (promotion, rollback):
+            self.assertIn("group: release-promotion", workflow)
+            self.assertIn("cancel-in-progress: false", workflow)
+            self.assertIn("environment: release", workflow)
+        self.assertIn("whole-snapshot ancestor", baseline_script)
+        self.assertIn("baseline snapshot parent link", baseline_script)
+        self.assertIn("make_latest=true", baseline_script)
+        self.assertIn("make_latest:true exists outside final promotion or protected rollback", audit)
+
     def test_release_only_manual_dispatch_and_no_push_publication(self) -> None:
-        for workflow in ("release-candidate.yml", "release-promote.yml"):
+        for workflow in ("release-candidate.yml", "release-promote.yml", "release-rollback.yml"):
             content = (ROOT / ".github/workflows" / workflow).read_text()
             self.assertIn("workflow_dispatch:", content)
             self.assertNotIn("push:\n", content)

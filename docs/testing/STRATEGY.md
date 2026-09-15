@@ -32,8 +32,8 @@ Tier is compiled scenario metadata, not an estimate of importance. A higher tier
 
 Every suite execution records exactly one mode:
 
-- **`source`** — one full source SHA plus an explicit dirty-worktree bit for local development. Local charts/images may be built from that checkout; every unselected dependency remains explicitly pinned. Source runs that consume published dependencies explicitly set `ITERABASE_E2E_SOURCE_INPUTS` to an exact checked-in input fixture; the library never loads one implicitly. Candidate fixtures reject dirty source.
-- **`candidate`** — the release candidate plan's full source SHA, selected candidate identities, checksum/digest-pinned published baselines, and any owner-declared checksum-pinned transition predecessor required by a selected lifecycle scenario.
+- **`source`** — one full source SHA plus an explicit dirty-worktree bit for local development. Local charts/images may be built from that checkout; every unselected release-capable dependency comes from the once-resolved complete published snapshot. Checked-in input files may support local F0 history but are not required-run baseline authority. Candidate fixtures reject dirty source.
+- **`candidate`** — the release candidate plan's full source SHA, selected candidate identities, one exact parent anchor/snapshot hash, digest/checksum-pinned published cohorts, and snapshot-pinned transition fixtures required by selected lifecycle scenarios.
 - **`published`** — explicit immutable semantic versions and, where available, digests/checksums.
 
 There is no default inside the library, floating `latest`, matching-branch lookup, coordinated-ref fallback, or silent source→published fallback. Owner Make targets explicitly choose source mode for local use. Candidate and published workflows override it with their exact retained inputs. The fixture record is printed before scenarios execute and retained in candidate evidence.
@@ -137,8 +137,8 @@ Release planning takes an explicit non-empty target set and selects the union of
 The release gate preserves these invariants:
 
 - all selected artifacts are exact candidates built once;
-- unselected runtime dependencies are immutable manifest/plan-pinned published baselines;
-- lifecycle predecessors come from owner-local immutable fixture authority, are copied into the generated candidate plan, and are checksum-verified before execution;
+- unselected runtime dependencies come from one complete Latest-anchored, plan-pinned immutable snapshot;
+- lifecycle predecessors come from that same snapshot, while owner-local files remain non-authoritative F0 inputs;
 - coordinated target sets execute the deduplicated scenario union;
 - Forge and platform-chart release coverage includes both CPU and GPU F3 scenarios;
 - missing mandatory CPU/GPU fixture credentials, identity, readiness, or cleanup is incomplete/failing, never passing;

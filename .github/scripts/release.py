@@ -15,6 +15,7 @@ import tempfile
 from typing import Any
 
 import e2e as e2e_contract
+import release_baseline
 
 SEMVER = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 SHA = re.compile(r"^[0-9a-f]{40}$")
@@ -203,112 +204,26 @@ def fixture_versions(root: Path) -> dict[str, str]:
             raise ReleaseError(f"cannot resolve test fixture {constant}")
         result[name] = require_semver(match.group(1), constant)
 
-    published = load_json(root / "forge" / "test" / "e2e" / "published-fixture.json")
-    if published.get("mode") != "published" or not isinstance(published.get("inputs"), list):
-        raise ReleaseError("published E2E fixture must record exact published inputs")
-    inputs: dict[str, dict[str, Any]] = {}
-    for item in published["inputs"]:
-        if not isinstance(item, dict):
-            raise ReleaseError("published E2E fixture input must be an object")
-        name = item.get("name")
-        reference = item.get("reference")
-        if not isinstance(name, str) or not isinstance(reference, str):
-            raise ReleaseError("published E2E fixture input must have a name and reference")
-        if name in inputs:
-            raise ReleaseError(f"published E2E fixture input {name} is duplicated")
-        if "latest" in reference.lower():
-            raise ReleaseError("published E2E fixture must not use floating latest")
-        inputs[name] = item
-
-    authorities = {
-        "platform_chart": (
-            "iterabase-platform",
-            "oci://ghcr.io/nunocgoncalves/iterabase-charts/iterabase-platform",
-        ),
-        "control_plane_chart": (
-            "control-plane",
-            "oci://ghcr.io/nunocgoncalves/iterabase-charts/control-plane",
-        ),
-        "certificate_migration_source": (
-            "certificate-migration-source",
-            "oci://ghcr.io/nunocgoncalves/iterabase-charts/iterabase-platform",
-        ),
-    }
-    for authority, (input_name, repository) in authorities.items():
-        item = inputs.get(input_name)
-        expected = f"{repository}:{result[authority]}"
-        if item is None or item.get("kind") != "published-chart" or item.get("reference") != expected:
-            raise ReleaseError(
-                f"published E2E fixture does not record {authority}={result[authority]}"
-            )
-
-    substrate = inputs.get("cert-manager-substrate")
-    expected_substrate = (
-        "oci://ghcr.io/nunocgoncalves/iterabase-charts/"
-        f"cert-manager-substrate:{result['platform_chart']}"
-    )
-    if (
-        substrate is None
-        or substrate.get("kind") != "published-chart"
-        or substrate.get("reference") != expected_substrate
-    ):
-        raise ReleaseError("published E2E fixture substrate does not match platform_chart")
     return result
 
 
-def chart_transition_baselines(root: Path) -> dict[str, list[dict[str, str]]]:
-    path = root / "charts" / "test" / "e2e" / "transition-baselines.json"
-    fixture = load_json(path)
-    if fixture.get("mode") != "published" or not isinstance(fixture.get("inputs"), list):
-        raise ReleaseError("chart transition baselines must record published fixture inputs")
-    expected = {
-        "supported-platform-predecessor": "iterabase-platform",
-        "supported-substrate-predecessor": "cert-manager-substrate",
-        "metallb-platform-predecessor": "iterabase-platform",
-        "metallb-substrate-predecessor": "cert-manager-substrate",
-    }
-    charts: list[dict[str, str]] = []
-    for item in fixture["inputs"]:
-        if not isinstance(item, dict):
-            raise ReleaseError("chart transition baseline input must be an object")
-        name = item.get("name")
-        reference = item.get("reference")
-        checksum = item.get("checksum")
-        if item.get("kind") != "published-chart" or name not in expected:
-            raise ReleaseError(f"unexpected chart transition baseline {name!r}")
-        if not isinstance(reference, str) or ":" not in reference:
-            raise ReleaseError(f"chart transition baseline {name} has no exact OCI version")
-        repository, version = reference.rsplit(":", 1)
-        require_semver(version, f"chart transition baseline {name}")
-        chart = repository.rsplit("/", 1)[-1]
-        if not repository.startswith("oci://") or chart != expected[name]:
-            raise ReleaseError(f"chart transition baseline {name} has invalid reference {reference!r}")
-        if not isinstance(checksum, str) or not re.fullmatch(r"[0-9a-f]{64}", checksum):
-            raise ReleaseError(f"chart transition baseline {name} has no exact archive checksum")
+def chart_transition_baselines(snapshot: dict[str, Any]) -> dict[str, list[dict[str, str]]]:
+    """Project exact historical fixture identities from the pinned snapshot."""
+    names = set(release_baseline.FIXTURE_ORDER) - {"certificate-migration-chart"}
+    charts = []
+    for item in snapshot["snapshot"]["fixtures"]:
+        if item["name"] not in names:
+            continue
+        repository, version = item["reference"].rsplit(":", 1)
         charts.append(
             {
-                "name": name,
-                "chart": chart,
-                "repository": repository,
-                "version": version,
-                "sha256": checksum,
+                "name": item["name"], "chart": item["chart"], "repository": repository,
+                "version": version, "sha256": item["sha256"], "oci_digest": item["oci_digest"],
+                "size": item["size"], "filename": item["filename"],
             }
         )
-    if len(charts) != len(expected) or {item["name"] for item in charts} != set(expected):
-        raise ReleaseError("chart transition baseline pair is incomplete or duplicated")
-    current = chart_metadata(
-        root / "charts" / "charts" / "iterabase-platform" / "Chart.yaml"
-    )["version"]
-    substrate_current = chart_metadata(
-        root / "charts" / "charts" / "cert-manager-substrate" / "Chart.yaml"
-    )["version"]
-    currents = {"iterabase-platform": current, "cert-manager-substrate": substrate_current}
-    for item in charts:
-        chart_version = currents[item["chart"]]
-        if tuple(map(int, item["version"].split("."))) >= tuple(map(int, chart_version.split("."))):
-            raise ReleaseError(
-                f"chart transition predecessor {item['name']} must be older than current {item['chart']} {chart_version}"
-            )
+    if {item["name"] for item in charts} != names:
+        raise ReleaseError("pinned baseline snapshot transition fixtures are incomplete")
     return {"charts": charts}
 
 
@@ -323,6 +238,17 @@ def validate_contract(
         raise ReleaseError("release target names or order do not match the workflow contract")
     if not isinstance(recipes, dict):
         raise ReleaseError("release artifact recipes are missing")
+    if "published_baselines" in targets:
+        raise ReleaseError("release targets must not contain hand-maintained published baselines")
+    for name, recipe in recipes.items():
+        if not isinstance(recipe, dict):
+            raise ReleaseError(f"artifact recipe {name!r} is invalid")
+        if recipe.get("kind") == "published-chart" and any(
+            field in recipe for field in ("reference", "checksum", "digest", "version")
+        ):
+            raise ReleaseError(f"published fixture recipe {name!r} must not contain baseline identity")
+    if "checksum" in recipes.get("forge-binary", {}):
+        raise ReleaseError("Forge build recipe must not contain a published-baseline checksum")
 
     for target, definition in definitions.items():
         if not isinstance(definition, dict) or not isinstance(definition.get("tag_prefix"), str):
@@ -350,7 +276,6 @@ def validate_contract(
     except e2e_contract.E2EError as exc:
         raise ReleaseError(str(exc)) from exc
     fixture_versions(root)
-    chart_transition_baselines(root)
 
 
 def repository_versions(root: Path, targets: dict[str, Any]) -> dict[str, str]:
@@ -401,6 +326,8 @@ def make_plan(
     workflow: str = CANDIDATE_WORKFLOW,
     event: str = CANDIDATE_EVENT,
     control_sha: str | None = None,
+    resolved_baseline: dict[str, Any] | None = None,
+    baseline_anchor_release_id: int | None = None,
 ) -> dict[str, Any]:
     selected = parse_targets(selected_targets)
     candidate_tag = candidate_image_alias(master_sha, run_id, run_attempt)
@@ -413,6 +340,18 @@ def make_plan(
         raise ReleaseError(f"candidate event must be {CANDIDATE_EVENT}")
     if not SHA.fullmatch(control_sha):
         raise ReleaseError("candidate control_sha must be a full lowercase commit SHA")
+    if resolved_baseline is None:
+        raise ReleaseError("candidate planning requires one pinned complete baseline snapshot")
+    try:
+        release_baseline.validate_snapshot(resolved_baseline, targets)
+        resolved_baseline = json.loads(compact(resolved_baseline))
+    except release_baseline.BaselineError as exc:
+        raise ReleaseError(f"candidate baseline snapshot is invalid: {exc}") from exc
+    anchor_release_id = resolved_baseline["snapshot"]["anchor"]["release_id"]
+    if baseline_anchor_release_id is None or anchor_release_id != baseline_anchor_release_id:
+        raise ReleaseError(
+            f"pinned Latest Release ID {anchor_release_id} does not match required baseline_anchor_release_id {baseline_anchor_release_id}"
+        )
 
     versions = repository_versions(root, targets)
     metadata = {
@@ -426,6 +365,9 @@ def make_plan(
         )
     }
     fixtures = fixture_versions(root)
+    fixture_index = release_baseline.artifact_map(resolved_baseline, targets)
+    if fixture_index["certificate-migration-chart"]["version"] != fixtures["certificate_migration_source"]:
+        raise ReleaseError("source certificate migration fixture version disagrees with the pinned snapshot")
     compiled_catalogue = catalogue or load_scenario_catalogue(root)
     validate_contract(targets, root, compiled_catalogue)
     releases: list[dict[str, Any]] = []
@@ -517,6 +459,7 @@ def make_plan(
             intent="candidate",
             source_sha=master_sha,
             targets=selected,
+            resolved_baseline=resolved_baseline,
         )
     except e2e_contract.E2EError as exc:
         raise ReleaseError(str(exc)) from exc
@@ -530,159 +473,17 @@ def make_plan(
     kind_matrix = execution_plan["kind_matrix"]
     real_machine_matrix = execution_plan["real_machine_matrix"]
 
-    # Derive product baselines from every artifact-backed runtime fixture in the
-    # selected suite union. Owner/source checks use the exact checkout; Kind and
-    # real-machine fixtures must use either a selected candidate or an immutable
-    # published identity recorded here.
-    selected_set = set(selected)
-    scenario_names = {scenario["metadata"]["name"] for scenario in scenarios}
-    platform_scenarios = {
-        "deployed-execution-contracts",
-        "deployed-identity-api",
-        "deployed-work-recovery",
-        "deployed-artifact-durability",
-        "certificate-ownership-migration",
-        "fresh-install",
-        "observability",
-        "observability-tls",
-        "internal-tls",
-        "n-minus-one-upgrade",
-        "feature-enable-upgrade",
-        "single-node-observability-ingress-recovery",
-        "reapply-rollback-recovery",
-    }
     real_machine = bool(real_machine_matrix)
     transition_baselines = (
-        chart_transition_baselines(root)
+        chart_transition_baselines(resolved_baseline)
         if any(scenario["suite"]["owner"] == "charts" for scenario in scenarios)
         else {"charts": []}
     )
-    uses_platform_chart = bool(platform_scenarios.intersection(scenario_names)) or real_machine
-    uses_substrate_chart = uses_platform_chart
-
-    baseline_charts: list[dict[str, Any]] = []
-
-    def add_baseline_chart(chart: str, version: str) -> None:
-        if any(item["chart"] == chart for item in baseline_charts):
-            return
-        baseline_charts.append(
-            {
-                "chart": chart,
-                "version": version,
-                "repository": f"oci://ghcr.io/nunocgoncalves/iterabase-charts/{chart}",
-            }
-        )
-
-    if uses_platform_chart and "iterabase-platform-chart" not in selected_set:
-        add_baseline_chart("iterabase-platform", fixtures["platform_chart"])
-    if uses_substrate_chart and "iterabase-platform-chart" not in selected_set:
-        add_baseline_chart("cert-manager-substrate", fixtures["platform_chart"])
-
-    image_definitions = {
-        recipe["name"]: recipe
-        for recipe in targets["artifact_recipes"].values()
-        if recipe.get("kind") == "image" and recipe.get("target") in {"control-plane", "inference-gateway"}
-    }
-    baseline_images: list[dict[str, Any]] = []
-
-    def add_baseline_image(
-        name: str,
-        target: str,
-        *,
-        version: str | None = None,
-        version_chart: str | None = None,
-        values_path: str | None = None,
-        value_key: str = "image.tag",
-    ) -> None:
-        image: dict[str, Any] = {
-            "name": name,
-            "target": target,
-            "repository": image_definitions[name]["repository"],
-        }
-        if version is not None:
-            image["version"] = version
-        else:
-            image["version_from"] = {
-                "chart": version_chart,
-                "values_path": values_path,
-                "value_key": value_key,
-            }
-        baseline_images.append(image)
-
-    control_values = root / "charts" / "charts" / "control-plane" / "values.yaml"
-    inference_values = root / "charts" / "charts" / "inference-gateway" / "values.yaml"
-    selected_control_chart = bool(
-        selected_set.intersection({"control-plane-chart", "iterabase-platform-chart"})
-    )
-    selected_inference_chart = bool(
-        selected_set.intersection({"inference-gateway-chart", "iterabase-platform-chart"})
-    )
-
-    uses_control_image = bool(scenario_names) or real_machine
-    uses_harness_image = "deployed-execution-contracts" in scenario_names or real_machine
-    uses_tool_runner_image = "deployed-execution-contracts" in scenario_names or real_machine
-    uses_inference_image = uses_platform_chart
-    if "control-plane" not in selected_set and uses_control_image:
-        if selected_control_chart:
-            add_baseline_image(
-                "control-plane",
-                "control-plane",
-                version=chart_image_version(control_values),
-            )
-        else:
-            source_chart = "iterabase-platform" if uses_platform_chart else "control-plane"
-            values_path = (
-                "charts/control-plane/values.yaml"
-                if source_chart == "iterabase-platform"
-                else "values.yaml"
-            )
-            add_baseline_image(
-                "control-plane",
-                "control-plane",
-                version_chart=source_chart,
-                values_path=values_path,
-            )
-    if "control-plane" not in selected_set and uses_harness_image:
-        add_baseline_image(
-            "control-plane-harness",
-            "control-plane",
-            version=versions["control-plane"],
-        )
-    if "control-plane" not in selected_set and uses_tool_runner_image:
-        if selected_control_chart:
-            add_baseline_image(
-                "control-plane-tool-runner",
-                "control-plane",
-                version=chart_image_version(control_values, "toolRunner.image.tag"),
-            )
-        else:
-            source_chart = "iterabase-platform" if uses_platform_chart else "control-plane"
-            values_path = (
-                "charts/control-plane/values.yaml"
-                if source_chart == "iterabase-platform"
-                else "values.yaml"
-            )
-            add_baseline_image(
-                "control-plane-tool-runner",
-                "control-plane",
-                version_chart=source_chart,
-                values_path=values_path,
-                value_key="toolRunner.image.tag",
-            )
-    if "inference-gateway" not in selected_set and uses_inference_image:
-        if selected_inference_chart:
-            add_baseline_image(
-                "inference-gateway",
-                "inference-gateway",
-                version=chart_image_version(inference_values),
-            )
-        else:
-            add_baseline_image(
-                "inference-gateway",
-                "inference-gateway",
-                version_chart="iterabase-platform",
-                values_path="charts/inference-gateway/values.yaml",
-            )
+    planned_baselines: dict[str, dict[str, Any]] = {}
+    for scenario in execution_plan["scenario_matrix"]:
+        for artifact in scenario["artifacts"]:
+            if artifact["custody"] == "published-baseline":
+                planned_baselines.setdefault(artifact["name"], artifact)
 
     plan = {
         "schema_version": 4,
@@ -694,6 +495,9 @@ def make_plan(
         "run_id": run_id,
         "run_attempt": run_attempt,
         "source_sha": master_sha,
+        "baseline_anchor_release_id": baseline_anchor_release_id,
+        "baseline_snapshot_sha256": resolved_baseline["snapshot_sha256"],
+        "resolved_baseline": resolved_baseline,
         "targets": selected,
         "releases": releases,
         "source_suites": source_suites,
@@ -707,9 +511,12 @@ def make_plan(
         "chart_matrix": chart_matrix,
         "forge": "forge" in selected,
         "forge_recipe_sha256": e2e_contract.recipe_hash(targets["artifact_recipes"]["forge-binary"]),
+        "forge_goreleaser_config_sha256": e2e_contract.hash_file(
+            root / targets["artifact_recipes"]["forge-binary"]["goreleaser_config"]
+        ),
         "baseline_dependencies": {
-            "images": baseline_images,
-            "charts": baseline_charts,
+            "snapshot_sha256": resolved_baseline["snapshot_sha256"],
+            "artifacts": [planned_baselines[name] for name in sorted(planned_baselines)],
         },
         "transition_baselines": transition_baselines,
         "tested_with": {
@@ -823,7 +630,11 @@ def release_asset_paths(plan: dict[str, Any], candidate: Path, target: str) -> l
     if release is None:
         raise ReleaseError(f"candidate has no release target {target!r}")
     artifact_types = set(release["artifact_types"])
-    result = [candidate / "candidate-plan.json", candidate / "candidate-evidence.json"]
+    result = [
+        candidate / "candidate-plan.json",
+        candidate / "candidate-evidence.json",
+        candidate / "baseline-snapshot.json",
+    ]
     if "image" in artifact_types:
         for image in plan["image_matrix"]:
             if image["target"] == target:
@@ -856,28 +667,105 @@ def release_asset_paths(plan: dict[str, Any], candidate: Path, target: str) -> l
     return result
 
 
+def planned_release_manifest(
+    plan: dict[str, Any], candidate_snapshot: dict[str, Any], target: str
+) -> dict[str, Any]:
+    release = next(item for item in plan["releases"] if item["target"] == target)
+    body = candidate_snapshot["snapshot"]
+    cohort = next(item for item in body["targets"] if item["target"] == target)
+    names = ["candidate-plan.json", "candidate-evidence.json", "baseline-snapshot.json"]
+    if "image" in release["artifact_types"]:
+        for image in plan["image_matrix"]:
+            if image["target"] == target:
+                names.extend([f"candidate-{image['name']}.json", f"candidate-{image['name']}.spdx.json"])
+    if "chart" in release["artifact_types"]:
+        chart = next(item for item in plan["chart_matrix"] if item["target"] == target)
+        names.extend(
+            [
+                f"candidate-chart-{chart['chart']}.json",
+                f"candidate-chart-{chart['chart']}.spdx.json",
+                f"checksums-{chart['chart']}.txt",
+                *[f"{name}-{chart['version']}.tgz" for name in [chart["chart"], *chart["companions"]]],
+            ]
+        )
+    if "forge" in release["artifact_types"]:
+        names.extend(["candidate-forge.json", "checksums.txt"])
+        for platform in release_baseline.FORGE_PLATFORMS:
+            names.extend([f"forge_{release['version']}_{platform}.tar.gz", f"forge_{release['version']}_{platform}.tar.gz.sbom.json"])
+    if len(names) != len(set(names)):
+        raise ReleaseError(f"planned Release target {target} has duplicate asset names")
+    return {
+        "schema_version": 3,
+        "mode": "planned-final",
+        "release_id": None,
+        "target": target,
+        "version": release["version"],
+        "tag": release["production_tag"],
+        "source_sha": plan["source_sha"],
+        "candidate_run_id": plan["run_id"],
+        "candidate_run_attempt": plan["run_attempt"],
+        "cohort_id": body["cohort_id"],
+        "parent_anchor": body["parent_anchor"],
+        "anchor_target": body["anchor_target"],
+        "planned_final_snapshot_sha256": candidate_snapshot["snapshot_sha256"],
+        "planned_asset_names": names,
+        "artifacts": cohort["artifacts"],
+        "release_metadata": {"title": release["production_tag"], "target_commitish": plan["source_sha"], "prerelease": False, "make_latest": False},
+    }
+
+
+def planned_release_manifests(
+    plan: dict[str, Any], candidate_snapshot: dict[str, Any]
+) -> list[dict[str, Any]]:
+    return [planned_release_manifest(plan, candidate_snapshot, target) for target in plan["targets"]]
+
+
 def release_manifest(plan: dict[str, Any], candidate: Path, target: str) -> dict[str, Any]:
     release = next(item for item in plan["releases"] if item["target"] == target)
+    snapshot = load_json(candidate / "baseline-snapshot.json")
+    contract = load_json(Path(__file__).resolve().parents[2] / "release" / "targets.json")
+    try:
+        release_baseline.validate_snapshot(snapshot, contract)
+    except release_baseline.BaselineError as exc:
+        raise ReleaseError(f"final baseline snapshot is invalid: {exc}") from exc
+    body = snapshot["snapshot"]
+    if body["mode"] != "published" or target not in body["selected_targets"]:
+        raise ReleaseError(f"final baseline snapshot does not select release target {target}")
+    cohort = next(item for item in body["targets"] if item["target"] == target)
+    if (
+        cohort["version"] != release["version"]
+        or cohort["source_sha"] != plan["source_sha"]
+        or cohort["release"]["tag"] != release["production_tag"]
+    ):
+        raise ReleaseError(f"final snapshot cohort {target} disagrees with the candidate release plan")
+    release_id = cohort["release"]["id"]
     paths = release_asset_paths(plan, candidate, target)
     tag = release["production_tag"]
     notes = (
         f"Release of **{target} {release['version']}** from `{plan['source_sha']}` "
-        f"as part of candidate run `{plan['run_id']}`.\n\n"
-        "Built and validated once, staged as a complete draft, and published without rebuilding. "
-        "The attached release manifest binds every exact member."
+        f"as part of candidate run `{plan['run_id']}` and complete cohort `{body['cohort_id']}`.\n\n"
+        "Built and validated once, staged non-Latest as a complete draft, and published without rebuilding. "
+        "The attached schema-v3 manifest and shared baseline snapshot bind every exact member."
     )
     return {
-        "schema_version": 2,
+        "schema_version": 3,
+        "release_id": release_id,
         "target": target,
         "version": release["version"],
         "tag": tag,
         "source_sha": plan["source_sha"],
         "candidate_run_id": plan["run_id"],
+        "candidate_run_attempt": plan["run_attempt"],
+        "cohort_id": body["cohort_id"],
+        "parent_anchor": body["parent_anchor"],
+        "anchor_target": body["anchor_target"],
+        "baseline_snapshot_sha256": snapshot["snapshot_sha256"],
         "release_metadata": {
             "title": tag,
             "notes": notes,
             "target_commitish": plan["source_sha"],
             "prerelease": False,
+            "make_latest": False,
         },
         "assets": [
             {
@@ -932,6 +820,14 @@ def validate_candidate_assets(plan: dict[str, Any], assets: Path) -> None:
     validate_candidate_aliases(plan)
     if plan["image_matrix"]:
         expected = {item["name"]: item for item in plan["image_matrix"]}
+        expected_files = {
+            filename
+            for name in expected
+            for filename in (f"candidate-{name}.json", f"candidate-{name}.spdx.json")
+        }
+        actual_files = {path.name for path in (assets / "images").glob("*") if path.is_file()}
+        if actual_files != expected_files:
+            raise ReleaseError("candidate image file set is missing, extra, or ambiguous")
         discovered: set[str] = set()
         for metadata_path in sorted((assets / "images").glob("candidate-*.json")):
             if metadata_path.name.endswith(".spdx.json"):
@@ -967,7 +863,10 @@ def validate_candidate_assets(plan: dict[str, Any], assets: Path) -> None:
             raise ReleaseError(
                 f"candidate image evidence mismatch: {discovered} != {set(expected)}"
             )
+    elif any(path.is_file() for path in (assets / "images").glob("*")):
+        raise ReleaseError("candidate contains image files without a selected image target")
 
+    expected_chart_files: set[str] = set()
     for chart_plan in plan["chart_matrix"]:
         chart = chart_plan["chart"]
         version = chart_plan["version"]
@@ -984,11 +883,25 @@ def validate_candidate_assets(plan: dict[str, Any], assets: Path) -> None:
             if metadata.get(field) != expected:
                 raise ReleaseError(f"candidate chart {chart} {field} does not match the plan")
         expected_archives = [chart, *chart_plan["companions"]]
+        expected_chart_files.update(
+            {
+                f"candidate-chart-{chart}.json",
+                f"candidate-chart-{chart}.spdx.json",
+                f"checksums-{chart}.txt",
+                *[f"{expected_chart}-{version}.tgz" for expected_chart in expected_archives],
+                *[f"candidate-chart-{companion}.json" for companion in chart_plan["companions"]],
+            }
+        )
         for expected_chart in expected_archives:
             if not (assets / "charts" / f"{expected_chart}-{version}.tgz").is_file():
                 raise ReleaseError(f"candidate chart archive for {expected_chart} is missing")
         if not (assets / "charts" / f"checksums-{chart}.txt").is_file():
             raise ReleaseError(f"candidate chart checksums for {chart} are missing")
+    actual_chart_files = {
+        path.name for path in (assets / "charts").glob("*") if path.is_file()
+    }
+    if actual_chart_files != expected_chart_files:
+        raise ReleaseError("candidate chart file set is missing, extra, or ambiguous")
 
     if plan["forge"]:
         metadata = load_json(assets / "forge" / "candidate-forge.json")
@@ -1004,10 +917,43 @@ def validate_candidate_assets(plan: dict[str, Any], assets: Path) -> None:
             raise ReleaseError(f"Forge candidate platform matrix is incomplete: {found}")
         if not (assets / "forge" / "checksums.txt").is_file():
             raise ReleaseError("Forge candidate checksums are missing")
+        expected_forge_files = {"candidate-forge.json", "checksums.txt"}
+        for platform in expected_platforms:
+            expected_forge_files.update(
+                {
+                    f"forge_{metadata['version']}_{platform}.tar.gz",
+                    f"forge_{metadata['version']}_{platform}.tar.gz.sbom.json",
+                }
+            )
+        actual_forge_files = {
+            path.name for path in (assets / "forge").glob("*") if path.is_file()
+        }
+        if actual_forge_files != expected_forge_files:
+            raise ReleaseError("Forge candidate file set is missing, extra, or ambiguous")
+    elif any(path.is_file() for path in (assets / "forge").glob("*")):
+        raise ReleaseError("candidate contains Forge files without a selected Forge target")
 
 
-def assemble_evidence(plan: dict[str, Any], assets: Path) -> dict[str, Any]:
+def assemble_evidence(
+    plan: dict[str, Any], assets: Path, contract: dict[str, Any]
+) -> dict[str, Any]:
     validate_candidate_assets(plan, assets)
+    candidate_snapshot = release_baseline.build_candidate_snapshot(plan, assets, contract)
+    planned_snapshot = release_baseline.planned_final_snapshot(candidate_snapshot, contract)
+    candidate_root = assets.parent
+    (candidate_root / "candidate-snapshot.json").write_text(
+        compact(candidate_snapshot) + "\n", encoding="utf-8"
+    )
+    (candidate_root / "planned-final-snapshot.json").write_text(
+        compact(planned_snapshot) + "\n", encoding="utf-8"
+    )
+    planned_manifests = planned_release_manifests(plan, planned_snapshot)
+    planned_directory = candidate_root / "planned-release-manifests"
+    planned_directory.mkdir(exist_ok=True)
+    for manifest in planned_manifests:
+        (planned_directory / f"release-manifest-{manifest['target']}.json").write_text(
+            compact(manifest) + "\n", encoding="utf-8"
+        )
     with tempfile.TemporaryDirectory(prefix="iterabase-candidate-plan-") as value:
         normalized_plan = Path(value) / "candidate-plan.json"
         normalized_plan.write_text(compact(plan) + "\n", encoding="utf-8")
@@ -1029,6 +975,8 @@ def assemble_evidence(plan: dict[str, Any], assets: Path) -> dict[str, Any]:
             "run_id",
             "run_attempt",
             "source_sha",
+            "baseline_anchor_release_id",
+            "baseline_snapshot_sha256",
             "targets",
             "releases",
         )
@@ -1051,6 +999,9 @@ def assemble_evidence(plan: dict[str, Any], assets: Path) -> dict[str, Any]:
             ],
         },
         "plan_sha256": hashlib.sha256((compact(plan) + "\n").encode()).hexdigest(),
+        "candidate_snapshot_sha256": candidate_snapshot["snapshot_sha256"],
+        "planned_final_snapshot_sha256": planned_snapshot["snapshot_sha256"],
+        "planned_release_manifests_sha256": hashlib.sha256(compact(planned_manifests).encode()).hexdigest(),
         "assets": records,
     }
 
@@ -1061,6 +1012,38 @@ def verify_candidate(directory: Path) -> dict[str, Any]:
     assets = directory / "assets"
     plan = load_json(plan_path)
     evidence = load_json(evidence_path)
+    contract = load_json(Path(__file__).resolve().parents[2] / "release" / "targets.json")
+    candidate_snapshot = load_json(directory / "candidate-snapshot.json")
+    planned_snapshot = load_json(directory / "planned-final-snapshot.json")
+    planned_directory = directory / "planned-release-manifests"
+    try:
+        release_baseline.validate_snapshot(candidate_snapshot, contract)
+        release_baseline.validate_snapshot(planned_snapshot, contract)
+    except release_baseline.BaselineError as exc:
+        raise ReleaseError(f"candidate snapshot is invalid: {exc}") from exc
+    try:
+        expected_candidate_snapshot = release_baseline.build_candidate_snapshot(plan, assets, contract)
+        expected_planned_snapshot = release_baseline.planned_final_snapshot(expected_candidate_snapshot, contract)
+    except release_baseline.BaselineError as exc:
+        raise ReleaseError(f"candidate snapshots cannot be reproduced from retained assets: {exc}") from exc
+    if candidate_snapshot != expected_candidate_snapshot or planned_snapshot != expected_planned_snapshot:
+        raise ReleaseError("retained candidate/final snapshot plans do not match the exact plan and assets")
+    expected_planned_manifests = planned_release_manifests(plan, planned_snapshot)
+    expected_names = {f"release-manifest-{item['target']}.json" for item in expected_planned_manifests}
+    if {path.name for path in planned_directory.glob("release-manifest-*.json")} != expected_names:
+        raise ReleaseError("planned schema-v3 Release manifest set is incomplete")
+    actual_planned_manifests = [
+        load_json(planned_directory / f"release-manifest-{item['target']}.json")
+        for item in expected_planned_manifests
+    ]
+    if actual_planned_manifests != expected_planned_manifests:
+        raise ReleaseError("planned schema-v3 Release manifests do not match the complete candidate")
+    if (
+        evidence.get("candidate_snapshot_sha256") != candidate_snapshot.get("snapshot_sha256")
+        or evidence.get("planned_final_snapshot_sha256") != planned_snapshot.get("snapshot_sha256")
+        or evidence.get("planned_release_manifests_sha256") != hashlib.sha256(compact(expected_planned_manifests).encode()).hexdigest()
+    ):
+        raise ReleaseError("candidate evidence does not bind the complete candidate/final snapshot plans")
     required_authority = {
         "schema_version": 4,
         "candidate_repository": CANDIDATE_REPOSITORY,
@@ -1113,6 +1096,8 @@ def verify_candidate(directory: Path) -> dict[str, Any]:
         "run_id",
         "run_attempt",
         "source_sha",
+        "baseline_anchor_release_id",
+        "baseline_snapshot_sha256",
         "targets",
         "releases",
     ]
@@ -1174,6 +1159,7 @@ def build_parser() -> argparse.ArgumentParser:
     plan.add_argument("--workflow", required=True)
     plan.add_argument("--event", required=True)
     plan.add_argument("--control-sha", required=True)
+    plan.add_argument("--baseline-anchor-release-id", type=int, required=True)
     plan.add_argument("--output", type=Path, required=True)
     plan.add_argument("--github-output", type=Path)
     evidence = sub.add_parser("evidence")
@@ -1188,6 +1174,12 @@ def build_parser() -> argparse.ArgumentParser:
     verify_manifests = sub.add_parser("verify-release-manifests")
     verify_manifests.add_argument("--candidate", type=Path, required=True)
     verify_manifests.add_argument("--directory", type=Path, required=True)
+    final = sub.add_parser("final-snapshot")
+    final.add_argument("--candidate", type=Path, required=True)
+    final.add_argument("--release-ids", type=Path, required=True)
+    final.add_argument("--chart-digests", type=Path, required=True)
+    final.add_argument("--tag-objects", type=Path, required=True)
+    final.add_argument("--output", type=Path, required=True)
     image_version = sub.add_parser("image-version")
     image_version.add_argument("--values", type=Path, required=True)
     image_version.add_argument("--key", required=True)
@@ -1210,6 +1202,12 @@ def main() -> int:
         elif args.command == "outputs":
             write_github_outputs(args.github_output, load_json(args.plan))
         elif args.command == "plan":
+            try:
+                baseline = release_baseline.resolve_latest(
+                    targets, expected_anchor_id=args.baseline_anchor_release_id
+                )
+            except release_baseline.BaselineError as exc:
+                raise ReleaseError(str(exc)) from exc
             plan = make_plan(
                 targets,
                 args.targets,
@@ -1221,6 +1219,8 @@ def main() -> int:
                 workflow=args.workflow,
                 event=args.event,
                 control_sha=args.control_sha,
+                resolved_baseline=baseline,
+                baseline_anchor_release_id=args.baseline_anchor_release_id,
             )
             args.output.write_text(compact(plan) + "\n", encoding="utf-8")
             print(compact(plan))
@@ -1230,7 +1230,7 @@ def main() -> int:
             if output:
                 write_github_outputs(output, plan)
         elif args.command == "evidence":
-            evidence = assemble_evidence(load_json(args.plan), args.assets)
+            evidence = assemble_evidence(load_json(args.plan), args.assets, targets)
             args.output.write_text(compact(evidence) + "\n", encoding="utf-8")
             print(compact(evidence))
         elif args.command == "verify-candidate":
@@ -1239,6 +1239,23 @@ def main() -> int:
             print(compact([str(path) for path in write_release_manifests(args.candidate, args.output)]))
         elif args.command == "verify-release-manifests":
             print(compact(verify_release_manifests(args.candidate, args.directory)))
+        elif args.command == "final-snapshot":
+            release_ids = load_json(args.release_ids)
+            chart_digests = load_json(args.chart_digests)
+            tag_objects = load_json(args.tag_objects)
+            final = release_baseline.final_snapshot(
+                load_json(args.candidate / "candidate-snapshot.json"),
+                targets,
+                {name: int(value) for name, value in release_ids.items()},
+                {name: str(value) for name, value in chart_digests.items()},
+                {
+                    name: {field: str(identity[field]) for field in ("sha", "target_sha")}
+                    for name, identity in tag_objects.items()
+                    if isinstance(identity, dict)
+                },
+            )
+            args.output.write_text(compact(final) + "\n", encoding="utf-8")
+            print(compact(final))
         elif args.command == "image-version":
             print(chart_image_version(args.values, args.key))
     except ReleaseError as exc:

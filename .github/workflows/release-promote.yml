@@ -75,18 +75,10 @@ jobs:
             printf 'has_chart=%s\n' "$(jq -r '(.chart_matrix | length) > 0' verified-plan.json)"
             printf 'has_forge=%s\n' "$(jq -r '.forge' verified-plan.json)"
           } >> "$GITHUB_OUTPUT"
-      - name: Build and verify complete per-target Release manifests
-        run: |
-          python3 .github/scripts/release.py release-manifests \
-            --candidate candidate --output release-manifests
-          python3 .github/scripts/release.py verify-release-manifests \
-            --candidate candidate --directory release-manifests
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: verified-release-candidate
-          path: |
-            candidate/
-            release-manifests/
+          path: candidate/
           retention-days: 7
 
   promote:
@@ -125,8 +117,6 @@ jobs:
           [[ "$RUN_ID" =~ ^[0-9]+$ ]]
           python3 .github/scripts/release.py verify-candidate --directory candidate > verified-plan.json
           .github/scripts/verify_candidate_run.sh "$RUN_ID" verified-plan.json '${{ github.repository }}'
-          python3 .github/scripts/release.py verify-release-manifests \
-            --candidate candidate --directory release-manifests
           test "$(jq -r '.run_id' verified-plan.json)" = "$RUN_ID"
           test "$(jq -r '.source_sha' verified-plan.json)" = "$SOURCE_SHA"
           git fetch --no-tags origin master
@@ -134,12 +124,12 @@ jobs:
           .github/scripts/audit_release_security.sh '${{ github.repository }}'
       - uses: ./.github/actions/setup-kubernetes-tools
         if: needs.verify-candidate.outputs.has_chart == 'true'
-      - name: Install checksummed Buildx for immutable image promotion
-        if: needs.verify-candidate.outputs.has_images == 'true'
+      - name: Install checksummed Buildx for immutable artifact promotion
+        if: needs.verify-candidate.outputs.has_images == 'true' || needs.verify-candidate.outputs.has_chart == 'true'
         uses: ./.github/actions/setup-ci-tool
         with: {name: buildx, version: 0.36.1}
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
-        if: needs.verify-candidate.outputs.has_images == 'true'
+        if: needs.verify-candidate.outputs.has_images == 'true' || needs.verify-candidate.outputs.has_chart == 'true'
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -173,15 +163,20 @@ jobs:
           test "$CONTROL_SHA" = '${{ github.workflow_sha }}'
           python3 .github/scripts/release.py verify-candidate --directory candidate > verified-plan.json
           .github/scripts/verify_candidate_run.sh "$RUN_ID" verified-plan.json '${{ github.repository }}'
-          python3 .github/scripts/release.py verify-release-manifests \
-            --candidate candidate --directory release-manifests
           test "$(jq -r '.run_id' verified-plan.json)" = "$RUN_ID"
           test "$(jq -r '.source_sha' verified-plan.json)" = "$SOURCE_SHA"
           git fetch --no-tags origin master
           git merge-base --is-ancestor "$SOURCE_SHA" origin/master
           .github/scripts/audit_release_security.sh '${{ github.repository }}'
+          parent_id=$(jq -er '.baseline_anchor_release_id' verified-plan.json)
+          latest_id=$(gh api 'repos/${{ github.repository }}/releases/latest' --jq '.id')
+          if [ "$latest_id" != "$parent_id" ]; then
+            anchor_target=$(jq -r '.targets[-1]' verified-plan.json)
+            anchor_tag=$(jq -er --arg target "$anchor_target" '.releases[] | select(.target == $target) | .production_tag' verified-plan.json)
+            test "$(gh api "repos/${{ github.repository }}/releases/tags/$anchor_tag" --jq '.id')" = "$latest_id"
+          fi
           .github/scripts/check_promotion_destinations.sh \
-            candidate '${{ github.repository_owner }}' '${{ github.repository }}' release-manifests
+            candidate '${{ github.repository_owner }}' '${{ github.repository }}'
           while IFS=$'\t' read -r tag _target; do
             direct="$(git ls-remote --tags origin "refs/tags/$tag" | awk '{print $1}')"
             peeled="$(git ls-remote --tags origin "refs/tags/$tag^{}" | awk '{print $1}')"
@@ -244,4 +239,4 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: >-
           .github/scripts/publish_github_releases.sh
-          candidate release-manifests '${{ github.repository }}'
+          candidate '${{ github.repository }}'

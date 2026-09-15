@@ -463,11 +463,12 @@ running `helm upgrade`. Forge performs this sequence automatically. Direct Helm
 operators must perform the same ordered operation; applying the regular custom
 resources first can fail during REST mapping before any chart hook executes.
 
-The chart-owned `test/e2e/transition-baselines.json` currently declares platform
-and substrate `0.3.12` as the checksum-pinned supported predecessor for current
-`0.3.23`, and a checksum-pinned `0.3.19` MetalLB hook predecessor transition
-(DES-HOR-511) covers the hook→ordinary pool/VIP preservation path through
-upgrade and reapply. The supported inverse boundary is current → the declared
+The chart-owned `test/e2e/transition-baselines.json` preserves local F0 fixture
+inputs only. Required planning obtains the exact platform/substrate `0.3.12` and
+MetalLB hook predecessor `0.3.19` OCI/archive identities from the one pinned
+complete release-baseline snapshot; the source file is not baseline authority.
+The DES-HOR-511 transition still covers the hook→ordinary pool/VIP preservation
+path through upgrade and reapply. The supported inverse boundary is current → the declared
 predecessor within the post-0.3 companion-ownership model, followed by a current
 forward recovery. Roll back the platform release before the companion substrate.
 CRDs, generated Secrets, and PVCs are retained. The separate pre-0.3 ownership
