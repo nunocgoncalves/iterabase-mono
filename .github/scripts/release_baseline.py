@@ -327,9 +327,18 @@ def _validate_artifact(
                 raise BaselineError("Forge baseline variant filename is invalid")
             if not isinstance(item.get("size"), int) or item["size"] <= 0 or not SHA256.fullmatch(str(item.get("sha256", ""))):
                 raise BaselineError("Forge baseline variant content identity is invalid")
-            reference = item.get("url") or item.get("candidate_path")
-            if not isinstance(reference, str) or not reference:
-                raise BaselineError("Forge baseline variant has no retrieval identity")
+            expected_url = (
+                f"https://github.com/{REPOSITORY}/releases/download/"
+                f"{cohort['release']['tag']}/{item['filename']}"
+            )
+            if custody == "published-baseline":
+                if item.get("url") != expected_url or "candidate_path" in item:
+                    raise BaselineError("published Forge variant uses an unauthorized Release URL or candidate path")
+            elif (
+                item.get("candidate_path") != f"assets/forge/{item['filename']}"
+                or "url" in item
+            ):
+                raise BaselineError("candidate Forge variant has invalid local custody")
     else:
         raise BaselineError(f"published snapshot contains unsupported artifact kind {kind!r}")
 
@@ -392,6 +401,12 @@ class GitHubBackend:
         value = self.api("releases/latest")
         if not isinstance(value, dict):
             raise BaselineError("GitHub Latest is not a Release object")
+        return value
+
+    def reread_latest_before_mutation(self) -> dict[str, Any]:
+        value = self.api("releases/latest")
+        if not isinstance(value, dict):
+            raise BaselineError("GitHub Latest pre-mutation response is not a Release object")
         return value
 
     def reread_latest_after_mutation(self) -> dict[str, Any]:
@@ -845,15 +860,53 @@ def bootstrap_snapshot(backend: GitHubBackend, latest: dict[str, Any]) -> dict[s
     return envelope(snapshot)
 
 
+def _validate_v3_manifest_authority(
+    manifest: dict[str, Any],
+    shared_value: dict[str, Any],
+    cohort: dict[str, Any],
+    release: dict[str, Any],
+    release_id: int,
+) -> None:
+    shared = shared_value["snapshot"]
+    if (
+        manifest.get("release_id") != release_id
+        or str(manifest.get("candidate_run_attempt"))
+        != str(cohort.get("candidate_run_attempt"))
+        or manifest.get("cohort_id") != shared["cohort_id"]
+        or manifest.get("parent_anchor") != shared.get("parent_anchor")
+        or manifest.get("anchor_target") != shared["anchor_target"]
+        or manifest.get("baseline_snapshot_sha256") != shared_value["snapshot_sha256"]
+    ):
+        raise BaselineError(
+            f"snapshot target {cohort['target']} schema-v3 manifest authority drifted"
+        )
+    expected_metadata = {
+        "title": release.get("name"),
+        "notes": release.get("body"),
+        "target_commitish": release.get("target_commitish"),
+        "prerelease": release.get("prerelease"),
+        "make_latest": False,
+    }
+    if manifest.get("release_metadata") != expected_metadata:
+        raise BaselineError(
+            f"snapshot target {cohort['target']} governed Release metadata drifted"
+        )
+
+
 def _verify_published_snapshot(
     backend: GitHubBackend,
     value: dict[str, Any],
     captured_anchor: dict[str, Any],
     contract: dict[str, Any],
+    *,
+    target_filter: set[str] | None = None,
+    expected_manifests: Path | None = None,
 ) -> None:
     snapshot = value["snapshot"]
     verified_releases: dict[int, tuple[dict[str, Any], dict[str, bytes]]] = {}
     for cohort in snapshot["targets"]:
+        if target_filter is not None and cohort["target"] not in target_filter:
+            continue
         release_pin = cohort.get("release")
         if not isinstance(release_pin, dict) or release_pin.get("id") is None:
             continue
@@ -893,6 +946,18 @@ def _verify_published_snapshot(
         manifest_name = manifest_pin.get("name") if isinstance(manifest_pin, dict) else None
         if not isinstance(manifest_name, str) or manifest_name not in downloaded:
             raise BaselineError(f"snapshot target {cohort['target']} has no exact Release manifest")
+        if expected_manifests is not None:
+            expected_manifest = expected_manifests / manifest_name
+            try:
+                expected_manifest_bytes = expected_manifest.read_bytes()
+            except OSError as exc:
+                raise BaselineError(
+                    f"expected schema-v3 manifest for {cohort['target']} is unavailable"
+                ) from exc
+            if downloaded[manifest_name] != expected_manifest_bytes:
+                raise BaselineError(
+                    f"published Release {release_id} manifest conflicts with the selected candidate"
+                )
         try:
             manifest = json.loads(downloaded[manifest_name])
         except json.JSONDecodeError as exc:
@@ -911,11 +976,6 @@ def _verify_published_snapshot(
         ):
             raise BaselineError(f"snapshot target {cohort['target']} manifest provenance disagrees with its cohort")
         if manifest.get("schema_version") == 3:
-            if (
-                manifest.get("release_id") != release_id
-                or str(manifest.get("candidate_run_attempt")) != str(cohort.get("candidate_run_attempt"))
-            ):
-                raise BaselineError(f"snapshot target {cohort['target']} schema-v3 manifest identity drifted")
             shared = downloaded.get("baseline-snapshot.json")
             if shared is None or hash_bytes(shared) != _asset_digest(assets["baseline-snapshot.json"]):
                 raise BaselineError(f"snapshot cohort Release {release_id} lacks its shared snapshot bytes")
@@ -926,10 +986,9 @@ def _verify_published_snapshot(
             if not isinstance(shared_value, dict):
                 raise BaselineError("shared Release snapshot asset is not an object")
             validate_snapshot(shared_value, contract)
-            if manifest.get("cohort_id") != shared_value["snapshot"]["cohort_id"]:
-                raise BaselineError(f"snapshot target {cohort['target']} manifest cohort identity drifted")
-            if manifest.get("baseline_snapshot_sha256") != shared_value["snapshot_sha256"]:
-                raise BaselineError(f"snapshot target {cohort['target']} manifest does not bind its Release snapshot")
+            _validate_v3_manifest_authority(
+                manifest, shared_value, cohort, release, release_id
+            )
             if cohort["target"] in snapshot["selected_targets"]:
                 if shared_value != value:
                     raise BaselineError("selected cohort Releases do not carry identical final snapshot bytes")
@@ -952,6 +1011,8 @@ def _verify_published_snapshot(
         verified_releases[release_id] = (release, downloaded)
 
     for cohort in snapshot["targets"]:
+        if target_filter is not None and cohort["target"] not in target_filter:
+            continue
         for artifact in cohort["artifacts"]:
             _verify_registry_identity(backend, artifact)
             if artifact["kind"] == "forge":
@@ -963,8 +1024,9 @@ def _verify_published_snapshot(
                     data = downloaded.get(variant["filename"])
                     if data is None or len(data) != variant["size"] or hash_bytes(data) != variant["sha256"]:
                         raise BaselineError(f"published Forge variant {variant['platform']} drifted")
-    for fixture in snapshot["fixtures"]:
-        _verify_registry_identity(backend, fixture)
+    if target_filter is None:
+        for fixture in snapshot["fixtures"]:
+            _verify_registry_identity(backend, fixture)
 
 
 def _resolve_v3(backend: GitHubBackend, latest: dict[str, Any]) -> dict[str, Any]:
@@ -1041,7 +1103,7 @@ def test_snapshot(contract: dict[str, Any]) -> dict[str, Any]:
                 artifacts.append(_test_chart(name, target, versions[target], recipe["chart"]))
             else:
                 variants = [
-                    {"platform": platform, "filename": f"forge_{versions[target]}_{platform}.tar.gz", "size": 1, "sha256": hashlib.sha256(platform.encode()).hexdigest(), "url": f"https://github.com/{REPOSITORY}/releases/download/forge-v{versions[target]}/forge_{versions[target]}_{platform}.tar.gz"}
+                    {"platform": platform, "filename": f"forge_{versions[target]}_{platform}.tar.gz", "size": 1, "sha256": hashlib.sha256(platform.encode()).hexdigest(), "url": f"https://github.com/{REPOSITORY}/releases/download/{target}-{versions[target]}/forge_{versions[target]}_{platform}.tar.gz"}
                     for platform in FORGE_PLATFORMS
                 ]
                 artifacts.append({
@@ -1263,6 +1325,41 @@ def final_snapshot(
     return value
 
 
+def verify_published_members(
+    contract: dict[str, Any],
+    value: dict[str, Any],
+    targets: list[str],
+    expected_manifests: Path,
+    *,
+    backend: GitHubBackend | None = None,
+) -> None:
+    validate_snapshot(value, contract)
+    snapshot = value["snapshot"]
+    if snapshot["mode"] != "published":
+        raise BaselineError("published-member preflight requires a final published snapshot")
+    if not targets or len(targets) != len(set(targets)):
+        raise BaselineError("published-member preflight target set is empty or duplicated")
+    selected = set(snapshot["selected_targets"])
+    if not set(targets).issubset(selected):
+        raise BaselineError("published-member preflight target is not selected by the candidate")
+    expected_names = {
+        f"release-manifest-{target}.json" for target in snapshot["selected_targets"]
+    }
+    discovered = {
+        path.name for path in expected_manifests.glob("release-manifest-*.json")
+    }
+    if discovered != expected_names:
+        raise BaselineError("expected schema-v3 manifest set is incomplete or ambiguous")
+    _verify_published_snapshot(
+        backend or GitHubBackend(),
+        value,
+        {},
+        contract,
+        target_filter=set(targets),
+        expected_manifests=expected_manifests,
+    )
+
+
 def _resolve_captured(
     contract: dict[str, Any], backend: GitHubBackend, release: dict[str, Any]
 ) -> dict[str, Any]:
@@ -1320,6 +1417,9 @@ def rollback(
         current = parent_value
     if destination is None:
         raise BaselineError("rollback destination is not a whole-snapshot ancestor")
+    before_handoff = backend.reread_latest_before_mutation()
+    if before_handoff.get("id") != current_anchor_id:
+        raise BaselineError("rollback current anchor moved during ancestor verification")
     backend.set_latest(destination_anchor_id)
     reread = backend.reread_latest_after_mutation()
     if reread.get("id") != destination_anchor_id:
@@ -1348,6 +1448,11 @@ def main() -> int:
     validate = sub.add_parser("validate")
     validate.add_argument("--contract", type=Path, default=Path("release/targets.json"))
     validate.add_argument("--snapshot", type=Path, required=True)
+    verify_members = sub.add_parser("verify-published-members")
+    verify_members.add_argument("--contract", type=Path, default=Path("release/targets.json"))
+    verify_members.add_argument("--snapshot", type=Path, required=True)
+    verify_members.add_argument("--targets", type=Path, required=True)
+    verify_members.add_argument("--manifests", type=Path, required=True)
     rollback_parser = sub.add_parser("rollback")
     rollback_parser.add_argument("--contract", type=Path, default=Path("release/targets.json"))
     rollback_parser.add_argument("--current-anchor-id", type=int, required=True)
@@ -1365,6 +1470,19 @@ def main() -> int:
         elif args.command == "validate":
             validate_snapshot(load_envelope(args.snapshot), contract)
             print("baseline snapshot valid")
+        elif args.command == "verify-published-members":
+            targets = json.loads(args.targets.read_text(encoding="utf-8"))
+            if not isinstance(targets, list) or any(
+                not isinstance(target, str) for target in targets
+            ):
+                raise BaselineError("published-member preflight targets are malformed")
+            verify_published_members(
+                contract,
+                load_envelope(args.snapshot),
+                targets,
+                args.manifests,
+            )
+            print("published Release members match the selected candidate")
         else:
             workflow_ref = os.environ.get("GITHUB_WORKFLOW_REF", "")
             if (

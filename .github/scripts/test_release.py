@@ -1083,6 +1083,16 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         ):
             self.assertIn(value, workflow)
         self.assertNotIn("Create or complete target GitHub Releases", workflow)
+        self.assertNotIn(
+            "- uses: ./.github/actions/setup-kubernetes-tools\n        if:", workflow
+        )
+        self.assertNotIn(
+            "if: needs.verify-candidate.outputs.has_images == 'true' || needs.verify-candidate.outputs.has_chart == 'true'",
+            workflow,
+        )
+        self.assertIn(
+            "Install checksummed Buildx for complete snapshot verification", workflow
+        )
         self.assertNotIn("docker/build-push-action", workflow)
         self.assertNotIn("docker build -", workflow)
         self.assertNotIn("goreleaser/goreleaser-action", workflow.lower())
@@ -1130,7 +1140,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         final_verify = script.index("release_baseline.py\" resolve", handoff)
         self.assertEqual([create, final_snapshot, upload, verify_draft, publish, handoff, final_verify], sorted([create, final_snapshot, upload, verify_draft, publish, handoff, final_verify]))
 
-    def test_destination_preflight_rejects_conflicts_without_inventing_final_manifests(self) -> None:
+    def test_destination_preflight_reconstructs_and_verifies_published_retry_members(self) -> None:
         script = (ROOT / ".github/scripts/check_promotion_destinations.sh").read_text()
         for value in (
             "imagetools inspect",
@@ -1138,10 +1148,19 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             "releases/tags/$tag",
             ".target_commitish == $source",
             ".immutable == true",
-            "publish_github_releases.sh",
+            "final-snapshot",
+            "release-manifests",
+            "verify-release-manifests",
+            "verify-published-members",
+            "published retry cohort has a missing or ambiguous selected Release destination",
         ):
             self.assertIn(value, script)
-        self.assertNotIn("release-manifests", script)
+        workflow = (ROOT / ".github/workflows/release-promote.yml").read_text()
+        preflight = workflow.index("check_promotion_destinations.sh")
+        self.assertLess(preflight, workflow.index("Promote tested image digests"))
+        self.assertLess(preflight, workflow.index("Publish unchanged chart archives"))
+        self.assertLess(preflight, workflow.index("Create or verify protected namespaced tags"))
+        self.assertLess(preflight, workflow.index("publish_github_releases.sh"))
 
     def test_protected_release_callers_use_only_non_admin_audits(self) -> None:
         for name in ("release-rehearsal.yml", "release-promote.yml", "release-rollback.yml"):
