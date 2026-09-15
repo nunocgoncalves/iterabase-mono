@@ -122,14 +122,13 @@ jobs:
           git fetch --no-tags origin master
           git merge-base --is-ancestor "$SOURCE_SHA" origin/master
           .github/scripts/audit_release_security.sh '${{ github.repository }}'
+      # Complete-snapshot verification always resolves every image, chart,
+      # companion, and fixture, not only the selected publication matrix.
       - uses: ./.github/actions/setup-kubernetes-tools
-        if: needs.verify-candidate.outputs.has_chart == 'true'
-      - name: Install checksummed Buildx for immutable artifact promotion
-        if: needs.verify-candidate.outputs.has_images == 'true' || needs.verify-candidate.outputs.has_chart == 'true'
+      - name: Install checksummed Buildx for complete snapshot verification
         uses: ./.github/actions/setup-ci-tool
         with: {name: buildx, version: 0.36.1}
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
-        if: needs.verify-candidate.outputs.has_images == 'true' || needs.verify-candidate.outputs.has_chart == 'true'
         with:
           registry: ghcr.io
           username: ${{ github.actor }}

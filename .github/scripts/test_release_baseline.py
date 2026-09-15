@@ -85,6 +85,25 @@ class SnapshotContractTests(unittest.TestCase):
             with self.subTest(message=message):
                 self.assert_invalid(mutate, message)
 
+    def test_published_forge_variants_require_exact_release_urls_and_no_candidate_paths(self) -> None:
+        for mutation in ("url", "candidate_path"):
+            value = self.snapshot()
+            forge = next(
+                artifact
+                for cohort in value["snapshot"]["targets"]
+                for artifact in cohort["artifacts"]
+                if artifact["name"] == "forge-binary"
+            )
+            if mutation == "url":
+                forge["variants"][0]["url"] = "https://example.invalid/forge.tar.gz"
+            else:
+                forge["variants"][0]["candidate_path"] = "assets/forge/forged.tar.gz"
+            value = baseline.envelope(value["snapshot"])
+            with self.subTest(mutation=mutation), self.assertRaisesRegex(
+                baseline.BaselineError, "unauthorized Release URL or candidate path"
+            ):
+                baseline.validate_snapshot(value, self.contract)
+
     def test_selected_targets_are_canonical_and_anchor_is_deterministic(self) -> None:
         self.assertEqual(
             "iterabase-platform-chart",
@@ -115,6 +134,99 @@ class SnapshotContractTests(unittest.TestCase):
         value["snapshot_sha256"] = "0" * 64
         self.assertEqual(pinned, plan["resolved_baseline"]["snapshot_sha256"])
         self.assertNotEqual(value["snapshot_sha256"], pinned)
+
+
+class PublishedManifestAuthorityTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.contract = e2e.load_contract(ROOT)
+
+    def fixture(self) -> tuple[dict, dict, dict, dict]:
+        shared = baseline.test_snapshot(self.contract)
+        cohort = shared["snapshot"]["targets"][0]
+        release = {
+            "id": cohort["release"]["id"],
+            "name": cohort["release"]["tag"],
+            "body": "governed release notes",
+            "target_commitish": cohort["source_sha"],
+            "prerelease": False,
+        }
+        manifest = {
+            "release_id": release["id"],
+            "candidate_run_attempt": cohort["candidate_run_attempt"],
+            "cohort_id": shared["snapshot"]["cohort_id"],
+            "parent_anchor": shared["snapshot"]["parent_anchor"],
+            "anchor_target": shared["snapshot"]["anchor_target"],
+            "baseline_snapshot_sha256": shared["snapshot_sha256"],
+            "release_metadata": {
+                "title": release["name"],
+                "notes": release["body"],
+                "target_commitish": release["target_commitish"],
+                "prerelease": False,
+                "make_latest": False,
+            },
+        }
+        return manifest, shared, cohort, release
+
+    def test_v3_manifest_rejects_parent_anchor_and_deterministic_anchor_disagreement(self) -> None:
+        for field, value in (
+            ("parent_anchor", {"release_id": 999, "tag": "other", "snapshot_sha256": "0" * 64}),
+            ("anchor_target", "control-plane"),
+        ):
+            manifest, shared, cohort, release = self.fixture()
+            manifest[field] = value
+            with self.subTest(field=field), self.assertRaisesRegex(
+                baseline.BaselineError, "schema-v3 manifest authority drifted"
+            ):
+                baseline._validate_v3_manifest_authority(
+                    manifest, shared, cohort, release, release["id"]
+                )
+
+    def test_v3_manifest_rejects_governed_release_title_and_notes_disagreement(self) -> None:
+        for field in ("title", "notes"):
+            manifest, shared, cohort, release = self.fixture()
+            manifest["release_metadata"][field] = "conflicting metadata"
+            with self.subTest(field=field), self.assertRaisesRegex(
+                baseline.BaselineError, "governed Release metadata drifted"
+            ):
+                baseline._validate_v3_manifest_authority(
+                    manifest, shared, cohort, release, release["id"]
+                )
+
+    def test_published_member_preflight_uses_exact_expected_manifest_set(self) -> None:
+        shared = baseline.test_snapshot(self.contract)
+        with tempfile.TemporaryDirectory() as raw:
+            manifests = Path(raw)
+            for target in shared["snapshot"]["selected_targets"]:
+                (manifests / f"release-manifest-{target}.json").write_text("{}\n")
+            backend = object()
+            with patch("release_baseline._verify_published_snapshot") as verify:
+                baseline.verify_published_members(
+                    self.contract,
+                    shared,
+                    ["forge"],
+                    manifests,
+                    backend=backend,  # type: ignore[arg-type]
+                )
+            verify.assert_called_once_with(
+                backend,
+                shared,
+                {},
+                self.contract,
+                target_filter={"forge"},
+                expected_manifests=manifests,
+            )
+            (manifests / "release-manifest-forge.json").unlink()
+            with self.assertRaisesRegex(
+                baseline.BaselineError, "manifest set is incomplete"
+            ):
+                baseline.verify_published_members(
+                    self.contract,
+                    shared,
+                    ["forge"],
+                    manifests,
+                    backend=backend,  # type: ignore[arg-type]
+                )
 
 
 class CandidateSnapshotTests(unittest.TestCase):
@@ -205,9 +317,12 @@ class RollbackContractTests(unittest.TestCase):
         cls.contract = e2e.load_contract(ROOT)
 
     class Backend:
-        def __init__(self, current: int, destination: int) -> None:
+        def __init__(
+            self, current: int, destination: int, *, before_mutation: int | None = None
+        ) -> None:
             self.current = current
             self.destination = destination
+            self.before_mutation = current if before_mutation is None else before_mutation
             self.updated: int | None = None
 
         def latest(self) -> dict:
@@ -215,6 +330,9 @@ class RollbackContractTests(unittest.TestCase):
 
         def release(self, release_id: int) -> dict:
             return {"id": release_id}
+
+        def reread_latest_before_mutation(self) -> dict:
+            return {"id": self.before_mutation}
 
         def set_latest(self, release_id: int) -> None:
             self.updated = release_id
@@ -251,6 +369,31 @@ class RollbackContractTests(unittest.TestCase):
             )
         self.assertEqual(destination_id, backend.updated)
         self.assertTrue(result["verified"])
+
+    def test_pointer_movement_during_ancestor_verification_fails_before_handoff(self) -> None:
+        current, destination = self.chain()
+        current_id = current["snapshot"]["anchor"]["release_id"]
+        destination_id = destination["snapshot"]["anchor"]["release_id"]
+        backend = self.Backend(
+            current_id, destination_id, before_mutation=current_id + 1
+        )
+        values = {current_id: current, destination_id: destination}
+        with patch(
+            "release_baseline._resolve_captured",
+            side_effect=lambda _contract, _backend, release: values[release["id"]],
+        ):
+            with self.assertRaisesRegex(
+                baseline.BaselineError, "moved during ancestor verification"
+            ):
+                baseline.rollback(
+                    self.contract,
+                    current_anchor_id=current_id,
+                    destination_anchor_id=destination_id,
+                    linear_identifier="HOR-554",
+                    reason="reject a concurrent pointer move",
+                    backend=backend,  # type: ignore[arg-type]
+                )
+        self.assertIsNone(backend.updated)
 
     def test_stale_current_nonancestor_and_partial_requests_fail_closed(self) -> None:
         current, destination = self.chain()
