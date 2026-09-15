@@ -215,11 +215,7 @@ func Apply(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner, 
 		return res, fmt.Errorf("%s", plan.Reason)
 	}
 
-	if err := refusePreLVMPlatform(ctx, cfg, d, plan); err != nil {
-		return res, err
-	}
-
-	storage, err := reconcileDataStorage(ctx, cfg, p)
+	storage, err := prepareHostBeforeK3s(ctx, cfg, p, d, plan)
 	if err != nil {
 		return res, err
 	}
@@ -269,6 +265,19 @@ func Apply(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner, 
 		Action: "apply", Result: "success", Version: version.String(),
 	})
 	return res, nil
+}
+
+func prepareHostBeforeK3s(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner, d deployer.Deployer, plan *ReconcilePlan) (*provisioner.DataStorageState, error) {
+	if err := refusePreLVMPlatform(ctx, cfg, d, plan); err != nil {
+		return nil, err
+	}
+	if plan.Action == ActionInstall {
+		if err := p.EnsureHostSwapDisabled(ctx); err != nil {
+			auditFail(cfg, "apply-host-swap", err)
+			return nil, fmt.Errorf("host swap hardening: %w", err)
+		}
+	}
+	return reconcileDataStorage(ctx, cfg, p)
 }
 
 const (

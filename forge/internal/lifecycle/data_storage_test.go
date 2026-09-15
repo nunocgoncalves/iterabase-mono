@@ -35,11 +35,46 @@ func TestApplyReconcilesDataStorageBeforeK3s(t *testing.T) {
 	res, err := Apply(context.Background(), testConfig(), p, nil, nil, nil, ApplyOpts{ReadyTimeout: time.Second, ReadyInterval: time.Millisecond})
 	require.NoError(t, err)
 	assert.Equal(t, 1, p.workspaceInspectCalls)
+	assert.Equal(t, 1, p.hostSwapCalls)
 	assert.Equal(t, 1, p.workspaceToolsCalls)
 	assert.Equal(t, 1, p.workspaceApplyCalls)
 	assert.Len(t, p.installs, 1)
+	assert.Equal(t, []string{"host-swap", "data-storage-tools", "data-storage-reconcile", "k3s-install"}, p.mutationOrder)
 	assert.Equal(t, "complete", res.DataStorage.State)
 	assert.Equal(t, "iterabase-data", res.DataStorage.VGName)
+}
+
+func TestApplyHostSwapFailurePreventsStorageAndK3sMutation(t *testing.T) {
+	p := &fakeProv{pf: readyPf(), hostSwapErr: errors.New("swapoff failed")}
+	_, err := Apply(context.Background(), testConfig(), p, nil, nil, nil, ApplyOpts{})
+	require.ErrorContains(t, err, "host swap hardening: swapoff failed")
+	assert.Equal(t, 1, p.hostSwapCalls)
+	assert.Zero(t, p.workspaceToolsCalls)
+	assert.Zero(t, p.workspaceApplyCalls)
+	assert.Empty(t, p.installs)
+	assert.Equal(t, []string{"host-swap"}, p.mutationOrder)
+}
+
+func TestApplyDoesNotHardenSwapDuringDryRunOrInstalledReapply(t *testing.T) {
+	t.Run("dry-run", func(t *testing.T) {
+		p := &fakeProv{pf: readyPf()}
+		_, err := Apply(context.Background(), testConfig(), p, nil, nil, nil, ApplyOpts{DryRun: true})
+		require.NoError(t, err)
+		assert.Zero(t, p.hostSwapCalls)
+		assert.Empty(t, p.mutationOrder)
+	})
+
+	t.Run("installed-reapply", func(t *testing.T) {
+		useTempHome(t)
+		p := &fakeProv{pf: readyPf(), state: inSyncState(), ready: true, kubeconfig: []byte(minKubeconfig)}
+		p.pf.Installed = true
+		_, err := Apply(context.Background(), testConfig(), p, nil, nil, nil, ApplyOpts{
+			ReadyTimeout: time.Second, ReadyInterval: time.Millisecond,
+		})
+		require.NoError(t, err)
+		assert.Zero(t, p.hostSwapCalls)
+		assert.Equal(t, []string{"data-storage-tools", "data-storage-reconcile"}, p.mutationOrder)
+	})
 }
 
 func TestApplyDataStorageToolingFailurePreventsPVAndK3sMutation(t *testing.T) {

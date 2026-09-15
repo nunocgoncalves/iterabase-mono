@@ -65,6 +65,9 @@ type fakeProv struct {
 	installs              []installCall
 	ensureDepsErr         error
 	ensureDepsCalls       int
+	hostSwapErr           error
+	hostSwapCalls         int
+	mutationOrder         []string
 	workspaceInspectErr   error
 	workspaceInspectState *provisioner.DataStorageState
 	workspaceReconcileErr error
@@ -87,6 +90,7 @@ func (f *fakeProv) Preflight(_ context.Context) (*provisioner.PreflightResult, e
 	return &f.pf, nil
 }
 func (f *fakeProv) Install(_ context.Context, version string, args []string) error {
+	f.mutationOrder = append(f.mutationOrder, "k3s-install")
 	f.installs = append(f.installs, installCall{version, args})
 	if f.installErr != nil {
 		return f.installErr
@@ -123,6 +127,11 @@ func (f *fakeProv) EnsureDriverBuildDeps(_ context.Context) error {
 	f.ensureDepsCalls++
 	return f.ensureDepsErr
 }
+func (f *fakeProv) EnsureHostSwapDisabled(_ context.Context) error {
+	f.hostSwapCalls++
+	f.mutationOrder = append(f.mutationOrder, "host-swap")
+	return f.hostSwapErr
+}
 func (f *fakeProv) ListDataStorageDevices(_ context.Context) ([]provisioner.DataStorageDevice, error) {
 	return nil, nil
 }
@@ -144,10 +153,12 @@ func (f *fakeProv) InspectDataStorage(_ context.Context, spec provisioner.DataSt
 }
 func (f *fakeProv) EnsureDataStorageTools(_ context.Context) error {
 	f.workspaceToolsCalls++
+	f.mutationOrder = append(f.mutationOrder, "data-storage-tools")
 	return f.workspaceToolsErr
 }
 func (f *fakeProv) ReconcileDataStorage(_ context.Context, spec provisioner.DataStorageSpec) (*provisioner.DataStorageState, error) {
 	f.workspaceApplyCalls++
+	f.mutationOrder = append(f.mutationOrder, "data-storage-reconcile")
 	if f.workspaceReconcileErr != nil {
 		return nil, f.workspaceReconcileErr
 	}
