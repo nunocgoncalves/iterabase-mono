@@ -29,20 +29,26 @@ const (
 
 // RuntimeArtifact is one identity verified by the shared runtime composer.
 type RuntimeArtifact struct {
-	Name             string `json:"name"`
-	Kind             string `json:"kind"`
-	Custody          string `json:"custody"`
-	SourceSHA        string `json:"source_sha,omitempty"`
-	Reference        string `json:"reference"`
-	Digest           string `json:"digest,omitempty"`
-	ConfigDigest     string `json:"config_digest,omitempty"`
-	RuntimeDigest    string `json:"runtime_digest,omitempty"`
-	Checksum         string `json:"checksum,omitempty"`
-	Path             string `json:"path,omitempty"`
-	RecipeHash       string `json:"recipe_sha256,omitempty"`
-	PlannedReference string `json:"planned_reference,omitempty"`
-	PlannedDigest    string `json:"planned_digest,omitempty"`
-	PlannedChecksum  string `json:"planned_checksum,omitempty"`
+	Name                          string `json:"name"`
+	Kind                          string `json:"kind"`
+	Custody                       string `json:"custody"`
+	Version                       string `json:"version"`
+	BaselineProvenance            string `json:"baseline_provenance,omitempty"`
+	SourceSHA                     string `json:"source_sha,omitempty"`
+	Reference                     string `json:"reference"`
+	Digest                        string `json:"digest,omitempty"`
+	ConfigDigest                  string `json:"config_digest,omitempty"`
+	RuntimeDigest                 string `json:"runtime_digest,omitempty"`
+	Checksum                      string `json:"checksum,omitempty"`
+	Path                          string `json:"path,omitempty"`
+	RecipeHash                    string `json:"recipe_sha256,omitempty"`
+	PlannedReference              string `json:"planned_reference,omitempty"`
+	PlannedDigest                 string `json:"planned_digest,omitempty"`
+	PlannedChecksum               string `json:"planned_checksum,omitempty"`
+	PlannedOCIDigest              string `json:"planned_oci_digest,omitempty"`
+	PlannedFilename               string `json:"planned_filename,omitempty"`
+	PlannedSize                   int64  `json:"planned_size,omitempty"`
+	PlannedBaselineSnapshotSHA256 string `json:"planned_baseline_snapshot_sha256,omitempty"`
 }
 
 var observedRuntimeIdentityMu sync.Mutex
@@ -295,7 +301,7 @@ func validateRuntimeBundle(bundle RuntimeBundle) error {
 	}
 	seen := make(map[string]struct{}, len(bundle.Artifacts))
 	for _, artifact := range bundle.Artifacts {
-		if artifact.Name == "" || artifact.Kind == "" || artifact.Custody == "" || artifact.Reference == "" {
+		if artifact.Name == "" || artifact.Kind == "" || artifact.Custody == "" || artifact.Version == "" || artifact.Reference == "" {
 			return fmt.Errorf("runtime artifact has incomplete identity: %+v", artifact)
 		}
 		if _, exists := seen[artifact.Name]; exists {
@@ -305,8 +311,11 @@ func validateRuntimeBundle(bundle RuntimeBundle) error {
 		if artifact.Custody != "published-baseline" && artifact.SourceSHA != bundle.SourceSHA {
 			return fmt.Errorf("runtime artifact %q source SHA does not match the bundle", artifact.Name)
 		}
-		if artifact.Custody == "published-baseline" && artifact.SourceSHA != "" {
-			return fmt.Errorf("published baseline %q must not claim source custody", artifact.Name)
+		if artifact.Custody == "published-baseline" && (artifact.SourceSHA != "" || artifact.BaselineProvenance == "") {
+			return fmt.Errorf("published baseline %q must retain baseline provenance without source custody", artifact.Name)
+		}
+		if artifact.Custody != "published-baseline" && artifact.BaselineProvenance != "" {
+			return fmt.Errorf("selected artifact %q must not claim baseline provenance", artifact.Name)
 		}
 		if artifact.Digest != "" && !canonicalHash.MatchString(artifact.Digest) {
 			return fmt.Errorf("runtime artifact %q has invalid digest", artifact.Name)
@@ -322,10 +331,17 @@ func validateRuntimeBundle(bundle RuntimeBundle) error {
 		}
 		for label, value := range map[string]string{
 			"planned_digest": artifact.PlannedDigest, "planned_checksum": artifact.PlannedChecksum,
+			"planned_oci_digest": artifact.PlannedOCIDigest,
 		} {
 			if value != "" && !canonicalHash.MatchString(value) {
 				return fmt.Errorf("runtime artifact %q has invalid %s", artifact.Name, label)
 			}
+		}
+		if artifact.PlannedBaselineSnapshotSHA256 != "" && !canonicalHash.MatchString(artifact.PlannedBaselineSnapshotSHA256) {
+			return fmt.Errorf("runtime artifact %q has invalid planned baseline snapshot hash", artifact.Name)
+		}
+		if artifact.PlannedSize < 0 {
+			return fmt.Errorf("runtime artifact %q has invalid planned size", artifact.Name)
 		}
 		if artifact.RecipeHash != "" && (!canonicalHash.MatchString(artifact.RecipeHash) || strings.HasPrefix(artifact.RecipeHash, "sha256:")) {
 			return fmt.Errorf("runtime artifact %q has invalid recipe hash", artifact.Name)
