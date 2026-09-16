@@ -87,13 +87,14 @@ active=$(inspect_active_swaps)
 configured=$(inspect_configured_swap_count)
 if test -n "$active"; then need "$swapoff_command"; fi
 
+uid=$(stat -c '%u' -- "$fstab") || fail "cannot inspect $fstab owner"
+gid=$(stat -c '%g' -- "$fstab") || fail "cannot inspect $fstab group"
+mode=$(stat -c '%a' -- "$fstab") || fail "cannot inspect $fstab mode"
+case "$uid:$gid" in *[!0-9:]*|:*|*:|*:*:*) fail "invalid $fstab ownership $uid:$gid" ;; esac
+case "$mode" in ''|*[!0-7]*) fail "invalid $fstab mode $mode" ;; esac
+fstab_dir=$(dirname -- "$fstab") || fail "cannot resolve $fstab parent directory"
+
 if test "$configured" -gt 0; then
-  uid=$(stat -c '%u' -- "$fstab") || fail "cannot inspect $fstab owner"
-  gid=$(stat -c '%g' -- "$fstab") || fail "cannot inspect $fstab group"
-  mode=$(stat -c '%a' -- "$fstab") || fail "cannot inspect $fstab mode"
-  case "$uid:$gid" in *[!0-9:]*|:*|*:|*:*:*) fail "invalid $fstab ownership $uid:$gid" ;; esac
-  case "$mode" in ''|*[!0-7]*) fail "invalid $fstab mode $mode" ;; esac
-  fstab_dir=$(dirname -- "$fstab") || fail "cannot resolve $fstab parent directory"
   fstab_tmp=$(mktemp "$fstab_dir/.forge-fstab.XXXXXX") || fail "cannot create temporary fstab beside $fstab"
   if ! LC_ALL=C awk '
     function is_active_swap(line, trimmed, fields, count) {
@@ -112,9 +113,14 @@ if test "$configured" -gt 0; then
   sync "$fstab_tmp" || fail "cannot persist rewritten configured swap state $fstab"
   mv -- "$fstab_tmp" "$fstab" || fail "cannot atomically replace configured swap state $fstab"
   fstab_tmp=
-  test "$(stat -c '%u:%g:%a' -- "$fstab")" = "$uid:$gid:$mode" || fail "$fstab ownership or mode changed during rewrite"
-  sync "$fstab_dir" || fail "cannot persist configured swap directory $fstab_dir"
 fi
+
+# Re-establish the post-rename proof on every run. If a prior run was
+# interrupted after rename, the converged retry still verifies stable metadata
+# and flushes both the replacement inode and its directory entry before k3s.
+test "$(stat -c '%u:%g:%a' -- "$fstab")" = "$uid:$gid:$mode" || fail "$fstab ownership or mode changed during rewrite"
+sync "$fstab" || fail "cannot persist configured swap state $fstab"
+sync "$fstab_dir" || fail "cannot persist configured swap directory $fstab_dir"
 
 if test -n "$active"; then
   "$swapoff_command" --all || fail "swapoff --all failed; active swap may remain"

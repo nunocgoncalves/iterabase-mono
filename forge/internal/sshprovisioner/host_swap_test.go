@@ -47,6 +47,7 @@ type hostSwapFixture struct {
 	binDir     string
 	swapLog    string
 	mvLog      string
+	syncLog    string
 }
 
 func newHostSwapFixture(t *testing.T, active, fstab string, mode os.FileMode) *hostSwapFixture {
@@ -59,6 +60,7 @@ func newHostSwapFixture(t *testing.T, active, fstab string, mode os.FileMode) *h
 		binDir:     filepath.Join(dir, "bin"),
 		swapLog:    filepath.Join(dir, "swapoff.log"),
 		mvLog:      filepath.Join(dir, "mv.log"),
+		syncLog:    filepath.Join(dir, "sync.log"),
 	}
 	require.NoError(t, os.Mkdir(fixture.binDir, 0o700))
 	require.NoError(t, os.WriteFile(fixture.activePath, []byte(active), 0o600))
@@ -98,13 +100,22 @@ case "$format" in
 esac
 exec "$real" -f "$bsd_format" "$file"
 `, shellQuote(realStat)))
-	writeExecutable("sync", "#!/bin/sh\nexit 0\n")
+	writeExecutable("sync", `#!/bin/sh
+printf '%s\n' "$1" >> "$FORGE_SWAP_SYNC_LOG"
+case "${FORGE_SWAP_SYNC_MODE:-success}" in
+  success) exit 0 ;;
+  fail-directory) test -d "$1" && exit 8; exit 0 ;;
+  *) exit 64 ;;
+esac
+`)
 	writeExecutable("mv", fmt.Sprintf(`#!/bin/sh
+real=%s
 printf 'mv\n' >> "$FORGE_SWAP_MV_LOG"
 case "${FORGE_SWAP_MV_MODE:-real}" in
   fail) exit 9 ;;
+  real-fail) "$real" "$@"; exit 9 ;;
   noop) exit 0 ;;
-  real) exec %s "$@" ;;
+  real) exec "$real" "$@" ;;
   *) exit 64 ;;
 esac
 `, shellQuote(realMV)))
@@ -120,8 +131,13 @@ esac
 `)
 }
 
-func (f *hostSwapFixture) run(t *testing.T, swapoffMode, mvMode string) (string, error) {
+func (f *hostSwapFixture) run(t *testing.T, swapoffMode, mvMode string, syncModes ...string) (string, error) {
 	t.Helper()
+	require.LessOrEqual(t, len(syncModes), 1)
+	syncMode := "success"
+	if len(syncModes) == 1 {
+		syncMode = syncModes[0]
+	}
 	cmd := exec.Command("bash", f.scriptPath)
 	values := map[string]string{
 		"PATH":                   f.binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
@@ -130,6 +146,8 @@ func (f *hostSwapFixture) run(t *testing.T, swapoffMode, mvMode string) (string,
 		"FORGE_SWAPOFF_MODE":     swapoffMode,
 		"FORGE_SWAP_MV_LOG":      f.mvLog,
 		"FORGE_SWAP_MV_MODE":     mvMode,
+		"FORGE_SWAP_SYNC_LOG":    f.syncLog,
+		"FORGE_SWAP_SYNC_MODE":   syncMode,
 	}
 	cmd.Env = replaceHostSwapFixtureEnv(os.Environ(), values)
 	out, err := cmd.CombinedOutput()
@@ -205,6 +223,7 @@ func TestHostSwapScriptDisablesUbuntuSwapAndIsIdempotent(t *testing.T) {
 	assert.Equal(t, beforeGID, afterGID)
 	assert.Equal(t, 1, hostSwapFixtureLogCount(t, fixture.swapLog))
 	assert.Equal(t, 1, hostSwapFixtureLogCount(t, fixture.mvLog))
+	assert.Equal(t, 3, hostSwapFixtureLogCount(t, fixture.syncLog))
 
 	out, err = fixture.run(t, "clear", "real")
 	require.NoError(t, err, out)
@@ -213,6 +232,7 @@ func TestHostSwapScriptDisablesUbuntuSwapAndIsIdempotent(t *testing.T) {
 	assert.Equal(t, expectedFstab, string(fstab))
 	assert.Equal(t, 1, hostSwapFixtureLogCount(t, fixture.swapLog), "repeat run must not call swapoff")
 	assert.Equal(t, 1, hostSwapFixtureLogCount(t, fixture.mvLog), "repeat run must not rewrite fstab")
+	assert.Equal(t, 5, hostSwapFixtureLogCount(t, fixture.syncLog), "repeat run must re-establish fstab durability")
 }
 
 func TestHostSwapScriptAlreadyDisabledIsNoOp(t *testing.T) {
@@ -226,6 +246,7 @@ func TestHostSwapScriptAlreadyDisabledIsNoOp(t *testing.T) {
 	assert.Equal(t, fstab, string(got))
 	assert.Zero(t, hostSwapFixtureLogCount(t, fixture.swapLog))
 	assert.Zero(t, hostSwapFixtureLogCount(t, fixture.mvLog))
+	assert.Equal(t, 2, hostSwapFixtureLogCount(t, fixture.syncLog), "converged run still proves fstab durability")
 }
 
 func TestHostSwapScriptFailuresAreActionableAndFailClosed(t *testing.T) {
@@ -279,6 +300,46 @@ func TestHostSwapScriptFailuresAreActionableAndFailClosed(t *testing.T) {
 		got, readErr = os.ReadFile(fixture.fstabPath)
 		require.NoError(t, readErr)
 		assert.Equal(t, expected, string(got))
+	})
+
+	t.Run("completed rename with lost response is recovered on retry", func(t *testing.T) {
+		const expected = "# forge-disabled-swap /swap.img none swap sw 0 0\n"
+		fixture := newHostSwapFixture(t, "Filename\tType\tSize\tUsed\tPriority\n", "/swap.img none swap sw 0 0\n", 0o600)
+		out, err := fixture.run(t, "clear", "real-fail")
+		require.Error(t, err)
+		assert.Contains(t, out, "cannot atomically replace configured swap state")
+		got, readErr := os.ReadFile(fixture.fstabPath)
+		require.NoError(t, readErr)
+		assert.Equal(t, expected, string(got), "rename completed before its response was lost")
+		assert.Equal(t, 1, hostSwapFixtureLogCount(t, fixture.syncLog), "only the temporary file was synced before the lost response")
+
+		out, err = fixture.run(t, "clear", "real")
+		require.NoError(t, err, out)
+		got, readErr = os.ReadFile(fixture.fstabPath)
+		require.NoError(t, readErr)
+		assert.Equal(t, expected, string(got))
+		assert.Equal(t, 1, hostSwapFixtureLogCount(t, fixture.mvLog), "converged retry must not rewrite fstab")
+		assert.Equal(t, 3, hostSwapFixtureLogCount(t, fixture.syncLog), "converged retry must sync fstab and its directory")
+	})
+
+	t.Run("directory sync failure is recovered on retry", func(t *testing.T) {
+		const expected = "# forge-disabled-swap /swap.img none swap sw 0 0\n"
+		fixture := newHostSwapFixture(t, "Filename\tType\tSize\tUsed\tPriority\n", "/swap.img none swap sw 0 0\n", 0o600)
+		out, err := fixture.run(t, "clear", "real", "fail-directory")
+		require.Error(t, err)
+		assert.Contains(t, out, "cannot persist configured swap directory")
+		got, readErr := os.ReadFile(fixture.fstabPath)
+		require.NoError(t, readErr)
+		assert.Equal(t, expected, string(got))
+		assert.Equal(t, 3, hostSwapFixtureLogCount(t, fixture.syncLog), "rewrite reached the failing directory sync")
+
+		out, err = fixture.run(t, "clear", "real")
+		require.NoError(t, err, out)
+		got, readErr = os.ReadFile(fixture.fstabPath)
+		require.NoError(t, readErr)
+		assert.Equal(t, expected, string(got))
+		assert.Equal(t, 1, hostSwapFixtureLogCount(t, fixture.mvLog), "converged retry must not rewrite fstab")
+		assert.Equal(t, 5, hostSwapFixtureLogCount(t, fixture.syncLog), "converged retry must repeat both durability steps")
 	})
 
 	t.Run("residual configured swap is rejected", func(t *testing.T) {
