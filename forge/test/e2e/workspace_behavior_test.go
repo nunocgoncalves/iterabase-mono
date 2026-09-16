@@ -25,7 +25,10 @@ import (
 
 const workspaceNamespace = "iterabase-system"
 
-var bootstrapCredentialPattern = regexp.MustCompile(`API key \(scope=([^)]+)\): (\S+)`)
+var (
+	bootstrapCredentialPattern = regexp.MustCompile(`API key \(scope=([^)]+)\): (\S+)`)
+	workspaceUUIDPattern       = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+)
 
 type workspaceWorkItem struct {
 	ID               string `json:"id"`
@@ -451,7 +454,7 @@ func exerciseHumanGateWorkspaceReplacementStage(t *testing.T, state *permanentCP
 	defer stopAPI()
 
 	item := startWorkspaceWork(t, baseURL, state.workspaceWorkKey, "e2e/forge-workspace-recovery", "Human-gated workspace recovery", "hor-545-human-recovery")
-	item = waitWorkspaceWorkState(t, baseURL, state.workspaceWorkKey, item.ID, "blocked", 4*time.Minute)
+	item = waitWorkspaceWorkStateWithEvidence(t, cluster, state, baseURL, state.workspaceWorkKey, item.ID, "blocked", "initial", 4*time.Minute)
 	sessionBefore := workspaceDatabaseQuery(t, cluster, state, fmt.Sprintf(`SELECT session_id FROM runtime.workflow_runs WHERE id='%s'`, item.CurrentAttemptID))
 	assignedWorker := workspaceDatabaseQuery(t, cluster, state, fmt.Sprintf(`SELECT worker_id FROM runtime.turn_assignments WHERE attempt_id='%s' ORDER BY assigned_at LIMIT 1`, item.CurrentAttemptID))
 	if assignedWorker == "" {
@@ -470,7 +473,7 @@ func exerciseHumanGateWorkspaceReplacementStage(t *testing.T, state *permanentCP
 
 	respondWorkspaceBlocker(t, baseURL, state.workspaceWorkKey, item.ID)
 	waitWorkspaceDatabaseValue(t, cluster, state, fmt.Sprintf(`SELECT count(*) FROM runtime.turn_assignments WHERE attempt_id='%s'`, item.CurrentAttemptID), "2", 4*time.Minute)
-	item = waitWorkspaceWorkState(t, baseURL, state.workspaceWorkKey, item.ID, "blocked", 2*time.Minute)
+	item = waitWorkspaceWorkStateWithEvidence(t, cluster, state, baseURL, state.workspaceWorkKey, item.ID, "blocked", "resumed", 2*time.Minute)
 	recoveryEvents := workspaceDatabaseQuery(t, cluster, state, fmt.Sprintf(`SELECT string_agg(seq::text || ':' || kind || ':' || payload::text, E'\n' ORDER BY seq) FROM runtime.events WHERE run_id='%s'`, item.CurrentAttemptID))
 	t.Logf("human-gate recovery events before external resumed proof:\n%s", recoveryEvents)
 	assertRecoveryWorkspaceState(t, cluster, sessionBefore, "resumed", true)
@@ -637,6 +640,95 @@ func waitWorkspaceWorkState(t *testing.T, baseURL, key, id, wanted string, timeo
 	}
 	t.Fatalf("workspace work %s state=%s did not reach %s", id, item.State, wanted)
 	return workspaceWorkItem{}
+}
+
+func waitWorkspaceWorkStateWithEvidence(t *testing.T, cluster *remotecluster.Cluster, state *permanentCPUFixtureState, baseURL, key, id, wanted, phase string, timeout time.Duration) workspaceWorkItem {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var item workspaceWorkItem
+	for time.Now().Before(deadline) {
+		item = readWorkspaceWork(t, baseURL, key, id)
+		if item.State == wanted {
+			return item
+		}
+		if item.State == "failed" && wanted != "failed" {
+			query, err := workspaceFailureEvidenceQuery(item)
+			if err != nil {
+				t.Fatalf("human-gate workspace work %s failed in phase %s while waiting for %s; build evidence query: %v", id, phase, wanted, err)
+			}
+			evidence := state.diagnostics.redactor.String(workspaceDatabaseQuery(t, cluster, state, query))
+			path := filepath.Join(state.diagnostics.outputDir, "workspace-human-gate-failure.log")
+			if err := os.WriteFile(path, []byte(evidence+"\n"), 0o600); err != nil {
+				t.Logf("write human-gate failure evidence: %v", err)
+			}
+			t.Fatalf("human-gate workspace work %s failed in phase %s while waiting for %s; durable evidence:\n%s", id, phase, wanted, evidence)
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	t.Fatalf("human-gate workspace work %s state=%s did not reach %s in phase %s", id, item.State, wanted, phase)
+	return workspaceWorkItem{}
+}
+
+func workspaceFailureEvidenceQuery(item workspaceWorkItem) (string, error) {
+	if !workspaceUUIDPattern.MatchString(item.ID) || !workspaceUUIDPattern.MatchString(item.CurrentAttemptID) {
+		return "", fmt.Errorf("invalid work/attempt identity %q/%q", item.ID, item.CurrentAttemptID)
+	}
+	return fmt.Sprintf(`
+WITH evidence AS (
+  SELECT 10::bigint AS ordinal, 'work=' || json_build_object(
+    'id', wi.id, 'workflow_key', wi.workflow_key, 'current_attempt_id', wi.current_attempt_id,
+    'created_at', wi.created_at, 'updated_at', wi.updated_at
+  )::text AS line
+  FROM work.work_items wi WHERE wi.id='%[1]s'
+  UNION ALL
+  SELECT 20, 'attempt=' || json_build_object(
+    'id', wr.id, 'state', wr.state, 'session_id', wr.session_id,
+    'started_at', wr.started_at, 'finished_at', wr.finished_at,
+    'customer_failure_summary', a.customer_failure_summary,
+    'operator_failure_detail', a.operator_failure_detail
+  )::text
+  FROM runtime.workflow_runs wr JOIN work.attempts a ON a.id=wr.id WHERE wr.id='%[2]s'
+  UNION ALL
+  SELECT 30, 'allocation=' || json_build_object(
+    'session_id', alloc.session_id, 'uid', alloc.uid, 'state', alloc.state,
+    'allocated_at', alloc.allocated_at, 'freed_at', alloc.freed_at
+  )::text
+  FROM runtime.workflow_runs wr
+  LEFT JOIN runtime.session_uid_allocations alloc ON alloc.session_id=wr.session_id
+  WHERE wr.id='%[2]s'
+  UNION ALL
+  SELECT 100 + ne.execution_seq, 'node=' || json_build_object(
+    'id', ne.id, 'key', ne.node_key, 'visit', ne.visit, 'kind', ne.kind, 'state', ne.state,
+    'completion_outcome', ne.completion_outcome, 'completion_summary', ne.completion_summary,
+    'started_at', ne.started_at, 'finished_at', ne.finished_at
+  )::text
+  FROM runtime.node_executions ne WHERE ne.attempt_id='%[2]s'
+  UNION ALL
+  SELECT 200 + row_number() OVER (ORDER BY tr.started_at), 'turn=' || json_build_object(
+    'id', tr.id, 'node_execution_id', tr.node_execution_id, 'state', tr.state,
+    'started_at', tr.started_at, 'settled_at', tr.settled_at
+  )::text
+  FROM runtime.turns tr WHERE tr.run_id='%[2]s'
+  UNION ALL
+  SELECT 300 + row_number() OVER (ORDER BY ta.assigned_at), 'assignment=' || json_build_object(
+    'turn_id', ta.turn_id, 'worker_id', ta.worker_id, 'generation', ta.fencing_generation,
+    'state', ta.state, 'highest_applied_sequence', ta.highest_applied_sequence,
+    'assigned_at', ta.assigned_at, 'terminalized_at', ta.terminalized_at
+  )::text
+  FROM runtime.turn_assignments ta WHERE ta.attempt_id='%[2]s'
+  UNION ALL
+  SELECT 1000 + ev.seq, 'event=' || json_build_object(
+    'seq', ev.seq, 'turn_id', ev.turn_id, 'kind', ev.kind, 'payload', ev.payload, 'ts', ev.ts
+  )::text
+  FROM runtime.events ev WHERE ev.run_id='%[2]s'
+  UNION ALL
+  SELECT 100000 + te.cursor, 'timeline=' || json_build_object(
+    'cursor', te.cursor, 'node_execution_id', te.node_execution_id,
+    'code', te.code, 'params', te.params, 'created_at', te.created_at
+  )::text
+  FROM work.timeline_events te WHERE te.work_item_id='%[1]s'
+)
+SELECT COALESCE(string_agg(line, E'\n' ORDER BY ordinal), 'no durable evidence') FROM evidence`, item.ID, item.CurrentAttemptID), nil
 }
 
 func workspaceDatabaseQuery(t *testing.T, cluster *remotecluster.Cluster, state *permanentCPUFixtureState, query string) string {
@@ -1252,4 +1344,34 @@ fi`, workspaceMarkerDigest("recovery-marker"))
 func workspaceMarkerDigest(value string) string {
 	digest := sha256.Sum256([]byte(value))
 	return hex.EncodeToString(digest[:])
+}
+
+func TestWorkspaceFailureEvidenceQueryBindsExactWorkIdentity(t *testing.T) {
+	item := workspaceWorkItem{
+		ID:               "2084979d-bbb4-4f05-8f12-8c3d6ab7c78e",
+		CurrentAttemptID: "5cf5a3ce-21bf-4b3f-90d9-a22847680b97",
+	}
+	query, err := workspaceFailureEvidenceQuery(item)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{
+		"work.work_items", "work.attempts", "runtime.workflow_runs", "runtime.session_uid_allocations",
+		"runtime.node_executions", "runtime.turns", "runtime.turn_assignments", "runtime.events", "work.timeline_events",
+		item.ID, item.CurrentAttemptID, "operator_failure_detail", "highest_applied_sequence",
+	} {
+		if !strings.Contains(query, required) {
+			t.Fatalf("failure evidence query does not contain %q:\n%s", required, query)
+		}
+	}
+}
+
+func TestWorkspaceFailureEvidenceQueryRejectsUntrustedIdentity(t *testing.T) {
+	_, err := workspaceFailureEvidenceQuery(workspaceWorkItem{
+		ID:               "2084979d-bbb4-4f05-8f12-8c3d6ab7c78e'; DROP TABLE runtime.events; --",
+		CurrentAttemptID: "5cf5a3ce-21bf-4b3f-90d9-a22847680b97",
+	})
+	if err == nil {
+		t.Fatal("failure evidence query accepted a non-UUID work identity")
+	}
 }
