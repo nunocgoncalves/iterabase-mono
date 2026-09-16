@@ -45,17 +45,24 @@ func (e *workspaceWorkStateError) Error() string {
 	if e.Phase != "" {
 		prefix = fmt.Sprintf("human-gate workspace work %s in phase %s", e.WorkID, e.Phase)
 	}
+	if e.TimedOut {
+		message := fmt.Sprintf("%s state=%s did not reach %s", prefix, e.State, e.Wanted)
+		if e.Qualification != "" {
+			message = fmt.Sprintf("%s state=%s did not qualify for %s (%s)", prefix, e.State, e.Wanted, e.Qualification)
+		}
+		if e.Cause != nil {
+			message += fmt.Sprintf("; %v", e.Cause)
+		}
+		if e.Evidence != "" {
+			message += fmt.Sprintf("; durable evidence:\n%s", e.Evidence)
+		}
+		return message
+	}
 	if e.Cause != nil {
 		if e.Evidence != "" {
 			return fmt.Sprintf("%s while waiting for %s: %v; durable evidence:\n%s", prefix, e.Wanted, e.Cause, e.Evidence)
 		}
 		return fmt.Sprintf("%s while waiting for %s: %v", prefix, e.Wanted, e.Cause)
-	}
-	if e.TimedOut {
-		if e.Qualification != "" {
-			return fmt.Sprintf("%s state=%s did not qualify for %s (%s)", prefix, e.State, e.Wanted, e.Qualification)
-		}
-		return fmt.Sprintf("%s state=%s did not reach %s", prefix, e.State, e.Wanted)
 	}
 	if e.Evidence != "" {
 		return fmt.Sprintf("%s failed while waiting for %s; durable evidence:\n%s", prefix, e.Wanted, e.Evidence)
@@ -99,26 +106,34 @@ func (o workspaceWorkStateObserver) wait(id, wanted, phase string, timeout time.
 			}
 		}
 		if item.State == "failed" && wanted != "failed" {
-			if o.collect == nil {
-				return workspaceWorkItem{}, &workspaceWorkStateError{WorkID: id, Wanted: wanted, Phase: phase, State: item.State}
-			}
-			evidence, collectErr := o.collect(item)
-			if collectErr != nil {
-				return workspaceWorkItem{}, &workspaceWorkStateError{WorkID: id, Wanted: wanted, Phase: phase, State: item.State, Cause: fmt.Errorf("collect causal evidence: %w", collectErr)}
-			}
-			if o.persist != nil {
-				if persistErr := o.persist(evidence); persistErr != nil {
-					return workspaceWorkItem{}, &workspaceWorkStateError{WorkID: id, Wanted: wanted, Phase: phase, State: item.State, Evidence: evidence, Cause: fmt.Errorf("persist causal evidence: %w", persistErr)}
-				}
-			}
-			return workspaceWorkItem{}, &workspaceWorkStateError{WorkID: id, Wanted: wanted, Phase: phase, State: item.State, Evidence: evidence}
+			waitErr := &workspaceWorkStateError{WorkID: id, Wanted: wanted, Phase: phase, State: item.State}
+			return workspaceWorkItem{}, o.attachEvidence(item, waitErr, "")
 		}
 		sleep(interval)
 	}
-	return workspaceWorkItem{}, &workspaceWorkStateError{
+	waitErr := &workspaceWorkStateError{
 		WorkID: id, Wanted: wanted, Phase: phase, State: item.State,
 		Qualification: qualification, TimedOut: true,
 	}
+	return workspaceWorkItem{}, o.attachEvidence(item, waitErr, " after timeout")
+}
+
+func (o workspaceWorkStateObserver) attachEvidence(item workspaceWorkItem, waitErr *workspaceWorkStateError, context string) *workspaceWorkStateError {
+	if o.collect == nil {
+		return waitErr
+	}
+	evidence, collectErr := o.collect(item)
+	if collectErr != nil {
+		waitErr.Cause = fmt.Errorf("collect causal evidence%s: %w", context, collectErr)
+		return waitErr
+	}
+	waitErr.Evidence = evidence
+	if o.persist != nil {
+		if persistErr := o.persist(evidence); persistErr != nil {
+			waitErr.Cause = fmt.Errorf("persist causal evidence%s: %w", context, persistErr)
+		}
+	}
+	return waitErr
 }
 
 type workspaceFailureEvidenceCollector struct {
@@ -478,6 +493,55 @@ func TestWorkspaceWorkStateObserverWaitsForDurableGateQualification(t *testing.T
 	}
 	if got != item || reads != 2 || qualifications != 2 {
 		t.Fatalf("observer returned before durable qualification: got=%+v reads=%d qualifications=%d", got, reads, qualifications)
+	}
+}
+
+func TestWorkspaceWorkStateObserverPersistsBoundedEvidenceOnQualificationTimeout(t *testing.T) {
+	item := workspaceWorkItem{ID: "2084979d-bbb4-4f05-8f12-8c3d6ab7c78e", CurrentAttemptID: "5cf5a3ce-21bf-4b3f-90d9-a22847680b97", State: "blocked"}
+	const secret = "timeout-secret-must-not-survive"
+	raw := "work={\"id\":\"" + item.ID + "\"}\n" +
+		"attempt={\"id\":\"" + item.CurrentAttemptID + "\"}\n" +
+		"assignment={\"generation\":1}\nevent={\"seq\":7}\n" + secret + strings.Repeat("x", workspaceFailureEvidenceMaxBytes)
+	collector := workspaceFailureEvidenceCollector{
+		query:  func(string) (string, error) { return raw, nil },
+		redact: func(value string) string { return strings.ReplaceAll(value, secret, "[REDACTED]") },
+	}
+	now := time.Unix(0, 0)
+	reads, qualifications, collections := 0, 0, 0
+	var persisted string
+	observer := workspaceWorkStateObserver{
+		read: func() (workspaceWorkItem, error) { reads++; return item, nil },
+		qualify: func(workspaceWorkItem) (bool, string, error) {
+			qualifications++
+			return false, "assignments=1 initial=0", nil
+		},
+		collect: func(item workspaceWorkItem) (string, error) {
+			collections++
+			return collector.collect(item)
+		},
+		persist:  func(value string) error { persisted = value; return nil },
+		now:      func() time.Time { return now },
+		sleep:    func(duration time.Duration) { now = now.Add(duration) },
+		interval: time.Millisecond,
+	}
+	_, err := observer.wait(item.ID, "blocked", "initial", 2*time.Millisecond)
+	var waitErr *workspaceWorkStateError
+	if !errors.As(err, &waitErr) || !waitErr.TimedOut {
+		t.Fatalf("qualification timeout error=%v want timed workspaceWorkStateError", err)
+	}
+	if reads != 2 || qualifications != 2 || collections != 1 {
+		t.Fatalf("timeout path reads=%d qualifications=%d collections=%d want 2/2/1", reads, qualifications, collections)
+	}
+	if persisted == "" || waitErr.Evidence != persisted || len(persisted) > workspaceFailureEvidenceMaxBytes || strings.Contains(persisted, secret) {
+		t.Fatalf("timeout evidence was not persisted, bounded, and redacted: bytes=%d evidence=%q", len(persisted), persisted)
+	}
+	for _, required := range []string{item.ID, item.CurrentAttemptID, `"generation":1`, `"seq":7`} {
+		if !strings.Contains(persisted, required) {
+			t.Fatalf("timeout evidence lost %q: %s", required, persisted)
+		}
+	}
+	if message := waitErr.Error(); !strings.Contains(message, "did not qualify") || !strings.Contains(message, "assignments=1 initial=0") || !strings.Contains(message, "durable evidence") {
+		t.Fatalf("timeout error lost timeout, qualification, or evidence context: %s", message)
 	}
 }
 
