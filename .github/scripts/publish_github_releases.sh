@@ -33,16 +33,86 @@ validate_candidate_release() {
   }
 }
 
+detached_recovery_spec() {
+  local target=$1 tag=$2 source_sha=$3 repository=$4
+  if [[ "$repository" == "nunocgoncalves/iterabase-mono" &&
+        "$target" == "iterabase-platform-chart" &&
+        "$tag" == "iterabase-platform-0.4.1" &&
+        "$source_sha" == "135731c57061b57268ff01ea2a10f5b6c9f13e6f" ]]; then
+    jq -cn '{
+      release_id:390152336,
+      detached_tag:"untagged-6c1dcab9e0ad48512af0",
+      asset_count:10
+    }'
+    return 0
+  fi
+  return 1
+}
+
+validate_detached_candidate_release() {
+  local release_json=$1 recovery_spec=$2 tag=$3 source_sha=$4
+  jq -e --argjson recovery "$recovery_spec" --arg tag "$tag" --arg source "$source_sha" '
+    .id == $recovery.release_id and .tag_name == $recovery.detached_tag and
+    .target_commitish == $source and .name == $tag and
+    (.body | type == "string" and length > 0) and
+    .draft == true and .prerelease == false and .immutable == false and
+    .author.login == "github-actions[bot]" and
+    (.assets | type == "array" and length == $recovery.asset_count) and
+    ([.assets[].id] | length == (unique | length)) and
+    ([.assets[].name] | length == (unique | length)) and
+    all(.assets[];
+      (.id | type == "number" and . > 0) and
+      (.name | type == "string" and length > 0) and
+      (.size | type == "number" and . >= 0) and .state == "uploaded" and
+      (.digest | type == "string" and test("^sha256:[0-9a-f]{64}$")))
+  ' <<<"$release_json" >/dev/null || {
+    echo "detached Release ID $(jq -r '.release_id' <<<"$recovery_spec") no longer matches the approved recovery identity" >&2
+    return 1
+  }
+}
+
 resolve_candidate_release() {
   local target=$1 tag=$2 source_sha=$3 repository=$4
   local tag_identity pages matches count release_json notes payload expected_state=existing
+  local recovery_spec recovery_json recovery_tag recovery_id match_id recovered_detached=false
   tag_identity=$(verify_candidate_tag "$repository" "$tag" "$source_sha")
   # The tag lookup endpoint omits drafts. Enumerate every authenticated page,
   # require one exact tag match at most, and retain its database ID.
   pages=$(gh api --paginate --slurp "repos/$repository/releases?per_page=100")
   matches=$(jq -ce --arg tag "$tag" '[.[][] | select(.tag_name == $tag)]' <<<"$pages")
   count=$(jq -er 'length' <<<"$matches")
-  if [[ "$count" == 0 ]]; then
+  if [[ "$count" -gt 1 ]]; then
+    echo "release destination $tag is ambiguous across $count Releases" >&2
+    return 1
+  fi
+
+  if recovery_spec=$(detached_recovery_spec "$target" "$tag" "$source_sha" "$repository"); then
+    recovery_id=$(jq -er '.release_id' <<<"$recovery_spec")
+    recovery_json=$(gh api "repos/$repository/releases/$recovery_id")
+    recovery_tag=$(jq -er '.tag_name' <<<"$recovery_json")
+    if [[ "$recovery_tag" == "$tag" ]]; then
+      validate_candidate_release "$recovery_json" "$tag" "$source_sha" existing
+      if [[ "$count" == 1 ]]; then
+        match_id=$(jq -er '.[0].id' <<<"$matches")
+        [[ "$match_id" == "$recovery_id" ]] || {
+          echo "release destination $tag conflicts with detached-recovery Release ID $recovery_id" >&2
+          return 1
+        }
+      fi
+      release_json=$recovery_json
+    elif [[ "$recovery_tag" == "$(jq -er '.detached_tag' <<<"$recovery_spec")" ]]; then
+      validate_detached_candidate_release "$recovery_json" "$recovery_spec" "$tag" "$source_sha"
+      [[ "$count" == 0 ]] || {
+        echo "release destination $tag conflicts with detached-recovery Release ID $recovery_id" >&2
+        return 1
+      }
+      release_json=$recovery_json
+      recovered_detached=true
+    else
+      echo "approved recovery Release ID $recovery_id has unexpected tag $recovery_tag" >&2
+      return 1
+    fi
+  elif [[ "$count" == 0 ]]; then
     notes=$(printf 'Staging complete immutable cohort for %s from %s.\n' "$target" "$source_sha")
     payload=$(jq -cn --arg tag "$tag" --arg source "$source_sha" --arg notes "$notes" '{
       tag_name:$tag,
@@ -55,15 +125,119 @@ resolve_candidate_release() {
     }')
     release_json=$(gh api --method POST --input - "repos/$repository/releases" <<<"$payload")
     expected_state=draft
-  elif [[ "$count" == 1 ]]; then
-    release_json=$(jq -ce '.[0]' <<<"$matches")
   else
-    echo "release destination $tag is ambiguous across $count Releases" >&2
-    return 1
+    release_json=$(jq -ce '.[0]' <<<"$matches")
   fi
-  validate_candidate_release "$release_json" "$tag" "$source_sha" "$expected_state"
+  if [[ "$recovered_detached" != true ]]; then
+    validate_candidate_release "$release_json" "$tag" "$source_sha" "$expected_state"
+  fi
   jq -cn --argjson release "$release_json" --argjson tag "$tag_identity" \
-    '{release:$release,tag:$tag}'
+    --argjson recovered_detached "$recovered_detached" \
+    '{release:$release,tag:$tag,recovered_detached:$recovered_detached}'
+}
+
+verify_release_assets() {
+  local repository=$1 release_json=$2 manifest=$3
+  local name asset_id downloaded actual_sha expected_sha expected_size
+  local -a expected_names actual_names expected_sorted
+  mapfile -t expected_names < <(jq -r '.assets[].name' "$manifest"; basename "$manifest")
+  mapfile -t actual_names < <(jq -r '.assets[].name' <<<"$release_json" | sort)
+  mapfile -t expected_sorted < <(printf '%s\n' "${expected_names[@]}" | sort)
+  [[ "${actual_names[*]}" == "${expected_sorted[*]}" ]] || {
+    echo "Release ID $(jq -r '.id' <<<"$release_json") has missing, extra, or duplicate assets" >&2
+    return 1
+  }
+  for name in "${expected_names[@]}"; do
+    asset_id=$(jq -er --arg name "$name" '.assets[] | select(.name == $name) | .id' <<<"$release_json")
+    downloaded=$(mktemp)
+    gh api -H 'Accept: application/octet-stream' "repos/$repository/releases/assets/$asset_id" > "$downloaded"
+    if [[ "$name" == "$(basename "$manifest")" ]]; then
+      expected_sha=$(sha256sum "$manifest" | awk '{print $1}')
+      expected_size=$(wc -c < "$manifest" | tr -d ' ')
+    else
+      expected_sha=$(jq -er --arg name "$name" '.assets[] | select(.name == $name) | .sha256' "$manifest")
+      expected_size=$(jq -er --arg name "$name" '.assets[] | select(.name == $name) | .size' "$manifest")
+    fi
+    actual_sha=$(sha256sum "$downloaded" | awk '{print $1}')
+    [[ "$actual_sha" == "$expected_sha" && $(wc -c < "$downloaded" | tr -d ' ') == "$expected_size" ]] || {
+      echo "Release ID $(jq -r '.id' <<<"$release_json") asset $name size or digest drifted" >&2
+      return 1
+    }
+  done
+}
+
+validate_detached_manifest_metadata() {
+  local release_json=$1 manifest=$2
+  jq -e --slurpfile expected "$manifest" '
+    .id == $expected[0].release_id and
+    .target_commitish == $expected[0].release_metadata.target_commitish and
+    .name == $expected[0].release_metadata.title and
+    .body == $expected[0].release_metadata.notes and
+    .draft == true and .prerelease == false and .immutable == false and
+    .author.login == "github-actions[bot]" and (.assets | type == "array")
+  ' <<<"$release_json" >/dev/null || {
+    echo "detached Release metadata no longer matches its exact candidate manifest" >&2
+    return 1
+  }
+}
+
+validate_staged_draft_response() {
+  local release_json=$1 release_id=$2 manifest=$3
+  jq -e --slurpfile expected "$manifest" --argjson release_id "$release_id" '
+    .id == $release_id and .tag_name == $expected[0].tag and
+    .target_commitish == $expected[0].release_metadata.target_commitish and
+    .name == $expected[0].release_metadata.title and
+    .body == $expected[0].release_metadata.notes and
+    .draft == true and .prerelease == false and .immutable == false and
+    .author.login == "github-actions[bot]" and (.assets | type == "array")
+  ' <<<"$release_json" >/dev/null || {
+    echo "GitHub did not preserve the exact tag and metadata for draft Release ID $release_id" >&2
+    return 1
+  }
+}
+
+release_metadata_payload() {
+  local manifest=$1 draft=$2
+  jq -cn \
+    --arg tag "$(jq -r '.tag' "$manifest")" \
+    --arg source "$(jq -r '.release_metadata.target_commitish' "$manifest")" \
+    --arg name "$(jq -r '.release_metadata.title' "$manifest")" \
+    --arg body "$(jq -j '.release_metadata.notes' "$manifest")" \
+    --argjson draft "$draft" '{
+      tag_name:$tag,
+      target_commitish:$source,
+      name:$name,
+      body:$body,
+      draft:$draft,
+      prerelease:false,
+      make_latest:"false"
+    }'
+}
+
+restore_draft_release_metadata() {
+  local repository=$1 release_id=$2 manifest=$3 payload response reread
+  payload=$(release_metadata_payload "$manifest" true)
+  response=$(gh api --method PATCH --input - "repos/$repository/releases/$release_id" <<<"$payload")
+  validate_staged_draft_response "$response" "$release_id" "$manifest"
+  reread=$(gh api "repos/$repository/releases/$release_id")
+  validate_staged_draft_response "$reread" "$release_id" "$manifest"
+  printf '%s\n' "$reread"
+}
+
+publish_draft_release_non_latest() {
+  local repository=$1 release_id=$2 manifest=$3 payload response
+  payload=$(release_metadata_payload "$manifest" false)
+  response=$(gh api --method PATCH --input - "repos/$repository/releases/$release_id" <<<"$payload")
+  jq -e --slurpfile expected "$manifest" --argjson release_id "$release_id" '
+    .id == $release_id and .tag_name == $expected[0].tag and
+    .target_commitish == $expected[0].release_metadata.target_commitish and
+    .name == $expected[0].release_metadata.title and
+    .body == $expected[0].release_metadata.notes and
+    .draft == false and .prerelease == false and (.assets | type == "array")
+  ' <<<"$response" >/dev/null || {
+    echo "GitHub did not publish exact non-Latest Release ID $release_id with its intended tag" >&2
+    return 1
+  }
 }
 
 upload_release_asset() {
@@ -128,8 +302,10 @@ fi
 
 release_ids=$(mktemp)
 tag_objects=$(mktemp)
+detached_release_ids=$(mktemp)
 printf '{}\n' > "$release_ids"
 printf '{}\n' > "$tag_objects"
+printf '{}\n' > "$detached_release_ids"
 while IFS=$'\t' read -r target tag source_sha; do
   identity=$(resolve_candidate_release "$target" "$tag" "$source_sha" "$repository")
   release_id=$(jq -er '.release.id' <<<"$identity")
@@ -137,6 +313,11 @@ while IFS=$'\t' read -r target tag source_sha; do
   target_sha=$(jq -er '.tag.target_sha' <<<"$identity")
   jq --arg target "$target" --argjson id "$release_id" '. + {($target):$id}' "$release_ids" > "$release_ids.next"
   mv "$release_ids.next" "$release_ids"
+  if [[ $(jq -r '.recovered_detached' <<<"$identity") == true ]]; then
+    jq --arg target "$target" --argjson id "$release_id" '. + {($target):$id}' \
+      "$detached_release_ids" > "$detached_release_ids.next"
+    mv "$detached_release_ids.next" "$detached_release_ids"
+  fi
   jq --arg target "$target" --arg sha "$object_sha" --arg target_sha "$target_sha" \
     '. + {($target):{sha:$sha,target_sha:$target_sha}}' "$tag_objects" > "$tag_objects.next"
   mv "$tag_objects.next" "$tag_objects"
@@ -168,8 +349,8 @@ python3 "$repo_root/.github/scripts/release.py" verify-release-manifests \
   --candidate "$candidate" --directory "$manifests" >/dev/null
 
 verify_release() {
-  local release_id=$1 manifest=$2 expected_dir=$3 expected_draft=$4
-  local release_json name asset_id downloaded actual_sha expected_sha expected_size
+  local release_id=$1 manifest=$2 expected_draft=$3
+  local release_json
   release_json=$(gh api "repos/$repository/releases/$release_id")
   jq -e --slurpfile expected "$manifest" --argjson draft "$expected_draft" '
     .id == $expected[0].release_id and
@@ -183,30 +364,7 @@ verify_release() {
     echo "Release ID $release_id metadata does not match its schema-v3 manifest" >&2
     return 1
   }
-  mapfile -t expected_names < <(jq -r '.assets[].name' "$manifest"; basename "$manifest")
-  mapfile -t actual_names < <(jq -r '.assets[].name' <<<"$release_json" | sort)
-  mapfile -t expected_sorted < <(printf '%s\n' "${expected_names[@]}" | sort)
-  [[ "${actual_names[*]}" == "${expected_sorted[*]}" ]] || {
-    echo "Release ID $release_id has missing, extra, or duplicate assets" >&2
-    return 1
-  }
-  for name in "${expected_names[@]}"; do
-    asset_id=$(jq -er --arg name "$name" '.assets[] | select(.name == $name) | .id' <<<"$release_json")
-    downloaded=$(mktemp)
-    gh api -H 'Accept: application/octet-stream' "repos/$repository/releases/assets/$asset_id" > "$downloaded"
-    if [[ "$name" == "$(basename "$manifest")" ]]; then
-      expected_sha=$(sha256sum "$manifest" | awk '{print $1}')
-      expected_size=$(wc -c < "$manifest" | tr -d ' ')
-    else
-      expected_sha=$(jq -er --arg name "$name" '.assets[] | select(.name == $name) | .sha256' "$manifest")
-      expected_size=$(jq -er --arg name "$name" '.assets[] | select(.name == $name) | .size' "$manifest")
-    fi
-    actual_sha=$(sha256sum "$downloaded" | awk '{print $1}')
-    [[ "$actual_sha" == "$expected_sha" && $(wc -c < "$downloaded" | tr -d ' ') == "$expected_size" ]] || {
-      echo "Release ID $release_id asset $name size or digest drifted" >&2
-      return 1
-    }
-  done
+  verify_release_assets "$repository" "$release_json" "$manifest"
 }
 
 # Drafts are replaceable in full. Their database IDs remain stable so every
@@ -222,21 +380,33 @@ while IFS= read -r manifest; do
   done < <(jq -r '.assets[] | [.name,.path] | @tsv' "$manifest")
   cp "$manifest" "$stage/$(basename "$manifest")"
   if [[ $(jq -r '.draft' <<<"$release_json") == false ]]; then
-    verify_release "$release_id" "$manifest" "$stage" false
+    verify_release "$release_id" "$manifest" false
     continue
   fi
+  if jq -e --arg target "$target" 'has($target)' "$detached_release_ids" >/dev/null; then
+    recovery_spec=$(detached_recovery_spec \
+      "$target" "$(jq -r '.tag' "$manifest")" \
+      "$(jq -r '.release_metadata.target_commitish' "$manifest")" "$repository")
+    validate_detached_candidate_release \
+      "$release_json" "$recovery_spec" "$(jq -r '.tag' "$manifest")" \
+      "$(jq -r '.release_metadata.target_commitish' "$manifest")"
+    # The approved detached draft is recoverable only while all retained
+    # metadata and bytes still match the exact original candidate. Verify both
+    # before any mutation.
+    validate_detached_manifest_metadata "$release_json" "$manifest"
+    verify_release_assets "$repository" "$release_json" "$manifest"
+  fi
+  # Always send tag_name explicitly. GitHub detached the observed draft when a
+  # prior metadata PATCH omitted it, so validate both its response and a fresh
+  # exact-ID read before deleting or uploading any asset.
+  release_json=$(restore_draft_release_metadata "$repository" "$release_id" "$manifest")
   while IFS= read -r asset_id; do
     gh api --method DELETE "repos/$repository/releases/assets/$asset_id"
   done < <(jq -r '.assets[].id' <<<"$release_json")
-  notes=$(mktemp)
-  jq -j '.release_metadata.notes' "$manifest" > "$notes"
-  gh api --method PATCH "repos/$repository/releases/$release_id" \
-    -f "name=$(jq -r '.release_metadata.title' "$manifest")" \
-    -f "body=$(cat "$notes")" -F prerelease=false -f make_latest=false >/dev/null
   while IFS= read -r staged_asset; do
     upload_release_asset "$repository" "$release_id" "$staged_asset"
   done < <(find "$stage" -maxdepth 1 -type f | sort)
-  verify_release "$release_id" "$manifest" "$stage" true
+  verify_release "$release_id" "$manifest" true
 
 done < <(find "$manifests" -maxdepth 1 -name 'release-manifest-*.json' -type f | sort)
 
@@ -247,11 +417,10 @@ while IFS= read -r manifest; do
   release_id=$(jq -er --arg target "$target" '.[$target]' "$release_ids")
   release_json=$(gh api "repos/$repository/releases/$release_id")
   if [[ $(jq -r '.draft' <<<"$release_json") == true ]]; then
-    gh api --method PATCH "repos/$repository/releases/$release_id" \
-      -F draft=false -F prerelease=false -f make_latest=false >/dev/null
+    publish_draft_release_non_latest "$repository" "$release_id" "$manifest"
   fi
   for attempt in {1..12}; do
-    if verify_release "$release_id" "$manifest" /dev/null false; then break; fi
+    if verify_release "$release_id" "$manifest" false; then break; fi
     [[ $attempt -lt 12 ]] || exit 1
     sleep 5
   done

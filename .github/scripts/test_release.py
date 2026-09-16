@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -1007,9 +1008,39 @@ class RetainedReleaseGateTests(unittest.TestCase):
 class DraftReleaseRecoveryTests(unittest.TestCase):
     TARGET = "iterabase-platform-chart"
     TAG = "iterabase-platform-0.4.1"
+    DETACHED_TAG = "untagged-6c1dcab9e0ad48512af0"
     SOURCE = "135731c57061b57268ff01ea2a10f5b6c9f13e6f"
     RELEASE_ID = 390152336
     REPOSITORY = "nunocgoncalves/iterabase-mono"
+
+    def asset(self, asset_id: int, name: str, content: str) -> dict:
+        encoded = content.encode()
+        return {
+            "id": asset_id,
+            "name": name,
+            "size": len(encoded),
+            "state": "uploaded",
+            "digest": f"sha256:{hashlib.sha256(encoded).hexdigest()}",
+            "content": content,
+        }
+
+    def detached_assets(self) -> list[dict]:
+        names = (
+            "baseline-snapshot.json",
+            "candidate-chart-iterabase-platform.json",
+            "candidate-chart-iterabase-platform.spdx.json",
+            "candidate-evidence.json",
+            "candidate-plan.json",
+            "cert-manager-substrate-0.4.1.tgz",
+            "checksums-iterabase-platform.txt",
+            "iterabase-platform-0.4.1.tgz",
+            "lvm-storage-substrate-0.4.1.tgz",
+            "release-manifest-iterabase-platform-chart.json",
+        )
+        return [
+            self.asset(568609280 + index, name, f"exact {name}\n")
+            for index, name in enumerate(names)
+        ]
 
     def draft(self, **changes: object) -> dict:
         value = {
@@ -1030,13 +1061,22 @@ class DraftReleaseRecoveryTests(unittest.TestCase):
         value.update(changes)
         return value
 
-    def fixture(self, directory: Path, releases: list[dict]) -> tuple[dict, dict]:
+    def fixture(
+        self,
+        directory: Path,
+        releases: list[dict],
+        *,
+        tag: str | None = None,
+        source: str | None = None,
+        release_id: int | None = None,
+    ) -> tuple[dict, dict]:
         state = directory / "state.json"
         log = directory / "calls.jsonl"
         state.write_text(json.dumps({"releases": releases}), encoding="utf-8")
         fake_gh = directory / "gh"
         fake_gh.write_text(
             """#!/usr/bin/env python3
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -1055,13 +1095,28 @@ repository = os.environ["TEST_REPOSITORY"]
 tag = os.environ["TEST_TAG"]
 source = os.environ["TEST_SOURCE"]
 tag_object = "b" * 40
+method = args[args.index("--method") + 1] if "--method" in args else "GET"
+
+
+def save() -> None:
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+
+def release_by_id(release_id: int) -> dict:
+    for item in state["releases"]:
+        if item["id"] == release_id:
+            return item
+    print(f"unknown release ID {release_id}", file=sys.stderr)
+    sys.exit(1)
+
+
 if endpoint == f"repos/{repository}/git/ref/tags/{tag}":
     print(json.dumps({"object": {"type": "tag", "sha": tag_object}}))
 elif endpoint == f"repos/{repository}/git/tags/{tag_object}":
     print(json.dumps({"object": {"type": "commit", "sha": source}}))
 elif endpoint == f"repos/{repository}/releases?per_page=100":
     print(json.dumps([state["releases"]]))
-elif endpoint == f"repos/{repository}/releases" and "POST" in args:
+elif endpoint == f"repos/{repository}/releases" and method == "POST":
     payload = json.load(sys.stdin)
     created = {
         "id": int(os.environ["TEST_RELEASE_ID"]),
@@ -1076,17 +1131,54 @@ elif endpoint == f"repos/{repository}/releases" and "POST" in args:
         "author": {"login": "github-actions[bot]"},
     }
     state["releases"].append(created)
-    state_path.write_text(json.dumps(state))
+    save()
     print(json.dumps(created))
 elif endpoint.startswith(f"https://uploads.github.com/repos/{repository}/releases/"):
     release_id = int(endpoint.split("/releases/", 1)[1].split("/", 1)[0])
     name = parse_qs(urlparse(endpoint).query)["name"][0]
     path = Path(args[args.index("--input") + 1])
-    release = next(item for item in state["releases"] if item["id"] == release_id)
-    asset = {"id": 9001, "name": name, "size": path.stat().st_size, "state": "uploaded"}
+    content = path.read_bytes()
+    release = release_by_id(release_id)
+    asset = {
+        "id": 9000 + len(release["assets"]),
+        "name": name,
+        "size": len(content),
+        "state": "uploaded",
+        "digest": f"sha256:{hashlib.sha256(content).hexdigest()}",
+        "content": content.decode(),
+    }
     release["assets"].append(asset)
-    state_path.write_text(json.dumps(state))
+    save()
     print(json.dumps(asset))
+elif endpoint.startswith(f"repos/{repository}/releases/assets/"):
+    asset_id = int(endpoint.rsplit("/", 1)[1])
+    for release in state["releases"]:
+        matches = [item for item in release["assets"] if item["id"] == asset_id]
+        if not matches:
+            continue
+        if method == "DELETE":
+            release["assets"] = [item for item in release["assets"] if item["id"] != asset_id]
+            save()
+        else:
+            sys.stdout.write(matches[0]["content"])
+        break
+    else:
+        print(f"unknown asset ID {asset_id}", file=sys.stderr)
+        sys.exit(1)
+elif endpoint.startswith(f"repos/{repository}/releases/"):
+    release_id = int(endpoint.rsplit("/", 1)[1])
+    release = release_by_id(release_id)
+    if method == "PATCH":
+        payload = json.load(sys.stdin)
+        for name in ("target_commitish", "name", "body", "draft", "prerelease"):
+            if name in payload:
+                release[name] = payload[name]
+        if os.environ.get("GH_IGNORE_PATCH_TAG") == "true":
+            release["tag_name"] = os.environ["TEST_DETACHED_TAG"]
+        elif "tag_name" in payload:
+            release["tag_name"] = payload["tag_name"]
+        save()
+    print(json.dumps(release))
 else:
     print(f"unexpected gh invocation: {args}", file=sys.stderr)
     sys.exit(2)
@@ -1100,13 +1192,21 @@ else:
             "GH_STATE": str(state),
             "GH_LOG": str(log),
             "TEST_REPOSITORY": self.REPOSITORY,
-            "TEST_TAG": self.TAG,
-            "TEST_SOURCE": self.SOURCE,
-            "TEST_RELEASE_ID": str(self.RELEASE_ID),
+            "TEST_TAG": tag or self.TAG,
+            "TEST_SOURCE": source or self.SOURCE,
+            "TEST_RELEASE_ID": str(release_id or self.RELEASE_ID),
+            "TEST_DETACHED_TAG": self.DETACHED_TAG,
         }
         return env, {"state": state, "log": log}
 
-    def resolve(self, env: dict) -> subprocess.CompletedProcess[str]:
+    def resolve(
+        self,
+        env: dict,
+        *,
+        target: str | None = None,
+        tag: str | None = None,
+        source: str | None = None,
+    ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [
                 "bash",
@@ -1114,9 +1214,9 @@ else:
                 'source "$1"; resolve_candidate_release "$2" "$3" "$4" "$5"',
                 "draft-release-test",
                 str(ROOT / ".github/scripts/publish_github_releases.sh"),
-                self.TARGET,
-                self.TAG,
-                self.SOURCE,
+                target or self.TARGET,
+                tag or self.TAG,
+                source or self.SOURCE,
                 self.REPOSITORY,
             ],
             cwd=ROOT,
@@ -1126,20 +1226,25 @@ else:
             stderr=subprocess.PIPE,
         )
 
-    def test_first_creation_and_current_empty_draft_retry_keep_one_exact_release(self) -> None:
+    def test_generic_creation_and_retry_keep_one_exact_release(self) -> None:
+        target = "control-plane-chart"
+        tag = "control-plane-1.2.3"
+        source = "c" * 40
+        release_id = 4815162342
         with tempfile.TemporaryDirectory() as value:
-            env, files = self.fixture(Path(value), [])
-            first = self.resolve(env)
+            env, files = self.fixture(
+                Path(value), [], tag=tag, source=source, release_id=release_id
+            )
+            first = self.resolve(env, target=target, tag=tag, source=source)
             self.assertEqual(0, first.returncode, first.stderr)
-            self.assertEqual(self.RELEASE_ID, json.loads(first.stdout)["release"]["id"])
+            self.assertEqual(release_id, json.loads(first.stdout)["release"]["id"])
 
-            retry = self.resolve(env)
+            retry = self.resolve(env, target=target, tag=tag, source=source)
             self.assertEqual(0, retry.returncode, retry.stderr)
-            self.assertEqual(self.RELEASE_ID, json.loads(retry.stdout)["release"]["id"])
+            self.assertEqual(release_id, json.loads(retry.stdout)["release"]["id"])
 
             state = json.loads(files["state"].read_text())
             self.assertEqual(1, len(state["releases"]))
-            self.assertEqual([], state["releases"][0]["assets"])
             calls = [json.loads(line) for line in files["log"].read_text().splitlines()]
             creations = [
                 call
@@ -1148,6 +1253,46 @@ else:
             ]
             self.assertEqual(1, len(creations))
             self.assertFalse(any("/assets?name=" in call[-1] for call in calls))
+
+    def test_current_empty_draft_retry_uses_the_approved_release_id(self) -> None:
+        with tempfile.TemporaryDirectory() as value:
+            env, files = self.fixture(Path(value), [self.draft()])
+            for _ in range(2):
+                completed = self.resolve(env)
+                self.assertEqual(0, completed.returncode, completed.stderr)
+                self.assertEqual(
+                    self.RELEASE_ID, json.loads(completed.stdout)["release"]["id"]
+                )
+            calls = [json.loads(line) for line in files["log"].read_text().splitlines()]
+            self.assertFalse(
+                any(
+                    call[-1] == f"repos/{self.REPOSITORY}/releases"
+                    and "POST" in call
+                    for call in calls
+                )
+            )
+
+    def test_detached_draft_is_recovered_by_exact_id_without_duplication(self) -> None:
+        detached = self.draft(
+            tag_name=self.DETACHED_TAG, assets=self.detached_assets()
+        )
+        with tempfile.TemporaryDirectory() as value:
+            env, files = self.fixture(Path(value), [detached])
+            completed = self.resolve(env)
+            self.assertEqual(0, completed.returncode, completed.stderr)
+            identity = json.loads(completed.stdout)
+            self.assertEqual(self.RELEASE_ID, identity["release"]["id"])
+            self.assertTrue(identity["recovered_detached"])
+            state = json.loads(files["state"].read_text())
+            self.assertEqual([self.RELEASE_ID], [item["id"] for item in state["releases"]])
+            calls = [json.loads(line) for line in files["log"].read_text().splitlines()]
+            self.assertFalse(
+                any(
+                    call[-1] == f"repos/{self.REPOSITORY}/releases"
+                    and "POST" in call
+                    for call in calls
+                )
+            )
 
     def test_resolution_rejects_ambiguous_conflicting_and_foreign_drafts(self) -> None:
         invalid = {
@@ -1163,6 +1308,48 @@ else:
                 self.assertNotEqual(0, completed.returncode)
                 self.assertRegex(completed.stderr, "ambiguous|conflicting|workflow-owned")
 
+    def test_detached_recovery_rejects_drift_and_a_duplicate_tag_match(self) -> None:
+        assets = self.detached_assets()
+        invalid = {
+            "duplicate": [
+                self.draft(tag_name=self.DETACHED_TAG, assets=assets),
+                self.draft(id=self.RELEASE_ID + 1),
+            ],
+            "source": [
+                self.draft(
+                    tag_name=self.DETACHED_TAG,
+                    target_commitish="d" * 40,
+                    assets=assets,
+                )
+            ],
+            "foreign": [
+                self.draft(
+                    tag_name=self.DETACHED_TAG,
+                    author={"login": "nunocgoncalves"},
+                    assets=assets,
+                )
+            ],
+            "missing-asset": [
+                self.draft(tag_name=self.DETACHED_TAG, assets=assets[:-1])
+            ],
+            "asset-digest": [
+                self.draft(
+                    tag_name=self.DETACHED_TAG,
+                    assets=[{**assets[0], "digest": "sha256:bad"}, *assets[1:]],
+                )
+            ],
+            "unexpected-tag": [self.draft(tag_name="untagged-other", assets=assets)],
+        }
+        for case, releases in invalid.items():
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as value:
+                env, _ = self.fixture(Path(value), releases)
+                completed = self.resolve(env)
+                self.assertNotEqual(0, completed.returncode)
+                self.assertRegex(
+                    completed.stderr,
+                    "approved recovery|conflicts|no longer matches",
+                )
+
     def test_exact_immutable_member_is_verification_only(self) -> None:
         release_json = self.draft(draft=False, immutable=True)
         with tempfile.TemporaryDirectory() as value:
@@ -1173,6 +1360,245 @@ else:
             self.assertFalse(
                 any(call[-1] == f"repos/{self.REPOSITORY}/releases" for call in calls)
             )
+
+    def test_detached_assets_match_the_retained_candidate_before_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as value:
+            directory = Path(value)
+            payload = directory / "candidate-plan.json"
+            payload.write_text("exact\n", encoding="utf-8")
+            manifest = directory / "release-manifest-iterabase-platform-chart.json"
+            notes = "exact release notes"
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "release_id": self.RELEASE_ID,
+                        "release_metadata": {
+                            "target_commitish": self.SOURCE,
+                            "title": self.TAG,
+                            "notes": notes,
+                        },
+                        "assets": [
+                            {
+                                "name": payload.name,
+                                "size": payload.stat().st_size,
+                                "sha256": hashlib.sha256(payload.read_bytes()).hexdigest(),
+                            }
+                        ],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            release_json = self.draft(
+                tag_name=self.DETACHED_TAG,
+                body=notes,
+                assets=[
+                    self.asset(7001, payload.name, payload.read_text()),
+                    self.asset(7002, manifest.name, manifest.read_text()),
+                ],
+            )
+            env, files = self.fixture(directory, [release_json])
+            command = [
+                "bash",
+                "-c",
+                'source "$1"; validate_detached_manifest_metadata "$3" "$4"; '
+                'verify_release_assets "$2" "$3" "$4"',
+                "draft-assets-test",
+                str(ROOT / ".github/scripts/publish_github_releases.sh"),
+                self.REPOSITORY,
+                json.dumps(release_json),
+                str(manifest),
+            ]
+            exact = subprocess.run(
+                command,
+                cwd=ROOT,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            self.assertEqual(0, exact.returncode, exact.stderr)
+
+            metadata_drift_command = list(command)
+            metadata_drift_command[-2] = json.dumps(
+                {**release_json, "body": "changed release notes"}
+            )
+            metadata_drift = subprocess.run(
+                metadata_drift_command,
+                cwd=ROOT,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            self.assertNotEqual(0, metadata_drift.returncode)
+            self.assertIn("metadata no longer matches", metadata_drift.stderr)
+
+            state = json.loads(files["state"].read_text())
+            state["releases"][0]["assets"][0]["content"] = "wrong\n"
+            files["state"].write_text(json.dumps(state), encoding="utf-8")
+            drifted = subprocess.run(
+                command,
+                cwd=ROOT,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            self.assertNotEqual(0, drifted.returncode)
+            self.assertIn("size or digest drifted", drifted.stderr)
+
+    def test_metadata_restore_reattaches_before_mutation_and_supports_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as value:
+            directory = Path(value)
+            notes = (
+                f"Release of **{self.TARGET} 0.4.1** from `{self.SOURCE}` as part "
+                "of candidate run `35111495477` and complete cohort "
+                "`candidate-35111495477-1`."
+            )
+            manifest = directory / "release-manifest-iterabase-platform-chart.json"
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "release_id": self.RELEASE_ID,
+                        "tag": self.TAG,
+                        "release_metadata": {
+                            "target_commitish": self.SOURCE,
+                            "title": self.TAG,
+                            "notes": notes,
+                        },
+                        "assets": [],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            detached = self.draft(tag_name=self.DETACHED_TAG, assets=[])
+            env, files = self.fixture(directory, [detached])
+            command = [
+                "bash",
+                "-c",
+                'source "$1"; restore_draft_release_metadata "$2" "$3" "$4"',
+                "draft-metadata-test",
+                str(ROOT / ".github/scripts/publish_github_releases.sh"),
+                self.REPOSITORY,
+                str(self.RELEASE_ID),
+                str(manifest),
+            ]
+            restored = subprocess.run(
+                command,
+                cwd=ROOT,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            self.assertEqual(0, restored.returncode, restored.stderr)
+            self.assertEqual(self.TAG, json.loads(restored.stdout)["tag_name"])
+            state = json.loads(files["state"].read_text())
+            self.assertEqual(self.TAG, state["releases"][0]["tag_name"])
+            calls = [json.loads(line) for line in files["log"].read_text().splitlines()]
+            self.assertFalse(
+                any("/assets/" in call[-1] or "/assets?name=" in call[-1] for call in calls)
+            )
+
+            retry = self.resolve(env)
+            self.assertEqual(0, retry.returncode, retry.stderr)
+            self.assertEqual(self.RELEASE_ID, json.loads(retry.stdout)["release"]["id"])
+            state = json.loads(files["state"].read_text())
+            self.assertEqual(1, len(state["releases"]))
+
+    def test_metadata_restore_fails_if_github_does_not_preserve_the_tag(self) -> None:
+        with tempfile.TemporaryDirectory() as value:
+            directory = Path(value)
+            manifest = directory / "release-manifest-iterabase-platform-chart.json"
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "release_id": self.RELEASE_ID,
+                        "tag": self.TAG,
+                        "release_metadata": {
+                            "target_commitish": self.SOURCE,
+                            "title": self.TAG,
+                            "notes": "exact notes",
+                        },
+                        "assets": [],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            env, files = self.fixture(
+                directory, [self.draft(tag_name=self.DETACHED_TAG)]
+            )
+            env["GH_IGNORE_PATCH_TAG"] = "true"
+            completed = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    'source "$1"; restore_draft_release_metadata "$2" "$3" "$4"',
+                    "draft-metadata-test",
+                    str(ROOT / ".github/scripts/publish_github_releases.sh"),
+                    self.REPOSITORY,
+                    str(self.RELEASE_ID),
+                    str(manifest),
+                ],
+                cwd=ROOT,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            self.assertNotEqual(0, completed.returncode)
+            self.assertIn("did not preserve the exact tag", completed.stderr)
+            calls = [json.loads(line) for line in files["log"].read_text().splitlines()]
+            self.assertFalse(
+                any("/assets/" in call[-1] or "/assets?name=" in call[-1] for call in calls)
+            )
+
+    def test_publish_patch_keeps_the_exact_tag_and_non_latest_state(self) -> None:
+        with tempfile.TemporaryDirectory() as value:
+            directory = Path(value)
+            manifest = directory / "release-manifest-iterabase-platform-chart.json"
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "release_id": self.RELEASE_ID,
+                        "tag": self.TAG,
+                        "release_metadata": {
+                            "target_commitish": self.SOURCE,
+                            "title": self.TAG,
+                            "notes": "exact notes",
+                        },
+                        "assets": [],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            env, files = self.fixture(directory, [self.draft(body="exact notes")])
+            completed = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    'source "$1"; publish_draft_release_non_latest "$2" "$3" "$4"',
+                    "draft-publish-test",
+                    str(ROOT / ".github/scripts/publish_github_releases.sh"),
+                    self.REPOSITORY,
+                    str(self.RELEASE_ID),
+                    str(manifest),
+                ],
+                cwd=ROOT,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            self.assertEqual(0, completed.returncode, completed.stderr)
+            state = json.loads(files["state"].read_text())["releases"][0]
+            self.assertEqual(self.TAG, state["tag_name"])
+            self.assertFalse(state["draft"])
+            self.assertFalse(state["prerelease"])
 
     def test_draft_asset_upload_uses_exact_release_id(self) -> None:
         with tempfile.TemporaryDirectory() as value:
@@ -1332,11 +1758,15 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             "--paginate --slurp",
             "draft:true",
             'make_latest:"false"',
+            "detached_recovery_spec",
+            "release_id:390152336",
+            "verify_release_assets",
+            "restore_draft_release_metadata",
+            "publish_draft_release_non_latest",
             "final-snapshot",
             "baseline-snapshot.json",
             "verify-release-manifests",
             "upload_release_asset",
-            "-F draft=false -F prerelease=false -f make_latest=false",
             "verification-only",
             "release_baseline.py\" resolve",
         ):
@@ -1346,12 +1776,36 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertEqual(1, script.count("make_latest=true"))
         create = script.index("release_json=$(gh api --method POST --input -")
         final_snapshot = script.index("final-snapshot", create)
-        upload = script.index('upload_release_asset "$repository" "$release_id" "$staged_asset"', final_snapshot)
-        verify_draft = script.index('verify_release "$release_id" "$manifest" "$stage" true', upload)
-        publish = script.index("-F draft=false", verify_draft)
+        restore = script.index(
+            'release_json=$(restore_draft_release_metadata "$repository"',
+            final_snapshot,
+        )
+        delete = script.index('gh api --method DELETE "repos/$repository/releases/assets/', restore)
+        upload = script.index(
+            'upload_release_asset "$repository" "$release_id" "$staged_asset"',
+            delete,
+        )
+        verify_draft = script.index(
+            'verify_release "$release_id" "$manifest" true', upload
+        )
+        publish = script.index(
+            'publish_draft_release_non_latest "$repository" "$release_id" "$manifest"',
+            verify_draft,
+        )
         handoff = script.index("make_latest=true", publish)
         final_verify = script.index("release_baseline.py\" resolve", handoff)
-        self.assertEqual([create, final_snapshot, upload, verify_draft, publish, handoff, final_verify], sorted([create, final_snapshot, upload, verify_draft, publish, handoff, final_verify]))
+        order = [
+            create,
+            final_snapshot,
+            restore,
+            delete,
+            upload,
+            verify_draft,
+            publish,
+            handoff,
+            final_verify,
+        ]
+        self.assertEqual(order, sorted(order))
 
     def test_destination_preflight_reconstructs_and_verifies_published_retry_members(self) -> None:
         script = (ROOT / ".github/scripts/check_promotion_destinations.sh").read_text()
