@@ -63,11 +63,13 @@ After a read-only preflight, a fresh install first disables every active host
 swap device with `swapoff --all` and atomically comments every uncommented
 `/etc/fstab` entry whose filesystem type is `swap` (including Ubuntu's default
 `/swap.img`). The rewrite preserves every unrelated/commented line plus the
-file's owner and mode, leaves inactive swap files in place, and is skipped when
-already converged. Forge immediately re-reads `/proc/swaps` and `/etc/fstab` and
-fails before package, disk, or k3s artifact/service mutation unless both are
-swap-free. Dry-run, installed-cluster reapply, and upgrade remain read-only with
-respect to this fresh-install hardening operation.
+file's owner and mode and leaves inactive swap files in place. The content
+rewrite is skipped when already converged, but every run re-verifies metadata
+and syncs the current fstab plus its parent directory so an interruption after
+atomic replacement is retry-safe. Forge immediately re-reads `/proc/swaps` and
+`/etc/fstab` and fails before package, disk, or k3s artifact/service mutation
+unless both are swap-free. Dry-run, installed-cluster reapply, and upgrade remain
+read-only with respect to this fresh-install hardening operation.
 
 Forge then installs/verifies `lvm2` and XFS tooling, converges the superseded
 pre-release `dm-snapshot` module/configuration to absence, and uses a root-owned
