@@ -1071,6 +1071,12 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertIn("environment: release", workflow)
         self.assertEqual(2, workflow.count("ref: ${{ github.sha }}"))
         self.assertNotIn("ref: master", workflow)
+        self.assertIn(
+            "name: verified-release-candidate\n"
+            "          path: candidate\n"
+            "      - name: Re-verify every privileged-boundary invariant after approval",
+            workflow,
+        )
         for value in (
             "github.workflow_sha",
             "Re-verify every privileged-boundary invariant after approval",
