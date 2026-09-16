@@ -1,6 +1,100 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+verify_candidate_tag() {
+  local repository=$1 tag=$2 source_sha=$3 ref object_sha tag_json target_sha
+  ref=$(gh api "repos/$repository/git/ref/tags/$tag")
+  object_sha=$(jq -er 'select(.object.type == "tag") | .object.sha' <<<"$ref")
+  tag_json=$(gh api "repos/$repository/git/tags/$object_sha")
+  target_sha=$(jq -er 'select(.object.type == "commit") | .object.sha' <<<"$tag_json")
+  [[ "$target_sha" == "$source_sha" ]] || {
+    echo "protected tag $tag does not target exact candidate source" >&2
+    return 1
+  }
+  jq -cn --arg sha "$object_sha" --arg target_sha "$target_sha" \
+    '{sha:$sha,target_sha:$target_sha}'
+}
+
+validate_candidate_release() {
+  local release_json=$1 tag=$2 source_sha=$3 expected_state=$4
+  jq -e --arg tag "$tag" --arg source "$source_sha" --arg expected_state "$expected_state" '
+    (.id | type == "number" and . > 0) and
+    .tag_name == $tag and .target_commitish == $source and .name == $tag and
+    (.body | type == "string") and (.assets | type == "array") and
+    (if $expected_state == "draft" then
+      (.draft == true and .prerelease == false and .immutable == false and .author.login == "github-actions[bot]")
+    else
+      ((.draft == true and .prerelease == false and .immutable == false and .author.login == "github-actions[bot]") or
+       (.draft == false and .prerelease == false and .immutable == true))
+    end)
+  ' <<<"$release_json" >/dev/null || {
+    echo "Release $tag is ambiguous, conflicting, published without immutability, or not an exact workflow-owned draft" >&2
+    return 1
+  }
+}
+
+resolve_candidate_release() {
+  local target=$1 tag=$2 source_sha=$3 repository=$4
+  local tag_identity pages matches count release_json notes payload expected_state=existing
+  tag_identity=$(verify_candidate_tag "$repository" "$tag" "$source_sha")
+  # The tag lookup endpoint omits drafts. Enumerate every authenticated page,
+  # require one exact tag match at most, and retain its database ID.
+  pages=$(gh api --paginate --slurp "repos/$repository/releases?per_page=100")
+  matches=$(jq -ce --arg tag "$tag" '[.[][] | select(.tag_name == $tag)]' <<<"$pages")
+  count=$(jq -er 'length' <<<"$matches")
+  if [[ "$count" == 0 ]]; then
+    notes=$(printf 'Staging complete immutable cohort for %s from %s.\n' "$target" "$source_sha")
+    payload=$(jq -cn --arg tag "$tag" --arg source "$source_sha" --arg notes "$notes" '{
+      tag_name:$tag,
+      target_commitish:$source,
+      name:$tag,
+      body:$notes,
+      draft:true,
+      prerelease:false,
+      make_latest:"false"
+    }')
+    release_json=$(gh api --method POST --input - "repos/$repository/releases" <<<"$payload")
+    expected_state=draft
+  elif [[ "$count" == 1 ]]; then
+    release_json=$(jq -ce '.[0]' <<<"$matches")
+  else
+    echo "release destination $tag is ambiguous across $count Releases" >&2
+    return 1
+  fi
+  validate_candidate_release "$release_json" "$tag" "$source_sha" "$expected_state"
+  jq -cn --argjson release "$release_json" --argjson tag "$tag_identity" \
+    '{release:$release,tag:$tag}'
+}
+
+upload_release_asset() {
+  local repository=$1 release_id=$2 path=$3 name size response
+  [[ "$release_id" =~ ^[1-9][0-9]*$ && -f "$path" ]] || {
+    echo "draft asset upload requires an exact Release ID and file" >&2
+    return 1
+  }
+  name=$(basename "$path")
+  [[ "$name" =~ ^[A-Za-z0-9._-]+$ ]] || {
+    echo "draft asset name $name is not URL-safe" >&2
+    return 1
+  }
+  size=$(wc -c < "$path" | tr -d ' ')
+  # Tag-addressed uploads cannot resolve drafts; the database ID is
+  # the immutable operation identity throughout staging and verification.
+  response=$(gh api --method POST -H 'Content-Type: application/octet-stream' \
+    --input "$path" "https://uploads.github.com/repos/$repository/releases/$release_id/assets?name=$name")
+  jq -e --arg name "$name" --argjson size "$size" '
+    (.id | type == "number" and . > 0) and .name == $name and
+    .size == $size and .state == "uploaded"
+  ' <<<"$response" >/dev/null || {
+    echo "GitHub did not confirm exact asset $name on Release ID $release_id" >&2
+    return 1
+  }
+}
+
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+  return 0
+fi
+
 candidate=${1:?usage: publish_github_releases.sh CANDIDATE REPOSITORY}
 repository=${2:-${GITHUB_REPOSITORY:-}}
 [[ -n "$repository" ]] || { echo "GitHub repository is required" >&2; exit 2; }
@@ -33,40 +127,16 @@ if [[ "$initial_latest" != "$parent_id" ]]; then
 fi
 
 release_ids=$(mktemp)
-printf '{}\n' > "$release_ids"
-while IFS=$'\t' read -r target tag source_sha; do
-  set +e
-  release_json=$(gh api "repos/$repository/releases/tags/$tag" 2>/dev/null)
-  status=$?
-  set -e
-  if [[ $status -eq 0 ]]; then
-    jq -e --arg tag "$tag" --arg source "$source_sha" '
-      .tag_name == $tag and .target_commitish == $source and
-      ((.draft == true) or (.draft == false and .prerelease == false and .immutable == true))
-    ' <<<"$release_json" >/dev/null || {
-      echo "existing Release $tag conflicts with the candidate cohort" >&2
-      exit 1
-    }
-  else
-    notes=$(mktemp)
-    printf 'Staging complete immutable cohort for %s from %s.\n' "$target" "$source_sha" > "$notes"
-    gh release create "$tag" --repo "$repository" --verify-tag --draft --latest=false \
-      --target "$source_sha" --title "$tag" --notes-file "$notes"
-    release_json=$(gh api "repos/$repository/releases/tags/$tag")
-  fi
-  release_id=$(jq -er '.id' <<<"$release_json")
-  jq --arg target "$target" --argjson id "$release_id" '. + {($target):$id}' "$release_ids" > "$release_ids.next"
-  mv "$release_ids.next" "$release_ids"
-done < <(jq -r '.releases[] | [.target,.production_tag,$source] | @tsv' --arg source "$(jq -r '.source_sha' "$plan")" "$plan")
-
 tag_objects=$(mktemp)
+printf '{}\n' > "$release_ids"
 printf '{}\n' > "$tag_objects"
 while IFS=$'\t' read -r target tag source_sha; do
-  ref=$(gh api "repos/$repository/git/ref/tags/$tag")
-  object_sha=$(jq -er 'select(.object.type == "tag") | .object.sha' <<<"$ref")
-  tag_json=$(gh api "repos/$repository/git/tags/$object_sha")
-  target_sha=$(jq -er 'select(.object.type == "commit") | .object.sha' <<<"$tag_json")
-  [[ "$target_sha" == "$source_sha" ]] || { echo "protected tag $tag does not target exact candidate source" >&2; exit 1; }
+  identity=$(resolve_candidate_release "$target" "$tag" "$source_sha" "$repository")
+  release_id=$(jq -er '.release.id' <<<"$identity")
+  object_sha=$(jq -er '.tag.sha' <<<"$identity")
+  target_sha=$(jq -er '.tag.target_sha' <<<"$identity")
+  jq --arg target "$target" --argjson id "$release_id" '. + {($target):$id}' "$release_ids" > "$release_ids.next"
+  mv "$release_ids.next" "$release_ids"
   jq --arg target "$target" --arg sha "$object_sha" --arg target_sha "$target_sha" \
     '. + {($target):{sha:$sha,target_sha:$target_sha}}' "$tag_objects" > "$tag_objects.next"
   mv "$tag_objects.next" "$tag_objects"
@@ -163,8 +233,9 @@ while IFS= read -r manifest; do
   gh api --method PATCH "repos/$repository/releases/$release_id" \
     -f "name=$(jq -r '.release_metadata.title' "$manifest")" \
     -f "body=$(cat "$notes")" -F prerelease=false -f make_latest=false >/dev/null
-  mapfile -t staged_assets < <(find "$stage" -maxdepth 1 -type f | sort)
-  gh release upload "$(jq -r '.tag' "$manifest")" "${staged_assets[@]}" --repo "$repository"
+  while IFS= read -r staged_asset; do
+    upload_release_asset "$repository" "$release_id" "$staged_asset"
+  done < <(find "$stage" -maxdepth 1 -type f | sort)
   verify_release "$release_id" "$manifest" "$stage" true
 
 done < <(find "$manifests" -maxdepth 1 -name 'release-manifest-*.json' -type f | sort)

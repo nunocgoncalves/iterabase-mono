@@ -1004,6 +1004,209 @@ class RetainedReleaseGateTests(unittest.TestCase):
                 retained_release.compare_states(before, changed)
 
 
+class DraftReleaseRecoveryTests(unittest.TestCase):
+    TARGET = "iterabase-platform-chart"
+    TAG = "iterabase-platform-0.4.1"
+    SOURCE = "135731c57061b57268ff01ea2a10f5b6c9f13e6f"
+    RELEASE_ID = 390152336
+    REPOSITORY = "nunocgoncalves/iterabase-mono"
+
+    def draft(self, **changes: object) -> dict:
+        value = {
+            "id": self.RELEASE_ID,
+            "tag_name": self.TAG,
+            "target_commitish": self.SOURCE,
+            "name": self.TAG,
+            "body": (
+                "Staging complete immutable cohort for iterabase-platform-chart "
+                f"from {self.SOURCE}.\n"
+            ),
+            "draft": True,
+            "prerelease": False,
+            "immutable": False,
+            "assets": [],
+            "author": {"login": "github-actions[bot]"},
+        }
+        value.update(changes)
+        return value
+
+    def fixture(self, directory: Path, releases: list[dict]) -> tuple[dict, dict]:
+        state = directory / "state.json"
+        log = directory / "calls.jsonl"
+        state.write_text(json.dumps({"releases": releases}), encoding="utf-8")
+        fake_gh = directory / "gh"
+        fake_gh.write_text(
+            """#!/usr/bin/env python3
+import json
+import os
+from pathlib import Path
+import sys
+from urllib.parse import parse_qs, urlparse
+
+args = sys.argv[1:]
+endpoint = args[-1]
+state_path = Path(os.environ["GH_STATE"])
+log_path = Path(os.environ["GH_LOG"])
+state = json.loads(state_path.read_text())
+with log_path.open("a", encoding="utf-8") as stream:
+    stream.write(json.dumps(args) + "\\n")
+
+repository = os.environ["TEST_REPOSITORY"]
+tag = os.environ["TEST_TAG"]
+source = os.environ["TEST_SOURCE"]
+tag_object = "b" * 40
+if endpoint == f"repos/{repository}/git/ref/tags/{tag}":
+    print(json.dumps({"object": {"type": "tag", "sha": tag_object}}))
+elif endpoint == f"repos/{repository}/git/tags/{tag_object}":
+    print(json.dumps({"object": {"type": "commit", "sha": source}}))
+elif endpoint == f"repos/{repository}/releases?per_page=100":
+    print(json.dumps([state["releases"]]))
+elif endpoint == f"repos/{repository}/releases" and "POST" in args:
+    payload = json.load(sys.stdin)
+    created = {
+        "id": int(os.environ["TEST_RELEASE_ID"]),
+        "tag_name": payload["tag_name"],
+        "target_commitish": payload["target_commitish"],
+        "name": payload["name"],
+        "body": payload["body"],
+        "draft": payload["draft"],
+        "prerelease": payload["prerelease"],
+        "immutable": False,
+        "assets": [],
+        "author": {"login": "github-actions[bot]"},
+    }
+    state["releases"].append(created)
+    state_path.write_text(json.dumps(state))
+    print(json.dumps(created))
+elif endpoint.startswith(f"https://uploads.github.com/repos/{repository}/releases/"):
+    release_id = int(endpoint.split("/releases/", 1)[1].split("/", 1)[0])
+    name = parse_qs(urlparse(endpoint).query)["name"][0]
+    path = Path(args[args.index("--input") + 1])
+    release = next(item for item in state["releases"] if item["id"] == release_id)
+    asset = {"id": 9001, "name": name, "size": path.stat().st_size, "state": "uploaded"}
+    release["assets"].append(asset)
+    state_path.write_text(json.dumps(state))
+    print(json.dumps(asset))
+else:
+    print(f"unexpected gh invocation: {args}", file=sys.stderr)
+    sys.exit(2)
+""",
+            encoding="utf-8",
+        )
+        fake_gh.chmod(0o755)
+        env = {
+            **os.environ,
+            "PATH": f"{directory}:{os.environ['PATH']}",
+            "GH_STATE": str(state),
+            "GH_LOG": str(log),
+            "TEST_REPOSITORY": self.REPOSITORY,
+            "TEST_TAG": self.TAG,
+            "TEST_SOURCE": self.SOURCE,
+            "TEST_RELEASE_ID": str(self.RELEASE_ID),
+        }
+        return env, {"state": state, "log": log}
+
+    def resolve(self, env: dict) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [
+                "bash",
+                "-c",
+                'source "$1"; resolve_candidate_release "$2" "$3" "$4" "$5"',
+                "draft-release-test",
+                str(ROOT / ".github/scripts/publish_github_releases.sh"),
+                self.TARGET,
+                self.TAG,
+                self.SOURCE,
+                self.REPOSITORY,
+            ],
+            cwd=ROOT,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+    def test_first_creation_and_current_empty_draft_retry_keep_one_exact_release(self) -> None:
+        with tempfile.TemporaryDirectory() as value:
+            env, files = self.fixture(Path(value), [])
+            first = self.resolve(env)
+            self.assertEqual(0, first.returncode, first.stderr)
+            self.assertEqual(self.RELEASE_ID, json.loads(first.stdout)["release"]["id"])
+
+            retry = self.resolve(env)
+            self.assertEqual(0, retry.returncode, retry.stderr)
+            self.assertEqual(self.RELEASE_ID, json.loads(retry.stdout)["release"]["id"])
+
+            state = json.loads(files["state"].read_text())
+            self.assertEqual(1, len(state["releases"]))
+            self.assertEqual([], state["releases"][0]["assets"])
+            calls = [json.loads(line) for line in files["log"].read_text().splitlines()]
+            creations = [
+                call
+                for call in calls
+                if call[-1] == f"repos/{self.REPOSITORY}/releases" and "POST" in call
+            ]
+            self.assertEqual(1, len(creations))
+            self.assertFalse(any("/assets?name=" in call[-1] for call in calls))
+
+    def test_resolution_rejects_ambiguous_conflicting_and_foreign_drafts(self) -> None:
+        invalid = {
+            "ambiguous": [self.draft(), self.draft(id=self.RELEASE_ID + 1)],
+            "conflicting": [self.draft(target_commitish="c" * 40)],
+            "foreign": [self.draft(author={"login": "nunocgoncalves"})],
+            "mutable-published": [self.draft(draft=False, immutable=False)],
+        }
+        for case, releases in invalid.items():
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as value:
+                env, _ = self.fixture(Path(value), releases)
+                completed = self.resolve(env)
+                self.assertNotEqual(0, completed.returncode)
+                self.assertRegex(completed.stderr, "ambiguous|conflicting|workflow-owned")
+
+    def test_exact_immutable_member_is_verification_only(self) -> None:
+        release_json = self.draft(draft=False, immutable=True)
+        with tempfile.TemporaryDirectory() as value:
+            env, files = self.fixture(Path(value), [release_json])
+            completed = self.resolve(env)
+            self.assertEqual(0, completed.returncode, completed.stderr)
+            calls = [json.loads(line) for line in files["log"].read_text().splitlines()]
+            self.assertFalse(
+                any(call[-1] == f"repos/{self.REPOSITORY}/releases" for call in calls)
+            )
+
+    def test_draft_asset_upload_uses_exact_release_id(self) -> None:
+        with tempfile.TemporaryDirectory() as value:
+            directory = Path(value)
+            env, files = self.fixture(directory, [self.draft()])
+            asset = directory / "release-manifest-iterabase-platform-chart.json"
+            asset.write_text("{}\n", encoding="utf-8")
+            completed = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    'source "$1"; upload_release_asset "$2" "$3" "$4"',
+                    "draft-asset-test",
+                    str(ROOT / ".github/scripts/publish_github_releases.sh"),
+                    self.REPOSITORY,
+                    str(self.RELEASE_ID),
+                    str(asset),
+                ],
+                cwd=ROOT,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            self.assertEqual(0, completed.returncode, completed.stderr)
+            state = json.loads(files["state"].read_text())
+            self.assertEqual([asset.name], [item["name"] for item in state["releases"][0]["assets"]])
+            calls = [json.loads(line) for line in files["log"].read_text().splitlines()]
+            self.assertIn(
+                f"/releases/{self.RELEASE_ID}/assets?name={asset.name}",
+                calls[-1][-1],
+            )
+
+
 class ReleaseWorkflowContractTests(unittest.TestCase):
     def test_candidate_uses_unified_plan_composer_results_and_capacity_groups(self) -> None:
         workflow = (ROOT / ".github/workflows/release-candidate.yml").read_text(
@@ -1126,20 +1329,24 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
     def test_release_publication_is_complete_draft_first_non_latest_and_verification_only(self) -> None:
         script = (ROOT / ".github/scripts/publish_github_releases.sh").read_text()
         for value in (
-            "--draft --latest=false",
+            "--paginate --slurp",
+            "draft:true",
+            'make_latest:"false"',
             "final-snapshot",
             "baseline-snapshot.json",
             "verify-release-manifests",
-            "gh release upload",
+            "upload_release_asset",
             "-F draft=false -F prerelease=false -f make_latest=false",
             "verification-only",
             "release_baseline.py\" resolve",
         ):
             self.assertIn(value, script)
+        self.assertNotIn("gh release create", script)
+        self.assertNotIn("gh release upload", script)
         self.assertEqual(1, script.count("make_latest=true"))
-        create = script.index("gh release create")
+        create = script.index("release_json=$(gh api --method POST --input -")
         final_snapshot = script.index("final-snapshot", create)
-        upload = script.index("gh release upload", final_snapshot)
+        upload = script.index('upload_release_asset "$repository" "$release_id" "$staged_asset"', final_snapshot)
         verify_draft = script.index('verify_release "$release_id" "$manifest" "$stage" true', upload)
         publish = script.index("-F draft=false", verify_draft)
         handoff = script.index("make_latest=true", publish)
