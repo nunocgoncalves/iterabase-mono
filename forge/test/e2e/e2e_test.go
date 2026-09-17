@@ -329,7 +329,7 @@ YAML`
 	if after := strings.TrimSpace(mustSSHOutput(t, sc, fmt.Sprintf(`sudo bash -ceu 'lv=/dev/iterabase-data/%s; printf "%%s|%%s" "$(lvs --noheadings -o lv_uuid "$lv" | xargs)" "$(blkid -s UUID -o value "$lv")"'`, candidateShellQuote(handle)))); after != hostIdentity {
 		t.Fatalf("general growth replaced LV/filesystem identity: before=%s after=%s", hostIdentity, after)
 	}
-	mustSSHOutput(t, sc, `sudo k3s kubectl exec -n iterabase-system forge-lvm-resize-holder -- test "$(cat /data/marker)" = HOR-545-reapply`)
+	mustSSHOutput(t, sc, `sudo k3s kubectl exec -n iterabase-system forge-lvm-resize-holder -- bash -ceu 'test "$(cat /data/marker)" = HOR-545-reapply'`)
 	mustSSHOutput(t, sc, "sudo k3s kubectl delete pod/forge-lvm-resize-holder -n iterabase-system --wait=true --timeout=5m")
 }
 
@@ -681,7 +681,7 @@ exit 1`, candidateShellQuote(state.storagePVCUID+"|"+state.storagePV))
 	if identity := strings.TrimSpace(mustSSHOutput(t, client, fmt.Sprintf(`sudo bash -ceu 'lv=/dev/iterabase-data/%s; printf "%%s|%%s" "$(lvs --noheadings -o lv_uuid "$lv" | xargs)" "$(blkid -s UUID -o value "$lv")"'`, candidateShellQuote(handle)))); identity != hostIdentity {
 		t.Fatalf("rebooted growth replaced LV/filesystem identity: before=%s after=%s", hostIdentity, identity)
 	}
-	mustSSHOutput(t, client, `sudo k3s kubectl exec -n iterabase-system forge-lvm-interrupted-resize -- test "$(cat /data/marker)" = HOR-545-reapply`)
+	mustSSHOutput(t, client, `sudo k3s kubectl exec -n iterabase-system forge-lvm-interrupted-resize -- bash -ceu 'test "$(cat /data/marker)" = HOR-545-reapply'`)
 	mustSSHOutput(t, client, "sudo k3s kubectl delete pod/forge-lvm-interrupted-resize -n iterabase-system --wait=true --timeout=5m")
 	t.Logf("storage reboot preserved and converged grow-only identity: boot %s -> %s", before, after)
 }

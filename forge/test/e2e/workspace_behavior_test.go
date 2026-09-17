@@ -567,7 +567,7 @@ YAML`
 	if after := strings.TrimSpace(mustSSHOutput(t, client, fmt.Sprintf(`sudo k3s kubectl get pv %s -o jsonpath='{.spec.csi.volumeHandle}'`, parts[1]))); after != handle {
 		t.Fatalf("failed resize replaced the OpenEBS volume handle: before=%s after=%s", handle, after)
 	}
-	mustSSHOutput(t, client, `sudo k3s kubectl exec -n iterabase-system forge-resize-exhaustion -- test "$(cat /data/marker)" = resize-exhaustion-preserved`)
+	mustSSHOutput(t, client, `sudo k3s kubectl exec -n iterabase-system forge-resize-exhaustion -- sh -ceu 'test "$(cat /data/marker)" = resize-exhaustion-preserved'`)
 	if unrelated := strings.TrimSpace(mustSSHOutput(t, client, `sudo k3s kubectl get pvc forge-storage-pool-sandbox -n iterabase-system -o jsonpath='{.metadata.uid}'`)); unrelated != agentPoolPVCUID {
 		t.Fatalf("failed resize damaged unrelated AgentPool claim: before=%s after=%s", agentPoolPVCUID, unrelated)
 	}
