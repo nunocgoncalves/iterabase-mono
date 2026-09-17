@@ -88,6 +88,18 @@ func TestValidateModelBackendPersistentVolumes(t *testing.T) {
 		{name: "raw mount collision", mutate: func(mb *v1alpha1.ModelBackend) {
 			mb.Spec.VolumeMounts = []corev1.VolumeMount{{Name: "raw", MountPath: "/cache"}}
 		}, want: "collides"},
+		{name: "raw mount collision with ephemeral fallback and no declarations", mutate: func(mb *v1alpha1.ModelBackend) {
+			mb.Spec.PersistentVolumes = nil
+			mb.Spec.VolumeMounts = []corev1.VolumeMount{{Name: "raw", MountPath: defaultModelCachePath}}
+		}, want: "ephemeral HF cache"},
+		{name: "raw mount collision with ephemeral fallback and unrelated declaration", mutate: func(mb *v1alpha1.ModelBackend) {
+			mb.Spec.PersistentVolumes = mb.Spec.PersistentVolumes[1:]
+			mb.Spec.VolumeMounts = []corev1.VolumeMount{{Name: "raw", MountPath: defaultModelCachePath}}
+		}, want: "ephemeral HF cache"},
+		{name: "managed nested path collision with ephemeral fallback", mutate: func(mb *v1alpha1.ModelBackend) {
+			mb.Spec.PersistentVolumes = mb.Spec.PersistentVolumes[:1]
+			mb.Spec.PersistentVolumes[0].MountPath = defaultModelCachePath + "/nested"
+		}, want: "ephemeral HF cache"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
