@@ -235,6 +235,21 @@ spec:
 	if _, err := state.kubectlResult(30*time.Second, "patch", "pvc/manager-agentpool-claim", "-n", testNamespace, "--type=merge", "-p", `{"metadata":{"ownerReferences":[{"apiVersion":"platform.iterabase.com/v1alpha1","kind":"AgentPool","name":"ap-other","uid":"22222222-2222-2222-2222-222222222222","controller":true}]}}`); err == nil {
 		t.Fatalf("an AgentPool PVC UPDATE swapping its controller ownerReference to a different AgentPool was admitted; ownership must be immutable")
 	}
+	consumer := `apiVersion: v1
+kind: Pod
+metadata: {name: manager-agentpool-claim-consumer, namespace: ` + testNamespace + `}
+spec:
+  containers:
+    - name: hold
+      image: busybox:1.37.0@sha256:9db7b59979c38555a39def84a31fb98b5296952f9e3afd4f6f11f05b07adfab0
+      command: [sh, -ceu]
+      args: ['printf manager-growth > /data/marker; sync; sleep 600']
+      volumeMounts: [{name: data, mountPath: /data}]
+  volumes: [{name: data, persistentVolumeClaim: {claimName: manager-agentpool-claim}}]
+`
+	consumerPath := state.writeManifest(t, "manager-agentpool-claim-consumer.yaml", consumer)
+	state.kubectl(t, 30*time.Second, "apply", "-f", consumerPath)
+	state.kubectl(t, 5*time.Minute, "wait", "pod/manager-agentpool-claim-consumer", "-n", testNamespace, "--for=condition=Ready", "--timeout=4m")
 	if _, err := state.kubectlResult(30*time.Second, "patch", "pvc/manager-agentpool-claim", "-n", testNamespace, "--type=merge", "-p", `{"spec":{"resources":{"requests":{"storage":"768Mi"}}}}`); err == nil {
 		t.Fatalf("a non-manager identity raised an AgentPool PVC request")
 	}
@@ -247,7 +262,7 @@ spec:
 	if got := state.kubectl(t, 30*time.Second, "get", "pvc/manager-agentpool-claim", "-n", testNamespace, "-o", "jsonpath={.spec.resources.requests.storage}"); got != "768Mi" {
 		t.Fatalf("grow-only admission changed the same request to %q, want 768Mi", got)
 	}
-	state.kubectl(t, 30*time.Second, "delete", "pvc/manager-agentpool-claim", "-n", testNamespace, "--ignore-not-found=true", "--wait=true", "--timeout=2m")
+	state.kubectl(t, 30*time.Second, "delete", "pod/manager-agentpool-claim-consumer", "pvc/manager-agentpool-claim", "-n", testNamespace, "--ignore-not-found=true", "--wait=true", "--timeout=2m")
 
 	// Ubuntu 24.04 XFS refuses filesystems at or below 300 MB; keep this real
 	// lifecycle claim above that supported minimum rather than bypassing format.

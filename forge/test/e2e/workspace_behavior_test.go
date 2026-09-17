@@ -374,9 +374,7 @@ func growAgentPoolDuringActiveTurn(t *testing.T, cluster *remotecluster.Cluster,
 		t.Fatalf("AgentPool growth replaced PVC/PV identity: before=%s after=%s", identity, after)
 	}
 	lvm := strings.TrimSpace(mustSSHOutput(t, client, fmt.Sprintf(`sudo k3s kubectl get lvmvolume.local.openebs.io %s -n iterabase-system -o jsonpath='{.spec.capacity}|{.status.state}'`, handle)))
-	if lvm != "3Gi|Ready" {
-		t.Fatalf("AgentPool LVMVolume did not converge to 3Gi Ready: %q", lvm)
-	}
+	assertLVMVolumeCapacity(t, lvm, "3Gi")
 	if after := strings.TrimSpace(mustSSHOutput(t, client, fmt.Sprintf(`sudo bash -ceu 'lv=/dev/iterabase-data/%s; lvuuid=$(lvs --noheadings -o lv_uuid "$lv" | xargs); fsuuid=$(blkid -s UUID -o value "$lv"); printf "%%s|%%s" "$lvuuid" "$fsuuid"'`, candidateShellQuote(handle)))); after != hostIdentity {
 		t.Fatalf("AgentPool growth replaced LV/filesystem identity: before=%s after=%s", hostIdentity, after)
 	}

@@ -21,6 +21,7 @@ import (
 
 	"golang.org/x/crypto/ssh"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
@@ -324,14 +325,28 @@ YAML`
 		t.Fatalf("general growth replaced PVC/PV identity: before=%s|%s after=%s", state.storagePVCUID, state.storagePV, identity)
 	}
 	lvm := strings.TrimSpace(mustSSHOutput(t, sc, fmt.Sprintf(`sudo k3s kubectl get lvmvolume.local.openebs.io %s -n iterabase-system -o jsonpath='{.spec.capacity}|{.status.state}'`, handle)))
-	if lvm != "2Gi|Ready" {
-		t.Fatalf("general LVMVolume did not converge to 2Gi Ready: %q", lvm)
-	}
+	assertLVMVolumeCapacity(t, lvm, "2Gi")
 	if after := strings.TrimSpace(mustSSHOutput(t, sc, fmt.Sprintf(`sudo bash -ceu 'lv=/dev/iterabase-data/%s; printf "%%s|%%s" "$(lvs --noheadings -o lv_uuid "$lv" | xargs)" "$(blkid -s UUID -o value "$lv")"'`, candidateShellQuote(handle)))); after != hostIdentity {
 		t.Fatalf("general growth replaced LV/filesystem identity: before=%s after=%s", hostIdentity, after)
 	}
 	mustSSHOutput(t, sc, `sudo k3s kubectl exec -n iterabase-system forge-lvm-resize-holder -- test "$(cat /data/marker)" = HOR-545-reapply`)
 	mustSSHOutput(t, sc, "sudo k3s kubectl delete pod/forge-lvm-resize-holder -n iterabase-system --wait=true --timeout=5m")
+}
+
+func assertLVMVolumeCapacity(t *testing.T, observed, wanted string) {
+	t.Helper()
+	parts := strings.Split(observed, "|")
+	if len(parts) != 2 || parts[1] != "Ready" {
+		t.Fatalf("LVMVolume capacity/state is malformed: %q", observed)
+	}
+	got, err := resource.ParseQuantity(parts[0])
+	if err != nil {
+		t.Fatalf("parse LVMVolume capacity %q: %v", parts[0], err)
+	}
+	want := resource.MustParse(wanted)
+	if got.Cmp(want) != 0 {
+		t.Fatalf("LVMVolume capacity=%s state=Ready want=%s", got.String(), wanted)
+	}
 }
 
 func assertLVMReapplyStage(t *testing.T, state *permanentCPUFixtureState) {
@@ -662,9 +677,7 @@ exit 1`, candidateShellQuote(state.storagePVCUID+"|"+state.storagePV))
 		t.Fatalf("reboot did not preserve and converge receipt/VG/PVC/PV growth intent: %v\n%s", err, output)
 	}
 	lvm := strings.TrimSpace(mustSSHOutput(t, client, fmt.Sprintf(`sudo k3s kubectl get lvmvolume.local.openebs.io %s -n iterabase-system -o jsonpath='{.spec.capacity}|{.status.state}'`, handle)))
-	if lvm != "3Gi|Ready" {
-		t.Fatalf("interrupted growth did not converge the same LVMVolume: %q", lvm)
-	}
+	assertLVMVolumeCapacity(t, lvm, "3Gi")
 	if identity := strings.TrimSpace(mustSSHOutput(t, client, fmt.Sprintf(`sudo bash -ceu 'lv=/dev/iterabase-data/%s; printf "%%s|%%s" "$(lvs --noheadings -o lv_uuid "$lv" | xargs)" "$(blkid -s UUID -o value "$lv")"'`, candidateShellQuote(handle)))); identity != hostIdentity {
 		t.Fatalf("rebooted growth replaced LV/filesystem identity: before=%s after=%s", hostIdentity, identity)
 	}
