@@ -3,13 +3,21 @@ set -euo pipefail
 
 rendered=$(helm template manager-contract charts/control-plane)
 
-for crd in agentpools.platform.iterabase.com workflows.platform.iterabase.com; do
+for crd in agentpools.platform.iterabase.com modelbackends.platform.iterabase.com workflows.platform.iterabase.com; do
   if ! grep -q "^  name: ${crd}$" <<<"$rendered"; then
     echo "ERROR: missing manager-required CRD ${crd}" >&2
     exit 1
   fi
 done
-echo "OK: AgentPool and Workflow CRDs render"
+grep -q '^              persistentVolumes:$' <<<"$rendered" || {
+  echo "ERROR: ModelBackend CRD omits managed persistentVolumes" >&2
+  exit 1
+}
+grep -q '^                      - iterabase-lvm-xfs$' <<<"$(grep -A55 '^              persistentVolumes:$' <<<"$rendered")" || {
+  echo "ERROR: ModelBackend managed storage omits the exact class enum" >&2
+  exit 1
+}
+echo "OK: AgentPool, ModelBackend managed storage, and Workflow CRDs render"
 
 rbac=$(helm template manager-contract charts/control-plane --show-only templates/rbac.yaml)
 for resource in configmaps persistentvolumeclaims persistentvolumes pods services secrets storageclasses lvmnodes lvmvolumes deployments networkpolicies agentpools identitymappings modelbackends models permissionpolicies workflows; do

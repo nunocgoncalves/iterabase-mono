@@ -12,10 +12,9 @@
 #
 # Reference: https://github.com/hikarioyama/dsv4-flash-nvfp4-sm120
 #
-# NOTE: weights are NOT pre-mounted. vLLM downloads
-# nvidia/DeepSeek-V4-Flash-NVFP4 from HuggingFace into the controller-managed
-# hf-cache hostPath (/data/hf-cache, HF_HOME) on first start and reuses it
-# across restarts. The model is not HF-gated, so no HF_TOKEN is required.
+# NOTE: vLLM downloads nvidia/DeepSeek-V4-Flash-NVFP4 from HuggingFace into
+# the controller-managed PVC mounted at /data/hf-cache (HF_HOME) and reuses it
+# across pod replacement. The model is not HF-gated, so no HF_TOKEN is required.
 #
 # Context is capped at 256k (the kit's "balanced 256K" preset:
 # --max-model-len 262144 --max-num-batched-tokens 512 --gpu-memory-utilization
@@ -49,6 +48,11 @@ spec:
   # spec.model is unset: with spec.args overridden, the model is the positional
   # arg to `vllm ... serve` (downloaded from HF into hf-cache).
   replicas: 1
+  persistentVolumes:
+    - name: hf-cache
+      mountPath: /data/hf-cache
+      storageClassName: iterabase-lvm-xfs
+      size: 500Gi
   # TP=2 in a single pod: 2 GPUs on one node. --tensor-parallel-size 2 in args.
   resources:
     limits:

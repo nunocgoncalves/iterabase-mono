@@ -43,7 +43,7 @@ func storagePool() *v1alpha1.AgentPool {
 func lvmAgentPoolClass() *storagev1.StorageClass {
 	reclaim := corev1.PersistentVolumeReclaimDelete
 	binding := storagev1.VolumeBindingWaitForFirstConsumer
-	expand := false
+	expand := true
 	return &storagev1.StorageClass{
 		ObjectMeta:  metav1.ObjectMeta{Name: agentPoolWorkspaceStorageClass, Annotations: map[string]string{"storageclass.kubernetes.io/is-default-class": "false"}},
 		Provisioner: agentPoolWorkspaceProvisioner, ReclaimPolicy: &reclaim,
@@ -57,8 +57,14 @@ func lvmAgentPoolClass() *storagev1.StorageClass {
 func pendingWorkspacePVC(pool *v1alpha1.AgentPool) *corev1.PersistentVolumeClaim {
 	class := agentPoolWorkspaceStorageClass
 	filesystem := corev1.PersistentVolumeFilesystem
+	controller := true
 	return &corev1.PersistentVolumeClaim{
-		ObjectMeta: metav1.ObjectMeta{Name: sandboxPVCName(pool), Namespace: pool.Namespace},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: sandboxPVCName(pool), Namespace: pool.Namespace,
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: v1alpha1.GroupVersion.String(), Kind: "AgentPool", Name: pool.Name, UID: pool.UID, Controller: &controller,
+			}},
+		},
 		Spec: corev1.PersistentVolumeClaimSpec{
 			StorageClassName: &class, AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}, VolumeMode: &filesystem,
 			Resources: corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("10Gi")}},
@@ -210,6 +216,48 @@ func TestAssessAgentPoolStorageAcceptsBoundOpenEBSLVMVolume(t *testing.T) {
 	assert.Equal(t, "pvc-volume-1", assessment.VolumeHandle)
 	assert.Contains(t, assessment.Message, "shared=yes")
 	assert.Contains(t, assessment.Message, "vg=iterabase-data")
+	assert.Contains(t, assessment.Message, "expansion=true")
+}
+
+func TestAssessAgentPoolStorageKeepsMountedWorkersDuringResizeAndRequiresFreshStatfs(t *testing.T) {
+	pool := storagePool()
+	pool.Spec.Sandbox.Size = resource.MustParse("20Gi")
+	objects := boundWorkspaceObjects(pool)
+	assessment := storageReconciler(t, objects...).assessAgentPoolStorage(context.Background(), pool)
+	assert.False(t, assessment.Ready)
+	assert.True(t, assessment.CanMount)
+	assert.True(t, assessment.SafeResize)
+	assert.False(t, storageQuiescenceRequired(assessment))
+	assert.Equal(t, storageReasonPVCExpansionPending, assessment.Reason)
+
+	started := time.Now().Add(-time.Second).UTC()
+	pvc := objects[1].(*corev1.PersistentVolumeClaim)
+	pvc.Spec.Resources.Requests[corev1.ResourceStorage] = resource.MustParse("20Gi")
+	pvc.Status.Capacity[corev1.ResourceStorage] = resource.MustParse("20Gi")
+	pvc.Annotations = map[string]string{
+		agentPoolResizeStartedAnnotation:          started.Format(time.RFC3339Nano),
+		agentPoolResizeBaselineCapacityAnnotation: "10",
+	}
+	objects[2].(*corev1.PersistentVolume).Spec.Capacity[corev1.ResourceStorage] = resource.MustParse("20Gi")
+	require.NoError(t, unstructured.SetNestedField(objects[3].(*unstructured.Unstructured).Object, "20Gi", "spec", "capacity"))
+
+	stale := started.Add(-time.Second)
+	r := storageReconciler(t, objects...)
+	r.CapacityReader = &staticWorkspaceCapacityReader{status: gateway.WorkspaceCapacityStatus{
+		Observed: true, FreeBytes: 15, CapacityBytes: 20, FreeRatio: 0.75, ObservedAt: &stale,
+	}}
+	assessment = r.assessAgentPoolStorage(context.Background(), pool)
+	assert.False(t, assessment.Ready)
+	assert.True(t, assessment.SafeResize)
+	assert.Contains(t, assessment.Message, "fresh valid mounted-filesystem statfs")
+
+	fresh := time.Now().UTC()
+	r.CapacityReader = &staticWorkspaceCapacityReader{status: gateway.WorkspaceCapacityStatus{
+		Observed: true, FreeBytes: 15, CapacityBytes: 20, FreeRatio: 0.75, ObservedAt: &fresh,
+	}}
+	assessment = r.assessAgentPoolStorage(context.Background(), pool)
+	assert.True(t, assessment.Ready, "%+v", assessment)
+	assert.False(t, assessment.SafeResize)
 }
 
 type storageQueryClient struct {
@@ -312,6 +360,51 @@ func TestStorageObservationErrorWithdrawsDispatchAuthorizationWithoutDeletingWor
 	require.NoError(t, base.Get(context.Background(), types.NamespacedName{Name: worker.Name, Namespace: worker.Namespace}, &retained))
 }
 
+func TestSafeAgentPoolResizeClosesCreditWithoutDeletingMountedWorkers(t *testing.T) {
+	pool := validAgentPool("pool", "iterabase-system")
+	pool.UID = types.UID("pool-uid")
+	pool.Finalizers = []string{agentPoolFinalizer}
+	pool.Status.Ready = true
+	pool.Status.ReadyReplicas = 1
+	pool.Status.Conditions = []metav1.Condition{{
+		Type: storageConditionOperationalReadinessReached, Status: metav1.ConditionTrue,
+		Reason: storageReasonOperationalReadinessReached, LastTransitionTime: metav1.Now(),
+	}}
+	pool.Spec.Sandbox.Size = resource.MustParse("20Gi")
+	worker := buildWorkerPod(pool, workerName(pool, 0), workerPodTemplateHash(pool, workerName(pool, 0)))
+	worker.UID = types.UID("worker-uid")
+	worker.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
+	objects := []client.Object{
+		pool,
+		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "platform-ca", Namespace: pool.Namespace}, Data: map[string][]byte{"tls.crt": []byte("c"), "tls.key": []byte("k")}},
+		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "graph-creds", Namespace: pool.Namespace}, Data: map[string][]byte{"token": []byte("v")}},
+		worker,
+	}
+	objects = append(objects, boundWorkspaceObjects(pool)...)
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, networkingv1.AddToScheme(scheme))
+	require.NoError(t, storagev1.AddToScheme(scheme))
+	require.NoError(t, v1alpha1.AddToScheme(scheme))
+	base := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&v1alpha1.AgentPool{}).WithObjects(objects...).Build()
+	gate := &recordingWorkspaceStorageGate{}
+	r := &AgentPoolReconciler{Client: base, APIReader: base, Scheme: scheme, StorageGate: gate}
+
+	result, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: pool.Name, Namespace: pool.Namespace}})
+	require.NoError(t, err)
+	assert.Equal(t, healthRequeueInterval, result.RequeueAfter)
+	assert.Equal(t, []bool{false}, gate.decisions)
+	var retained corev1.Pod
+	require.NoError(t, base.Get(context.Background(), types.NamespacedName{Name: worker.Name, Namespace: worker.Namespace}, &retained))
+	assert.Equal(t, types.UID("worker-uid"), retained.UID)
+	var pvc corev1.PersistentVolumeClaim
+	require.NoError(t, base.Get(context.Background(), types.NamespacedName{Name: sandboxPVCName(pool), Namespace: pool.Namespace}, &pvc))
+	request := pvc.Spec.Resources.Requests[corev1.ResourceStorage]
+	assert.Equal(t, "20Gi", request.String())
+	assert.NotEmpty(t, pvc.Annotations[agentPoolResizeStartedAnnotation])
+	assert.Equal(t, "10737418240", pvc.Annotations[agentPoolResizeBaselineCapacityAnnotation])
+}
+
 func TestHealthyStorageObservationAuthorizesDispatch(t *testing.T) {
 	pool := validAgentPool("pool", "iterabase-system")
 	pool.UID = types.UID("pool-uid")
@@ -386,7 +479,7 @@ func TestValidateAgentPoolStorageClassExactContract(t *testing.T) {
 	}{
 		{name: "wrong provisioner", mutate: func(c *storagev1.StorageClass) { c.Provisioner = "rancher.io/local-path" }},
 		{name: "default", mutate: func(c *storagev1.StorageClass) { c.Annotations["storageclass.kubernetes.io/is-default-class"] = "true" }},
-		{name: "expandable", mutate: func(c *storagev1.StorageClass) { yes := true; c.AllowVolumeExpansion = &yes }},
+		{name: "non-expandable", mutate: func(c *storagev1.StorageClass) { no := false; c.AllowVolumeExpansion = &no }},
 		{name: "retain", mutate: func(c *storagev1.StorageClass) {
 			retain := corev1.PersistentVolumeReclaimRetain
 			c.ReclaimPolicy = &retain
@@ -408,6 +501,17 @@ func TestValidateAgentPoolStorageClassExactContract(t *testing.T) {
 			assert.NotEmpty(t, validateAgentPoolStorageClass(class))
 		})
 	}
+}
+
+func TestAssessAgentPoolStorageRejectsOwnerDrift(t *testing.T) {
+	pool := storagePool()
+	objects := boundWorkspaceObjects(pool)
+	objects[1].(*corev1.PersistentVolumeClaim).OwnerReferences[0].UID = types.UID("foreign")
+	assessment := storageReconciler(t, objects...).assessAgentPoolStorage(context.Background(), pool)
+	assert.False(t, assessment.CanMount)
+	assert.True(t, assessment.ConfirmedUnsafe)
+	assert.True(t, storageQuiescenceRequired(assessment))
+	assert.Contains(t, assessment.Message, "ownership mutation")
 }
 
 func TestAssessAgentPoolStorageRejectsAccessAndClassDrift(t *testing.T) {

@@ -1,20 +1,20 @@
 {{- if not (index .Values "lvm-localpv" "enabled") }}{{ fail "lvm-localpv.enabled must remain true" }}{{- end }}
 {{- if not (index .Values "agentpool" "authorizedManagerIdentity") }}{{ fail "agentpool.authorizedManagerIdentity must name the control-plane manager service-account username (fail closed); it is set by Forge on install" }}{{- end }}
-# DES-HOR-545-01: only the control-plane manager may claim the AgentPool
-# workspace class, and the resulting PVC must be controller-owned by exactly one
-# platform.iterabase.com AgentPool. The policy is operation-aware so the agreed
-# security invariant holds on both CREATE and UPDATE:
+# DES-HOR-545-01 / DES-HOR-545-07: only the control-plane manager may claim
+# and grow the AgentPool workspace class. The resulting PVC must be
+# controller-owned by exactly one platform.iterabase.com AgentPool. The policy
+# is operation-aware so the agreed security invariant holds on CREATE/UPDATE:
 #
 #  * CREATE  - the request must arrive under the exact control-plane manager
 #    ServiceAccount identity (request.userInfo.username) AND describe exactly one
 #    controller ownerReference to platform.iterabase.com/v1alpha1 AgentPool. An
 #    ownerReference alone can be forged by any client (it is client-set metadata),
 #    so both must hold.
-#  * UPDATE  - for an existing PVC that selects the AgentPool class, the protected
-#    fields (spec.storageClassName and the AgentPool controller ownerReference)
-#    are immutable: any UPDATE that changes them is Denied. Legitimate
-#    scheduler (VolumeBinding prebind), CSI, and kubelet updates - which never
-#    touch storageClassName or ownership - remain allowed regardless of identity.
+#  * UPDATE  - class, access mode, volume mode, and AgentPool controller
+#    ownership remain immutable. Only the exact manager identity may change the
+#    storage request, and only to a strictly larger quantity. Scheduler, CSI,
+#    and kubelet updates that leave these protected fields untouched remain
+#    allowed regardless of identity.
 #
 # The policy denies on missing/mismatched identity (failurePolicy Fail,
 # validationActions Deny). Only PVCs selecting iterabase-agentpool-lvm-xfs are
@@ -28,7 +28,7 @@ kind: ValidatingAdmissionPolicy
 metadata:
   name: iterabase-agentpool-claim-authority
   annotations:
-    iterabase.com/architecture-decision: DES-HOR-545-01
+    iterabase.com/architecture-decision: DES-HOR-545-01,DES-HOR-545-07
     iterabase.com/claim-authority: agentpool-only
 spec:
   failurePolicy: Fail
@@ -51,6 +51,16 @@ spec:
     # UPDATE: the class is immutable once the PVC exists.
     - expression: "request.operation != 'UPDATE' || (has(oldObject.spec) && has(object.spec) && object.spec.storageClassName == oldObject.spec.storageClassName)"
       message: "The storageClassName of a PVC in the iterabase-agentpool-lvm-xfs class is immutable"
+    - expression: "request.operation != 'UPDATE' || (object.spec.accessModes == oldObject.spec.accessModes && object.spec.volumeMode == oldObject.spec.volumeMode)"
+      message: "The accessModes and volumeMode of a PVC in the iterabase-agentpool-lvm-xfs class are immutable"
+    - expression: "request.operation != 'UPDATE' || object.spec.resources.requests.storage == oldObject.spec.resources.requests.storage || request.userInfo.username == '{{ .Values.agentpool.authorizedManagerIdentity }}'"
+      message: "Only the control-plane manager may change an AgentPool PVC storage request"
+    - expression: "request.operation != 'UPDATE' || object.spec.resources.requests.storage == oldObject.spec.resources.requests.storage || quantity(object.spec.resources.requests.storage).isGreaterThan(quantity(oldObject.spec.resources.requests.storage))"
+      message: "An AgentPool PVC storage request may only increase"
+    - expression: "request.operation != 'UPDATE' || (((!has(object.metadata.annotations) || !('platform.iterabase.com/resize-requested-at' in object.metadata.annotations)) && (!has(oldObject.metadata.annotations) || !('platform.iterabase.com/resize-requested-at' in oldObject.metadata.annotations))) || (has(object.metadata.annotations) && has(oldObject.metadata.annotations) && 'platform.iterabase.com/resize-requested-at' in object.metadata.annotations && 'platform.iterabase.com/resize-requested-at' in oldObject.metadata.annotations && object.metadata.annotations['platform.iterabase.com/resize-requested-at'] == oldObject.metadata.annotations['platform.iterabase.com/resize-requested-at']) || request.userInfo.username == '{{ .Values.agentpool.authorizedManagerIdentity }}')"
+      message: "Only the control-plane manager may change AgentPool resize observation evidence"
+    - expression: "request.operation != 'UPDATE' || (((!has(object.metadata.annotations) || !('platform.iterabase.com/resize-baseline-capacity-bytes' in object.metadata.annotations)) && (!has(oldObject.metadata.annotations) || !('platform.iterabase.com/resize-baseline-capacity-bytes' in oldObject.metadata.annotations))) || (has(object.metadata.annotations) && has(oldObject.metadata.annotations) && 'platform.iterabase.com/resize-baseline-capacity-bytes' in object.metadata.annotations && 'platform.iterabase.com/resize-baseline-capacity-bytes' in oldObject.metadata.annotations && object.metadata.annotations['platform.iterabase.com/resize-baseline-capacity-bytes'] == oldObject.metadata.annotations['platform.iterabase.com/resize-baseline-capacity-bytes']) || request.userInfo.username == '{{ .Values.agentpool.authorizedManagerIdentity }}')"
+      message: "Only the control-plane manager may change AgentPool resize capacity evidence"
     # UPDATE: the AgentPool controller ownership is immutable; removing,
     # replacing, or swapping the ownerReference to a different AgentPool (even at
     # the same count with a different {name,uid}) is denied, while
@@ -63,7 +73,7 @@ kind: ValidatingAdmissionPolicyBinding
 metadata:
   name: iterabase-agentpool-claim-authority
   annotations:
-    iterabase.com/architecture-decision: DES-HOR-545-01
+    iterabase.com/architecture-decision: DES-HOR-545-01,DES-HOR-545-07
 spec:
   policyName: iterabase-agentpool-claim-authority
   validationActions: [Deny]

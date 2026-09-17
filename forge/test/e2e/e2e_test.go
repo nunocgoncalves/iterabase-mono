@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -179,7 +180,7 @@ test ! -e /etc/modules-load.d/iterabase-data.conf
 	}
 	for class, shared := range map[string]string{"iterabase-lvm-xfs": "no", "iterabase-agentpool-lvm-xfs": "yes"} {
 		observed := strings.TrimSpace(mustSSHOutput(t, sc, fmt.Sprintf(`sudo k3s kubectl get storageclass %s -o jsonpath='{.provisioner}|{.reclaimPolicy}|{.volumeBindingMode}|{.allowVolumeExpansion}|{.parameters.storage}|{.parameters.vgpattern}|{.parameters.fsType}|{.parameters.thinProvision}|{.parameters.shared}|{.metadata.annotations.storageclass\.kubernetes\.io/is-default-class}'`, class)))
-		want := "local.csi.openebs.io|Delete|WaitForFirstConsumer|false|lvm|^iterabase-data$|xfs|no|" + shared + "|false"
+		want := "local.csi.openebs.io|Delete|WaitForFirstConsumer|true|lvm|^iterabase-data$|xfs|no|" + shared + "|false"
 		if observed != want {
 			t.Fatalf("StorageClass %s contract = %q, want %q", class, observed, want)
 		}
@@ -283,6 +284,54 @@ YAML`
 	if lvmVolume != "Ready|iterabase-data|^iterabase-data$|no|no" {
 		t.Fatalf("general LVMVolume contract is invalid: %q", lvmVolume)
 	}
+}
+
+func growGeneralLVMClaimStage(t *testing.T, state *permanentCPUFixtureState) {
+	t.Helper()
+	sc, err := sshDial(state.ip, state.privKeyPath)
+	if err != nil {
+		t.Fatalf("ssh dial %s: %v", state.ip, err)
+	}
+	defer sc.Close()
+	manifest := `cat <<'YAML' | sudo k3s kubectl apply -f -
+apiVersion: v1
+kind: Pod
+metadata: {name: forge-lvm-resize-holder, namespace: iterabase-system}
+spec:
+  containers:
+    - name: hold
+      image: debian:13-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132
+      command: [bash, -ceu]
+      args: ['test "$(cat /data/marker)" = HOR-545-reapply; sleep 1200']
+      volumeMounts: [{name: data, mountPath: /data}]
+  volumes: [{name: data, persistentVolumeClaim: {claimName: forge-lvm-reapply}}]
+YAML`
+	mustSSHOutput(t, sc, manifest)
+	mustSSHOutput(t, sc, "sudo k3s kubectl wait -n iterabase-system --for=condition=Ready pod/forge-lvm-resize-holder --timeout=10m")
+	beforeFS := strings.TrimSpace(mustSSHOutput(t, sc, `sudo k3s kubectl exec -n iterabase-system forge-lvm-resize-holder -- df -B1 --output=size /data | tail -1 | tr -d ' '`))
+	handle := strings.TrimSpace(mustSSHOutput(t, sc, fmt.Sprintf(`sudo k3s kubectl get pv %s -o jsonpath='{.spec.csi.volumeHandle}'`, state.storagePV)))
+	hostIdentity := strings.TrimSpace(mustSSHOutput(t, sc, fmt.Sprintf(`sudo bash -ceu 'lv=/dev/iterabase-data/%s; printf "%%s|%%s" "$(lvs --noheadings -o lv_uuid "$lv" | xargs)" "$(blkid -s UUID -o value "$lv")"'`, candidateShellQuote(handle))))
+	mustSSHOutput(t, sc, `sudo k3s kubectl patch pvc/forge-lvm-reapply -n iterabase-system --type=merge -p '{"spec":{"resources":{"requests":{"storage":"2Gi"}}}}'`)
+	mustSSHOutput(t, sc, `sudo k3s kubectl wait pvc/forge-lvm-reapply -n iterabase-system --for=jsonpath='{.status.capacity.storage}'=2Gi --timeout=15m`)
+	afterFS := strings.TrimSpace(mustSSHOutput(t, sc, `for i in $(seq 1 300); do value=$(sudo k3s kubectl exec -n iterabase-system forge-lvm-resize-holder -- df -B1 --output=size /data | tail -1 | tr -d ' '); test "$value" -gt 1073741824 && { printf '%s' "$value"; exit 0; }; sleep 2; done; exit 1`))
+	beforeBytes, beforeErr := strconv.ParseUint(beforeFS, 10, 64)
+	afterBytes, afterErr := strconv.ParseUint(afterFS, 10, 64)
+	if beforeErr != nil || afterErr != nil || afterBytes <= beforeBytes {
+		t.Fatalf("general mounted XFS did not grow: before=%q after=%q errors=%v/%v", beforeFS, afterFS, beforeErr, afterErr)
+	}
+	identity := strings.TrimSpace(mustSSHOutput(t, sc, `sudo k3s kubectl get pvc forge-lvm-reapply -n iterabase-system -o jsonpath='{.metadata.uid}|{.spec.volumeName}'`))
+	if identity != state.storagePVCUID+"|"+state.storagePV {
+		t.Fatalf("general growth replaced PVC/PV identity: before=%s|%s after=%s", state.storagePVCUID, state.storagePV, identity)
+	}
+	lvm := strings.TrimSpace(mustSSHOutput(t, sc, fmt.Sprintf(`sudo k3s kubectl get lvmvolume.local.openebs.io %s -n iterabase-system -o jsonpath='{.spec.capacity}|{.status.state}'`, handle)))
+	if lvm != "2Gi|Ready" {
+		t.Fatalf("general LVMVolume did not converge to 2Gi Ready: %q", lvm)
+	}
+	if after := strings.TrimSpace(mustSSHOutput(t, sc, fmt.Sprintf(`sudo bash -ceu 'lv=/dev/iterabase-data/%s; printf "%%s|%%s" "$(lvs --noheadings -o lv_uuid "$lv" | xargs)" "$(blkid -s UUID -o value "$lv")"'`, candidateShellQuote(handle)))); after != hostIdentity {
+		t.Fatalf("general growth replaced LV/filesystem identity: before=%s after=%s", hostIdentity, after)
+	}
+	mustSSHOutput(t, sc, `sudo k3s kubectl exec -n iterabase-system forge-lvm-resize-holder -- test "$(cat /data/marker)" = HOR-545-reapply`)
+	mustSSHOutput(t, sc, "sudo k3s kubectl delete pod/forge-lvm-resize-holder -n iterabase-system --wait=true --timeout=5m")
 }
 
 func assertLVMReapplyStage(t *testing.T, state *permanentCPUFixtureState) {
@@ -567,6 +616,26 @@ func rebootPreservesLVMStorageStage(t *testing.T, state *permanentCPUFixtureStat
 	if err != nil {
 		t.Fatalf("ssh before storage reboot: %v", err)
 	}
+	handle := strings.TrimSpace(mustSSHOutput(t, client, fmt.Sprintf(`sudo k3s kubectl get pv %s -o jsonpath='{.spec.csi.volumeHandle}'`, state.storagePV)))
+	hostIdentity := strings.TrimSpace(mustSSHOutput(t, client, fmt.Sprintf(`sudo bash -ceu 'lv=/dev/iterabase-data/%s; printf "%%s|%%s" "$(lvs --noheadings -o lv_uuid "$lv" | xargs)" "$(blkid -s UUID -o value "$lv")"'`, candidateShellQuote(handle))))
+	mustSSHOutput(t, client, `cat <<'YAML' | sudo k3s kubectl apply -f -
+apiVersion: v1
+kind: Pod
+metadata: {name: forge-lvm-interrupted-resize, namespace: iterabase-system}
+spec:
+  containers:
+    - name: hold
+      image: debian:13-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132
+      command: [bash, -ceu]
+      args: ['test "$(cat /data/marker)" = HOR-545-reapply; sleep 1200']
+      volumeMounts: [{name: data, mountPath: /data}]
+  volumes: [{name: data, persistentVolumeClaim: {claimName: forge-lvm-reapply}}]
+YAML`)
+	mustSSHOutput(t, client, "sudo k3s kubectl wait -n iterabase-system --for=condition=Ready pod/forge-lvm-interrupted-resize --timeout=10m")
+	mustSSHOutput(t, client, `sudo k3s kubectl patch pvc/forge-lvm-reapply -n iterabase-system --type=merge -p '{"spec":{"resources":{"requests":{"storage":"3Gi"}}}}'`)
+	if request := strings.TrimSpace(mustSSHOutput(t, client, `sudo k3s kubectl get pvc forge-lvm-reapply -n iterabase-system -o jsonpath='{.spec.resources.requests.storage}'`)); request != "3Gi" {
+		t.Fatalf("interrupted growth intent was not accepted before reboot: %q", request)
+	}
 	_, _ = sshOutput(client, "sudo systemctl reboot")
 	client.Close()
 	after, readyClient, err := state.fixture.waitForReboot(before)
@@ -579,18 +648,29 @@ func rebootPreservesLVMStorageStage(t *testing.T, state *permanentCPUFixtureStat
 		t.Fatalf("wait for host readiness after storage reboot: %v", err)
 	}
 	defer client.Close()
-	command := fmt.Sprintf(`for i in $(seq 1 150); do
+	command := fmt.Sprintf(`for i in $(seq 1 450); do
   test -f /var/lib/iterabase/data-storage.receipt &&
   test "$(vgs --noheadings -o vg_name iterabase-data | awk '{$1=$1;print}')" = iterabase-data &&
   test "$(k3s kubectl get --raw=/readyz 2>/dev/null)" = ok &&
-  test "$(k3s kubectl get pvc forge-lvm-reapply -n iterabase-system -o jsonpath='{.metadata.uid}|{.spec.volumeName}' 2>/dev/null)" = %s && exit 0
+  test "$(k3s kubectl get pvc forge-lvm-reapply -n iterabase-system -o jsonpath='{.metadata.uid}|{.spec.volumeName}' 2>/dev/null)" = %s &&
+  test "$(k3s kubectl get pvc forge-lvm-reapply -n iterabase-system -o jsonpath='{.status.capacity.storage}' 2>/dev/null)" = 3Gi &&
+  test "$(k3s kubectl get pod forge-lvm-interrupted-resize -n iterabase-system -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)" = True && exit 0
   sleep 2
 done
 exit 1`, candidateShellQuote(state.storagePVCUID+"|"+state.storagePV))
 	if output, err := sshOutput(client, "sudo bash -ceu "+candidateShellQuote(command)); err != nil {
-		t.Fatalf("reboot did not preserve receipt/VG/node/PVC/PV identity: %v\n%s", err, output)
+		t.Fatalf("reboot did not preserve and converge receipt/VG/PVC/PV growth intent: %v\n%s", err, output)
 	}
-	t.Logf("storage reboot preserved identity: boot %s -> %s", before, after)
+	lvm := strings.TrimSpace(mustSSHOutput(t, client, fmt.Sprintf(`sudo k3s kubectl get lvmvolume.local.openebs.io %s -n iterabase-system -o jsonpath='{.spec.capacity}|{.status.state}'`, handle)))
+	if lvm != "3Gi|Ready" {
+		t.Fatalf("interrupted growth did not converge the same LVMVolume: %q", lvm)
+	}
+	if identity := strings.TrimSpace(mustSSHOutput(t, client, fmt.Sprintf(`sudo bash -ceu 'lv=/dev/iterabase-data/%s; printf "%%s|%%s" "$(lvs --noheadings -o lv_uuid "$lv" | xargs)" "$(blkid -s UUID -o value "$lv")"'`, candidateShellQuote(handle)))); identity != hostIdentity {
+		t.Fatalf("rebooted growth replaced LV/filesystem identity: before=%s after=%s", hostIdentity, identity)
+	}
+	mustSSHOutput(t, client, `sudo k3s kubectl exec -n iterabase-system forge-lvm-interrupted-resize -- test "$(cat /data/marker)" = HOR-545-reapply`)
+	mustSSHOutput(t, client, "sudo k3s kubectl delete pod/forge-lvm-interrupted-resize -n iterabase-system --wait=true --timeout=5m")
+	t.Logf("storage reboot preserved and converged grow-only identity: boot %s -> %s", before, after)
 }
 
 func reapplyCurrentPlatformStage(t *testing.T, state *permanentCPUFixtureState) {

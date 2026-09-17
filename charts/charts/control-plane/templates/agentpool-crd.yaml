@@ -862,7 +862,8 @@ spec:
                   supervisor in this pool may access the whole claim; separate AgentPools
                   receive separate claims/mounts. Each disposable child gets a stable distinct
                   UID=GID and session-owned 0700 tree beneath the root-owned 0711 PVC root.
-                  The requested size is the fixed thick-LV/filesystem capacity; online expansion and shrink are unsupported.
+                  The requested size is desired grow-only thick-LV/filesystem capacity.
+                  Increases patch the same claim; shrink and identity replacement are refused.
                 properties:
                   accessMode:
                     description: |-
@@ -882,8 +883,9 @@ spec:
                     anyOf:
                     - type: integer
                     - type: string
-                    description: size is the immutable thick XFS volume capacity requested
-                      from iterabase-data.
+                    description: |-
+                      size is the desired grow-only thick XFS capacity requested from
+                      iterabase-data. Only an increase is reconciled after provisioning.
                     pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                     x-kubernetes-int-or-string: true
                   storageClassName:

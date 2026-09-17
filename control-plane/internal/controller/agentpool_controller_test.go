@@ -185,7 +185,7 @@ func seedOpenEBSLVMClass(t *testing.T, c client.Client, ctx context.Context) {
 	t.Helper()
 	reclaim := corev1.PersistentVolumeReclaimDelete
 	binding := storagev1.VolumeBindingWaitForFirstConsumer
-	expand := false
+	expand := true
 	err := c.Create(ctx, &storagev1.StorageClass{
 		ObjectMeta:  metav1.ObjectMeta{Name: agentPoolWorkspaceStorageClass, Annotations: map[string]string{"storageclass.kubernetes.io/is-default-class": "false"}},
 		Provisioner: agentPoolWorkspaceProvisioner, ReclaimPolicy: &reclaim,
@@ -969,10 +969,9 @@ func TestAgentPoolMultiReplicaRWOReconcile(t *testing.T) {
 	}, 15*time.Second, 200*time.Millisecond, "two warm-worker pods should be created for same-node RWO")
 }
 
-// TestAgentPoolLVMSizeMutationPreservesPVC proves the non-expandable
-// contract: changing requested size never recreates or silently mutates the
-// existing claim.
-func TestAgentPoolLVMSizeMutationPreservesPVC(t *testing.T) {
+// TestAgentPoolLVMGrowOnlyMutationPreservesPVC proves that desired capacity
+// patches only the same claim upward and refuses shrink without replacement.
+func TestAgentPoolLVMGrowOnlyMutationPreservesPVC(t *testing.T) {
 	adminClient, ctx := newAgentPoolTestEnv(t, nil)
 	ns := "default"
 
@@ -1004,9 +1003,30 @@ func TestAgentPoolLVMSizeMutationPreservesPVC(t *testing.T) {
 		firstUID = pvc.UID
 		return firstUID != "" && len(pvc.Spec.AccessModes) == 1 && pvc.Spec.AccessModes[0] == corev1.ReadWriteOnce
 	}, 15*time.Second, 200*time.Millisecond, "RWO sandbox PVC should be created")
+	var workerUID types.UID
+	require.Eventually(t, func() bool {
+		var pod corev1.Pod
+		if err := adminClient.Get(ctx, types.NamespacedName{Name: "mut-pool-worker-0", Namespace: ns}, &pod); err != nil {
+			return false
+		}
+		workerUID = pod.UID
+		return workerUID != ""
+	}, 15*time.Second, 200*time.Millisecond, "mounted worker intent should exist before resize")
 
-	// Request online expansion. The fixed thick LVM class is non-expandable, so
-	// the controller must preserve the existing claim and surface the refusal.
+	// envtest has no CSI provisioner/binder. Mark the claim Bound through its
+	// status subresource so Kubernetes exercises the real bound-PVC expansion
+	// validation rather than rejecting a resize of an unbound WFFC claim.
+	require.Eventually(t, func() bool {
+		var pvc corev1.PersistentVolumeClaim
+		if err := adminClient.Get(ctx, pvcNN, &pvc); err != nil {
+			return false
+		}
+		pvc.Status.Phase = corev1.ClaimBound
+		pvc.Status.Capacity = corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("10Gi")}
+		return adminClient.Status().Update(ctx, &pvc) == nil
+	}, 15*time.Second, 200*time.Millisecond, "should emulate a bound CSI claim")
+
+	// Request online expansion. The controller patches only the existing claim.
 	require.Eventually(t, func() bool {
 		var got v1alpha1.AgentPool
 		if err := adminClient.Get(ctx, poolNN, &got); err != nil {
@@ -1014,11 +1034,27 @@ func TestAgentPoolLVMSizeMutationPreservesPVC(t *testing.T) {
 		}
 		got.Spec.Sandbox.Size = resource.MustParse("20Gi")
 		return adminClient.Update(ctx, &got) == nil
-	}, 15*time.Second, 200*time.Millisecond, "should update requested planning size")
+	}, 15*time.Second, 200*time.Millisecond, "should update desired grow-only size")
 
-	// Fail-closed: the PVC is NOT recreated (same UID), its access mode is NOT
-	// silently rewritten, and the reconcile surfaces the immutability error in
-	// status instead of destroying the bound PVC.
+	require.Eventually(t, func() bool {
+		var pvc corev1.PersistentVolumeClaim
+		if err := adminClient.Get(ctx, pvcNN, &pvc); err != nil {
+			return false
+		}
+		current := pvc.Spec.Resources.Requests[corev1.ResourceStorage]
+		return pvc.UID == firstUID && current.Cmp(resource.MustParse("20Gi")) == 0 &&
+			pvc.Annotations[agentPoolResizeStartedAnnotation] != ""
+	}, 15*time.Second, 200*time.Millisecond, "PVC request should grow in place with durable resize evidence")
+
+	// A later shrink is refused while the grown claim identity and request stay.
+	require.Eventually(t, func() bool {
+		var got v1alpha1.AgentPool
+		if err := adminClient.Get(ctx, poolNN, &got); err != nil {
+			return false
+		}
+		got.Spec.Sandbox.Size = resource.MustParse("5Gi")
+		return adminClient.Update(ctx, &got) == nil
+	}, 15*time.Second, 200*time.Millisecond, "should submit an unsupported shrink")
 	require.Eventually(t, func() bool {
 		var pvc corev1.PersistentVolumeClaim
 		if err := adminClient.Get(ctx, pvcNN, &pvc); err != nil {
@@ -1028,10 +1064,13 @@ func TestAgentPoolLVMSizeMutationPreservesPVC(t *testing.T) {
 		if err := adminClient.Get(ctx, poolNN, &got); err != nil {
 			return false
 		}
+		var pod corev1.Pod
+		if err := adminClient.Get(ctx, types.NamespacedName{Name: "mut-pool-worker-0", Namespace: ns}, &pod); err != nil {
+			return false
+		}
 		current := pvc.Spec.Resources.Requests[corev1.ResourceStorage]
-		return pvc.UID == firstUID && current.Cmp(resource.MustParse("10Gi")) == 0 &&
-			strings.Contains(got.Status.Message, "size is immutable")
-	}, 15*time.Second, 200*time.Millisecond, "PVC must not be recreated or expanded; the immutable size error is surfaced")
+		return pvc.UID == firstUID && pod.UID == workerUID && current.Cmp(resource.MustParse("20Gi")) == 0 && strings.Contains(got.Status.Message, "PVCShrinkRefused")
+	}, 15*time.Second, 200*time.Millisecond, "shrink must preserve the same grown claim and report an actionable refusal")
 }
 
 type quiesceFailureClient struct {

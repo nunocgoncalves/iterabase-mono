@@ -211,9 +211,11 @@ state, and strict host-key verification. GPU readiness remains at the
 NFD-published node-label/operator boundary: Forge pins the GPU Operator v26.3.3
 subchart to the compatible NFD v0.19.0 image and a 30-second master full-resync
 period, then requires the rendered image/argument and the normal operator/node
-readiness evidence. GPU execution also validates the separate `/data/hf-cache`
-volume and the model authority in
-`forge/test/e2e/model-cache.json`; data-storage purge never targets that device.
+readiness evidence. GPU execution also validates the separate harness cache
+disk mounted at `/data/hf-cache` and the model authority in
+`forge/test/e2e/model-cache.json`, then copies the verified cache into a managed
+ModelBackend PVC. The serving pod mounts only that PVC; data-storage purge never
+targets the seed device.
 Actions has no provider API credential. An SSH-unrecoverable fixture stops F3
 until founder-operated provider quarantine/recovery restores the documented
 baseline.

@@ -187,7 +187,7 @@ func TestValidateManagedLVMStorageClassFailsClosed(t *testing.T) {
 			"annotations": map[string]any{defaultClassAnnotation: "false", betaDefaultClassAnnotation: "false"},
 		},
 		"provisioner": contract.Provisioner, "reclaimPolicy": "Delete",
-		"volumeBindingMode": "WaitForFirstConsumer", "allowVolumeExpansion": false,
+		"volumeBindingMode": "WaitForFirstConsumer", "allowVolumeExpansion": true,
 		"parameters": map[string]any{
 			"storage": "lvm", "vgpattern": "^" + contract.DataVolumeGroupName + "$", "fsType": "xfs", "thinProvision": "no", "shared": "yes",
 		},
@@ -208,7 +208,7 @@ func TestValidateManagedLVMStorageClassFailsClosed(t *testing.T) {
 		"provisioner": func(value map[string]any) { value["provisioner"] = "rancher.io/local-path" },
 		"reclaim":     func(value map[string]any) { value["reclaimPolicy"] = "Retain" },
 		"binding":     func(value map[string]any) { value["volumeBindingMode"] = "Immediate" },
-		"expansion":   func(value map[string]any) { value["allowVolumeExpansion"] = true },
+		"expansion":   func(value map[string]any) { value["allowVolumeExpansion"] = false },
 		"filesystem":  func(value map[string]any) { value["parameters"].(map[string]any)["fsType"] = "ext4" },
 		"thin":        func(value map[string]any) { value["parameters"].(map[string]any)["thinProvision"] = "yes" },
 		"unshared":    func(value map[string]any) { value["parameters"].(map[string]any)["shared"] = "no" },

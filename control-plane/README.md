@@ -258,8 +258,8 @@ A `ModelBackend` (`kind: vLLM`) deploys an internal GPU workload (Deployment +
 Service) and materializes into `catalog.backends`; a `Model` references it and
 carries the client-facing alias/config. For **plug-n-play** models the
 controller assembles the serving command (`--model <id> --port --host
-<extraArgs>`) and manages the HF cache (`hf-cache` hostPath + `HF_HOME`), a
-sized `/dev/shm` (`devShmSize`, default 2Gi), the `nvidia` runtimeClass, the GPU
+<extraArgs>`) and manages `HF_HOME=/data/hf-cache`, a sized `/dev/shm`
+(`devShmSize`, default 2Gi), the `nvidia` runtimeClass, the GPU
 request, the GPU node selector, and a 10-min startup probe.
 
 **Custom vLLM builds** (HOR-388) — e.g. a quantized/SM120-specific build with a
@@ -271,15 +271,18 @@ path when unset:
 |---|---|
 | `spec.command` / `spec.args` | Override the container ENTRYPOINT/CMD. When `args` is set, the controller **skips** its `--model/--port/--host` assembly and `extraArgs`; the deployer owns the whole command shape (e.g. positional `vllm … serve <model>`). `healthProbe.port` stays the sole port source for the Service + probes — the deployer must bind `--port <healthProbe.port>` in `args`. |
 | `spec.env` | Extra env vars (`corev1.EnvVar`, supports `valueFrom` for `HF_TOKEN` from a Secret). The controller injects `HF_HOME=/data/hf-cache` only if `env` doesn't already set it (user wins). |
-| `spec.volumes` / `spec.volumeMounts` | Extra volumes/mounts, appended after the managed `hf-cache` + `dshm`. Reserved names `hf-cache`/`dshm` are rejected. Use for runtime file-artifact overlays (a ConfigMap of patch `.py` files subPath-mounted over venv paths) or a PV. |
+| `spec.persistentVolumes[]` | Generic controller-owned serving claims. Every entry declares a unique stable name, unique absolute mount path, explicit `iterabase-lvm-xfs`, and positive desired size. Claims are deterministic RWO/Filesystem PVCs; identity is immutable after provisioning and size may only grow in place. `/data/hf-cache` backs the default `HF_HOME`; `/cache` remains a generic mount with no LMCache-specific behavior. |
+| `spec.volumes` / `spec.volumeMounts` | Extra volumes/mounts, appended after managed persistent/ephemeral storage and `dshm`. Reserved names and mount-path collisions are rejected. Use for runtime file-artifact overlays such as a ConfigMap of patch files. The unrelated disposable `container-tmp` hostPath remains allowed and is not HF/cache persistence. |
 | `spec.hostIPC` | Opt-in `hostIPC` (default false). Sized `/dev/shm` (`devShmSize`) is the normal TP shm mechanism; flip on only if a build's NCCL/CUDA IPC proves to need it. |
 | `spec.securityContext` | Container-level `corev1.SecurityContext` passthrough. Set `capabilities.add: [IPC_LOCK]` for NCCL TP — `CAP_IPC_LOCK` bypasses `RLIMIT_MEMLOCK` (the K8s equivalent of `--ulimit memlock=-1`; a bash `ulimit` wrapper is a no-op without `CAP_SYS_RESOURCE`). Also covers `runAsUser`, `readOnlyRootFilesystem`, etc. |
 | `spec.healthProbe.startupTimeoutSeconds` | Scales the startupProbe window (default 600s; controller renders `period=10, failureThreshold=ceil(n/10)`). Raise for large/long-context models whose warmup is slow. |
 
 The platform does **not** carry forked serving images: a custom build consumes
 its upstream image verbatim and overlays any patches as file artifacts
-(ConfigMaps). Weights are downloaded from HuggingFace into the `hf-cache` hostPath
-(no pre-mount needed); set `HF_TOKEN` in `env` for gated models. See
+(ConfigMaps). A backend with a managed `/data/hf-cache` declaration persists
+weights on its controller-owned PVC; an undeclared HF cache uses only an
+`emptyDir` and remains plug-and-play but ephemeral. Set `HF_TOKEN` in `env` for
+gated models. See
 `config/samples/platform_v1alpha1_modelbackend_dsv4flash_b12x.yaml` for a full
 B12X/SM120 example (DeepSeek-V4-Flash NVFP4, TP=2, MTP, 256k context, patch
 overlays). Multi-replica TP/PP and SGLang are deferred (HOR-323 / deepen).
@@ -293,9 +296,13 @@ bindings for work dispatched to the pool. No separate Tool/EgressRoute/
 IntegrationBinding CRD exists in v1.
 
 The operator reconciles, per pool, one explicit Filesystem-mode **ReadWriteOnce
-sandbox PVC** on `iterabase-agentpool-lvm-xfs`. The request is an immutable thick
-XFS LV/filesystem capacity in the fixed `iterabase-data` VG; online expansion
-and shrink are unsupported. All trusted root supervisors in that pool may access
+sandbox PVC** on `iterabase-agentpool-lvm-xfs`. `spec.sandbox.size` is desired
+grow-only thick XFS capacity in the fixed `iterabase-data` VG. An increase
+patches only that claim; shrink, identity change, copy, and replacement are
+refused. During online growth, readiness and fresh dispatch authorization stay
+closed while mounted workers remain available for Kubelet XFS expansion and an
+active turn is not aborted solely by resize. Reopening requires PVC/PV/OpenEBS
+convergence and a fresh valid mounted-filesystem `statfs`. All trusted root supervisors in that pool may access
 the whole claim; separate pools receive separate OpenEBS volumes. Model-directed
 children use stable distinct session UID=GID, cleared groups, no capabilities,
 `no_new_privs`, umask `0077`, and session-owned `0700`
@@ -322,15 +329,17 @@ The rendered supervisor retains runtime-default capabilities and explicitly adds
 The child uses equal stable UID/GID, cleared groups, no capabilities,
 `no_new_privs`, and umask `0077`, so opening the key returns `EACCES`.
 
-Readiness requires the exact non-default, non-expandable
+Readiness requires the exact non-default, grow-only-expandable
 `iterabase-agentpool-lvm-xfs` class (`local.csi.openebs.io`, XFS,
 `vgpattern: ^iterabase-data$`, thick, `shared: yes`, `WaitForFirstConsumer`,
 `Delete`), one explicit RWO Filesystem claim, and a bound CSI PV whose driver,
 filesystem, VG attribute, volume handle, local node affinity, Ready LVMVolume,
 and LVMNode VG identity agree. The initial unbound `WaitForFirstConsumer` state
 does not deadlock worker creation. Wrong/ambiguous class, CSI, filesystem, VG,
-OpenEBS identity, topology, access/volume mode, immutable claim mutation,
-unsafe ownership, or actual I/O failure fails closed.
+OpenEBS identity, topology, access/volume mode, unauthorized/non-size claim
+mutation, unsafe ownership, or actual I/O failure fails closed. Positively
+observed identity/topology corruption retains destructive quiescence; safe
+resize and unknown observations retain mounted workers while closing credit.
 
 The harness measures available blocks on its pool's actual XFS PVC and persists
 that pool's local hysteresis state on the claim. Dispatch serializes a separate

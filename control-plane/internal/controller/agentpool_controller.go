@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -54,6 +55,7 @@ func (e *secretDependencyReadError) Unwrap() error {
 type agentPoolStorageMutationError struct {
 	reason  string
 	message string
+	quiesce bool
 }
 
 func (e *agentPoolStorageMutationError) Error() string { return e.message }
@@ -80,6 +82,11 @@ const (
 	// attempting a forbidden spec mutation that also drops scheduler-owned
 	// state (e.g. nodeName).
 	workerTemplateHashAnnotation = "platform.iterabase.com/pod-template-hash"
+	// agentPoolResizeStartedAnnotation requires a statfs observation newer than
+	// the latest grow-in-place request before StorageReady and dispatch storage
+	// authorization may reopen.
+	agentPoolResizeStartedAnnotation          = "platform.iterabase.com/resize-requested-at"
+	agentPoolResizeBaselineCapacityAnnotation = "platform.iterabase.com/resize-baseline-capacity-bytes"
 )
 
 // AgentPoolReconciler maintains isolated warm-worker pods plus one fixed-class
@@ -237,8 +244,8 @@ func (r *AgentPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		_ = r.patchStatus(ctx, &pool, false, 0, fmt.Sprintf("materialize gateway: %v", err), false)
 		return ctrl.Result{}, err
 	}
-	// Validate the fixed StorageClass before creating or mutating a claim. A
-	// missing/wrong/default/expandable class must fail without leaving a new PVC.
+	// Validate the fixed expandable StorageClass before creating or mutating a
+	// claim. A missing, wrong, default, or non-expandable class fails closed.
 	storage := r.assessAgentPoolStorage(ctx, &pool)
 	var storageGateErr error
 	if !storage.Ready {
@@ -282,8 +289,10 @@ func (r *AgentPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 				ClassName: pool.Spec.Sandbox.StorageClassName,
 			}
 			hadWorkers := r.countReadyWorkers(ctx, &pool) > 0 || storageWasOperationallyReady(&pool)
-			if hadWorkers {
-				assessment.Message += "; scheduling credit was removed before worker quiescing, and recovery requires a reviewed storage migration or a corrected declarative value without automatic turn/effect replay"
+			if hadWorkers && mutationErr.quiesce {
+				assessment.Message += "; scheduling credit was removed before worker quiescing, and recovery requires corrected identity without automatic turn/effect replay"
+			} else if hadWorkers {
+				assessment.Message += "; existing mounted workers and bytes are retained while readiness and fresh credits remain closed"
 			}
 			gateErr := r.setDispatchStorageAuthorized(ctx, &pool, false)
 			if gateErr != nil {
@@ -292,8 +301,16 @@ func (r *AgentPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			// Publish the fail-closed condition independently of pod deletion. A
 			// transient list/delete error must not leave Ready or StorageReady=True
 			// visible while the immutable storage mutation is being rejected.
-			statusErr := r.patchStatus(ctx, &pool, false, 0, assessment.Message, true, assessment)
-			quiesceErr := r.quiesceWorkers(ctx, &pool)
+			readyReplicas := r.countReadyWorkers(ctx, &pool)
+			if mutationErr.quiesce {
+				assessment.ReplacementPending = hadWorkers
+				readyReplicas = 0
+			}
+			statusErr := r.patchStatus(ctx, &pool, false, readyReplicas, assessment.Message, true, assessment)
+			var quiesceErr error
+			if mutationErr.quiesce {
+				quiesceErr = r.quiesceWorkers(ctx, &pool)
+			}
 			if err := stderrors.Join(statusErr, gateErr, quiesceErr); err != nil {
 				return ctrl.Result{}, err
 			}
@@ -314,6 +331,12 @@ func (r *AgentPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 	readyReplicas := r.countReadyWorkers(ctx, &pool)
 	if !storage.Ready {
+		if storage.SafeResize {
+			// Mounted publication is required for online XFS growth. Keep healthy
+			// workers (and any active turn) alive while StorageReady and all fresh
+			// credit remain closed; a resize request alone never grants capacity.
+			return ctrl.Result{RequeueAfter: healthRequeueInterval}, r.patchStatus(ctx, &pool, false, readyReplicas, storage.Message, false, &storage)
+		}
 		wasOperationallyReady := storageWasOperationallyReady(&pool)
 		if wasOperationallyReady || !storage.CanMount {
 			if wasOperationallyReady || readyReplicas > 0 {
@@ -628,17 +651,29 @@ func (r *AgentPoolReconciler) secretExists(ctx context.Context, ns, name string)
 	return nil
 }
 
-// ensurePVC creates/updates the one fixed-class RWO sandbox PVC.
+// ensurePVC creates the one fixed-class RWO sandbox PVC or patches only its
+// existing storage request upward. It never adopts or replaces another claim.
+//
+//nolint:gocyclo // ordered ownership/identity/grow-only predicates intentionally fail closed.
 func (r *AgentPoolReconciler) ensurePVC(ctx context.Context, pool *v1alpha1.AgentPool) error {
 	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: sandboxPVCName(pool), Namespace: pool.Namespace}}
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, pvc, func() error {
-		if err := controllerutil.SetControllerReference(pool, pvc, r.Scheme); err != nil {
+		existing := !pvc.CreationTimestamp.IsZero() || pvc.ResourceVersion != ""
+		if existing {
+			owner := metav1.GetControllerOf(pvc)
+			if owner == nil || owner.APIVersion != v1alpha1.GroupVersion.String() || owner.Kind != "AgentPool" || owner.Name != pool.Name || owner.UID != pool.UID {
+				return &agentPoolStorageMutationError{
+					reason:  storageReasonClassMismatch,
+					message: fmt.Sprintf("refusing to adopt unrelated sandbox PVC %s/%s; the deterministic claim must remain owned by AgentPool %s uid=%s", pvc.Namespace, pvc.Name, pool.Name, pool.UID),
+				}
+			}
+		} else if err := controllerutil.SetControllerReference(pool, pvc, r.Scheme); err != nil {
 			return err
 		}
 		sc := pool.Spec.Sandbox.StorageClassName
 		access := []corev1.PersistentVolumeAccessMode{pool.Spec.Sandbox.AccessMode}
 		volumeMode := corev1.PersistentVolumeFilesystem
-		if !pvc.CreationTimestamp.IsZero() {
+		if existing {
 			if pvc.Spec.StorageClassName == nil || *pvc.Spec.StorageClassName != sc {
 				return &agentPoolStorageMutationError{
 					reason:  storageReasonClassMismatch,
@@ -652,11 +687,38 @@ func (r *AgentPoolReconciler) ensurePVC(ctx context.Context, pool *v1alpha1.Agen
 				}
 			}
 			current := pvc.Spec.Resources.Requests[corev1.ResourceStorage]
-			if current.Cmp(pool.Spec.Sandbox.Size) != 0 {
+			if current.Cmp(pool.Spec.Sandbox.Size) > 0 {
 				return &agentPoolStorageMutationError{
-					reason:  storageReasonPVCExpansionFailed,
-					message: fmt.Sprintf("PVCExpansionFailed: OpenEBS thick XFS sandbox PVC size is immutable (current %s requested %s); online expansion and shrink are unsupported", current.String(), pool.Spec.Sandbox.Size.String()),
+					reason:  storageReasonPVCShrinkRefused,
+					message: fmt.Sprintf("PVCShrinkRefused: OpenEBS thick XFS sandbox PVC may only grow (current %s requested %s); the same claim, mounted workers, and bytes were preserved", current.String(), pool.Spec.Sandbox.Size.String()),
 				}
+			}
+			if current.Cmp(pool.Spec.Sandbox.Size) < 0 {
+				if (pvc.Status.Phase == corev1.ClaimPending || pvc.Status.Phase == "") && pvc.Spec.VolumeName == "" {
+					// Kubernetes permits expansion only after binding. Preserve the
+					// initial request and let workers trigger WaitForFirstConsumer;
+					// the next bound reconcile patches the same claim upward.
+					return nil
+				}
+				if pvc.Annotations == nil {
+					pvc.Annotations = map[string]string{}
+				}
+				baseline := uint64(0)
+				currentCapacity := pvc.Status.Capacity[corev1.ResourceStorage]
+				if observed := currentCapacity.Value(); observed > 0 {
+					baseline = uint64(observed)
+				}
+				if r.CapacityReader != nil {
+					status, statusErr := r.CapacityReader.WorkspaceCapacityStatus(ctx, pool.Namespace+"/"+pool.Name)
+					if statusErr == nil && workspaceCapacityStatusValid(status) && status.ObservedAt != nil && time.Since(*status.ObservedAt) <= workspaceCapacityObservationFreshness {
+						baseline = status.CapacityBytes
+					}
+				}
+				if baseline == 0 {
+					return fmt.Errorf("PVCExpansionPending: wait for an authoritative pre-resize filesystem/PVC capacity observation before growing %s/%s", pvc.Namespace, pvc.Name)
+				}
+				pvc.Annotations[agentPoolResizeBaselineCapacityAnnotation] = strconv.FormatUint(baseline, 10)
+				pvc.Annotations[agentPoolResizeStartedAnnotation] = time.Now().UTC().Format(time.RFC3339Nano)
 			}
 		} else {
 			pvc.Spec.AccessModes = access

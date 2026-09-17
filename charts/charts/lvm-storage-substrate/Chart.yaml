@@ -6,7 +6,7 @@ version: 0.4.1
 appVersion: "1.10.0"
 annotations:
   iterabase.com/architecture-decision: DES-HOR-545-01
-  iterabase.com/architecture-amendment: DES-HOR-545-05
+  iterabase.com/architecture-amendment: DES-HOR-545-05,DES-HOR-545-07
 dependencies:
   - name: lvm-localpv
     version: 1.10.0

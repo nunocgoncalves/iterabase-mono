@@ -57,7 +57,7 @@ done
 [[ $(grep -c 'thinProvision: "no"' <<<"$render") -eq 2 ]]
 [[ $(grep -c 'volumeBindingMode: WaitForFirstConsumer' <<<"$render") -eq 2 ]]
 [[ $(grep -c 'reclaimPolicy: Delete' <<<"$render") -eq 2 ]]
-[[ $(grep -c 'allowVolumeExpansion: false' <<<"$render") -eq 2 ]]
+[[ $(grep -c 'allowVolumeExpansion: true' <<<"$render") -eq 2 ]]
 [[ $(grep -c 'storageclass.kubernetes.io/is-default-class: "false"' <<<"$render") -eq 2 ]]
 grep -A14 'name: iterabase-lvm-xfs' <<<"$render" | grep -Fq 'shared: "no"'
 grep -A15 'name: iterabase-agentpool-lvm-xfs' <<<"$render" | grep -Fq 'shared: "yes"'
@@ -89,20 +89,25 @@ fi
 grep -Fq 'resources: ["lvmsnapshots"]' <<<"$generated_runtime"
 grep -A1 -F 'resources: ["lvmsnapshots"]' <<<"$generated_runtime" | grep -Fq 'verbs: ["list", "watch"]'
 
-# DES-HOR-545-01: the agentpool class must be gated by a fail-closed admission
-# policy bound to the exact control-plane manager service-account identity.
+# DES-HOR-545-01 / DES-HOR-545-07: the AgentPool class must be gated by a
+# fail-closed policy that permits only the exact manager to raise a request.
 grep -Fq 'kind: ValidatingAdmissionPolicy' <<<"$render"
 grep -Fq 'kind: ValidatingAdmissionPolicyBinding' <<<"$render"
 grep -Fq 'name: iterabase-agentpool-claim-authority' <<<"$render"
 grep -Fq 'failurePolicy: Fail' <<<"$render"
 grep -Fq 'validationActions: [Deny]' <<<"$render"
 grep -Fq 'request.userInfo.username == '\''system:serviceaccount:iterabase-system:release-control-plane-manager'\''' <<<"$render"
-# Operation-aware: CREATE gated by manager identity; UPDATE denies mutating the
-# protected class / AgentPool ownership while letting scheduler/CSI/kubelet pass.
+# Operation-aware: CREATE is manager-gated; UPDATE keeps identity fields
+# immutable, permits only manager-owned request changes, and requires growth.
 grep -Fq 'operations: ["CREATE", "UPDATE"]' <<<"$render"
 grep -Fq 'request.operation != '\''CREATE'\'' || request.userInfo.username' <<<"$render"
 grep -Fq 'request.operation != '\''UPDATE'\'' || (has(oldObject.spec)' <<<"$render"
 grep -Fq 'object.spec.storageClassName == oldObject.spec.storageClassName' <<<"$render"
+grep -Fq 'object.spec.accessModes == oldObject.spec.accessModes' <<<"$render"
+grep -Fq 'Only the control-plane manager may change an AgentPool PVC storage request' <<<"$render"
+grep -Fq 'quantity(object.spec.resources.requests.storage).isGreaterThan(quantity(oldObject.spec.resources.requests.storage))' <<<"$render"
+grep -Fq 'Only the control-plane manager may change AgentPool resize observation evidence' <<<"$render"
+grep -Fq 'Only the control-plane manager may change AgentPool resize capacity evidence' <<<"$render"
 grep -Fq 'resources: ["persistentvolumeclaims"]' <<<"$render"
 
 # DES-HOR-545-05: the inert provider schema is protected by a fail-closed,
@@ -134,4 +139,4 @@ if helm template release-lvm-storage "$substrate" --set lvm-localpv.enabled=fals
   exit 1
 fi
 
-echo "OK: pinned OpenEBS volume authority, inert LVMSnapshot deny boundary, CSI/user snapshot absence, narrowed RBAC, and exact managed classes"
+echo "OK: pinned expandable OpenEBS volume authority, grow-only AgentPool admission, inert LVMSnapshot deny boundary, CSI/user snapshot absence, narrowed RBAC, and exact managed classes"

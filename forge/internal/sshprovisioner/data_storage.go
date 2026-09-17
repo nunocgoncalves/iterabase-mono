@@ -651,7 +651,7 @@ if k3s kubectl get deployment local-path-provisioner -n kube-system >/dev/null 2
 verify_class() {
   name=$1; shared=$2
   observed=$(k3s kubectl get storageclass "$name" -o jsonpath='{.provisioner}|{.reclaimPolicy}|{.volumeBindingMode}|{.allowVolumeExpansion}|{.parameters.storage}|{.parameters.vgpattern}|{.parameters.fsType}|{.parameters.thinProvision}|{.parameters.shared}')
-  test "$observed" = "local.csi.openebs.io|Delete|WaitForFirstConsumer|false|lvm|^iterabase-data$|xfs|no|$shared" || fail "StorageClass $name contract drift: $observed"
+  test "$observed" = "local.csi.openebs.io|Delete|WaitForFirstConsumer|true|lvm|^iterabase-data$|xfs|no|$shared" || fail "StorageClass $name contract drift: $observed"
 }
 verify_class %s no
 verify_class %s yes
