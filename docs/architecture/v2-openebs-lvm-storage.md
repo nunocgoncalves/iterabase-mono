@@ -1,12 +1,12 @@
 # Platform V2 OpenEBS LVM LocalPV storage
 
-Status: current repository implementation contract for HOR-545 and approved `DES-HOR-545-01` / `DES-HOR-545-02` / `DES-HOR-545-03` / `DES-HOR-545-05`, recorded canonically in Obsidian `Platform V2 — OpenEBS LVM LocalPV Storage`. The same-day pre-release `DES-HOR-545-04` snapshot amendment is superseded historical evidence only.
+Status: current repository implementation contract for HOR-545/HOR-557 and approved `DES-HOR-545-01` / `DES-HOR-545-02` / `DES-HOR-545-03` / `DES-HOR-545-05` / `DES-HOR-545-07`, recorded canonically in Obsidian `Platform V2 — OpenEBS LVM LocalPV Storage`. The same-day pre-release `DES-HOR-545-04` snapshot amendment is superseded historical evidence only.
 
 ## Supported topology
 
 Platform V2 supports exactly one schedulable K3s server node and one or more explicitly selected blank stable whole data disks. Forge prepares only physical volumes and one fixed thick volume group, `iterabase-data`. Chart-owned OpenEBS LVM LocalPV `1.10.0` creates every platform LV, XFS filesystem, mount, and claim lifecycle.
 
-K3s local-path/default/root-backed storage, Longhorn, RWX, NFS/iSCSI, thin provisioning, online expansion, alternate/BYO classes, existing PV/VG/filesystem adoption, disk-set extension/replacement, migration, and multi-node/HA are unsupported.
+K3s local-path/default/root-backed storage, Longhorn, RWX, NFS/iSCSI, thin provisioning, shrink, claim-replacing resize, alternate/BYO classes, existing PV/VG/filesystem adoption, disk-set/VG extension or replacement, migration, and multi-node/HA are unsupported. Both managed classes support only grow-in-place online XFS/LVM expansion within real free extents already present in `iterabase-data`.
 
 ## Forge device and transaction contract
 
@@ -41,7 +41,7 @@ Forge applies certificate substrate, LVM substrate, then platform. It waits boun
 
 ## Exact StorageClasses
 
-Both classes are non-default, non-expandable, `ReadWriteOnce`, `WaitForFirstConsumer`, `Delete`, XFS, and thick. Their provisioner is `local.csi.openebs.io` and parameters include:
+Both classes are non-default, grow-only-expandable, `ReadWriteOnce`, `WaitForFirstConsumer`, `Delete`, XFS, and thick. Their provisioner is `local.csi.openebs.io` and parameters include:
 
 ```yaml
 storage: lvm
@@ -53,13 +53,23 @@ thinProvision: "no"
 - `iterabase-lvm-xfs` adds `shared: "no"` and is explicit on every chart-generated data PVC: PostgreSQL, MinIO, persistent observability components, and any future enabled chart data claim.
 - `iterabase-agentpool-lvm-xfs` adds `shared: "yes"` and is authorized only for one claim per AgentPool. `shared: yes` allows multiple pods on the same node to mount the RWO filesystem; it does not create RWX or cross-node behavior.
 
+A provisioned claim may change only `spec.resources.requests.storage`, and only upward. Growth preserves PVC/PV/OpenEBS `LVMVolume`/LV/filesystem identity, topology, owner, and bytes. It never authorizes claim recreation, copy/cutover, disk-set/VG mutation, thin overcommit, alternate classes, or root fallback.
+
+## ModelBackend managed serving storage
+
+`ModelBackend.spec.persistentVolumes[]` is the reusable serving-storage declaration. Every entry requires a unique DNS-label name, unique canonical absolute mount path, explicit `iterabase-lvm-xfs`, and positive desired size. The controller creates one deterministic owner-referenced RWO/Filesystem PVC per entry and refuses to adopt an unrelated deterministic-name claim. A claim-set digest plus per-claim declaration annotations make names, paths, class, access mode, and volume mode immutable after provisioning; the only supported mutation patches the same request upward.
+
+Pending `WaitForFirstConsumer` claims remain schedulable so the first serving pod can bind them. ModelBackend/catalogue health stays false while a required claim, class, PVC/PV/OpenEBS identity, capacity, or resize condition is missing or unconverged. Safe online resize retains the serving pod so Kubelet can grow mounted XFS, but the gateway receives no healthy route until all claims converge. A declared `/data/hf-cache` backs the existing `HF_HOME`; `/cache` is a generic mount. Without a managed HF declaration the controller uses an ephemeral `emptyDir`, never a hostPath. Explicit raw volumes remain available for unrelated file overlays and may not collide with managed names/paths; the existing disposable `container-tmp` hostPath remains allowed and is never represented as HF/LMCache persistence. Owned claims retain ordinary owner-GC plus StorageClass `Delete` reclamation when the ModelBackend is deleted.
+
+Managed serving claims are single-replica in this release. Multi-replica/HA, retention, adoption, migration, copy/cutover, backup, restore, and first-class model-cache administration remain unsupported.
+
 ## Inert provider dependency; snapshot lifecycle absent
 
 Platform V2 installs no `dm-snapshot` module/configuration, CSI VolumeSnapshot CRD, `VolumeSnapshotClass`, snapshot controller, CSI snapshotter sidecar/image, user/operator snapshot authority, or supported snapshot lifecycle. `DES-HOR-545-05` permits exactly one inert dependency: the `lvmsnapshots.local.openebs.io` CRD and `list`/`watch` for the controller and node service accounts that host the pinned OpenEBS driver. A fail-closed admission policy denies every `LVMSnapshot` creation; neither service account has `get`, `create`, `update`, `patch`, or `delete`; and readiness requires zero instances. Static packaging, runtime readiness, claim deletion, reapply, and real-machine evidence prove that exact boundary. OPP-005 remains the sole authority for any future recovery mechanism.
 
 ## AgentPool validation and isolation
 
-The API fixes `spec.sandbox.storageClassName` to `iterabase-agentpool-lvm-xfs`, access to `ReadWriteOnce`, and the generated claim to explicit Filesystem mode. Size is immutable thick capacity, not local-path planning metadata.
+The API fixes `spec.sandbox.storageClassName` to `iterabase-agentpool-lvm-xfs`, access to `ReadWriteOnce`, and the generated claim to explicit Filesystem mode. Size is desired grow-only thick capacity, not local-path planning metadata.
 
 The controller validates the class before creating a claim. An unbound `WaitForFirstConsumer` claim remains mount-capable so the first worker can schedule. Once bound, readiness requires:
 
@@ -67,7 +77,7 @@ The controller validates the class before creating a claim. An unbound `WaitForF
 - one unique Ready LVMVolume matching that handle, `volGroup`, `vgPattern`, `shared: yes`, `thinProvision: no`, and owner node;
 - the owner LVMNode reporting `iterabase-data` with a non-empty UUID, no missing PVs, and no thin pool.
 
-Class, access/volume mode, size, CSI, VG, OpenEBS identity, or topology drift withdraws readiness and quiesces workers without automatic turn/effect replay. Transient or unknown StorageClass/PV/LVMVolume/LVMNode observation errors withdraw readiness and fresh credit but retain healthy workers; only positively observed unsafe drift authorizes destructive quiescence. The manager records that authoritative storage decision independently of the PVC-capacity hysteresis row, and dispatch checks it durably before consuming even an already-advertised idle credit; worker capacity reports cannot reopen storage authority. One storage assessment is reused per reconcile, and known OpenEBS volume/node identities are read directly rather than through repeated cluster-wide lists.
+Class, access/volume mode, CSI, VG, OpenEBS identity, or topology drift withdraws readiness and quiesces workers without automatic turn/effect replay. A size increase instead patches only the same PVC request and records a resize timestamp. While PVC request/capacity, PV capacity, Ready LVMVolume capacity, filesystem growth, or the required post-resize mounted `statfs` observation has not converged, `StorageReady` and durable fresh-credit authorization remain false while mounted workers and active turns are retained. Shrink is refused without replacing the claim or deleting workers. Transient or unknown StorageClass/PV/LVMVolume/LVMNode observations likewise withdraw readiness/credit but retain healthy workers; only positively observed unsafe identity/topology drift authorizes destructive quiescence. The manager records storage authorization independently of PVC-capacity hysteresis, and dispatch checks it durably before consuming an idle credit; a request alone cannot reopen authority.
 
 All trusted root supervisors in one pool may access that whole claim; separate pools receive separate PVC/PV/LVMVolume identities. Disposable children retain stable distinct session UID=GID, cleared groups/capabilities, `no_new_privs`, umask `0077`, root-owned `0711` pool root, session-owned `0700` trees, sibling denial, and path containment. `DES-HOR-538-03` remains authoritative for constrained cert-manager CSI AtomicWriter key validation, supervisor mTLS, and child `EACCES`.
 
@@ -82,7 +92,7 @@ The harness measures and performs real write/fsync/rename/unlink health against 
 
 Different AgentPool PVCs remain independent. Real I/O/fsync/mount/ownership failure fences without replay. Dispatch metrics carry a bounded `pool` label and manager conditions query only the matching pool.
 
-The OpenEBS node metric endpoint supplies `lvm_vg_free_size_bytes{name="iterabase-data"}` and `lvm_vg_total_size_bytes{name="iterabase-data"}`. Chart-owned monitoring reports aggregate VG pressure independently and alerts on a managed PVC that remains Pending. Thick-capacity exhaustion for a new claim must fail visibly and actionably; there is no thin overcommit, alternate class, or root fallback. Soft-deleting a pool removes its durable capacity row, process-local hysteresis entry, and every per-pool Prometheus label series; a same-UUID revival starts fail-closed until its new PVC is observed.
+The OpenEBS node metric endpoint supplies `lvm_vg_free_size_bytes{name="iterabase-data"}` and `lvm_vg_total_size_bytes{name="iterabase-data"}`. Chart-owned monitoring reports aggregate VG pressure independently and alerts on a managed PVC that remains Pending. Thick-capacity exhaustion for a new claim or resize must fail visibly and actionably while preserving the existing claim/volume identity, current usable bytes, mounted observer, and unrelated claims. There is no capacity manufacture, disk/VG extension, thin overcommit, alternate class, or root fallback. Soft-deleting a pool removes its durable capacity row, process-local hysteresis entry, and every per-pool Prometheus label series; a same-UUID revival starts fail-closed until its new PVC is observed.
 
 ## Claim deletion, destroy, and purge
 
@@ -94,4 +104,4 @@ A deleted claim uses `Delete` and must remove its PV, LVMVolume, and LV after co
 
 The affected semantic target set is `control-plane`, `forge`, `control-plane-chart`, and `iterabase-platform-chart`; the platform target contains both same-version companions. HOR-538 artifacts remain immutable historical evidence.
 
-Required evidence includes focused owners, generated CRDs, static/render and runtime proof of the inert CRD/read-only RBAC/deny-all/zero-instance boundary plus CSI/user snapshot absence, real Kind OpenEBS volume provisioning/deletion/reapply/capacity proof, permanent-fixture PV/VG receipt safety and deterministic reconcile/purge crash matrices, same-pool concurrency/isolation, separate pools, per-pool and aggregate capacity, worker replacement, reboot/reapply, MinIO Job identity, ordinary destroy/non-purge, explicit purge, exact-head CI/E2E, an exact-head explicit four-target candidate rehearsal, exact-source candidate, protected promotion, and fresh bare-metal Ubuntu 24.04 LTS OPO1 acceptance. Active F3 evidence uses only the provider-neutral `forge/permanent-fixture-cpu`, `forge/permanent-fixture-cpu-workspace`, and `forge/permanent-fixture-gpu` identities. Merge and publication do not complete HOR-545.
+Required evidence includes focused owners, generated CRDs, static/render and runtime proof of both expandable classes plus the inert CRD/read-only RBAC/deny-all/zero-instance boundary and CSI/user snapshot absence, manager-only grow admission, ModelBackend deterministic multi-claim/WFFC/no-adoption behavior, real mounted general/ModelBackend/AgentPool growth with stable PVC/PV/LVMVolume/LV/filesystem identities and bytes, shrink and insufficient-VG refusal, safe interruption/reboot/reapply convergence, same-pool concurrency/isolation and active-turn continuity, fresh-statfs 20/25 behavior, worker and serving-pod replacement, lifecycle reclamation, exact-head CI/E2E, an exact-head explicit four-target candidate rehearsal, exact-source candidate, protected promotion, and fresh bare-metal Ubuntu 24.04 LTS OPO1 acceptance. The permanent GPU fixture copies its separately verified pinned model from the harness cache disk into a managed general-class PVC before serving; the serving pod mounts only that PVC. Active F3 evidence uses only the provider-neutral `forge/permanent-fixture-cpu`, `forge/permanent-fixture-cpu-workspace`, and `forge/permanent-fixture-gpu` identities. Merge and publication do not complete HOR-557 or HOR-545's later OPO1 gate.

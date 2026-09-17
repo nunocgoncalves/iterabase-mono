@@ -6,7 +6,7 @@ metadata:
   annotations:
     storageclass.kubernetes.io/is-default-class: "false"
     storageclass.beta.kubernetes.io/is-default-class: "false"
-    iterabase.com/architecture-decision: DES-HOR-545-01
+    iterabase.com/architecture-decision: DES-HOR-545-01,DES-HOR-545-07
 provisioner: local.csi.openebs.io
 parameters:
   storage: lvm
@@ -16,7 +16,7 @@ parameters:
   shared: "no"
 reclaimPolicy: Delete
 volumeBindingMode: WaitForFirstConsumer
-allowVolumeExpansion: false
+allowVolumeExpansion: true
 ---
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
@@ -25,7 +25,7 @@ metadata:
   annotations:
     storageclass.kubernetes.io/is-default-class: "false"
     storageclass.beta.kubernetes.io/is-default-class: "false"
-    iterabase.com/architecture-decision: DES-HOR-545-01
+    iterabase.com/architecture-decision: DES-HOR-545-01,DES-HOR-545-07
     iterabase.com/claim-authority: agentpool-only
 provisioner: local.csi.openebs.io
 parameters:
@@ -36,4 +36,4 @@ parameters:
   shared: "yes"
 reclaimPolicy: Delete
 volumeBindingMode: WaitForFirstConsumer
-allowVolumeExpansion: false
+allowVolumeExpansion: true

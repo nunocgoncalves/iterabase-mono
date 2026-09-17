@@ -274,6 +274,7 @@ func exerciseActiveWorkspaceCapacityStage(t *testing.T, state *permanentCPUFixtu
 	active := startWorkspaceWork(t, baseURL, state.workspaceWorkKey, "e2e/forge-workspace-capacity", "Active turn across capacity floor", "hor-545-capacity-active")
 	waitWorkspaceModelCapacity(t, modelURL, 1, 2*time.Minute)
 	waitWorkspaceDatabaseValue(t, cluster, state, fmt.Sprintf(`SELECT count(*) FROM runtime.turn_assignments WHERE attempt_id='%s' AND state='active'`, active.CurrentAttemptID), "1", time.Minute)
+	growAgentPoolDuringActiveTurn(t, cluster, state, client, active)
 	setWorkspaceFreeTarget(t, client, filler, 19)
 	waitWorkspaceGate(t, client, true, storageReasonWorkspaceCapacityGatedE2E, 3*time.Minute)
 	otherMetrics := mustSSHOutput(t, client, `pod=$(sudo k3s kubectl get pods -n iterabase-system -l platform.iterabase.com/agentpool=forge-storage-pool-b -o jsonpath='{.items[0].metadata.name}'); sudo k3s kubectl get --raw "/api/v1/namespaces/iterabase-system/pods/$pod:8081/proxy/metrics"`)
@@ -317,6 +318,77 @@ func exerciseActiveWorkspaceCapacityStage(t *testing.T, state *permanentCPUFixtu
 	removeFiller()
 	waitWorkspaceGate(t, client, false, storageReasonWorkspaceCapacityHealthyE2E, 3*time.Minute)
 	_ = waitWorkspaceWorkState(t, baseURL, state.workspaceWorkKey, queued.ID, "done", 4*time.Minute)
+}
+
+func growAgentPoolDuringActiveTurn(t *testing.T, cluster *remotecluster.Cluster, state *permanentCPUFixtureState, client *ssh.Client, active workspaceWorkItem) {
+	t.Helper()
+	const (
+		pool  = "forge-storage-pool"
+		claim = "forge-storage-pool-sandbox"
+	)
+	workersBefore := strings.TrimSpace(mustSSHOutput(t, client, `sudo k3s kubectl get pods -n iterabase-system -l platform.iterabase.com/agentpool=forge-storage-pool -o jsonpath='{range .items[*]}{.metadata.uid}{"\n"}{end}' | sort`))
+	pod := strings.Fields(mustSSHOutput(t, client, `sudo k3s kubectl get pods -n iterabase-system -l platform.iterabase.com/agentpool=forge-storage-pool -o name`))[0]
+	beforeFS := strings.TrimSpace(mustSSHOutput(t, client, fmt.Sprintf(`sudo k3s kubectl exec -n iterabase-system %s -- sh -ceu 'df -B1 --output=size /data/sandboxes | tail -1 | tr -d " "'`, pod)))
+	mustSSHOutput(t, client, fmt.Sprintf(`sudo k3s kubectl exec -n iterabase-system %s -- sh -ceu 'printf HOR-557-agentpool-growth > /data/sandboxes/.growth-marker; sync'`, pod))
+	identity := strings.TrimSpace(mustSSHOutput(t, client, `sudo k3s kubectl get pvc forge-storage-pool-sandbox -n iterabase-system -o jsonpath='{.metadata.uid}|{.spec.volumeName}'`))
+	parts := strings.Split(identity, "|")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		t.Fatalf("AgentPool pre-growth identity is malformed: %q", identity)
+	}
+	handle := strings.TrimSpace(mustSSHOutput(t, client, fmt.Sprintf(`sudo k3s kubectl get pv %s -o jsonpath='{.spec.csi.volumeHandle}'`, parts[1])))
+	hostIdentity := strings.TrimSpace(mustSSHOutput(t, client, fmt.Sprintf(`sudo bash -ceu 'lv=/dev/iterabase-data/%s; lvuuid=$(lvs --noheadings -o lv_uuid "$lv" | xargs); fsuuid=$(blkid -s UUID -o value "$lv"); printf "%%s|%%s" "$lvuuid" "$fsuuid"'`, candidateShellQuote(handle))))
+	if handle == "" || strings.Contains(hostIdentity, "||") || !strings.Contains(hostIdentity, "|") {
+		t.Fatalf("AgentPool pre-growth LVM/XFS identity is incomplete: handle=%q host=%q", handle, hostIdentity)
+	}
+
+	cluster.Kubectl(t, "patch", "agentpool/"+pool, "-n", workspaceNamespace, "--type=merge", "-p", `{"spec":{"sandbox":{"size":"3Gi"}}}`)
+	deadline := time.Now().Add(3 * time.Minute)
+	observedClosed := false
+	for time.Now().Before(deadline) {
+		status, err := kubectlAllowFail(t, cluster.Kubeconfig, "get", "agentpool/"+pool, "-n", workspaceNamespace, "-o", `jsonpath={.status.conditions[?(@.type=="StorageReady")].status}|{.status.conditions[?(@.type=="StorageReady")].reason}`)
+		request, requestErr := kubectlAllowFail(t, cluster.Kubeconfig, "get", "pvc/"+claim, "-n", workspaceNamespace, "-o", "jsonpath={.spec.resources.requests.storage}")
+		if err == nil && requestErr == nil && strings.TrimSpace(request) == "3Gi" && strings.HasPrefix(strings.TrimSpace(status), "False|PVCExpansion") {
+			observedClosed = true
+			break
+		}
+		time.Sleep(2 * time.Second)
+	}
+	if !observedClosed {
+		t.Fatal("AgentPool did not expose StorageReady=False while its existing claim grew")
+	}
+	workersDuring := strings.TrimSpace(mustSSHOutput(t, client, `sudo k3s kubectl get pods -n iterabase-system -l platform.iterabase.com/agentpool=forge-storage-pool -o jsonpath='{range .items[*]}{.metadata.uid}{"\n"}{end}' | sort`))
+	if workersDuring != workersBefore {
+		t.Fatalf("safe AgentPool resize replaced mounted workers: before=%q during=%q", workersBefore, workersDuring)
+	}
+	if got := workspaceDatabaseQuery(t, cluster, state, fmt.Sprintf(`SELECT count(*) FROM runtime.turn_assignments WHERE attempt_id='%s' AND state='active'`, active.CurrentAttemptID)); got != "1" {
+		t.Fatalf("safe AgentPool resize aborted/fenced the active turn: active assignments=%s", got)
+	}
+
+	cluster.Kubectl(t, "wait", "pvc/"+claim, "-n", workspaceNamespace, "--for=jsonpath={.status.capacity.storage}=3Gi", "--timeout=15m")
+	cluster.Kubectl(t, "wait", "agentpool/"+pool, "-n", workspaceNamespace, "--for=jsonpath={.status.conditions[?(@.type==\"StorageReady\")].status}=True", "--timeout=15m")
+	workersAfter := strings.TrimSpace(mustSSHOutput(t, client, `sudo k3s kubectl get pods -n iterabase-system -l platform.iterabase.com/agentpool=forge-storage-pool -o jsonpath='{range .items[*]}{.metadata.uid}{"\n"}{end}' | sort`))
+	if workersAfter != workersBefore {
+		t.Fatalf("converged AgentPool resize replaced workers: before=%q after=%q", workersBefore, workersAfter)
+	}
+	if after := strings.TrimSpace(mustSSHOutput(t, client, `sudo k3s kubectl get pvc forge-storage-pool-sandbox -n iterabase-system -o jsonpath='{.metadata.uid}|{.spec.volumeName}'`)); after != identity {
+		t.Fatalf("AgentPool growth replaced PVC/PV identity: before=%s after=%s", identity, after)
+	}
+	lvm := strings.TrimSpace(mustSSHOutput(t, client, fmt.Sprintf(`sudo k3s kubectl get lvmvolume.local.openebs.io %s -n iterabase-system -o jsonpath='{.spec.capacity}|{.status.state}'`, handle)))
+	if lvm != "3Gi|Ready" {
+		t.Fatalf("AgentPool LVMVolume did not converge to 3Gi Ready: %q", lvm)
+	}
+	if after := strings.TrimSpace(mustSSHOutput(t, client, fmt.Sprintf(`sudo bash -ceu 'lv=/dev/iterabase-data/%s; lvuuid=$(lvs --noheadings -o lv_uuid "$lv" | xargs); fsuuid=$(blkid -s UUID -o value "$lv"); printf "%%s|%%s" "$lvuuid" "$fsuuid"'`, candidateShellQuote(handle)))); after != hostIdentity {
+		t.Fatalf("AgentPool growth replaced LV/filesystem identity: before=%s after=%s", hostIdentity, after)
+	}
+	afterFS := strings.TrimSpace(mustSSHOutput(t, client, fmt.Sprintf(`sudo k3s kubectl exec -n iterabase-system %s -- sh -ceu 'test "$(cat /data/sandboxes/.growth-marker)" = HOR-557-agentpool-growth; df -B1 --output=size /data/sandboxes | tail -1 | tr -d " "'`, pod)))
+	beforeBytes, beforeErr := strconv.ParseUint(beforeFS, 10, 64)
+	afterBytes, afterErr := strconv.ParseUint(afterFS, 10, 64)
+	if beforeErr != nil || afterErr != nil || afterBytes <= beforeBytes {
+		t.Fatalf("AgentPool mounted XFS did not grow: before=%q after=%q errors=%v/%v", beforeFS, afterFS, beforeErr, afterErr)
+	}
+	if got := workspaceDatabaseQuery(t, cluster, state, fmt.Sprintf(`SELECT count(*) FROM runtime.turn_assignments WHERE attempt_id='%s' AND state='active'`, active.CurrentAttemptID)); got != "1" {
+		t.Fatalf("AgentPool resize convergence changed the active assignment: %s", got)
+	}
 }
 
 func exerciseAggregateVGCapacityStage(t *testing.T, state *permanentCPUFixtureState) {
@@ -380,6 +452,7 @@ exit 1`
 	if err != nil {
 		t.Fatalf("parse pressured VG free capacity %q: %v", remainingText, err)
 	}
+	exerciseResizeExhaustion(t, client, remaining, state.agentPoolPVCUID)
 	exhaustRequest := remaining + 1<<30
 	exhaust := fmt.Sprintf(`cat <<'YAML' | sudo k3s kubectl apply -f -
 apiVersion: v1
@@ -439,6 +512,74 @@ YAML`, exhaustRequest)
 	command := fmt.Sprintf(`for i in $(seq 1 150); do test "$(sudo lvs --noheadings -o lv_name iterabase-data | awk 'NF {n++} END {print n+0}')" = %s && exit 0; sleep 2; done; exit 1`, before[1])
 	if output, err := sshOutput(client, command); err != nil {
 		t.Fatalf("aggregate pressure claim cleanup leaked an LV: %v\n%s", err, output)
+	}
+}
+
+func exerciseResizeExhaustion(t *testing.T, client *ssh.Client, freeBefore uint64, agentPoolPVCUID string) {
+	t.Helper()
+	manifest := `cat <<'YAML' | sudo k3s kubectl apply -f -
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: forge-resize-exhaustion, namespace: iterabase-system}
+spec:
+  accessModes: [ReadWriteOnce]
+  volumeMode: Filesystem
+  storageClassName: iterabase-lvm-xfs
+  resources: {requests: {storage: 512Mi}}
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: forge-resize-exhaustion, namespace: iterabase-system}
+spec:
+  containers:
+    - name: hold
+      image: debian:13-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132
+      command: [bash, -ceu]
+      args: ['printf resize-exhaustion-preserved > /data/marker; sync -f /data/marker; sleep 1200']
+      volumeMounts: [{name: data, mountPath: /data}]
+  volumes: [{name: data, persistentVolumeClaim: {claimName: forge-resize-exhaustion}}]
+YAML`
+	mustSSHOutput(t, client, manifest)
+	mustSSHOutput(t, client, "sudo k3s kubectl wait -n iterabase-system --for=condition=Ready pod/forge-resize-exhaustion --timeout=10m")
+	identity := strings.TrimSpace(mustSSHOutput(t, client, `sudo k3s kubectl get pvc forge-resize-exhaustion -n iterabase-system -o jsonpath='{.metadata.uid}|{.spec.volumeName}'`))
+	parts := strings.Split(identity, "|")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		t.Fatalf("resize-exhaustion identity is malformed: %q", identity)
+	}
+	handle := strings.TrimSpace(mustSSHOutput(t, client, fmt.Sprintf(`sudo k3s kubectl get pv %s -o jsonpath='{.spec.csi.volumeHandle}'`, parts[1])))
+	request := freeBefore + 2<<30
+	mustSSHOutput(t, client, fmt.Sprintf(`sudo k3s kubectl patch pvc/forge-resize-exhaustion -n iterabase-system --type=merge -p '{"spec":{"resources":{"requests":{"storage":"%d"}}}}'`, request))
+
+	deadline := time.Now().Add(3 * time.Minute)
+	var events string
+	for time.Now().Before(deadline) {
+		events = mustSSHOutput(t, client, `sudo k3s kubectl get events -n iterabase-system --field-selector involvedObject.name=forge-resize-exhaustion -o jsonpath='{range .items[*]}{.reason}|{.message}{"\n"}{end}'`)
+		if strings.Contains(events, "VolumeResizeFailed") || strings.Contains(events, "ExternalExpanding") && strings.Contains(strings.ToLower(events), "capacity") {
+			break
+		}
+		time.Sleep(2 * time.Second)
+	}
+	if !strings.Contains(events, "VolumeResizeFailed") && !(strings.Contains(events, "ExternalExpanding") && strings.Contains(strings.ToLower(events), "capacity")) {
+		t.Fatalf("insufficient-VG resize did not emit an actionable failure: %s", events)
+	}
+	observed := strings.TrimSpace(mustSSHOutput(t, client, `sudo k3s kubectl get pvc forge-resize-exhaustion -n iterabase-system -o jsonpath='{.metadata.uid}|{.spec.volumeName}|{.status.capacity.storage}'`))
+	if observed != identity+"|512Mi" {
+		t.Fatalf("failed resize changed claim/PV/current usable capacity: before=%s after=%s", identity, observed)
+	}
+	if after := strings.TrimSpace(mustSSHOutput(t, client, fmt.Sprintf(`sudo k3s kubectl get pv %s -o jsonpath='{.spec.csi.volumeHandle}'`, parts[1]))); after != handle {
+		t.Fatalf("failed resize replaced the OpenEBS volume handle: before=%s after=%s", handle, after)
+	}
+	mustSSHOutput(t, client, `sudo k3s kubectl exec -n iterabase-system forge-resize-exhaustion -- test "$(cat /data/marker)" = resize-exhaustion-preserved`)
+	if unrelated := strings.TrimSpace(mustSSHOutput(t, client, `sudo k3s kubectl get pvc forge-storage-pool-sandbox -n iterabase-system -o jsonpath='{.metadata.uid}'`)); unrelated != agentPoolPVCUID {
+		t.Fatalf("failed resize damaged unrelated AgentPool claim: before=%s after=%s", agentPoolPVCUID, unrelated)
+	}
+	if output, err := sshOutput(client, `sudo k3s kubectl patch pvc/forge-resize-exhaustion -n iterabase-system --type=merge -p '{"spec":{"resources":{"requests":{"storage":"256Mi"}}}}' 2>&1`); err == nil {
+		t.Fatalf("PVC shrink unexpectedly succeeded after failed growth: %s", output)
+	}
+	mustSSHOutput(t, client, "sudo k3s kubectl delete pod/forge-resize-exhaustion pvc/forge-resize-exhaustion -n iterabase-system --wait=true --timeout=10m")
+	cleanup := fmt.Sprintf(`for i in $(seq 1 150); do ! sudo k3s kubectl get pv %s >/dev/null 2>&1 && ! sudo k3s kubectl get lvmvolume.local.openebs.io %s -n iterabase-system >/dev/null 2>&1 && exit 0; sleep 2; done; exit 1`, parts[1], handle)
+	if output, err := sshOutput(client, cleanup); err != nil {
+		t.Fatalf("failed-resize claim cleanup leaked storage identity: %v\n%s", err, output)
 	}
 }
 

@@ -67,7 +67,8 @@ type AgentPoolSpec struct {
 	// supervisor in this pool may access the whole claim; separate AgentPools
 	// receive separate claims/mounts. Each disposable child gets a stable distinct
 	// UID=GID and session-owned 0700 tree beneath the root-owned 0711 PVC root.
-	// The requested size is the fixed thick-LV/filesystem capacity; online expansion and shrink are unsupported.
+	// The requested size is desired grow-only thick-LV/filesystem capacity.
+	// Increases patch the same claim; shrink and identity replacement are refused.
 	// +kubebuilder:validation:Required
 	Sandbox SandboxSpec `json:"sandbox"`
 
@@ -176,7 +177,8 @@ type SandboxSpec struct {
 	// +kubebuilder:validation:Required
 	AccessMode corev1.PersistentVolumeAccessMode `json:"accessMode"`
 
-	// size is the immutable thick XFS volume capacity requested from iterabase-data.
+	// size is the desired grow-only thick XFS capacity requested from
+	// iterabase-data. Only an increase is reconciled after provisioning.
 	// +kubebuilder:validation:Required
 	Size resource.Quantity `json:"size"`
 

@@ -19,10 +19,10 @@ func TestE2E(t *testing.T) {
 		sharede2e.Define(sharede2e.Scenario[*permanentCPUFixtureState]{
 			Metadata: forgeScenarioMetadata(
 				permanentCPUScenarioName,
-				"Resets the permanent CPU fixture and proves receipt-bound thick LVM preparation, exact OpenEBS/source/Flux handoff, two-worker same-node RWO readiness, persistence, worker replacement, reapply, diagnostics, and cleanup.",
+				"Resets the permanent CPU fixture and proves receipt-bound thick LVM preparation, exact expandable OpenEBS/source/Flux handoff, two-worker same-node RWO readiness, persistence, worker replacement, reapply, diagnostics, and cleanup.",
 				sharede2e.TierF3,
-				[]string{"HOR-406", "HOR-545", "DES-HOR-545-01", "DES-HOR-545-02", "DES-HOR-545-03", "DES-HOR-538-03"},
-				[]string{"forge", "control-plane", "iterabase-platform-chart"},
+				[]string{"HOR-406", "HOR-545", "HOR-557", "DES-HOR-545-01", "DES-HOR-545-02", "DES-HOR-545-03", "DES-HOR-545-07", "DES-HOR-538-03"},
+				[]string{"forge", "control-plane", "control-plane-chart", "iterabase-platform-chart"},
 				"test-e2e", 100, "cpu",
 			),
 			NewState: newPermanentCPUFixtureState,
@@ -44,11 +44,11 @@ func TestE2E(t *testing.T) {
 		sharede2e.Define(sharede2e.Scenario[*permanentCPUFixtureState]{
 			Metadata: forgeScenarioMetadata(
 				permanentCPUWorkspaceScenarioName,
-				"Fresh exact-head real-machine install proving process-open refusal, receipt-bound PV/VG identity, pinned OpenEBS thick XFS claims, authenticated concurrent same-pool work with isolated markers, per-pool active-turn capacity gating, aggregate VG pressure, human-gate worker replacement, persisted bytes, exact reapply, safe claim release, chart uninstall, and non-purging ordinary destroy.",
+				"Fresh exact-head real-machine install proving process-open refusal, receipt-bound PV/VG identity, mounted general and AgentPool grow-only XFS/LVM expansion, insufficient-capacity refusal, active-turn continuity, authenticated same-pool isolation, durable 20/25 gating, reboot/reapply convergence, persisted bytes, safe claim release, and non-purging ordinary destroy.",
 				sharede2e.TierF3,
-				[]string{"HOR-545", "REQ-018", "REQ-035", "SCN-018", "DES-HOR-545-01", "DES-HOR-545-02", "DES-HOR-545-03", "DES-HOR-538-03"},
-				[]string{"forge", "control-plane", "iterabase-platform-chart"},
-				"test-e2e-workspace", 90, "cpu",
+				[]string{"HOR-545", "HOR-557", "REQ-018", "REQ-035", "SCN-018", "DES-HOR-545-01", "DES-HOR-545-02", "DES-HOR-545-03", "DES-HOR-545-07", "DES-HOR-538-03"},
+				[]string{"forge", "control-plane", "control-plane-chart", "iterabase-platform-chart"},
+				"test-e2e-workspace", 120, "cpu",
 			),
 			NewState: newPermanentCPUWorkspaceFixtureState,
 			Stages: []sharede2e.Stage[*permanentCPUFixtureState]{
@@ -63,7 +63,8 @@ func TestE2E(t *testing.T) {
 				{Name: "prove-aggregate-vg-pressure-and-new-claim-exhaustion", DependsOn: []string{"cross-capacity-floor-during-active-turn"}, Run: cpuDiagnosticStage(failureDomainSubstrate, exerciseAggregateVGCapacityStage)},
 				{Name: "resume-human-gated-session-after-worker-replacement", DependsOn: []string{"prove-aggregate-vg-pressure-and-new-claim-exhaustion"}, Run: cpuDiagnosticStage(failureDomainDependentSmoke, exerciseHumanGateWorkspaceReplacementStage)},
 				{Name: "seed-committed-workspace-bytes", DependsOn: []string{"resume-human-gated-session-after-worker-replacement"}, Run: cpuDiagnosticStage(failureDomainSubstrate, seedLVMReapplyStage)},
-				{Name: "reboot-with-unchanged-storage-identities", DependsOn: []string{"seed-committed-workspace-bytes"}, Run: cpuDiagnosticStage(failureDomainSubstrate, rebootPreservesLVMStorageStage)},
+				{Name: "grow-mounted-general-xfs-in-place", DependsOn: []string{"seed-committed-workspace-bytes"}, Run: cpuDiagnosticStage(failureDomainSubstrate, growGeneralLVMClaimStage)},
+				{Name: "reboot-with-unchanged-storage-identities", DependsOn: []string{"grow-mounted-general-xfs-in-place"}, Run: cpuDiagnosticStage(failureDomainSubstrate, rebootPreservesLVMStorageStage)},
 				{Name: "reapply-with-unchanged-identities", DependsOn: []string{"reboot-with-unchanged-storage-identities"}, Run: cpuDiagnosticStage(failureDomainForgeReconcile, reapplyCurrentPlatformStage)},
 				{Name: "assert-persisted-bytes", DependsOn: []string{"reapply-with-unchanged-identities"}, Run: cpuDiagnosticStage(failureDomainSubstrate, assertLVMReapplyStage)},
 				{Name: "delete-general-claim-without-leaked-lv", DependsOn: []string{"assert-persisted-bytes"}, Run: cpuDiagnosticStage(failureDomainSubstrate, deleteLVMClaimStage)},
@@ -75,11 +76,11 @@ func TestE2E(t *testing.T) {
 		sharede2e.Define(sharede2e.Scenario[*permanentGPUFixtureState]{
 			Metadata: forgeScenarioMetadata(
 				permanentGPUScenarioName,
-				"Resets the permanent GPU fixture and proves Forge GPU readiness, an emptyDir-safe driver transition, exact artifact handoff, diagnostics, cleanup, and one non-authoritative real-serving smoke request.",
+				"Resets the permanent GPU fixture and proves Forge GPU readiness, an emptyDir-safe driver transition, exact artifact handoff, managed-PVC cache seeding, mounted HF/generic-cache growth, pod-replacement byte identity, diagnostics, cleanup, and one real-serving smoke request.",
 				sharede2e.TierF3,
-				[]string{"HOR-411", "HOR-406", "HOR-481", "HOR-485", "HOR-494", "DES-HOR-545-02"},
-				[]string{"forge", "iterabase-platform-chart"},
-				"test-e2e-gpu", 110, "gpu",
+				[]string{"HOR-411", "HOR-406", "HOR-481", "HOR-485", "HOR-494", "HOR-557", "DES-HOR-545-02", "DES-HOR-545-07"},
+				[]string{"forge", "control-plane", "control-plane-chart", "iterabase-platform-chart"},
+				"test-e2e-gpu", 130, "gpu",
 			),
 			NewState: newPermanentGPUFixtureState,
 			Stages: []sharede2e.Stage[*permanentGPUFixtureState]{
@@ -100,7 +101,7 @@ func TestE2E(t *testing.T) {
 }
 
 func forgeScenarioMetadata(name, description string, tier sharede2e.Tier, references, targets []string, makeTarget string, timeout int, capacity string) sharede2e.ScenarioMetadata {
-	artifacts := []string{"forge-binary", "iterabase-platform-chart", "cert-manager-substrate-chart", "lvm-storage-substrate-chart", "control-plane-image", "tool-runner-image", "inference-gateway-image"}
+	artifacts := []string{"forge-binary", "control-plane-chart", "iterabase-platform-chart", "cert-manager-substrate-chart", "lvm-storage-substrate-chart", "control-plane-image", "tool-runner-image", "inference-gateway-image"}
 	if name == permanentCPUScenarioName || name == permanentCPUWorkspaceScenarioName {
 		artifacts = append(artifacts, "harness-image")
 	}

@@ -71,9 +71,12 @@ volume.
 `2fc06364715b967f1860aea9cf38778875588b17` and pins the selected weight file to
 SHA-256 `04b1c301231dd422b8860db31311ab2721511346a32cb1e079c4c4e5f1fe4696`.
 Every GPU use verifies device, mount, UUID, revision path, and content hash
-before product execution. The ModelBackend receives that exact revision. Cache
-bytes can accelerate model loading but cannot satisfy product artifact/runtime
-identity or AgentPool workspace assertions.
+before product execution. The harness copies that exact cache into a
+controller-owned general-class ModelBackend PVC before serving. The serving pod
+mounts only the PVC at `/data/hf-cache`; the fixture disk is read-only seed input,
+not product persistence. The scenario then proves mounted HF and generic-cache
+growth plus pod-replacement byte identity. Cache bytes cannot satisfy product
+artifact/runtime identity or AgentPool workspace assertions.
 
 ## Compiled scenarios
 

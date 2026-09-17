@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -65,6 +66,7 @@ func TestModelBackendReconcile(t *testing.T) {
 
 	adminClient, err := client.New(cfg, client.Options{Scheme: scheme})
 	require.NoError(t, err)
+	require.NoError(t, adminClient.Create(ctx, lvmModelBackendClass()))
 	saCfg := rbacManagerConfig(t, ctx, cfg, scheme)
 
 	mgr, err := ctrl.NewManager(saCfg, ctrl.Options{Scheme: scheme})
@@ -191,6 +193,44 @@ func TestModelBackendReconcile(t *testing.T) {
 		}, 15*time.Second, 200*time.Millisecond, "ModelBackend should be deleted after finalizer cleanup")
 		_, err = store.GetBackendByKey(ctx, "default/vllm-qwen")
 		assert.ErrorIs(t, err, catalog.ErrNotFound, "soft-deleted backend should not be active")
+	})
+
+	t.Run("managed volumes create deterministic owned WFFC claims under RBAC", func(t *testing.T) {
+		mb := managedModelBackend()
+		mb.Name = "vllm-managed"
+		mb.Namespace = "default"
+		mb.UID = ""
+		require.NoError(t, adminClient.Create(ctx, mb))
+		nn := types.NamespacedName{Name: mb.Name, Namespace: mb.Namespace}
+		require.Eventually(t, func() bool {
+			var got v1alpha1.ModelBackend
+			return adminClient.Get(ctx, nn, &got) == nil && got.Status.Deployed && !got.Status.Healthy && strings.Contains(got.Status.Message, "first serving consumer")
+		}, 15*time.Second, 200*time.Millisecond, "managed WFFC backend should deploy a consumer while remaining unhealthy")
+
+		var got v1alpha1.ModelBackend
+		require.NoError(t, adminClient.Get(ctx, nn, &got))
+		for _, declaration := range got.Spec.PersistentVolumes {
+			var pvc corev1.PersistentVolumeClaim
+			require.NoError(t, adminClient.Get(ctx, types.NamespacedName{Name: modelBackendPVCName(&got, declaration.Name), Namespace: got.Namespace}, &pvc))
+			assert.True(t, modelBackendControllerOwner(&pvc, &got))
+			assert.Equal(t, modelBackendStorageClass, *pvc.Spec.StorageClassName)
+		}
+		var dep appsv1.Deployment
+		require.NoError(t, adminClient.Get(ctx, nn, &dep))
+		claims := 0
+		for _, volume := range dep.Spec.Template.Spec.Volumes {
+			assert.Nil(t, volume.HostPath)
+			if volume.PersistentVolumeClaim != nil {
+				claims++
+			}
+		}
+		assert.Equal(t, 2, claims)
+
+		require.NoError(t, adminClient.Delete(ctx, &got))
+		require.Eventually(t, func() bool {
+			var deleted v1alpha1.ModelBackend
+			return errors.IsNotFound(adminClient.Get(ctx, nn, &deleted))
+		}, 15*time.Second, 200*time.Millisecond)
 	})
 
 	t.Run("external records a baseURL with no workload", func(t *testing.T) {
@@ -553,8 +593,11 @@ func TestBuildDeploymentSpecDevShm(t *testing.T) {
 		}
 		spec := buildDeploymentSpec(mb, port)
 
-		// The hf-cache hostPath volume must be preserved alongside the new dshm.
-		assert.NotNil(t, findVol(spec, "hf-cache"), "hf-cache volume must be preserved")
+		// Undeclared HF storage remains plug-and-play through an ephemeral emptyDir.
+		hf := findVol(spec, "hf-cache")
+		require.NotNil(t, hf, "ephemeral hf-cache volume must be present")
+		require.NotNil(t, hf.EmptyDir)
+		assert.Nil(t, hf.HostPath, "serving persistence must never fall back to hostPath")
 
 		vol := findVol(spec, devShmVolumeName)
 		require.NotNil(t, vol, "vLLM pod must mount a dshm volume")

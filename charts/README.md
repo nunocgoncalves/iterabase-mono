@@ -204,13 +204,17 @@ root, and creates exactly:
 
 Both classes use `local.csi.openebs.io`, `storage: lvm`,
 `vgpattern: ^iterabase-data$`, XFS, explicit thick `thinProvision: no`,
-`ReadWriteOnce`, `WaitForFirstConsumer`, `Delete`, expansion disabled, and false
-default annotations. PostgreSQL, MinIO, persistent observability components,
+`ReadWriteOnce`, `WaitForFirstConsumer`, `Delete`, grow-only expansion enabled,
+and false default annotations. PostgreSQL, MinIO, persistent observability components,
 and every other chart-generated data claim use only the general class.
 
-The AgentPool controller accepts initial unbound `WaitForFirstConsumer` state,
-then requires the exact CSI driver, XFS, VG attribute, OpenEBS LVMVolume Ready
-identity, no-thin/shared settings, LVMNode VG identity, and local node topology.
+The claim-authority admission policy permits only the exact control-plane
+manager to raise an AgentPool request, and only upward; shrink and class,
+ownership, access-mode, or volume-mode changes remain denied. The AgentPool
+controller accepts initial unbound `WaitForFirstConsumer` state, then requires
+the exact CSI driver, XFS, VG attribute, OpenEBS LVMVolume Ready identity and
+capacity, no-thin/shared settings, LVMNode VG identity, local node topology, and
+a fresh post-resize mounted-filesystem observation.
 Trusted root-supervisor access, stable isolated child UID=GID and permissions,
 workload-key/mTLS validation, fencing, and no-replay behavior remain unchanged.
 Capacity warning/gating is per AgentPool PVC (25% warning, <=20% all-fresh-credit
@@ -220,7 +224,8 @@ report aggregate VG pressure and pending-claim exhaustion.
 Direct Helm installation does not replace Forge's receipt/VG safety gate. The
 companion must observe the exact `iterabase-data` VG before the platform creates
 claims. Multi-node/HA, RWX, default/BYO classes, Longhorn, local-path, thin
-provisioning, expansion, adoption, and migration remain unsupported. A
+provisioning, shrink, identity-replacing resize, disk/VG extension, adoption,
+and migration remain unsupported. A
 fail-closed admission policy denies every `LVMSnapshot` creation and readiness
 requires zero instances. Apart from that inert schema and driver `list`/`watch`,
 every CSI/user snapshot CRD/class/controller/sidecar/RBAC/image/lifecycle remains

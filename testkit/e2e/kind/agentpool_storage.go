@@ -431,7 +431,7 @@ func ValidateManagedLVMStorageClass(data []byte, contract LVMStorageContract) (s
 		"fsType": "xfs", "thinProvision": "no", "shared": shared,
 	}
 	if storageClass.Provisioner != contract.Provisioner || storageClass.ReclaimPolicy != "Delete" ||
-		storageClass.VolumeBindingMode != "WaitForFirstConsumer" || storageClass.AllowVolumeExpansion == nil || *storageClass.AllowVolumeExpansion ||
+		storageClass.VolumeBindingMode != "WaitForFirstConsumer" || storageClass.AllowVolumeExpansion == nil || !*storageClass.AllowVolumeExpansion ||
 		!reflect.DeepEqual(storageClass.Parameters, expected) || storageClass.Metadata.Annotations[defaultClassAnnotation] == "true" ||
 		storageClass.Metadata.Annotations[betaDefaultClassAnnotation] == "true" {
 		return "", fmt.Errorf("StorageClass %q does not match the exact non-default thick XFS LVM contract", storageClass.Metadata.Name)

@@ -120,7 +120,11 @@ model.safetensors-00001-of-00001.safetensors
 ```
 
 Do not place this disk's by-id identity in `spec.dataStorage.devices`. Forge
-data-storage purge never targets `/data/hf-cache`.
+data-storage purge never targets `/data/hf-cache`. This disk is harness-owned,
+read-only seed input: the GPU scenario first verifies its device/UUID/revision/
+hash, copies the pinned cache into a controller-owned `iterabase-lvm-xfs` PVC,
+and then starts the ModelBackend. The serving pod mounts only the managed PVC
+at `/data/hf-cache`; it never mounts this fixture disk or another hostPath.
 
 ## GitHub repository configuration
 

@@ -54,7 +54,7 @@ installs the exact composed `lvm-storage-substrate` with the real
 `/var/lib/kubelet` registration path used by both Kind and supported K3s, and
 waits for exact OpenEBS CRD/controller/node/CSINode-topology/VG readiness. It
 verifies exactly the non-default,
-non-expandable, thick XFS/RWO `iterabase-lvm-xfs` and
+grow-only-expandable, thick XFS/RWO `iterabase-lvm-xfs` and
 `iterabase-agentpool-lvm-xfs` classes, including the latter's same-node
 `shared: yes` boundary.
 

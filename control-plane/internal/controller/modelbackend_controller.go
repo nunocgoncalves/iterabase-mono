@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -70,8 +71,14 @@ type ModelBackendReconciler struct {
 // +kubebuilder:rbac:groups=platform.iterabase.com,resources=modelbackends/finalizers,verbs=update
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=persistentvolumes,verbs=get;list;watch
+// +kubebuilder:rbac:groups=storage.k8s.io,resources=storageclasses,verbs=get;list;watch
+// +kubebuilder:rbac:groups=local.openebs.io,resources=lvmnodes;lvmvolumes,verbs=get;list;watch
 
 // Reconcile handles ModelBackend create/update/delete events.
+//
+//nolint:gocyclo // deletion, durable managed-claim history, and three backend kinds fail independently.
 func (r *ModelBackendReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
@@ -109,6 +116,26 @@ func (r *ModelBackendReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{Requeue: true}, nil
 	}
 
+	if err := validateModelBackendPersistentVolumes(&mb); err != nil {
+		return ctrl.Result{}, r.patchStatus(ctx, &mb, false, false, "", fmt.Sprintf("validation: %v", err))
+	}
+	if mb.Spec.Kind != "vLLM" {
+		storage, err := r.reconcileModelBackendStorage(ctx, &mb)
+		if err != nil {
+			_ = r.patchStatus(ctx, &mb, false, false, "", fmt.Sprintf("inspect managed storage history: %v", err))
+			return ctrl.Result{}, err
+		}
+		if !storage.CanSchedule {
+			if err := r.materialize(ctx, &mb, "", false, false); err != nil {
+				return ctrl.Result{}, err
+			}
+			if err := r.patchStatus(ctx, &mb, false, false, "", storage.Message); err != nil {
+				return ctrl.Result{}, err
+			}
+			return ctrl.Result{RequeueAfter: healthRequeueInterval}, nil
+		}
+	}
+
 	switch mb.Spec.Kind {
 	case "vLLM":
 		return r.reconcileVLLM(ctx, &mb)
@@ -122,8 +149,8 @@ func (r *ModelBackendReconciler) Reconcile(ctx context.Context, req ctrl.Request
 }
 
 // reconcileVLLM deploys a vLLM Deployment + Service and materializes the
-// backend. Health is derived from the Deployment's Available condition (driven
-// by the pod readinessProbe on /health). envtest has no kubelet, so healthy
+// backend. Health requires converged managed storage plus a ready Deployment
+// replica driven by the pod readinessProbe on /health. envtest has no kubelet, so healthy
 // stays false there — real serving is validated on the GPU VM (manual runbook)
 // and the forge GPU E2E (HOR-324).
 func (r *ModelBackendReconciler) reconcileVLLM(ctx context.Context, mb *v1alpha1.ModelBackend) (ctrl.Result, error) {
@@ -146,6 +173,21 @@ func (r *ModelBackendReconciler) reconcileVLLM(ctx context.Context, mb *v1alpha1
 	}
 
 	port := servingPort(mb)
+	serviceURL := fmt.Sprintf("http://%s.%s.svc:%d", mb.Name, mb.Namespace, port)
+	storage, err := r.reconcileModelBackendStorage(ctx, mb)
+	if err != nil {
+		_ = r.patchStatus(ctx, mb, false, false, "", fmt.Sprintf("reconcile managed storage: %v", err))
+		return ctrl.Result{}, err
+	}
+	if !storage.CanSchedule {
+		if err := r.materialize(ctx, mb, serviceURL, false, false); err != nil {
+			return ctrl.Result{}, err
+		}
+		if err := r.patchStatus(ctx, mb, false, false, serviceURL, storage.Message); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: healthRequeueInterval}, nil
+	}
 	if err := r.ensureDeployment(ctx, mb, port); err != nil {
 		_ = r.patchStatus(ctx, mb, false, false, "", fmt.Sprintf("ensure deployment: %v", err))
 		return ctrl.Result{}, err
@@ -155,12 +197,11 @@ func (r *ModelBackendReconciler) reconcileVLLM(ctx context.Context, mb *v1alpha1
 		return ctrl.Result{}, err
 	}
 
-	healthy := r.deploymentHealthy(ctx, mb)
-	serviceURL := fmt.Sprintf("http://%s.%s.svc:%d", mb.Name, mb.Namespace, port)
+	healthy := storage.Ready && r.deploymentHealthy(ctx, mb)
 	if err := r.materialize(ctx, mb, serviceURL, true, healthy); err != nil {
 		return ctrl.Result{}, err
 	}
-	if err := r.patchStatus(ctx, mb, true, healthy, serviceURL, ""); err != nil {
+	if err := r.patchStatus(ctx, mb, true, healthy, serviceURL, storage.Message); err != nil {
 		return ctrl.Result{}, err
 	}
 	logger.Info("reconciled vLLM backend", "key", backendKey(mb), "healthy", healthy)
@@ -263,9 +304,10 @@ func (r *ModelBackendReconciler) deploymentHealthy(ctx context.Context, mb *v1al
 	return dep.Status.ReadyReplicas >= 1
 }
 
-// buildDeploymentSpec renders the vLLM pod spec with the GPU contract from forge
-// (HOR-240): runtimeClassName nvidia + nvidia.com/gpu request + GPU node
-// selector. hostPath model cache avoids re-downloading weights on restart.
+// buildDeploymentSpec renders the vLLM pod spec with the GPU contract from
+// Forge and mounts each declared managed claim. Without a managed
+// /data/hf-cache declaration, plug-and-play startup gets an ephemeral emptyDir;
+// the controller never substitutes a hostPath for serving persistence.
 func buildDeploymentSpec(mb *v1alpha1.ModelBackend, port int32) appsv1.DeploymentSpec {
 	replicas := int32(1)
 	if mb.Spec.Replicas != nil {
@@ -295,7 +337,6 @@ func buildDeploymentSpec(mb *v1alpha1.ModelBackend, port int32) appsv1.Deploymen
 		nodeSelector = map[string]string{gpuNodeLabel: "true"}
 	}
 
-	hostPathType := corev1.HostPathDirectoryOrCreate
 	runtimeClassName := nvidiaRuntimeClass
 	probe := &corev1.Probe{
 		ProbeHandler: corev1.ProbeHandler{
@@ -344,6 +385,8 @@ func buildDeploymentSpec(mb *v1alpha1.ModelBackend, port int32) appsv1.Deploymen
 		shmSize = mb.Spec.DevShmSize.DeepCopy()
 	}
 
+	managedVolumes, managedMounts := modelBackendPodStorage(mb)
+
 	return appsv1.DeploymentSpec{
 		Replicas: &replicas,
 		Selector: &metav1.LabelSelector{MatchLabels: backendLabels(mb)},
@@ -362,26 +405,15 @@ func buildDeploymentSpec(mb *v1alpha1.ModelBackend, port int32) appsv1.Deploymen
 				HostIPC:                       mb.Spec.HostIPC,
 				NodeSelector:                  nodeSelector,
 				Tolerations:                   mb.Spec.Tolerations,
-				Volumes: append([]corev1.Volume{
-					{
-						Name: hfCacheVolumeName,
-						VolumeSource: corev1.VolumeSource{
-							HostPath: &corev1.HostPathVolumeSource{
-								Path: defaultModelCachePath,
-								Type: &hostPathType,
-							},
+				Volumes: append(append(managedVolumes, corev1.Volume{
+					Name: devShmVolumeName,
+					VolumeSource: corev1.VolumeSource{
+						EmptyDir: &corev1.EmptyDirVolumeSource{
+							Medium:    corev1.StorageMediumMemory,
+							SizeLimit: &shmSize,
 						},
 					},
-					{
-						Name: devShmVolumeName,
-						VolumeSource: corev1.VolumeSource{
-							EmptyDir: &corev1.EmptyDirVolumeSource{
-								Medium:    corev1.StorageMediumMemory,
-								SizeLimit: &shmSize,
-							},
-						},
-					},
-				}, mb.Spec.Volumes...),
+				}), mb.Spec.Volumes...),
 				Containers: []corev1.Container{{
 					Name:    "server",
 					Image:   image,
@@ -389,10 +421,9 @@ func buildDeploymentSpec(mb *v1alpha1.ModelBackend, port int32) appsv1.Deploymen
 					Args:    args,
 					Env:     buildContainerEnv(mb.Spec.Env),
 					Ports:   []corev1.ContainerPort{{ContainerPort: port, Name: "http"}},
-					VolumeMounts: append([]corev1.VolumeMount{
-						{Name: hfCacheVolumeName, MountPath: defaultModelCachePath},
-						{Name: devShmVolumeName, MountPath: devShmMountPath},
-					}, mb.Spec.VolumeMounts...),
+					VolumeMounts: append(append(managedMounts,
+						corev1.VolumeMount{Name: devShmVolumeName, MountPath: devShmMountPath}),
+						mb.Spec.VolumeMounts...),
 					Resources:       resources,
 					StartupProbe:    startupProbe,
 					ReadinessProbe:  probe,
@@ -402,6 +433,38 @@ func buildDeploymentSpec(mb *v1alpha1.ModelBackend, port int32) appsv1.Deploymen
 			},
 		},
 	}
+}
+
+// modelBackendPodStorage returns managed PVC mounts plus the ephemeral HF
+// fallback when /data/hf-cache is not declared. The PVC claim names and pod
+// volume names are deterministic functions of the ModelBackend identity.
+func modelBackendPodStorage(mb *v1alpha1.ModelBackend) ([]corev1.Volume, []corev1.VolumeMount) {
+	volumes := make([]corev1.Volume, 0, len(mb.Spec.PersistentVolumes)+1)
+	mounts := make([]corev1.VolumeMount, 0, len(mb.Spec.PersistentVolumes)+1)
+	hasManagedHFCache := false
+	declarations := append([]v1alpha1.ModelBackendPersistentVolumeSpec(nil), mb.Spec.PersistentVolumes...)
+	sort.Slice(declarations, func(i, j int) bool { return declarations[i].Name < declarations[j].Name })
+	for _, declaration := range declarations {
+		name := modelBackendManagedVolumeName(declaration.Name)
+		volumes = append(volumes, corev1.Volume{
+			Name: name,
+			VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+				ClaimName: modelBackendPVCName(mb, declaration.Name),
+			}},
+		})
+		mounts = append(mounts, corev1.VolumeMount{Name: name, MountPath: declaration.MountPath})
+		if declaration.MountPath == defaultModelCachePath {
+			hasManagedHFCache = true
+		}
+	}
+	if !hasManagedHFCache {
+		volumes = append([]corev1.Volume{{
+			Name:         hfCacheVolumeName,
+			VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+		}}, volumes...)
+		mounts = append([]corev1.VolumeMount{{Name: hfCacheVolumeName, MountPath: defaultModelCachePath}}, mounts...)
+	}
+	return volumes, mounts
 }
 
 // backendLabels returns the labels shared by the Deployment, its pods, and the
@@ -518,11 +581,12 @@ func (r *ModelBackendReconciler) patchStatus(ctx context.Context, mb *v1alpha1.M
 }
 
 // SetupWithManager registers the reconciler with the controller-runtime manager
-// and watches owned Deployments/Services for status propagation.
+// and watches owned Deployments, Services, and managed claims for convergence.
 func (r *ModelBackendReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.ModelBackend{}).
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.Service{}).
+		Owns(&corev1.PersistentVolumeClaim{}).
 		Complete(r)
 }

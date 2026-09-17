@@ -5,12 +5,14 @@ import (
 	"fmt"
 	"math"
 	"reflect"
+	"strconv"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -18,6 +20,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/nunocgoncalves/iterabase-mono/control-plane/api/v1alpha1"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/gateway"
 )
 
 const (
@@ -31,7 +34,9 @@ const (
 	storageReasonClassMissing                   = "StorageClassMissing"
 	storageReasonClassMismatch                  = "StorageClassMismatch"
 	storageReasonPVCProvisioning                = "PVCProvisioning"
+	storageReasonPVCExpansionPending            = "PVCExpansionPending"
 	storageReasonPVCExpansionFailed             = "PVCExpansionFailed"
+	storageReasonPVCShrinkRefused               = "PVCShrinkRefused"
 	storageReasonPVCUnavailable                 = "PVCUnavailable"
 	storageReasonMountRootUnsafe                = "MountRootUnsafe"
 	storageReasonCapacity                       = "CapacityInsufficient"
@@ -52,18 +57,21 @@ const (
 const workspaceCapacityObservationFreshness = time.Minute
 
 type agentPoolStorageAssessment struct {
-	Ready              bool
-	CanMount           bool
-	ConfirmedUnsafe    bool
-	ObservationUnknown bool
-	ObservationErr     error
-	Reason             string
-	Message            string
-	Mode               string
-	ClassName          string
-	PVName             string
-	VolumeHandle       string
-	ReplacementPending bool
+	Ready               bool
+	CanMount            bool
+	ConfirmedUnsafe     bool
+	ObservationUnknown  bool
+	ObservationErr      error
+	Reason              string
+	Message             string
+	Mode                string
+	ClassName           string
+	PVName              string
+	VolumeHandle        string
+	ReplacementPending  bool
+	SafeResize          bool
+	ResizeStartedAt     *time.Time
+	ResizeBaselineBytes uint64
 }
 
 func storageQuiescenceRequired(assessment agentPoolStorageAssessment) bool {
@@ -122,6 +130,14 @@ func (r *AgentPoolReconciler) assessAgentPoolStorage(ctx context.Context, pool *
 		}
 		return assessment
 	}
+	owner := metav1.GetControllerOf(&pvc)
+	if owner == nil || owner.APIVersion != v1alpha1.GroupVersion.String() || owner.Kind != "AgentPool" || owner.Name != pool.Name || owner.UID != pool.UID {
+		assessment.CanMount = false
+		assessment.ConfirmedUnsafe = true
+		assessment.Reason = storageReasonPVCUnavailable
+		assessment.Message = fmt.Sprintf("PVC %s/%s must remain controller-owned by AgentPool %s uid=%s; refusing adoption or ownership mutation", pool.Namespace, pvcName, pool.Name, pool.UID)
+		return assessment
+	}
 	pvcVolumeMode := corev1.PersistentVolumeFilesystem
 	if pvc.Spec.VolumeMode != nil {
 		pvcVolumeMode = *pvc.Spec.VolumeMode
@@ -132,6 +148,41 @@ func (r *AgentPoolReconciler) assessAgentPoolStorage(ctx context.Context, pool *
 		assessment.Reason = storageReasonClassMismatch
 		assessment.Message = fmt.Sprintf("PVC %s/%s must retain class=%s access=ReadWriteOnce volumeMode=Filesystem; bound identity changes require explicit settlement and recreation", pool.Namespace, pvcName, assessment.ClassName)
 		return assessment
+	}
+	requested := pvc.Spec.Resources.Requests[corev1.ResourceStorage]
+	desired := pool.Spec.Sandbox.Size
+	if requested.Cmp(desired) < 0 {
+		assessment.SafeResize = true
+		assessment.Reason = storageReasonPVCExpansionPending
+		assessment.Message = fmt.Sprintf("PVC %s/%s request %s is growing in place to %s; retain mounted workers and withhold fresh credits until OpenEBS/XFS/statfs convergence", pool.Namespace, pvcName, requested.String(), desired.String())
+		return assessment
+	}
+	if requested.Cmp(desired) > 0 {
+		assessment.Reason = storageReasonPVCShrinkRefused
+		assessment.Message = fmt.Sprintf("PVC %s/%s shrink is unsupported (current request %s desired %s); preserve the claim, workers, and bytes", pool.Namespace, pvcName, requested.String(), desired.String())
+		return assessment
+	}
+	if resizeStarted := pvc.Annotations[agentPoolResizeStartedAnnotation]; resizeStarted != "" {
+		started, err := time.Parse(time.RFC3339Nano, resizeStarted)
+		if err != nil {
+			assessment.ConfirmedUnsafe = true
+			assessment.CanMount = false
+			assessment.Reason = storageReasonPVCExpansionFailed
+			assessment.Message = fmt.Sprintf("PVC %s/%s has malformed controller resize evidence; preserve the claim and inspect annotation %s", pool.Namespace, pvcName, agentPoolResizeStartedAnnotation)
+			return assessment
+		}
+		baselineText := pvc.Annotations[agentPoolResizeBaselineCapacityAnnotation]
+		baseline, err := strconv.ParseUint(baselineText, 10, 64)
+		if err != nil || baseline == 0 {
+			assessment.ConfirmedUnsafe = true
+			assessment.CanMount = false
+			assessment.Reason = storageReasonPVCExpansionFailed
+			assessment.Message = fmt.Sprintf("PVC %s/%s has malformed controller filesystem-capacity baseline evidence; preserve the claim and inspect annotation %s", pool.Namespace, pvcName, agentPoolResizeBaselineCapacityAnnotation)
+			return assessment
+		}
+		assessment.ResizeStartedAt = &started
+		assessment.ResizeBaselineBytes = baseline
+		assessment.SafeResize = true
 	}
 	if (pvc.Status.Phase == corev1.ClaimPending || pvc.Status.Phase == "") && pvc.Spec.VolumeName == "" {
 		if pool.Spec.Replicas == 0 {
@@ -150,9 +201,13 @@ func (r *AgentPoolReconciler) assessAgentPoolStorage(ctx context.Context, pool *
 		return assessment
 	}
 	assessment.PVName = pvc.Spec.VolumeName
-	requested := pvc.Spec.Resources.Requests[corev1.ResourceStorage]
 	capacity := pvc.Status.Capacity[corev1.ResourceStorage]
 	if capacity.IsZero() || capacity.Cmp(requested) < 0 {
+		if assessment.SafeResize {
+			assessment.Reason = storageReasonPVCExpansionPending
+			assessment.Message = fmt.Sprintf("PVC %s/%s request is %s but reported capacity is %s; retain mounted workers for online XFS growth", pool.Namespace, pvcName, requested.String(), capacity.String())
+			return assessment
+		}
 		assessment.Reason = storageReasonCapacity
 		assessment.Message = fmt.Sprintf("PVC %s/%s requested thick XFS capacity %s but reports %s; inspect OpenEBS provisioning and iterabase-data free capacity", pool.Namespace, pvcName, requested.String(), capacity.String())
 		return assessment
@@ -185,7 +240,12 @@ func (r *AgentPoolReconciler) assessAgentPoolStorage(ctx context.Context, pool *
 		assessment.Message = failure
 		return assessment
 	}
-	if failure, unknown, err := r.validateAgentPoolLVMVolume(ctx, pool.Namespace, &pv); failure != "" {
+	if failure, resizePending, unknown, err := r.validateAgentPoolLVMVolume(ctx, pool.Namespace, &pv, desired); failure != "" {
+		if resizePending && assessment.SafeResize {
+			assessment.Reason = storageReasonPVCExpansionPending
+			assessment.Message = failure
+			return assessment
+		}
 		assessment.CanMount = false
 		assessment.ConfirmedUnsafe = !unknown
 		assessment.ObservationUnknown = unknown
@@ -196,6 +256,11 @@ func (r *AgentPoolReconciler) assessAgentPoolStorage(ctx context.Context, pool *
 	}
 	pvCapacity := pv.Spec.Capacity[corev1.ResourceStorage]
 	if pvCapacity.Cmp(requested) < 0 {
+		if assessment.SafeResize {
+			assessment.Reason = storageReasonPVCExpansionPending
+			assessment.Message = fmt.Sprintf("PV %s capacity %s is growing in place to PVC request %s; retain mounted workers", pv.Name, pvCapacity.String(), requested.String())
+			return assessment
+		}
 		assessment.CanMount = false
 		assessment.ConfirmedUnsafe = true
 		assessment.Reason = storageReasonCapacity
@@ -203,9 +268,31 @@ func (r *AgentPoolReconciler) assessAgentPoolStorage(ctx context.Context, pool *
 		return assessment
 	}
 	assessment.VolumeHandle = pv.Spec.CSI.VolumeHandle
+	if assessment.ResizeStartedAt != nil {
+		assessment.SafeResize = true
+		if r.CapacityReader == nil {
+			assessment.Reason = storageReasonPVCExpansionPending
+			assessment.Message = fmt.Sprintf("PVC %s/%s infrastructure resize converged; waiting for a fresh mounted-filesystem statfs observation after %s", pool.Namespace, pvcName, assessment.ResizeStartedAt.Format(time.RFC3339Nano))
+			return assessment
+		}
+		status, err := r.CapacityReader.WorkspaceCapacityStatus(ctx, pool.Namespace+"/"+pool.Name)
+		if err != nil {
+			assessment.ObservationUnknown = true
+			assessment.ObservationErr = err
+			assessment.Reason = storageReasonPVCExpansionPending
+			assessment.Message = fmt.Sprintf("PVC %s/%s infrastructure resize converged but the required post-resize statfs observation is unavailable: %v", pool.Namespace, pvcName, err)
+			return assessment
+		}
+		if !workspaceCapacityStatusValid(status) || status.ObservedAt == nil || !status.ObservedAt.After(*assessment.ResizeStartedAt) || time.Since(*status.ObservedAt) > workspaceCapacityObservationFreshness || status.CapacityBytes <= assessment.ResizeBaselineBytes {
+			assessment.Reason = storageReasonPVCExpansionPending
+			assessment.Message = fmt.Sprintf("PVC %s/%s infrastructure resize converged; waiting for a fresh valid mounted-filesystem statfs capacity greater than the pre-resize %d bytes after %s", pool.Namespace, pvcName, assessment.ResizeBaselineBytes, assessment.ResizeStartedAt.Format(time.RFC3339Nano))
+			return assessment
+		}
+	}
 	assessment.Ready = true
+	assessment.SafeResize = false
 	assessment.Reason = storageReasonReady
-	assessment.Message = fmt.Sprintf("StorageReady: class=%s provisioner=%s pvc=%s/%s pv=%s volume=%s vg=%s fs=xfs shared=yes access=ReadWriteOnce reclaim=Delete expansion=false", assessment.ClassName, agentPoolWorkspaceProvisioner, pool.Namespace, pvcName, assessment.PVName, assessment.VolumeHandle, agentPoolWorkspaceVolumeGroup)
+	assessment.Message = fmt.Sprintf("StorageReady: class=%s provisioner=%s pvc=%s/%s pv=%s volume=%s vg=%s fs=xfs shared=yes access=ReadWriteOnce reclaim=Delete expansion=true", assessment.ClassName, agentPoolWorkspaceProvisioner, pool.Namespace, pvcName, assessment.PVName, assessment.VolumeHandle, agentPoolWorkspaceVolumeGroup)
 	return assessment
 }
 
@@ -225,8 +312,8 @@ func validateAgentPoolStorageClass(class *storagev1.StorageClass) string {
 		"thinProvision": "no",
 		"shared":        "yes",
 	}
-	if class.Name != agentPoolWorkspaceStorageClass || class.Provisioner != agentPoolWorkspaceProvisioner || binding != storagev1.VolumeBindingWaitForFirstConsumer || reclaim != corev1.PersistentVolumeReclaimDelete || class.AllowVolumeExpansion == nil || *class.AllowVolumeExpansion || !reflect.DeepEqual(class.Parameters, expectedParameters) || storageClassIsDefault(class) {
-		return fmt.Sprintf("StorageClass %q must be non-default provisioner=%s binding=WaitForFirstConsumer reclaim=Delete expansion=false parameters=%v (observed provisioner=%s binding=%s reclaim=%s expansion=%v default=%v parameters=%v)", class.Name, agentPoolWorkspaceProvisioner, expectedParameters, class.Provisioner, binding, reclaim, pointerValue(class.AllowVolumeExpansion), storageClassIsDefault(class), class.Parameters)
+	if class.Name != agentPoolWorkspaceStorageClass || class.Provisioner != agentPoolWorkspaceProvisioner || binding != storagev1.VolumeBindingWaitForFirstConsumer || reclaim != corev1.PersistentVolumeReclaimDelete || class.AllowVolumeExpansion == nil || !*class.AllowVolumeExpansion || !reflect.DeepEqual(class.Parameters, expectedParameters) || storageClassIsDefault(class) {
+		return fmt.Sprintf("StorageClass %q must be non-default provisioner=%s binding=WaitForFirstConsumer reclaim=Delete expansion=true parameters=%v (observed provisioner=%s binding=%s reclaim=%s expansion=%v default=%v parameters=%v)", class.Name, agentPoolWorkspaceProvisioner, expectedParameters, class.Provisioner, binding, reclaim, pointerValue(class.AllowVolumeExpansion), storageClassIsDefault(class), class.Parameters)
 	}
 	return ""
 }
@@ -254,15 +341,15 @@ func validateAgentPoolPV(pv *corev1.PersistentVolume, className string) string {
 }
 
 //nolint:gocyclo // exact OpenEBS identity predicates retain distinct actionable failures.
-func (r *AgentPoolReconciler) validateAgentPoolLVMVolume(ctx context.Context, namespace string, pv *corev1.PersistentVolume) (failure string, observationUnknown bool, observationErr error) {
+func (r *AgentPoolReconciler) validateAgentPoolLVMVolume(ctx context.Context, namespace string, pv *corev1.PersistentVolume, desired resource.Quantity) (failure string, resizePending bool, observationUnknown bool, observationErr error) {
 	volume := &unstructured.Unstructured{}
 	volume.SetGroupVersionKind(schema.GroupVersionKind{Group: "local.openebs.io", Version: "v1alpha1", Kind: "LVMVolume"})
 	if err := r.Get(ctx, types.NamespacedName{Namespace: namespace, Name: pv.Spec.CSI.VolumeHandle}, volume); err != nil {
 		message := fmt.Sprintf("PV %s OpenEBS LVMVolume %s is unavailable: %v", pv.Name, pv.Spec.CSI.VolumeHandle, err)
 		if errors.IsNotFound(err) {
-			return message, false, nil
+			return message, false, false, nil
 		}
-		return message, true, err
+		return message, false, true, err
 	}
 	volGroup, _, _ := unstructured.NestedString(volume.Object, "spec", "volGroup")
 	vgPattern, _, _ := unstructured.NestedString(volume.Object, "spec", "vgPattern")
@@ -270,11 +357,19 @@ func (r *AgentPoolReconciler) validateAgentPoolLVMVolume(ctx context.Context, na
 	thin, _, _ := unstructured.NestedString(volume.Object, "spec", "thinProvision")
 	ownerNode, _, _ := unstructured.NestedString(volume.Object, "spec", "ownerNodeID")
 	state, _, _ := unstructured.NestedString(volume.Object, "status", "state")
-	if volGroup != agentPoolWorkspaceVolumeGroup || vgPattern != "^iterabase-data$" || shared != "yes" || thin != "no" || ownerNode == "" || state != "Ready" {
-		return fmt.Sprintf("LVMVolume %s/%s must be Ready thick shared=yes vg=%s pattern=^iterabase-data$ with one owner node (observed state=%s vg=%s pattern=%s shared=%s thin=%s node=%s)", volume.GetNamespace(), volume.GetName(), agentPoolWorkspaceVolumeGroup, state, volGroup, vgPattern, shared, thin, ownerNode), false, nil
+	capacityText, _, _ := unstructured.NestedString(volume.Object, "spec", "capacity")
+	capacity, capacityErr := resource.ParseQuantity(capacityText)
+	if volGroup != agentPoolWorkspaceVolumeGroup || vgPattern != "^iterabase-data$" || shared != "yes" || thin != "no" || ownerNode == "" || capacityErr != nil {
+		return fmt.Sprintf("LVMVolume %s/%s must retain thick shared=yes vg=%s pattern=^iterabase-data$ with one owner node (observed state=%s vg=%s pattern=%s shared=%s thin=%s node=%s capacity=%s)", volume.GetNamespace(), volume.GetName(), agentPoolWorkspaceVolumeGroup, state, volGroup, vgPattern, shared, thin, ownerNode, capacityText), false, false, nil
+	}
+	if state != "Ready" {
+		return fmt.Sprintf("LVMVolume %s/%s resize state is %s; retain mounted workers and inspect OpenEBS events plus iterabase-data free capacity", volume.GetNamespace(), volume.GetName(), state), true, false, nil
+	}
+	if capacity.Cmp(desired) < 0 {
+		return fmt.Sprintf("LVMVolume %s/%s capacity %s is growing in place to %s; retain mounted workers", volume.GetNamespace(), volume.GetName(), capacity.String(), desired.String()), true, false, nil
 	}
 	if !pvHasExactNodeTopology(pv, ownerNode) {
-		return fmt.Sprintf("PV %s node topology does not match LVMVolume owner node %s", pv.Name, ownerNode), false, nil
+		return fmt.Sprintf("PV %s node topology does not match LVMVolume owner node %s", pv.Name, ownerNode), false, false, nil
 	}
 
 	node := &unstructured.Unstructured{}
@@ -282,13 +377,13 @@ func (r *AgentPoolReconciler) validateAgentPoolLVMVolume(ctx context.Context, na
 	if err := r.Get(ctx, types.NamespacedName{Namespace: volume.GetNamespace(), Name: ownerNode}, node); err != nil {
 		message := fmt.Sprintf("OpenEBS LVMNode %s is unavailable in namespace %s: %v", ownerNode, volume.GetNamespace(), err)
 		if errors.IsNotFound(err) {
-			return message, false, nil
+			return message, false, false, nil
 		}
-		return message, true, err
+		return message, false, true, err
 	}
 	groups, found, err := unstructured.NestedSlice(node.Object, "volumeGroups")
 	if err != nil || !found {
-		return fmt.Sprintf("LVMNode %s/%s has no readable volumeGroups", node.GetNamespace(), ownerNode), false, nil
+		return fmt.Sprintf("LVMNode %s/%s has no readable volumeGroups", node.GetNamespace(), ownerNode), false, false, nil
 	}
 	for _, raw := range groups {
 		group, ok := raw.(map[string]any)
@@ -299,11 +394,11 @@ func (r *AgentPoolReconciler) validateAgentPoolLVMVolume(ctx context.Context, na
 		missing := nestedNumber(group["missingPvCount"])
 		thinPools, _ := group["thinPools"].([]any)
 		if uuid == "" || missing != 0 || len(thinPools) != 0 {
-			return fmt.Sprintf("LVMNode %s/%s VG %s must have a UUID, no missing PVs, and no thin pools", node.GetNamespace(), ownerNode, agentPoolWorkspaceVolumeGroup), false, nil
+			return fmt.Sprintf("LVMNode %s/%s VG %s must have a UUID, no missing PVs, and no thin pools", node.GetNamespace(), ownerNode, agentPoolWorkspaceVolumeGroup), false, false, nil
 		}
-		return "", false, nil
+		return "", false, false, nil
 	}
-	return fmt.Sprintf("LVMNode %s/%s does not report VG %s", node.GetNamespace(), ownerNode, agentPoolWorkspaceVolumeGroup), false, nil
+	return fmt.Sprintf("LVMNode %s/%s does not report VG %s", node.GetNamespace(), ownerNode, agentPoolWorkspaceVolumeGroup), false, false, nil
 }
 
 // OpenEBS publishes PV accessible topology with its driver key; the additional
@@ -335,6 +430,14 @@ func nestedNumber(value any) int64 {
 // matching AgentPool's actionable condition. Ready/StorageReady continue
 // to describe pod/PVC mount health; this independent condition explains why
 // fresh dispatch credit is open, warning, gated, or unavailable.
+func workspaceCapacityStatusValid(status gateway.WorkspaceCapacityStatus) bool {
+	if !status.Observed || status.CapacityBytes == 0 || status.FreeBytes > status.CapacityBytes || math.IsNaN(status.FreeRatio) || math.IsInf(status.FreeRatio, 0) {
+		return false
+	}
+	computed := float64(status.FreeBytes) / float64(status.CapacityBytes)
+	return math.Abs(computed-status.FreeRatio) <= 0.000001
+}
+
 func (r *AgentPoolReconciler) setWorkspaceCapacityCondition(ctx context.Context, pool *v1alpha1.AgentPool) string {
 	if r.CapacityReader == nil {
 		return ""
@@ -356,11 +459,7 @@ func (r *AgentPoolReconciler) setWorkspaceCapacityCondition(ctx context.Context,
 		meta.SetStatusCondition(&pool.Status.Conditions, condition)
 		return condition.Message
 	}
-	computed := 0.0
-	if status.CapacityBytes > 0 {
-		computed = float64(status.FreeBytes) / float64(status.CapacityBytes)
-	}
-	if status.CapacityBytes == 0 || status.FreeBytes > status.CapacityBytes || math.IsNaN(status.FreeRatio) || math.IsInf(status.FreeRatio, 0) || math.Abs(computed-status.FreeRatio) > 0.000001 {
+	if !workspaceCapacityStatusValid(status) {
 		condition.Message = "workspace capacity observation is invalid; dispatch fails closed until a valid actual-filesystem measurement arrives"
 		meta.SetStatusCondition(&pool.Status.Conditions, condition)
 		return condition.Message

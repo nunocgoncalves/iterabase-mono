@@ -1803,6 +1803,7 @@ func TestWaitForLVMStorageReadyParsesBoundedVGIdentity(t *testing.T) {
 		assert.NotContains(t, cmd, "iterabase-lvm-snapshot")
 		assert.Contains(t, cmd, "openebs.io/nodename")
 		assert.Contains(t, cmd, "iterabase-agentpool-lvm-xfs")
+		assert.Contains(t, cmd, "local.csi.openebs.io|Delete|WaitForFirstConsumer|true|lvm|^iterabase-data$|xfs|no|$shared")
 		assert.Contains(t, cmd, "K3s local-path provisioner still exists")
 		return "FORGE_LVM_STORAGE_READY\tnode-a\titerabase-data\tvg-a\t300\t250\t2\t2\n", 0
 	})

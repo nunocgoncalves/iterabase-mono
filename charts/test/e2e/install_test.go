@@ -147,6 +147,11 @@ func assertOpenEBSLVMClaimsStage(t *testing.T, state *chartState) {
 	if len(classes) != 2 || !slices.Contains(classes, PlatformDataStorageClass) || !slices.Contains(classes, AgentPoolWorkspaceStorageClass) {
 		t.Fatalf("managed StorageClass set=%v", classes)
 	}
+	for _, class := range classes {
+		if expansion := state.kubectl(t, 30*time.Second, "get", "storageclass/"+class, "-o", "jsonpath={.allowVolumeExpansion}"); expansion != "true" {
+			t.Fatalf("managed StorageClass %s allowVolumeExpansion=%q want=true", class, expansion)
+		}
+	}
 	claims := strings.Fields(state.kubectl(t, 30*time.Second, "get", "pvc", "-A", "-o", `jsonpath={range .items[*]}{.metadata.namespace}/{.metadata.name}|{.spec.storageClassName}|{.status.phase}|{.spec.volumeName}{"\n"}{end}`))
 	if len(claims) == 0 {
 		t.Fatal("fresh platform rendered no data claims")
@@ -229,6 +234,18 @@ spec:
 	}
 	if _, err := state.kubectlResult(30*time.Second, "patch", "pvc/manager-agentpool-claim", "-n", testNamespace, "--type=merge", "-p", `{"metadata":{"ownerReferences":[{"apiVersion":"platform.iterabase.com/v1alpha1","kind":"AgentPool","name":"ap-other","uid":"22222222-2222-2222-2222-222222222222","controller":true}]}}`); err == nil {
 		t.Fatalf("an AgentPool PVC UPDATE swapping its controller ownerReference to a different AgentPool was admitted; ownership must be immutable")
+	}
+	if _, err := state.kubectlResult(30*time.Second, "patch", "pvc/manager-agentpool-claim", "-n", testNamespace, "--type=merge", "-p", `{"spec":{"resources":{"requests":{"storage":"768Mi"}}}}`); err == nil {
+		t.Fatalf("a non-manager identity raised an AgentPool PVC request")
+	}
+	if _, err := state.kubectlResult(30*time.Second, "patch", "pvc/manager-agentpool-claim", "-n", testNamespace, "--type=merge", "-p", `{"spec":{"resources":{"requests":{"storage":"768Mi"}}}}`, "--as", managerIdentity); err != nil {
+		t.Fatalf("the exact manager identity could not raise an AgentPool PVC request: %v", err)
+	}
+	if _, err := state.kubectlResult(30*time.Second, "patch", "pvc/manager-agentpool-claim", "-n", testNamespace, "--type=merge", "-p", `{"spec":{"resources":{"requests":{"storage":"512Mi"}}}}`, "--as", managerIdentity); err == nil {
+		t.Fatalf("the manager identity was allowed to shrink an AgentPool PVC request")
+	}
+	if got := state.kubectl(t, 30*time.Second, "get", "pvc/manager-agentpool-claim", "-n", testNamespace, "-o", "jsonpath={.spec.resources.requests.storage}"); got != "768Mi" {
+		t.Fatalf("grow-only admission changed the same request to %q, want 768Mi", got)
 	}
 	state.kubectl(t, 30*time.Second, "delete", "pvc/manager-agentpool-claim", "-n", testNamespace, "--ignore-not-found=true", "--wait=true", "--timeout=2m")
 
