@@ -287,14 +287,14 @@ func growManagedModelBackendClaims(
 		identities[claim] = strings.TrimSpace(cluster.Kubectl(t, "get", "pvc/"+claim, "-n", namespace, "-o", `jsonpath={.metadata.uid}|{.spec.volumeName}`))
 	}
 
-	patch := fmt.Sprintf(`{"spec":{"persistentVolumes":[{"name":"hf-cache","mountPath":"/data/hf-cache","storageClassName":"iterabase-lvm-xfs","size":"6Gi"},{"name":"generic-cache","mountPath":"/cache","storageClassName":"iterabase-lvm-xfs","size":"2Gi"}]}}`)
+	patch := `{"spec":{"persistentVolumes":[{"name":"hf-cache","mountPath":"/data/hf-cache","storageClassName":"iterabase-lvm-xfs","size":"6Gi"},{"name":"generic-cache","mountPath":"/cache","storageClassName":"iterabase-lvm-xfs","size":"2Gi"}]}}`
 	cluster.Kubectl(t, "patch", "modelbackend/"+mbName, "-n", namespace, "--type=merge", "-p", patch)
 
 	deadline := time.Now().Add(3 * time.Minute)
 	observedClosed := false
 	for time.Now().Before(deadline) {
 		out, err := kubectlAllowFail(t, cluster.Kubeconfig, "get", "modelbackend/"+mbName, "-n", namespace, "-o", `jsonpath={.status.healthy}|{.status.message}`)
-		if err == nil && !strings.HasPrefix(strings.TrimSpace(out), "true|") && strings.Contains(out, "growing") {
+		if err == nil && !strings.HasPrefix(strings.TrimSpace(out), "true|") && strings.Contains(out, "managed PVC") {
 			observedClosed = true
 			break
 		}
@@ -332,9 +332,7 @@ unavailableObserved:
 		pv := strings.Split(identities[claim], "|")[1]
 		handle := strings.TrimSpace(cluster.Kubectl(t, "get", "pv/"+pv, "-o", "jsonpath={.spec.csi.volumeHandle}"))
 		capacity := strings.TrimSpace(cluster.Kubectl(t, "get", "lvmvolume.local.openebs.io/"+handle, "-n", namespace, "-o", "jsonpath={.spec.capacity}|{.status.state}"))
-		if capacity != wanted+"|Ready" {
-			t.Fatalf("managed LVMVolume %s did not converge in place: %s", handle, capacity)
-		}
+		assertLVMVolumeCapacity(t, capacity, wanted)
 	}
 	cluster.Kubectl(t, "wait", "modelbackend/"+mbName, "-n", namespace, "--for=jsonpath={.status.healthy}=true", "--timeout=15m")
 	if current := strings.TrimSpace(cluster.Kubectl(t, "get", "pod/"+pod, "-n", namespace, "-o", "jsonpath={.metadata.uid}")); current != podUID {
