@@ -328,8 +328,8 @@ func growAgentPoolDuringActiveTurn(t *testing.T, cluster *remotecluster.Cluster,
 	)
 	workersBefore := strings.TrimSpace(mustSSHOutput(t, client, `sudo k3s kubectl get pods -n iterabase-system -l platform.iterabase.com/agentpool=forge-storage-pool -o jsonpath='{range .items[*]}{.metadata.uid}{"\n"}{end}' | sort`))
 	pod := strings.Fields(mustSSHOutput(t, client, `sudo k3s kubectl get pods -n iterabase-system -l platform.iterabase.com/agentpool=forge-storage-pool -o name`))[0]
-	beforeFS := strings.TrimSpace(mustSSHOutput(t, client, fmt.Sprintf(`sudo k3s kubectl exec -n iterabase-system %s -- sh -ceu 'df -B1 --output=size /data/sandboxes | tail -1 | tr -d " "'`, pod)))
-	mustSSHOutput(t, client, fmt.Sprintf(`sudo k3s kubectl exec -n iterabase-system %s -- sh -ceu 'printf HOR-557-agentpool-growth > /data/sandboxes/.growth-marker; sync'`, pod))
+	beforeFS := strings.TrimSpace(mustSSHOutput(t, client, fmt.Sprintf(`sudo k3s kubectl exec -n iterabase-system -c supervisor %s -- sh -ceu 'df -B1 --output=size /data/sandboxes | tail -1 | tr -d " "'`, pod)))
+	mustSSHOutput(t, client, fmt.Sprintf(`sudo k3s kubectl exec -n iterabase-system -c supervisor %s -- sh -ceu 'printf HOR-557-agentpool-growth > /data/sandboxes/.growth-marker; sync'`, pod))
 	identity := strings.TrimSpace(mustSSHOutput(t, client, `sudo k3s kubectl get pvc forge-storage-pool-sandbox -n iterabase-system -o jsonpath='{.metadata.uid}|{.spec.volumeName}'`))
 	parts := strings.Split(identity, "|")
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
@@ -378,7 +378,7 @@ func growAgentPoolDuringActiveTurn(t *testing.T, cluster *remotecluster.Cluster,
 	if after := strings.TrimSpace(mustSSHOutput(t, client, fmt.Sprintf(`sudo bash -ceu 'lv=/dev/iterabase-data/%s; lvuuid=$(lvs --noheadings -o lv_uuid "$lv" | xargs); fsuuid=$(blkid -s UUID -o value "$lv"); printf "%%s|%%s" "$lvuuid" "$fsuuid"'`, candidateShellQuote(handle)))); after != hostIdentity {
 		t.Fatalf("AgentPool growth replaced LV/filesystem identity: before=%s after=%s", hostIdentity, after)
 	}
-	afterFS := strings.TrimSpace(mustSSHOutput(t, client, fmt.Sprintf(`sudo k3s kubectl exec -n iterabase-system %s -- sh -ceu 'test "$(cat /data/sandboxes/.growth-marker)" = HOR-557-agentpool-growth; df -B1 --output=size /data/sandboxes | tail -1 | tr -d " "'`, pod)))
+	afterFS := strings.TrimSpace(mustSSHOutput(t, client, fmt.Sprintf(`sudo k3s kubectl exec -n iterabase-system -c supervisor %s -- sh -ceu 'test "$(cat /data/sandboxes/.growth-marker)" = HOR-557-agentpool-growth; df -B1 --output=size /data/sandboxes | tail -1 | tr -d " "'`, pod)))
 	beforeBytes, beforeErr := strconv.ParseUint(beforeFS, 10, 64)
 	afterBytes, afterErr := strconv.ParseUint(afterFS, 10, 64)
 	if beforeErr != nil || afterErr != nil || afterBytes <= beforeBytes {

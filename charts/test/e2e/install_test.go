@@ -20,7 +20,7 @@ func freshInstallScenario() sharede2e.Definition {
 			"fresh-install",
 			"Installs ordered certificate and pinned OpenEBS LVM volume-only substrates plus class-isolated public/private ingress planes, then proves exact classes, claims, the inert LVMSnapshot deletion-safety boundary, CSI/user snapshot absence, manager, issuer, workload identity, fixed private allocation, route isolation, and verified gateway readiness.",
 			"test-e2e-install", 45,
-			[]string{"HOR-408", "HOR-414", "HOR-416", "HOR-475", "HOR-545", "DES-HOR-545-01", "DES-HOR-545-05"},
+			[]string{"HOR-408", "HOR-414", "HOR-416", "HOR-475", "HOR-545", "HOR-557", "DES-HOR-545-01", "DES-HOR-545-05", "DES-HOR-545-07"},
 			[]string{"control-plane-chart", "inference-gateway-chart", "iterabase-platform-chart"},
 		),
 		NewState: newChartState,
@@ -207,10 +207,27 @@ spec:
 
 	// UPDATE owner-replacement bypass: an existing AgentPool claim whose matching
 	// controller ownerReference is replaced with a different AgentPool {name,uid}
-	// at the same count must be denied. Create a valid manager-identity + single
-	// AgentPool claim (which CREATE admits), then attempt to swap its ownerRef to
-	// a different AgentPool and assert the UPDATE is denied.
+	// at the same count must be denied. Keep a real (intentionally dependency-
+	// unready) AgentPool owner present so garbage collection cannot remove the
+	// admission test claim before its WFFC consumer binds it.
 	managerIdentity := "system:serviceaccount:" + testNamespace + ":" + testRelease + "-control-plane-manager"
+	agentOwner := `apiVersion: platform.iterabase.com/v1alpha1
+kind: AgentPool
+metadata: {name: ap-manager, namespace: ` + testNamespace + `}
+spec:
+  replicas: 0
+  workerImage: unavailable.invalid/harness:test
+  podSecurity: baseline
+  identity: {caSecretRef: {name: intentionally-missing-ca}}
+  sandbox: {storageClassName: iterabase-agentpool-lvm-xfs, accessMode: ReadWriteOnce, size: 512Mi}
+  gateways:
+    controlPlane: {url: https://control-plane.invalid:8443, serverName: control-plane, selector: {podSelector: {matchLabels: {app: control-plane}}}}
+    toolGateway: {url: https://tool-gateway.invalid:8443, serverName: tool-gateway, selector: {podSelector: {matchLabels: {app: tool-gateway}}}}
+    inferenceGateway: {url: https://inference-gateway.invalid:8443, serverName: inference-gateway, selector: {podSelector: {matchLabels: {app: inference-gateway}}}}
+`
+	agentOwnerPath := state.writeManifest(t, "manager-agentpool-owner.yaml", agentOwner)
+	state.kubectl(t, 30*time.Second, "apply", "-f", agentOwnerPath)
+	agentOwnerUID := state.kubectl(t, 30*time.Second, "get", "agentpool/ap-manager", "-n", testNamespace, "-o", "jsonpath={.metadata.uid}")
 	agentClaim := `apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -220,7 +237,7 @@ metadata:
     - apiVersion: platform.iterabase.com/v1alpha1
       kind: AgentPool
       name: ap-manager
-      uid: 11111111-1111-1111-1111-111111111111
+      uid: ` + agentOwnerUID + `
       controller: true
 spec:
   accessModes: [ReadWriteOnce]
@@ -262,7 +279,7 @@ spec:
 	if got := state.kubectl(t, 30*time.Second, "get", "pvc/manager-agentpool-claim", "-n", testNamespace, "-o", "jsonpath={.spec.resources.requests.storage}"); got != "768Mi" {
 		t.Fatalf("grow-only admission changed the same request to %q, want 768Mi", got)
 	}
-	state.kubectl(t, 30*time.Second, "delete", "pod/manager-agentpool-claim-consumer", "pvc/manager-agentpool-claim", "-n", testNamespace, "--ignore-not-found=true", "--wait=true", "--timeout=2m")
+	state.kubectl(t, 30*time.Second, "delete", "pod/manager-agentpool-claim-consumer", "pvc/manager-agentpool-claim", "agentpool/ap-manager", "-n", testNamespace, "--ignore-not-found=true", "--wait=true", "--timeout=2m")
 
 	// Ubuntu 24.04 XFS refuses filesystems at or below 300 MB; keep this real
 	// lifecycle claim above that supported minimum rather than bypassing format.
