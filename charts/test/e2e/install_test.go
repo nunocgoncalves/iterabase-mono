@@ -279,7 +279,7 @@ spec:
 	if got := state.kubectl(t, 30*time.Second, "get", "pvc/manager-agentpool-claim", "-n", testNamespace, "-o", "jsonpath={.spec.resources.requests.storage}"); got != "768Mi" {
 		t.Fatalf("grow-only admission changed the same request to %q, want 768Mi", got)
 	}
-	state.kubectl(t, 30*time.Second, "delete", "pod/manager-agentpool-claim-consumer", "pvc/manager-agentpool-claim", "agentpool/ap-manager", "-n", testNamespace, "--ignore-not-found=true", "--wait=true", "--timeout=2m")
+	state.kubectl(t, 3*time.Minute, "delete", "pod/manager-agentpool-claim-consumer", "pvc/manager-agentpool-claim", "agentpool/ap-manager", "-n", testNamespace, "--ignore-not-found=true", "--wait=true", "--timeout=2m")
 
 	// Ubuntu 24.04 XFS refuses filesystems at or below 300 MB; keep this real
 	// lifecycle claim above that supported minimum rather than bypassing format.
