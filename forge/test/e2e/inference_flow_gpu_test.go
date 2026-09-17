@@ -380,7 +380,7 @@ func reapplyManagedModelBackendEvidence(t *testing.T, state *permanentGPUFixture
 	pod := cluster.FirstPodName(t, namespace, "platform.iterabase.com/modelbackend="+mbName)
 	podUID := strings.TrimSpace(cluster.Kubectl(t, "get", "pod/"+pod, "-n", namespace, "-o", "jsonpath={.metadata.uid}"))
 
-	applyInferencePlatformStage(t, state)
+	reapplyInferencePlatformStage(t, state)
 	for _, claim := range claims {
 		if after := strings.TrimSpace(cluster.Kubectl(t, "get", "pvc/"+claim, "-n", namespace, "-o", `jsonpath={.metadata.uid}|{.spec.volumeName}`)); after != identities[claim] {
 			t.Fatalf("exact Forge/chart reapply replaced managed claim %s: before=%s after=%s", claim, identities[claim], after)
@@ -391,6 +391,23 @@ func reapplyManagedModelBackendEvidence(t *testing.T, state *permanentGPUFixture
 	}
 	cluster.Kubectl(t, "exec", "-n", namespace, pod, "--", "sh", "-ceu", fmt.Sprintf("test \"$(sha256sum /data/hf-cache/%s | awk '{print $1}')\" = %s; test \"$(cat /cache/growth-marker)\" = HOR-557-managed-cache", authority.WeightPath, authority.SHA256))
 	assertModelBackendServingUsesManagedPVCs(t, cluster, namespace, mbName)
+}
+
+func reapplyInferencePlatformStage(t *testing.T, state *permanentGPUFixtureState) {
+	t.Helper()
+	prepareCandidateChart(t, state.host.IP, state.privKeyPath)
+	plan := prepareCandidateOverlay(t, state.runID, state.host.IP, state.privKeyPath)
+	candidateConfig := writeForgeConfigInferenceGPU(
+		t, state.runID, state.host.IP, state.privKeyPath, state.chartVersion, plan,
+	)
+	out := applyOnceArgs(t, state.forgeBin, state.forgeHome, candidateConfig, "--skip-gpu")
+	state.bindKubeconfigTunnel(t)
+	markers := []string{"action:     skip", "node ready: true", "data storage: iterabase-data", "LVM storage ready: true", "certificate substrate applied: true", "LVM storage substrate applied: true",
+		"chart applied: true", "overlay applied: true", "flux installed: true", "gitrepository: ready=True"}
+	assertApplyMarkers(t, out, markers...)
+	candidateCluster := remotecluster.Use(t, filepath.Join(state.forgeHome, state.runID, "kubeconfig.yaml"))
+	assertCandidateImageDigests(t, candidateCluster, "iterabase-system", state.runtimeImageDigests,
+		controlPlaneDigestEnv, inferenceGatewayDigestEnv, toolRunnerDigestEnv)
 }
 
 func deleteManagedModelBackendClaimsEvidence(t *testing.T, state *permanentGPUFixtureState, cluster *remotecluster.Cluster, namespace, mbName string) {
