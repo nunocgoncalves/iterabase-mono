@@ -16,8 +16,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -29,7 +27,7 @@ import (
 const (
 	modelBackendStorageClass            = "iterabase-lvm-xfs"
 	modelBackendStorageProvisioner      = "local.csi.openebs.io"
-	modelBackendStorageVolumeGroup      = "iterabase-data"
+	modelBackendStorageVolumeGroup      = managedOpenEBSVolumeGroup
 	modelBackendClaimSetAnnotation      = "platform.iterabase.com/modelbackend-claim-set"
 	modelBackendDeclarationAnnotation   = "platform.iterabase.com/modelbackend-volume-name"
 	modelBackendMountPathAnnotation     = "platform.iterabase.com/modelbackend-mount-path"
@@ -56,6 +54,13 @@ type modelBackendStorageIdentity struct {
 //nolint:gocyclo // each declaration/name/path/class/replica predicate has a distinct refusal.
 func validateModelBackendPersistentVolumes(mb *v1alpha1.ModelBackend) error {
 	if len(mb.Spec.PersistentVolumes) == 0 {
+		if mb.Spec.Kind == "vLLM" {
+			for _, mount := range mb.Spec.VolumeMounts {
+				if modelBackendMountPathsCollide(defaultModelCachePath, mount.MountPath) {
+					return fmt.Errorf("spec.volumeMounts path %q collides with the controller-managed ephemeral HF cache at %q", mount.MountPath, defaultModelCachePath)
+				}
+			}
+		}
 		return nil
 	}
 	if mb.Spec.Kind != "vLLM" {
@@ -72,6 +77,7 @@ func validateModelBackendPersistentVolumes(mb *v1alpha1.ModelBackend) error {
 	names := make(map[string]struct{}, len(mb.Spec.PersistentVolumes))
 	paths := make(map[string]struct{}, len(mb.Spec.PersistentVolumes))
 	podVolumeNames := make(map[string]struct{}, len(mb.Spec.PersistentVolumes))
+	hasManagedHFCache := false
 	for i, volume := range mb.Spec.PersistentVolumes {
 		if problems := validation.IsDNS1123Label(volume.Name); len(problems) > 0 {
 			return fmt.Errorf("spec.persistentVolumes[%d].name %q must be a DNS label: %s", i, volume.Name, strings.Join(problems, ", "))
@@ -95,6 +101,7 @@ func validateModelBackendPersistentVolumes(mb *v1alpha1.ModelBackend) error {
 			}
 		}
 		paths[volume.MountPath] = struct{}{}
+		hasManagedHFCache = hasManagedHFCache || volume.MountPath == defaultModelCachePath
 		if volume.StorageClassName != modelBackendStorageClass {
 			return fmt.Errorf("spec.persistentVolumes[%d].storageClassName must be %q; alternate, default, and BYO classes are unsupported", i, modelBackendStorageClass)
 		}
@@ -102,6 +109,13 @@ func validateModelBackendPersistentVolumes(mb *v1alpha1.ModelBackend) error {
 			return fmt.Errorf("spec.persistentVolumes[%d].size must be a positive Kubernetes quantity", i)
 		}
 		podVolumeNames[modelBackendManagedVolumeName(volume.Name)] = struct{}{}
+	}
+	if !hasManagedHFCache {
+		for managedPath := range paths {
+			if modelBackendMountPathsCollide(defaultModelCachePath, managedPath) {
+				return fmt.Errorf("spec.persistentVolumes mount path %q collides with the controller-managed ephemeral HF cache at %q", managedPath, defaultModelCachePath)
+			}
+		}
 	}
 	for _, volume := range mb.Spec.Volumes {
 		if _, collision := podVolumeNames[volume.Name]; collision {
@@ -114,8 +128,8 @@ func validateModelBackendPersistentVolumes(mb *v1alpha1.ModelBackend) error {
 				return fmt.Errorf("spec.volumeMounts path %q collides with managed path %q", mount.MountPath, managedPath)
 			}
 		}
-		if len(mb.Spec.PersistentVolumes) == 0 && mount.MountPath == defaultModelCachePath {
-			return fmt.Errorf("spec.volumeMounts path %q collides with the controller-managed ephemeral HF cache", mount.MountPath)
+		if !hasManagedHFCache && modelBackendMountPathsCollide(defaultModelCachePath, mount.MountPath) {
+			return fmt.Errorf("spec.volumeMounts path %q collides with the controller-managed ephemeral HF cache at %q", mount.MountPath, defaultModelCachePath)
 		}
 	}
 	return nil
@@ -417,56 +431,13 @@ func validateModelBackendPV(pv *corev1.PersistentVolume, className string, desir
 	return ""
 }
 
-//nolint:gocyclo // exact LVMVolume/LVMNode identity predicates retain distinct failures.
 func (r *ModelBackendReconciler) validateModelBackendLVMVolume(ctx context.Context, namespace string, pv *corev1.PersistentVolume, desired resource.Quantity) (string, error) {
-	volume := &unstructured.Unstructured{}
-	volume.SetGroupVersionKind(schema.GroupVersionKind{Group: "local.openebs.io", Version: "v1alpha1", Kind: "LVMVolume"})
-	if err := r.Get(ctx, types.NamespacedName{Namespace: namespace, Name: pv.Spec.CSI.VolumeHandle}, volume); err != nil {
-		message := fmt.Sprintf("ModelBackend PV %s OpenEBS LVMVolume %s is unavailable: %v", pv.Name, pv.Spec.CSI.VolumeHandle, err)
-		if errors.IsNotFound(err) {
-			return message, nil
-		}
-		return message, err
+	observation, issue := observeManagedOpenEBSVolume(ctx, r.Client, namespace, pv)
+	if issue != nil {
+		return "ModelBackend " + issue.Message, issue.Err
 	}
-	volGroup, _, _ := unstructured.NestedString(volume.Object, "spec", "volGroup")
-	vgPattern, _, _ := unstructured.NestedString(volume.Object, "spec", "vgPattern")
-	shared, _, _ := unstructured.NestedString(volume.Object, "spec", "shared")
-	thin, _, _ := unstructured.NestedString(volume.Object, "spec", "thinProvision")
-	ownerNode, _, _ := unstructured.NestedString(volume.Object, "spec", "ownerNodeID")
-	state, _, _ := unstructured.NestedString(volume.Object, "status", "state")
-	capacityText, _, _ := unstructured.NestedString(volume.Object, "spec", "capacity")
-	capacity, capacityErr := resource.ParseQuantity(capacityText)
-	if volGroup != modelBackendStorageVolumeGroup || vgPattern != "^iterabase-data$" || shared != "no" || thin != "no" || ownerNode == "" || state != "Ready" || capacityErr != nil || capacity.Cmp(desired) < 0 {
-		return fmt.Sprintf("ModelBackend LVMVolume %s/%s must be Ready thick shared=no vg=%s at capacity >=%s with one owner node (observed state=%s vg=%s shared=%s thin=%s capacity=%s)", volume.GetNamespace(), volume.GetName(), modelBackendStorageVolumeGroup, desired.String(), state, volGroup, shared, thin, capacityText), nil
+	if observation.Shared != "no" || observation.State != "Ready" || observation.Capacity.Cmp(desired) < 0 {
+		return fmt.Sprintf("ModelBackend LVMVolume %s/%s must be Ready thick shared=no vg=%s at capacity >=%s with one owner node (observed state=%s shared=%s capacity=%s)", observation.Namespace, observation.Name, modelBackendStorageVolumeGroup, desired.String(), observation.State, observation.Shared, observation.CapacityText), nil
 	}
-	if !pvHasExactNodeTopology(pv, ownerNode) {
-		return fmt.Sprintf("ModelBackend PV %s node topology does not match LVMVolume owner node %s", pv.Name, ownerNode), nil
-	}
-
-	node := &unstructured.Unstructured{}
-	node.SetGroupVersionKind(schema.GroupVersionKind{Group: "local.openebs.io", Version: "v1alpha1", Kind: "LVMNode"})
-	if err := r.Get(ctx, types.NamespacedName{Namespace: namespace, Name: ownerNode}, node); err != nil {
-		message := fmt.Sprintf("ModelBackend OpenEBS LVMNode %s is unavailable in namespace %s: %v", ownerNode, namespace, err)
-		if errors.IsNotFound(err) {
-			return message, nil
-		}
-		return message, err
-	}
-	groups, found, err := unstructured.NestedSlice(node.Object, "volumeGroups")
-	if err != nil || !found {
-		return fmt.Sprintf("ModelBackend LVMNode %s/%s has no readable volumeGroups", node.GetNamespace(), ownerNode), nil
-	}
-	for _, raw := range groups {
-		group, ok := raw.(map[string]any)
-		if !ok || group["name"] != modelBackendStorageVolumeGroup {
-			continue
-		}
-		uuid, _ := group["uuid"].(string)
-		thinPools, _ := group["thinPools"].([]any)
-		if uuid == "" || nestedNumber(group["missingPvCount"]) != 0 || len(thinPools) != 0 {
-			return fmt.Sprintf("ModelBackend LVMNode %s/%s VG %s must have a UUID, no missing PVs, and no thin pools", node.GetNamespace(), ownerNode, modelBackendStorageVolumeGroup), nil
-		}
-		return "", nil
-	}
-	return fmt.Sprintf("ModelBackend LVMNode %s/%s does not report VG %s", node.GetNamespace(), ownerNode, modelBackendStorageVolumeGroup), nil
+	return "", nil
 }

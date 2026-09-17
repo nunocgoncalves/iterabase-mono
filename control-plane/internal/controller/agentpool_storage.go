@@ -14,8 +14,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -26,7 +24,7 @@ import (
 const (
 	agentPoolWorkspaceStorageClass = "iterabase-agentpool-lvm-xfs"
 	agentPoolWorkspaceProvisioner  = "local.csi.openebs.io"
-	agentPoolWorkspaceVolumeGroup  = "iterabase-data"
+	agentPoolWorkspaceVolumeGroup  = managedOpenEBSVolumeGroup
 	storageModeOpenEBSLVMRWO       = "openebs-lvm-xfs-rwo"
 )
 
@@ -288,12 +286,28 @@ func (r *AgentPoolReconciler) assessAgentPoolStorage(ctx context.Context, pool *
 			assessment.Message = fmt.Sprintf("PVC %s/%s infrastructure resize converged; waiting for a fresh valid mounted-filesystem statfs capacity greater than the pre-resize %d bytes after %s", pool.Namespace, pvcName, assessment.ResizeBaselineBytes, assessment.ResizeStartedAt.Format(time.RFC3339Nano))
 			return assessment
 		}
+		if err := r.completeAgentPoolResize(ctx, &pvc); err != nil {
+			assessment.ObservationUnknown = true
+			assessment.ObservationErr = err
+			assessment.Reason = storageReasonPVCExpansionPending
+			assessment.Message = fmt.Sprintf("PVC %s/%s resize converged but completion evidence could not be persisted; retaining mounted workers and fresh-credit closure: %v", pool.Namespace, pvcName, err)
+			return assessment
+		}
+		assessment.ResizeStartedAt = nil
+		assessment.ResizeBaselineBytes = 0
 	}
 	assessment.Ready = true
 	assessment.SafeResize = false
 	assessment.Reason = storageReasonReady
 	assessment.Message = fmt.Sprintf("StorageReady: class=%s provisioner=%s pvc=%s/%s pv=%s volume=%s vg=%s fs=xfs shared=yes access=ReadWriteOnce reclaim=Delete expansion=true", assessment.ClassName, agentPoolWorkspaceProvisioner, pool.Namespace, pvcName, assessment.PVName, assessment.VolumeHandle, agentPoolWorkspaceVolumeGroup)
 	return assessment
+}
+
+func (r *AgentPoolReconciler) completeAgentPoolResize(ctx context.Context, pvc *corev1.PersistentVolumeClaim) error {
+	base := pvc.DeepCopy()
+	delete(pvc.Annotations, agentPoolResizeStartedAnnotation)
+	delete(pvc.Annotations, agentPoolResizeBaselineCapacityAnnotation)
+	return r.Patch(ctx, pvc, client.MergeFrom(base))
 }
 
 func validateAgentPoolStorageClass(class *storagev1.StorageClass) string {
@@ -340,90 +354,21 @@ func validateAgentPoolPV(pv *corev1.PersistentVolume, className string) string {
 	return ""
 }
 
-//nolint:gocyclo // exact OpenEBS identity predicates retain distinct actionable failures.
 func (r *AgentPoolReconciler) validateAgentPoolLVMVolume(ctx context.Context, namespace string, pv *corev1.PersistentVolume, desired resource.Quantity) (failure string, resizePending bool, observationUnknown bool, observationErr error) {
-	volume := &unstructured.Unstructured{}
-	volume.SetGroupVersionKind(schema.GroupVersionKind{Group: "local.openebs.io", Version: "v1alpha1", Kind: "LVMVolume"})
-	if err := r.Get(ctx, types.NamespacedName{Namespace: namespace, Name: pv.Spec.CSI.VolumeHandle}, volume); err != nil {
-		message := fmt.Sprintf("PV %s OpenEBS LVMVolume %s is unavailable: %v", pv.Name, pv.Spec.CSI.VolumeHandle, err)
-		if errors.IsNotFound(err) {
-			return message, false, false, nil
-		}
-		return message, false, true, err
+	observation, issue := observeManagedOpenEBSVolume(ctx, r.Client, namespace, pv)
+	if issue != nil {
+		return issue.Message, false, issue.Unknown, issue.Err
 	}
-	volGroup, _, _ := unstructured.NestedString(volume.Object, "spec", "volGroup")
-	vgPattern, _, _ := unstructured.NestedString(volume.Object, "spec", "vgPattern")
-	shared, _, _ := unstructured.NestedString(volume.Object, "spec", "shared")
-	thin, _, _ := unstructured.NestedString(volume.Object, "spec", "thinProvision")
-	ownerNode, _, _ := unstructured.NestedString(volume.Object, "spec", "ownerNodeID")
-	state, _, _ := unstructured.NestedString(volume.Object, "status", "state")
-	capacityText, _, _ := unstructured.NestedString(volume.Object, "spec", "capacity")
-	capacity, capacityErr := resource.ParseQuantity(capacityText)
-	if volGroup != agentPoolWorkspaceVolumeGroup || vgPattern != "^iterabase-data$" || shared != "yes" || thin != "no" || ownerNode == "" || capacityErr != nil {
-		return fmt.Sprintf("LVMVolume %s/%s must retain thick shared=yes vg=%s pattern=^iterabase-data$ with one owner node (observed state=%s vg=%s pattern=%s shared=%s thin=%s node=%s capacity=%s)", volume.GetNamespace(), volume.GetName(), agentPoolWorkspaceVolumeGroup, state, volGroup, vgPattern, shared, thin, ownerNode, capacityText), false, false, nil
+	if observation.Shared != "yes" {
+		return fmt.Sprintf("LVMVolume %s/%s must retain shared=yes for same-node AgentPool workers (observed shared=%s)", observation.Namespace, observation.Name, observation.Shared), false, false, nil
 	}
-	if state != "Ready" {
-		return fmt.Sprintf("LVMVolume %s/%s resize state is %s; retain mounted workers and inspect OpenEBS events plus iterabase-data free capacity", volume.GetNamespace(), volume.GetName(), state), true, false, nil
+	if observation.State != "Ready" {
+		return fmt.Sprintf("LVMVolume %s/%s resize state is %s; retain mounted workers only while a controller-recorded resize remains outstanding", observation.Namespace, observation.Name, observation.State), true, false, nil
 	}
-	if capacity.Cmp(desired) < 0 {
-		return fmt.Sprintf("LVMVolume %s/%s capacity %s is growing in place to %s; retain mounted workers", volume.GetNamespace(), volume.GetName(), capacity.String(), desired.String()), true, false, nil
+	if observation.Capacity.Cmp(desired) < 0 {
+		return fmt.Sprintf("LVMVolume %s/%s capacity %s is growing in place to %s; retain mounted workers", observation.Namespace, observation.Name, observation.Capacity.String(), desired.String()), true, false, nil
 	}
-	if !pvHasExactNodeTopology(pv, ownerNode) {
-		return fmt.Sprintf("PV %s node topology does not match LVMVolume owner node %s", pv.Name, ownerNode), false, false, nil
-	}
-
-	node := &unstructured.Unstructured{}
-	node.SetGroupVersionKind(schema.GroupVersionKind{Group: "local.openebs.io", Version: "v1alpha1", Kind: "LVMNode"})
-	if err := r.Get(ctx, types.NamespacedName{Namespace: volume.GetNamespace(), Name: ownerNode}, node); err != nil {
-		message := fmt.Sprintf("OpenEBS LVMNode %s is unavailable in namespace %s: %v", ownerNode, volume.GetNamespace(), err)
-		if errors.IsNotFound(err) {
-			return message, false, false, nil
-		}
-		return message, false, true, err
-	}
-	groups, found, err := unstructured.NestedSlice(node.Object, "volumeGroups")
-	if err != nil || !found {
-		return fmt.Sprintf("LVMNode %s/%s has no readable volumeGroups", node.GetNamespace(), ownerNode), false, false, nil
-	}
-	for _, raw := range groups {
-		group, ok := raw.(map[string]any)
-		if !ok || group["name"] != agentPoolWorkspaceVolumeGroup {
-			continue
-		}
-		uuid, _ := group["uuid"].(string)
-		missing := nestedNumber(group["missingPvCount"])
-		thinPools, _ := group["thinPools"].([]any)
-		if uuid == "" || missing != 0 || len(thinPools) != 0 {
-			return fmt.Sprintf("LVMNode %s/%s VG %s must have a UUID, no missing PVs, and no thin pools", node.GetNamespace(), ownerNode, agentPoolWorkspaceVolumeGroup), false, false, nil
-		}
-		return "", false, false, nil
-	}
-	return fmt.Sprintf("LVMNode %s/%s does not report VG %s", node.GetNamespace(), ownerNode, agentPoolWorkspaceVolumeGroup), false, false, nil
-}
-
-// OpenEBS publishes PV accessible topology with its driver key; the additional
-// allowed hostname key is a CSINode registration capability, not a PV term.
-func pvHasExactNodeTopology(pv *corev1.PersistentVolume, node string) bool {
-	terms := pv.Spec.NodeAffinity.Required.NodeSelectorTerms
-	if len(terms) != 1 || len(terms[0].MatchFields) != 0 || len(terms[0].MatchExpressions) != 1 {
-		return false
-	}
-	expression := terms[0].MatchExpressions[0]
-	return expression.Key == "openebs.io/nodename" && expression.Operator == corev1.NodeSelectorOpIn &&
-		len(expression.Values) == 1 && expression.Values[0] == node
-}
-
-func nestedNumber(value any) int64 {
-	switch typed := value.(type) {
-	case int64:
-		return typed
-	case float64:
-		return int64(typed)
-	case int:
-		return int64(typed)
-	default:
-		return -1
-	}
+	return "", false, false, nil
 }
 
 // setWorkspaceCapacityCondition projects one durable pool-PVC gate into the

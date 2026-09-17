@@ -258,6 +258,25 @@ func TestAssessAgentPoolStorageKeepsMountedWorkersDuringResizeAndRequiresFreshSt
 	assessment = r.assessAgentPoolStorage(context.Background(), pool)
 	assert.True(t, assessment.Ready, "%+v", assessment)
 	assert.False(t, assessment.SafeResize)
+
+	var completedPVC corev1.PersistentVolumeClaim
+	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(pvc), &completedPVC))
+	assert.NotContains(t, completedPVC.Annotations, agentPoolResizeStartedAnnotation)
+	assert.NotContains(t, completedPVC.Annotations, agentPoolResizeBaselineCapacityAnnotation)
+
+	volume := &unstructured.Unstructured{}
+	volume.SetGroupVersionKind(schema.GroupVersionKind{Group: "local.openebs.io", Version: "v1alpha1", Kind: "LVMVolume"})
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: pool.Namespace, Name: "pvc-volume-1"}, volume))
+	require.NoError(t, unstructured.SetNestedField(volume.Object, "Error", "status", "state"))
+	require.NoError(t, r.Update(context.Background(), volume))
+
+	assessment = r.assessAgentPoolStorage(context.Background(), pool)
+	assert.False(t, assessment.Ready)
+	assert.False(t, assessment.CanMount)
+	assert.False(t, assessment.SafeResize, "completed resize evidence must not retain workers through a later unrelated LVM failure")
+	assert.True(t, assessment.ConfirmedUnsafe)
+	assert.True(t, storageQuiescenceRequired(assessment))
+	assert.Equal(t, storageReasonPVCUnavailable, assessment.Reason)
 }
 
 type storageQueryClient struct {
