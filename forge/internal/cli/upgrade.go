@@ -43,5 +43,8 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 	fmt.Fprintln(out, "upgrade complete")
 	fmt.Fprintf(out, "  kubeconfig: %s\n", res.KubeconfigPath)
 	fmt.Fprintf(out, "  node ready: %v\n", res.NodeReady)
+	if res.HostInotify != nil {
+		fmt.Fprintf(out, "  inotify:    %s\n", hostInotifySummary(res.HostInotify))
+	}
 	return nil
 }

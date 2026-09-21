@@ -59,7 +59,7 @@ LVM/RAID/crypt, partition/signature, and `/proc` raw-consumer checks. Missing
 probes, read errors, descriptor races, ambiguity, or drift fail before K3s,
 charts, workloads, or claims. Forge never scans every byte.
 
-After a read-only preflight, a fresh install first disables every active host
+After a read-only preflight, a fresh install disables every active host
 swap device with `swapoff --all` and atomically comments every uncommented
 `/etc/fstab` entry whose filesystem type is `swap` (including Ubuntu's default
 `/swap.img`). The rewrite preserves every unrelated/commented line plus the
@@ -70,6 +70,23 @@ atomic replacement is retry-safe. Forge immediately re-reads `/proc/swaps` and
 `/etc/fstab` and fails before package, disk, or k3s artifact/service mutation
 unless both are swap-free. Dry-run, installed-cluster reapply, and upgrade remain
 read-only with respect to this fresh-install hardening operation.
+
+Every non-dry-run `apply` and `upgrade` also reconciles the managed-host
+`fs.inotify.max_user_instances` ceiling before downstream install, upgrade, or
+overlay mutation. Kubernetes CRI log following opens one fsnotify watcher per
+followed container log, so exhausting the per-user inotify **instance** ceiling
+fails with `EMFILE` (`failed to create fsnotify watcher: too many open files`)
+even when process and global file-descriptor limits are healthy; the OPO1
+incident exhausted Ubuntu's default of `128` with K3s, containerd shims, and
+root containers. Forge owns the stable drop-in
+`/etc/sysctl.d/90-iterabase-k3s-inotify.conf` (`root:root`, mode `0644`,
+`fs.inotify.max_user_instances = 8192`): a conforming persisted and effective
+value is a no-op, drift converges through a staged, fsynced atomic replacement
+that never removes the existing drop-in first and never lowers an already
+sufficient live value, a lower live value is raised with `sysctl -w`, and Forge
+fails closed unless the read-back proves both the persistent and effective
+setting. `forge apply --dry-run` and `forge status` stay read-only and report
+the effective value, drift, and drop-in state.
 
 Forge then installs/verifies `lvm2` and XFS tooling, converges the superseded
 pre-release `dm-snapshot` module/configuration to absence, and uses a root-owned

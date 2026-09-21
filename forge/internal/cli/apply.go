@@ -108,6 +108,9 @@ func printApplyResult(out io.Writer, cfg *config.Cluster, res *lifecycle.Result)
 	if res.DataStorage != nil {
 		fmt.Fprintf(out, "  data storage: %s (%s, devices=%d, uuid=%s, free=%d/%d)\n", res.DataStorage.VGName, res.DataStorage.State, len(res.DataStorage.Devices), res.DataStorage.VGUUID, res.DataStorage.FreeBytes, res.DataStorage.SizeBytes)
 	}
+	if res.HostInotify != nil {
+		fmt.Fprintf(out, "  inotify:    %s\n", hostInotifySummary(res.HostInotify))
+	}
 	if res.LVMStorageReady != nil {
 		fmt.Fprintf(out, "  LVM storage ready: %v (node=%s, vg=%s, lvs=%d)\n", res.LVMStorageReady.Ready, res.LVMStorageReady.NodeName, res.LVMStorageReady.VGName, res.LVMStorageReady.LVCount)
 	}
@@ -167,6 +170,9 @@ func printPlan(cmd *cobra.Command, plan *lifecycle.ReconcilePlan) {
 		for _, device := range plan.DataStorage.Devices {
 			fmt.Fprintf(out, "    %s (model=%s serial=%s transport=%s size=%d pv=%s)\n", device.Path, device.Model, device.Serial, device.Transport, device.SizeBytes, device.PVUUID)
 		}
+	}
+	if plan.HostInotify != nil {
+		fmt.Fprintf(out, "  inotify:   %s\n", hostInotifySummary(plan.HostInotify))
 	}
 	if plan.ChartVersion != "" {
 		fmt.Fprintf(out, "  chart:     %s\n", plan.ChartVersion)

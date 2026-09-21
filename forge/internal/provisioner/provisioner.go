@@ -10,6 +10,15 @@ import (
 	"fmt"
 )
 
+// InotifyMaxUserInstancesRequired is the durable fs.inotify.max_user_instances
+// capacity Forge guarantees on every managed single-node Kubernetes host.
+// Kubernetes CRI log following creates one fsnotify watcher per followed
+// container log, and exhausting the per-user inotify *instance* ceiling returns
+// EMFILE ("too many open files") from fsnotify even when process and global
+// file-descriptor limits are healthy. The OPO1 incident exhausted Ubuntu's
+// default of 128 with K3s, containerd shims, and root containers.
+const InotifyMaxUserInstancesRequired = 8192
+
 // Fixed Platform V2 data-storage identities shared by Forge and its callers.
 const (
 	DataVolumeGroupName             = "iterabase-data"
@@ -72,6 +81,39 @@ type HostState struct {
 	ServiceCIDR          string
 	DualStack            bool
 	LocalStorageDisabled bool
+}
+
+// HostInotifyState is one bounded observation of the live inotify instance
+// ceiling and the Forge-owned persistent drop-in. Effective is always the live
+// kernel value read back from /proc; Persisted is the value found in the
+// drop-in (0 when absent). DropInCanonical means the drop-in exists as a
+// regular file, is owned by root with mode 0644, and contains exactly the
+// canonical Forge setting.
+type HostInotifyState struct {
+	Effective       int
+	Persisted       int
+	DropInPresent   bool
+	DropInRegular   bool
+	DropInOwner     string
+	DropInMode      string
+	DropInCanonical bool
+}
+
+// Ready reports whether the live kernel value satisfies the Forge requirement
+// and the drop-in durably persists it. A live value above the requirement is
+// ready: Forge never lowers capacity that is already sufficient.
+func (s HostInotifyState) Ready() bool {
+	return s.Effective >= InotifyMaxUserInstancesRequired && s.DropInCanonical
+}
+
+// String returns actionable observed-versus-required evidence for plan,
+// dry-run, status, and failure output.
+func (s HostInotifyState) String() string {
+	dropIn := "missing"
+	if s.DropInPresent {
+		dropIn = fmt.Sprintf("present regular=%t owner=%s mode=%s canonical=%t", s.DropInRegular, s.DropInOwner, s.DropInMode, s.DropInCanonical)
+	}
+	return fmt.Sprintf("effective=%d required=%d persisted=%d drop-in=%s ready=%t", s.Effective, InotifyMaxUserInstancesRequired, s.Persisted, dropIn, s.Ready())
 }
 
 // PreflightResult is the read-only host readiness check outcome.
@@ -168,6 +210,15 @@ type Provisioner interface {
 	// /etc/fstab swap entry, and verifies both authoritative states. It is called
 	// only for a fresh install, before package, disk, or k3s mutation.
 	EnsureHostSwapDisabled(ctx context.Context) error
+	// InspectHostInotify returns the live fs.inotify.max_user_instances value
+	// plus drop-in presence, type, ownership, mode, and content evidence without
+	// mutating the host. Used by the reconcile plan, dry-run, and status.
+	InspectHostInotify(ctx context.Context) (*HostInotifyState, error)
+	// ReconcileHostInotify durably writes the canonical root-owned inotify
+	// drop-in where needed, raises only a live value below the requirement, and
+	// verifies the read-back before returning. It runs on every non-dry-run
+	// apply and upgrade, including already-installed clusters.
+	ReconcileHostInotify(ctx context.Context) (*HostInotifyState, error)
 	// ListDataStorageDevices returns stable non-removable whole-disk identities
 	// for interactive selection. It is strictly read-only.
 	ListDataStorageDevices(ctx context.Context) ([]DataStorageDevice, error)

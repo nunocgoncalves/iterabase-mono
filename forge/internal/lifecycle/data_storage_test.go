@@ -39,7 +39,7 @@ func TestApplyReconcilesDataStorageBeforeK3s(t *testing.T) {
 	assert.Equal(t, 1, p.workspaceToolsCalls)
 	assert.Equal(t, 1, p.workspaceApplyCalls)
 	assert.Len(t, p.installs, 1)
-	assert.Equal(t, []string{"host-swap", "data-storage-tools", "data-storage-reconcile", "k3s-install"}, p.mutationOrder)
+	assert.Equal(t, []string{"host-inotify", "host-swap", "data-storage-tools", "data-storage-reconcile", "k3s-install"}, p.mutationOrder)
 	assert.Equal(t, "complete", res.DataStorage.State)
 	assert.Equal(t, "iterabase-data", res.DataStorage.VGName)
 }
@@ -52,7 +52,7 @@ func TestApplyHostSwapFailurePreventsStorageAndK3sMutation(t *testing.T) {
 	assert.Zero(t, p.workspaceToolsCalls)
 	assert.Zero(t, p.workspaceApplyCalls)
 	assert.Empty(t, p.installs)
-	assert.Equal(t, []string{"host-swap"}, p.mutationOrder)
+	assert.Equal(t, []string{"host-inotify", "host-swap"}, p.mutationOrder)
 }
 
 func TestApplyDoesNotHardenSwapDuringDryRunOrInstalledReapply(t *testing.T) {
@@ -73,7 +73,7 @@ func TestApplyDoesNotHardenSwapDuringDryRunOrInstalledReapply(t *testing.T) {
 		})
 		require.NoError(t, err)
 		assert.Zero(t, p.hostSwapCalls)
-		assert.Equal(t, []string{"data-storage-tools", "data-storage-reconcile"}, p.mutationOrder)
+		assert.Equal(t, []string{"host-inotify", "data-storage-tools", "data-storage-reconcile"}, p.mutationOrder)
 	})
 }
 
