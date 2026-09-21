@@ -118,7 +118,8 @@ type ModelStatus struct {
 	// +optional
 	Healthy bool `json:"healthy,omitempty"`
 
-	// lastChecked is the time health was last evaluated.
+	// lastChecked is the time the observed status last changed. It is refreshed
+	// only when another status field changes, not as a per-reconcile heartbeat.
 	// +optional
 	LastChecked *metav1.Time `json:"lastChecked,omitempty"`
 

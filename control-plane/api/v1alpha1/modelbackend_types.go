@@ -237,7 +237,9 @@ type ModelBackendStatus struct {
 	// +optional
 	ServiceURL string `json:"serviceURL,omitempty"`
 
-	// lastReconciled is the time of the last successful reconciliation.
+	// lastReconciled is the time the observed status last changed. It is
+	// refreshed only when another status field changes, not as a per-reconcile
+	// heartbeat.
 	// +optional
 	LastReconciled *metav1.Time `json:"lastReconciled,omitempty"`
 

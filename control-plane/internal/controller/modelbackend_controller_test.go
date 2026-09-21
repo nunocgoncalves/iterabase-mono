@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -23,11 +24,34 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 
 	"github.com/nunocgoncalves/iterabase-mono/control-plane/api/v1alpha1"
 	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/catalog"
 	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/testutil"
 )
+
+// hor559BackendName is the ModelBackend used by the HOR-559 self-trigger
+// regression test. The reconcile counter is keyed to it so fallback requeues of
+// other backends in this test cannot perturb the count.
+const hor559BackendName = "be-hor559"
+
+// modelBackendGetCounter counts ModelBackendReconciler.Reconcile invocations for
+// one ModelBackend: every reconcile starts by loading the primary CR, and the
+// reconciler loads a ModelBackend nowhere else. It observes enqueues without
+// instrumenting production code (HOR-559).
+type modelBackendGetCounter struct {
+	client.Client
+	name  string
+	count atomic.Int64
+}
+
+func (c *modelBackendGetCounter) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if _, ok := obj.(*v1alpha1.ModelBackend); ok && key.Name == c.name {
+		c.count.Add(1)
+	}
+	return c.Client.Get(ctx, key, obj, opts...)
+}
 
 // newCatalogStore returns a Store backed by a fresh migrated Postgres.
 func newCatalogStore(t *testing.T) *catalog.Store {
@@ -71,8 +95,9 @@ func TestModelBackendReconcile(t *testing.T) {
 
 	mgr, err := ctrl.NewManager(saCfg, ctrl.Options{Scheme: scheme})
 	require.NoError(t, err)
+	tracking := &modelBackendGetCounter{Client: mgr.GetClient(), name: hor559BackendName}
 	require.NoError(t, (&ModelBackendReconciler{
-		Client: mgr.GetClient(),
+		Client: tracking,
 		Scheme: scheme,
 		Store:  store,
 	}).SetupWithManager(mgr))
@@ -265,6 +290,50 @@ func TestModelBackendReconcile(t *testing.T) {
 		assert.Equal(t, "https://api.anthropic.com", b.ServiceURL)
 		assert.True(t, b.Deployed)
 		assert.True(t, b.Healthy, "external healthy assumed true; reachability deferred to HOR-307")
+	})
+
+	// HOR-559 regression: the ModelBackend reconciler had the same latent
+	// self-trigger shape as the Model reconciler (an unconditional
+	// status.lastReconciled write plus an unfiltered primary watch). A
+	// status-only update must not enqueue a reconcile; a spec change still must.
+	t.Run("status-only update does not trigger a reconcile", func(t *testing.T) {
+		mb := &v1alpha1.ModelBackend{
+			ObjectMeta: metav1.ObjectMeta{Name: hor559BackendName, Namespace: "default"},
+			Spec: v1alpha1.ModelBackendSpec{
+				Kind:     "external",
+				External: &v1alpha1.ExternalBackendSpec{BaseURL: "https://hor559.example"},
+			},
+		}
+		require.NoError(t, adminClient.Create(ctx, mb))
+		nn := types.NamespacedName{Name: hor559BackendName, Namespace: "default"}
+		require.Eventually(t, func() bool {
+			var got v1alpha1.ModelBackend
+			return adminClient.Get(ctx, nn, &got) == nil && got.Status.Deployed && got.Status.Healthy
+		}, 15*time.Second, 200*time.Millisecond, "external backend should be deployed+healthy")
+
+		// Drain any in-flight setup events so the baseline is steady.
+		require.Eventually(t, func() bool {
+			stable := tracking.count.Load()
+			time.Sleep(250 * time.Millisecond)
+			return tracking.count.Load() == stable
+		}, 10*time.Second, 250*time.Millisecond, "reconcile count should quiesce before the status-only update")
+
+		var got v1alpha1.ModelBackend
+		require.NoError(t, adminClient.Get(ctx, nn, &got))
+		base := got.DeepCopy()
+		got.Status.Message = "out-of-band status write"
+		require.NoError(t, adminClient.Status().Patch(ctx, &got, client.MergeFrom(base)))
+		before := tracking.count.Load()
+		require.Never(t, func() bool { return tracking.count.Load() != before },
+			2*time.Second, 100*time.Millisecond, "status-only update must not trigger a reconcile")
+
+		// Positive control: a spec change still reconciles.
+		require.NoError(t, adminClient.Get(ctx, nn, &got))
+		base = got.DeepCopy()
+		got.Spec.External.BaseURL = "https://hor559.example/v2"
+		require.NoError(t, adminClient.Patch(ctx, &got, client.MergeFrom(base)))
+		require.Eventually(t, func() bool { return tracking.count.Load() > before },
+			10*time.Second, 100*time.Millisecond, "spec change must trigger a reconcile")
 	})
 
 	t.Run("SGLang is a recognized stub", func(t *testing.T) {
@@ -874,4 +943,41 @@ func TestValidateReservedVolumeNames(t *testing.T) {
 			[]corev1.VolumeMount{{Name: "dshm", MountPath: "/x"}},
 		))
 	})
+}
+
+// TestModelBackendPrimaryWatchPredicates pins the HOR-559 watch contract:
+// status-only updates (including the controller's own status writes) are
+// filtered, while create/delete and spec (generation) changes still enqueue.
+func TestModelBackendPrimaryWatchPredicates(t *testing.T) {
+	old := &v1alpha1.ModelBackend{
+		ObjectMeta: metav1.ObjectMeta{Name: "mb", Namespace: "default", Generation: 2},
+		Status:     v1alpha1.ModelBackendStatus{Deployed: true, Healthy: true, ObservedGeneration: 2},
+	}
+	statusOnly := old.DeepCopy()
+	statusOnly.Status.Healthy = false
+	statusOnly.Status.LastReconciled = &metav1.Time{Time: time.Now()}
+	specChange := old.DeepCopy()
+	specChange.Generation = 3
+
+	for _, p := range modelBackendPrimaryWatchPredicates() {
+		assert.True(t, p.Create(event.CreateEvent{Object: old}), "create events must enqueue")
+		assert.True(t, p.Delete(event.DeleteEvent{Object: old}), "delete events must enqueue")
+		assert.False(t, p.Update(event.UpdateEvent{ObjectOld: old, ObjectNew: statusOnly}),
+			"status-only updates must not enqueue a reconcile (HOR-559)")
+		assert.True(t, p.Update(event.UpdateEvent{ObjectOld: old, ObjectNew: specChange}),
+			"generation changes must enqueue a reconcile")
+	}
+}
+
+// TestModelBackendStatusChanged pins the conditional status write (HOR-559): a
+// steady-state reconcile must be a no-op, while every observed transition still
+// patches the CR.
+func TestModelBackendStatusChanged(t *testing.T) {
+	current := &v1alpha1.ModelBackendStatus{Deployed: true, Healthy: true, ServiceURL: "http://x", ObservedGeneration: 2}
+	assert.False(t, modelBackendStatusChanged(current, 2, true, true, "http://x", ""), "steady state must not patch status")
+	assert.True(t, modelBackendStatusChanged(current, 3, true, true, "http://x", ""), "generation advance must patch")
+	assert.True(t, modelBackendStatusChanged(current, 2, false, true, "http://x", ""), "deployed change must patch")
+	assert.True(t, modelBackendStatusChanged(current, 2, true, false, "http://x", ""), "health change must patch")
+	assert.True(t, modelBackendStatusChanged(current, 2, true, true, "http://y", ""), "serviceURL change must patch")
+	assert.True(t, modelBackendStatusChanged(current, 2, true, true, "http://x", "waiting"), "message change must patch")
 }

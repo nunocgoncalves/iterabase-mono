@@ -4,16 +4,19 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	"github.com/nunocgoncalves/iterabase-mono/control-plane/api/v1alpha1"
 	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/catalog"
@@ -22,7 +25,12 @@ import (
 const (
 	modelFinalizer       = "platform.iterabase.com/model-finalizer"
 	backendRefIndexField = ".spec.backendRef"
-	modelRequeueSeconds  = 30
+	// modelRequeueInterval is the fallback cadence for refreshing observed
+	// backend state; the ModelBackend watch handles prompt updates. It must be a
+	// time.Duration (not an untyped int): ctrl.Result.RequeueAfter is measured in
+	// nanoseconds, so a bare `30` would requeue every 30ns and hot-loop the
+	// reconciler even with the watch predicate in place (HOR-559).
+	modelRequeueInterval = 30 * time.Second
 )
 
 // ModelReconciler materializes Model CRs into the Postgres catalog.models table
@@ -106,7 +114,7 @@ func (r *ModelReconciler) reconcileUpsert(ctx context.Context, m *v1alpha1.Model
 	}
 	logger.Info("reconciled model", "key", modelKey(m), "available", available)
 	// Requeue as a fallback; the ModelBackend watch handles prompt updates.
-	return ctrl.Result{RequeueAfter: modelRequeueSeconds}, nil
+	return ctrl.Result{RequeueAfter: modelRequeueInterval}, nil
 }
 
 // resolveBackend reads the referenced ModelBackend and derives availability.
@@ -161,8 +169,16 @@ func modelKey(m *v1alpha1.Model) string {
 	return fmt.Sprintf("%s/%s", m.Namespace, m.Name)
 }
 
-// patchStatus updates the CR status subresource with a merge patch.
+// patchStatus updates the CR status subresource with a merge patch, but only
+// when a field would actually change. A steady-state reconcile must not rewrite
+// the CR: an unconditional status write is delivered back through the primary
+// watch and re-enqueues the same request, producing a self-triggered reconcile
+// loop (HOR-559). lastChecked therefore records the last time the observed
+// status changed instead of a per-reconcile heartbeat.
 func (r *ModelReconciler) patchStatus(ctx context.Context, m *v1alpha1.Model, available, healthy bool, message string) error {
+	if !modelStatusChanged(&m.Status, m.Generation, available, healthy, message) {
+		return nil
+	}
 	base := m.DeepCopy()
 	now := metav1.Now()
 	m.Status.Available = available
@@ -171,6 +187,26 @@ func (r *ModelReconciler) patchStatus(ctx context.Context, m *v1alpha1.Model, av
 	m.Status.ObservedGeneration = m.Generation
 	m.Status.Message = message
 	return r.Status().Patch(ctx, m, client.MergeFrom(base))
+}
+
+// modelStatusChanged reports whether the desired observed status differs from
+// the persisted one. lastChecked is intentionally excluded: it is bumped only
+// when another field changes, so a no-op reconcile does not touch (and thereby
+// re-trigger) the primary watch (HOR-559).
+func modelStatusChanged(status *v1alpha1.ModelStatus, generation int64, available, healthy bool, message string) bool {
+	return status.Available != available ||
+		status.Healthy != healthy ||
+		status.ObservedGeneration != generation ||
+		status.Message != message
+}
+
+// modelPrimaryWatchPredicates filters the primary Model watch to spec
+// (metadata.generation) changes. Status-only updates — including this
+// controller's own status writes — must not enqueue a new reconcile; the 30s
+// fallback requeue refreshes observed backend state without a watch feedback
+// loop (HOR-559).
+func modelPrimaryWatchPredicates() []predicate.Predicate {
+	return []predicate.Predicate{predicate.GenerationChangedPredicate{}}
 }
 
 // SetupWithManager registers the reconciler, watches ModelBackends, and indexes
@@ -183,7 +219,10 @@ func (r *ModelReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		return fmt.Errorf("index models by backendRef: %w", err)
 	}
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&v1alpha1.Model{}).
+		For(&v1alpha1.Model{}, builder.WithPredicates(modelPrimaryWatchPredicates()...)).
+		// The ModelBackend watch is intentionally unfiltered: a backend health
+		// change is a status-only update on the backend CR, and it must still
+		// propagate to referencing Models promptly (HOR-559).
 		Watches(&v1alpha1.ModelBackend{}, handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []ctrl.Request {
 			mb := obj.(*v1alpha1.ModelBackend)
 			var list v1alpha1.ModelList
