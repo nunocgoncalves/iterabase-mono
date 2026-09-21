@@ -20,7 +20,8 @@ test -f "$dropin" && test ! -L "$dropin"
 test "$(stat -c "%u:%g:%a" -- "$dropin")" = 0:0:644
 test "$(cat -- "$dropin")" = "fs.inotify.max_user_instances = 8192"
 effective=$(cat /proc/sys/fs/inotify/max_user_instances)
-case "$effective" in ''|*[!0-9]*) printf "effective inotify instance value is not numeric: %s\n" "$effective" >&2; exit 42 ;; esac
+case "$effective" in *[!0-9]*) printf "effective inotify instance value is not numeric: %s\n" "$effective" >&2; exit 42 ;; esac
+test -n "$effective" || { printf "effective inotify instance value is empty\n" >&2; exit 42; }
 test "$effective" = 8192
 printf "%s|%s\n" "$effective" "$(stat -c "%d:%i:%Y" -- "$dropin")"
 '`
@@ -39,7 +40,8 @@ case "$output" in
   *fsnotify*|*"too many open files"*) printf "%s\n" "$output" >&2; exit 42 ;;
 esac
 count=$(printf "%s\n" "$output" | grep -c "^follow-marker" || true)
-case "$count" in ''|*[!0-9]*) exit 43 ;; esac
+case "$count" in *[!0-9]*) exit 43 ;; esac
+test -n "$count"
 test "$count" -ge 3
 printf "followed-lines=%s\n" "$count"
 '`
@@ -94,10 +96,17 @@ func TestHostInotifyFixtureScriptsAreValid(t *testing.T) {
 		"follow":   hostInotifyFollowScript,
 	} {
 		t.Run(name, func(t *testing.T) {
-			command := exec.Command("bash", "-n")
-			command.Stdin = strings.NewReader(script)
-			if output, err := command.CombinedOutput(); err != nil {
+			inner := exec.Command("bash", "-n")
+			inner.Stdin = strings.NewReader(script)
+			if output, err := inner.CombinedOutput(); err != nil {
 				t.Fatalf("%s shell is invalid: %v\n%s", name, err, output)
+			}
+			// The scripts are executed as `sudo bash -ceu '<script>'` over SSH, so
+			// parse the exact assembled command line too: an embedded single quote
+			// would terminate the remote argument and corrupt the command.
+			outer := exec.Command("bash", "-n", "-c", "sudo bash -ceu "+candidateShellQuote(script))
+			if output, err := outer.CombinedOutput(); err != nil {
+				t.Fatalf("%s remote command line is invalid: %v\n%s", name, err, output)
 			}
 		})
 	}
