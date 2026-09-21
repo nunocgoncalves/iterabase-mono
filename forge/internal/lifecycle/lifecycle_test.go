@@ -56,34 +56,39 @@ type installCall struct {
 
 // fakeProv is a controllable provisioner.Provisioner for lifecycle tests.
 type fakeProv struct {
-	pf                    provisioner.PreflightResult
-	state                 provisioner.HostState
-	ready                 bool
-	readyAfterInstall     bool
-	kubeconfig            []byte
-	installErr            error
-	installs              []installCall
-	ensureDepsErr         error
-	ensureDepsCalls       int
-	hostSwapErr           error
-	hostSwapCalls         int
-	mutationOrder         []string
-	workspaceInspectErr   error
-	workspaceInspectState *provisioner.DataStorageState
-	workspaceReconcileErr error
-	workspaceInspectCalls int
-	workspaceToolsErr     error
-	workspaceToolsCalls   int
-	workspaceApplyCalls   int
-	lvmReadinessErr       error
-	lvmReadinessCalls     int
-	gpuReady              bool
-	gpuTerminal           bool
-	gpuReadinessReason    string
-	gpuDriverRequests     []string
-	destroyCalls          []string
-	purgeErr              error
-	rebootErr             error
+	pf                      provisioner.PreflightResult
+	state                   provisioner.HostState
+	ready                   bool
+	readyAfterInstall       bool
+	kubeconfig              []byte
+	installErr              error
+	installs                []installCall
+	ensureDepsErr           error
+	ensureDepsCalls         int
+	hostSwapErr             error
+	hostSwapCalls           int
+	hostInotify             *provisioner.HostInotifyState
+	hostInotifyErr          error
+	hostInotifyCalls        int
+	hostInotifyInspectErr   error
+	hostInotifyInspectCalls int
+	mutationOrder           []string
+	workspaceInspectErr     error
+	workspaceInspectState   *provisioner.DataStorageState
+	workspaceReconcileErr   error
+	workspaceInspectCalls   int
+	workspaceToolsErr       error
+	workspaceToolsCalls     int
+	workspaceApplyCalls     int
+	lvmReadinessErr         error
+	lvmReadinessCalls       int
+	gpuReady                bool
+	gpuTerminal             bool
+	gpuReadinessReason      string
+	gpuDriverRequests       []string
+	destroyCalls            []string
+	purgeErr                error
+	rebootErr               error
 }
 
 func (f *fakeProv) Preflight(_ context.Context) (*provisioner.PreflightResult, error) {
@@ -131,6 +136,39 @@ func (f *fakeProv) EnsureHostSwapDisabled(_ context.Context) error {
 	f.hostSwapCalls++
 	f.mutationOrder = append(f.mutationOrder, "host-swap")
 	return f.hostSwapErr
+}
+
+// hostInotifyState returns the configured observation or a canonical ready
+// host so most lifecycle tests stay focused on their own concern.
+func (f *fakeProv) hostInotifyState() *provisioner.HostInotifyState {
+	if f.hostInotify != nil {
+		state := *f.hostInotify
+		return &state
+	}
+	return &provisioner.HostInotifyState{
+		Effective:       provisioner.InotifyMaxUserInstancesRequired,
+		Persisted:       provisioner.InotifyMaxUserInstancesRequired,
+		DropInPresent:   true,
+		DropInRegular:   true,
+		DropInOwner:     "0:0",
+		DropInMode:      "644",
+		DropInCanonical: true,
+	}
+}
+func (f *fakeProv) InspectHostInotify(_ context.Context) (*provisioner.HostInotifyState, error) {
+	f.hostInotifyInspectCalls++
+	if f.hostInotifyInspectErr != nil {
+		return nil, f.hostInotifyInspectErr
+	}
+	return f.hostInotifyState(), nil
+}
+func (f *fakeProv) ReconcileHostInotify(_ context.Context) (*provisioner.HostInotifyState, error) {
+	f.hostInotifyCalls++
+	f.mutationOrder = append(f.mutationOrder, "host-inotify")
+	if f.hostInotifyErr != nil {
+		return nil, f.hostInotifyErr
+	}
+	return f.hostInotifyState(), nil
 }
 func (f *fakeProv) ListDataStorageDevices(_ context.Context) ([]provisioner.DataStorageDevice, error) {
 	return nil, nil

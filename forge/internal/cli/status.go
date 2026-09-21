@@ -53,6 +53,7 @@ func runStatus(cmd *cobra.Command, _ []string) error {
 	fmt.Fprintf(out, "want:       %s\n", plan.WantVersion)
 	fmt.Fprintf(out, "node ready: %v\n", ready)
 	printDataStorageStatus(out, plan.DataStorage)
+	printHostInotifyStatus(out, plan.HostInotify)
 	if cfg.Spec.Chart.Version != "" {
 		cs, _ := p.Status(ctx, cfg.Spec.Chart.Release, cfg.Spec.Chart.Namespace)
 		if cs != nil && cs.Installed {

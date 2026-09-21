@@ -69,6 +69,11 @@ each host:
 5. Obtain the host public key through a trusted provider console or first-boot
    channel. Compare it independently before recording the exact one-line
    OpenSSH public key. Do not trust an unauthenticated first `ssh-keyscan` result.
+6. Do not pre-create or remove
+   `/etc/sysctl.d/90-iterabase-k3s-inotify.conf` and do not set a conflicting
+   `fs.inotify.max_user_instances` in a higher-precedence drop-in. Forge owns that
+   file on every apply, and the permanent CPU fixture asserts the exact `8192`
+   live and persisted value (HOR-569).
 
 The source/candidate fixture-only Helm values keep the real thick PostgreSQL and
 MinIO claims enabled at 5 GiB each so the smallest 25 GiB disposable data VG

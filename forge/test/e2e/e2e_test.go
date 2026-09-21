@@ -35,23 +35,24 @@ const (
 )
 
 type permanentCPUFixtureState struct {
-	fixture             *permanentFixture
-	runID               string
-	privKeyPath         string
-	ip                  string
-	forgeBin            string
-	forgeHome           string
-	chartVersion        string
-	dataStorageDevice   string
-	freshInstall        bool
-	storagePVCUID       string
-	storagePV           string
-	agentPoolPVCUID     string
-	initialWorkerPodUID string
-	workspaceAdminKey   string
-	workspaceWorkKey    string
-	runtimeImageDigests map[string]importedRuntimeIdentity
-	diagnostics         forgeDiagnostics
+	fixture               *permanentFixture
+	runID                 string
+	privKeyPath           string
+	ip                    string
+	forgeBin              string
+	forgeHome             string
+	chartVersion          string
+	dataStorageDevice     string
+	freshInstall          bool
+	storagePVCUID         string
+	storagePV             string
+	agentPoolPVCUID       string
+	initialWorkerPodUID   string
+	inotifyDropInIdentity string
+	workspaceAdminKey     string
+	workspaceWorkKey      string
+	runtimeImageDigests   map[string]importedRuntimeIdentity
+	diagnostics           forgeDiagnostics
 }
 
 func newPermanentCPUFixtureState(t *testing.T) *permanentCPUFixtureState {

@@ -50,6 +50,7 @@ func (a Action) String() string {
 // ReconcilePlan is the read-only reconcile decision (also returned by --dry-run).
 type ReconcilePlan struct {
 	Preflight          *provisioner.PreflightResult
+	HostInotify        *provisioner.HostInotifyState // live inotify instance capacity + Forge drop-in evidence
 	Installed          bool
 	Action             Action
 	Reason             string
@@ -70,6 +71,7 @@ type ReconcilePlan struct {
 // Result is the outcome of a mutating apply.
 type Result struct {
 	Plan                        *ReconcilePlan
+	HostInotify                 *provisioner.HostInotifyState // post-reconcile host inotify capacity evidence
 	KubeconfigPath              string
 	NodeReady                   bool
 	CertificateSubstrateApplied bool
@@ -137,7 +139,11 @@ func Plan(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner) (
 	if err != nil {
 		return nil, err
 	}
-	plan := &ReconcilePlan{Preflight: pf, WantVersion: cfg.Spec.K3s.Version, ChartVersion: cfg.Spec.Chart.Version, DataStorage: storage}
+	inotify, err := p.InspectHostInotify(ctx)
+	if err != nil {
+		return nil, err
+	}
+	plan := &ReconcilePlan{Preflight: pf, HostInotify: inotify, WantVersion: cfg.Spec.K3s.Version, ChartVersion: cfg.Spec.Chart.Version, DataStorage: storage}
 
 	if cfg.Spec.GPU.Enabled {
 		if !pf.HasNVIDIAGPU {
@@ -156,14 +162,8 @@ func Plan(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner) (
 	plan.FluxVersion = cfg.Spec.Flux.Version
 
 	if !pf.Installed {
-		if !pf.HasCurl {
-			return nil, fmt.Errorf("preflight: curl is required to install k3s")
-		}
-		if !pf.HasSystemd {
-			return nil, fmt.Errorf("preflight: systemd is required to run k3s")
-		}
-		if cfg.Spec.K3s.DualStack && !pf.HasIPv6 {
-			return nil, fmt.Errorf("preflight: dualStack enabled but host has no IPv6")
+		if err := validateFreshInstallPreflight(cfg, pf); err != nil {
+			return nil, err
 		}
 		plan.Action = ActionInstall
 		plan.Reason = "k3s is not installed"
@@ -194,6 +194,21 @@ func Plan(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner) (
 	return plan, nil
 }
 
+// validateFreshInstallPreflight keeps the flat reconcile plan readable by
+// grouping the read-only fresh-install prerequisites in one place.
+func validateFreshInstallPreflight(cfg *config.Cluster, pf *provisioner.PreflightResult) error {
+	if !pf.HasCurl {
+		return fmt.Errorf("preflight: curl is required to install k3s")
+	}
+	if !pf.HasSystemd {
+		return fmt.Errorf("preflight: systemd is required to run k3s")
+	}
+	if cfg.Spec.K3s.DualStack && !pf.HasIPv6 {
+		return fmt.Errorf("preflight: dualStack enabled but host has no IPv6")
+	}
+	return nil
+}
+
 // Apply runs Plan and, unless DryRun, executes the install/reconcile, fetches
 // and stores the kubeconfig, and waits for the node to be Ready.
 func Apply(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner, d deployer.Deployer, o overlayer.Overlayer, f fluxer.Fluxer, opts ApplyOpts) (*Result, error) {
@@ -215,7 +230,7 @@ func Apply(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner, 
 		return res, fmt.Errorf("%s", plan.Reason)
 	}
 
-	storage, err := prepareHostBeforeK3s(ctx, cfg, p, d, plan)
+	storage, err := prepareHostBeforeK3s(ctx, cfg, p, d, plan, res)
 	if err != nil {
 		return res, err
 	}
@@ -267,10 +282,18 @@ func Apply(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner, 
 	return res, nil
 }
 
-func prepareHostBeforeK3s(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner, d deployer.Deployer, plan *ReconcilePlan) (*provisioner.DataStorageState, error) {
+func prepareHostBeforeK3s(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner, d deployer.Deployer, plan *ReconcilePlan, res *Result) (*provisioner.DataStorageState, error) {
 	if err := refusePreLVMPlatform(ctx, cfg, d, plan); err != nil {
 		return nil, err
 	}
+	// Host inotify capacity is reconciled before K3s installation and on every
+	// installed reapply, so existing clusters heal without reboot or restart.
+	inotify, err := p.ReconcileHostInotify(ctx)
+	if err != nil {
+		auditFail(cfg, "apply-host-inotify", err)
+		return nil, fmt.Errorf("host inotify capacity: %w (observed before reconcile: %s)", err, plan.HostInotify)
+	}
+	res.HostInotify = inotify
 	if plan.Action == ActionInstall {
 		if err := p.EnsureHostSwapDisabled(ctx); err != nil {
 			auditFail(cfg, "apply-host-swap", err)
@@ -1025,12 +1048,18 @@ func Upgrade(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner
 		to = cfg.Spec.K3s.Version
 	}
 
+	inotify, err := p.ReconcileHostInotify(ctx)
+	if err != nil {
+		auditFail(cfg, "upgrade-host-inotify", err)
+		return nil, fmt.Errorf("host inotify capacity: %w (observed before reconcile: %s)", err, plan.HostInotify)
+	}
+
 	if err := p.Upgrade(ctx, to, k3s.ServerArgs(cfg)); err != nil {
 		auditFail(cfg, "upgrade", err)
 		return nil, err
 	}
 
-	res := &Result{Plan: plan, DataStorage: storage}
+	res := &Result{Plan: plan, HostInotify: inotify, DataStorage: storage}
 	outPath, err := storeKubeconfig(ctx, cfg, p, opts.KubeconfigOut)
 	if err != nil {
 		auditFail(cfg, "upgrade", err)
@@ -1078,6 +1107,11 @@ func validateUpgradeFoundation(ctx context.Context, cfg *config.Cluster, p provi
 	if err := refusePreLVMPlatform(ctx, cfg, d, plan); err != nil {
 		return nil, nil, err
 	}
+	inotify, err := p.InspectHostInotify(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	plan.HostInotify = inotify
 	return plan, storage, nil
 }
 
