@@ -2818,7 +2818,10 @@ spec:
                   to HOR-307).
                 type: boolean
               lastReconciled:
-                description: lastReconciled is the time of the last successful reconciliation.
+                description: |-
+                  lastReconciled is the time the observed status last changed. It is
+                  refreshed only when another status field changes, not as a per-reconcile
+                  heartbeat.
                 format: date-time
                 type: string
               message:
@@ -2985,7 +2988,9 @@ spec:
                 description: healthy mirrors the referenced ModelBackend's health.
                 type: boolean
               lastChecked:
-                description: lastChecked is the time health was last evaluated.
+                description: |-
+                  lastChecked is the time the observed status last changed. It is refreshed
+                  only when another status field changes, not as a per-reconcile heartbeat.
                 format: date-time
                 type: string
               message:

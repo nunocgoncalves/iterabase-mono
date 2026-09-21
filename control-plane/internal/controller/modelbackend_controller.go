@@ -15,9 +15,11 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	"github.com/nunocgoncalves/iterabase-mono/control-plane/api/v1alpha1"
 	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/catalog"
@@ -567,8 +569,16 @@ func backendKey(mb *v1alpha1.ModelBackend) string {
 	return fmt.Sprintf("%s/%s", mb.Namespace, mb.Name)
 }
 
-// patchStatus updates the CR status subresource with a merge patch.
+// patchStatus updates the CR status subresource with a merge patch, but only
+// when a field would actually change. A steady-state reconcile must not rewrite
+// the CR: an unconditional status write is delivered back through the primary
+// watch and re-enqueues the same request (HOR-559). lastReconciled therefore
+// records the last time the observed status changed instead of a per-reconcile
+// heartbeat.
 func (r *ModelBackendReconciler) patchStatus(ctx context.Context, mb *v1alpha1.ModelBackend, deployed, healthy bool, serviceURL, message string) error {
+	if !modelBackendStatusChanged(&mb.Status, mb.Generation, deployed, healthy, serviceURL, message) {
+		return nil
+	}
 	base := mb.DeepCopy()
 	now := metav1.Now()
 	mb.Status.Deployed = deployed
@@ -580,11 +590,32 @@ func (r *ModelBackendReconciler) patchStatus(ctx context.Context, mb *v1alpha1.M
 	return r.Status().Patch(ctx, mb, client.MergeFrom(base))
 }
 
+// modelBackendStatusChanged reports whether the desired observed status differs
+// from the persisted one. lastReconciled is intentionally excluded: it is bumped
+// only when another field changes, so a no-op reconcile does not touch (and
+// thereby re-trigger) the primary watch (HOR-559).
+func modelBackendStatusChanged(status *v1alpha1.ModelBackendStatus, generation int64, deployed, healthy bool, serviceURL, message string) bool {
+	return status.Deployed != deployed ||
+		status.Healthy != healthy ||
+		status.ServiceURL != serviceURL ||
+		status.ObservedGeneration != generation ||
+		status.Message != message
+}
+
+// modelBackendPrimaryWatchPredicates filters the primary ModelBackend watch to
+// spec (metadata.generation) changes, so the controller's own status writes do
+// not re-enqueue a reconcile (HOR-559). The Owns watches stay unfiltered: pod
+// and claim status transitions are the convergence signal the reconciler
+// observes, and the health requeue covers time-based refreshes.
+func modelBackendPrimaryWatchPredicates() []predicate.Predicate {
+	return []predicate.Predicate{predicate.GenerationChangedPredicate{}}
+}
+
 // SetupWithManager registers the reconciler with the controller-runtime manager
 // and watches owned Deployments, Services, and managed claims for convergence.
 func (r *ModelBackendReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&v1alpha1.ModelBackend{}).
+		For(&v1alpha1.ModelBackend{}, builder.WithPredicates(modelBackendPrimaryWatchPredicates()...)).
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.Service{}).
 		Owns(&corev1.PersistentVolumeClaim{}).
