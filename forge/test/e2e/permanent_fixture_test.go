@@ -29,7 +29,7 @@ const (
 	permanentFixtureModelDeviceEnv       = "FORGE_E2E_MODEL_CACHE_DEVICE"
 	permanentFixtureModelUUIDEnv         = "FORGE_E2E_MODEL_CACHE_UUID"
 	permanentFixtureModelMount           = "/data/hf-cache"
-	permanentFixtureHarnessStatePaths    = "/tmp/edge-overlay /tmp/forge-secrets-overlay /tmp/iterabase-release-overlay-* /tmp/iterabase-release-charts-* /tmp/control-plane-image.tar /tmp/harness-image.tar /tmp/tool-runner-image.tar /tmp/inference-gateway-image.tar /tmp/runtime-fixture-image.tar /tmp/forge-e2e-data-storage-consumer.pid /tmp/forge-e2e-data-storage-consumer.log"
+	permanentFixtureHarnessStatePaths    = "/tmp/edge-overlay /tmp/forge-secrets-overlay /tmp/iterabase-release-overlay-* /tmp/iterabase-release-charts-* /tmp/control-plane-image.tar /tmp/harness-image.tar /tmp/tool-runner-image.tar /tmp/inference-gateway-image.tar /tmp/runtime-fixture-image.tar /tmp/forge-e2e-data-storage-consumer.pid /tmp/forge-e2e-data-storage-consumer.log /tmp/forge-e2e-consumer-release.*"
 )
 
 var bootIDPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
@@ -236,6 +236,44 @@ func (fixture *permanentFixture) releaseDataStorageConsumers() error {
 	return nil
 }
 
+// permanentFixtureConsumerReleaseFailureReporting makes a silent `set -e`
+// abort in the consumer-release purge observable. It replays a bounded tail of
+// the purge output and names the exact failing command with its step, exit
+// status, source line, and function, so a candidate is never red from
+// `Process exited with status 1` alone. Failures inside a subshell are reported
+// by the enclosing command instead, so a failing process substitution cannot
+// leak a spurious report into an otherwise successful run.
+const permanentFixtureConsumerReleaseFailureReporting = `teardown_evidence_lines=20
+teardown_step="initialize consumer release"
+teardown_log=$(mktemp "${TMPDIR:-/tmp}/forge-e2e-consumer-release.XXXXXX")
+exec 3>&1
+exec >"$teardown_log" 2>&1
+report_teardown_failure() {
+  local status=$?
+  if test "${BASH_SUBSHELL:-0}" -ne 0; then
+    return 0
+  fi
+  set +e
+  printf 'permanent-fixture consumer release failed: step=%s exit_status=%d line=%d function=%s command=%s\n' \
+    "$teardown_step" "$status" "${BASH_LINENO[0]:-0}" "${FUNCNAME[1]:-main}" "$BASH_COMMAND" >&3
+  exit "$status"
+}
+finish_teardown_report() {
+  local status=$?
+  trap - ERR
+  set +e
+  if test "$status" -ne 0; then
+    printf 'permanent-fixture consumer release evidence (last %s output lines):\n' "$teardown_evidence_lines" >&3
+    tail -n "$teardown_evidence_lines" "$teardown_log" >&3
+  else
+    cat "$teardown_log" >&3
+  fi
+  rm -f -- "$teardown_log"
+}
+trap report_teardown_failure ERR
+trap finish_teardown_report EXIT
+`
+
 const permanentFixtureConsumerHelmUninstallFunction = `uninstall_consumer_release() {
   local release="$1"
   local uninstall_output scheduled_crd expected_uninstall_error
@@ -245,9 +283,19 @@ const permanentFixtureConsumerHelmUninstallFunction = `uninstall_consumer_releas
     return 0
   fi
   scheduled_crd=$(printf "%s\n" "$uninstall_output" | sed -n 's#^Error: uninstallation completed with 1 error(s): resource CustomResourceDefinition//\([a-z0-9][a-z0-9.-]*\) still exists\. status: Terminating, message: Resource scheduled for deletion$#\1#p')
+  if test -z "$scheduled_crd"; then
+    printf 'permanent-fixture consumer release diagnostic: step=helm-uninstall release=%s reason=helm uninstall returned an unexpected error\n' "$release" >&2
+    printf 'permanent-fixture consumer release evidence: helm uninstall output (last 10 lines)\n' >&2
+    printf '%s\n' "$uninstall_output" | tail -n 10 >&2
+  fi
   test -n "$scheduled_crd"
   expected_uninstall_error="Error: uninstallation completed with 1 error(s): resource CustomResourceDefinition//$scheduled_crd still exists. status: Terminating, message: Resource scheduled for deletion
 context deadline exceeded"
+  if test "$uninstall_output" != "$expected_uninstall_error"; then
+    printf 'permanent-fixture consumer release diagnostic: step=helm-uninstall release=%s reason=helm uninstall error did not match the expected terminating-CRD error\n' "$release" >&2
+    printf 'permanent-fixture consumer release evidence: helm uninstall output (last 10 lines)\n' >&2
+    printf '%s\n' "$uninstall_output" | tail -n 10 >&2
+  fi
   test "$uninstall_output" = "$expected_uninstall_error"
 
   crd_observation=
@@ -276,33 +324,43 @@ context deadline exceeded"
   echo "helm uninstall reported CRD $scheduled_crd scheduled for deletion; authoritative absence/ownership/deletion/zero-instance checks passed"
 }`
 
-func permanentFixtureConsumerReleaseScript(dataStorageDevice string) string {
-	return "sudo bash -ceu " + candidateShellQuote(fmt.Sprintf(`data_storage_device=%s
+func permanentFixtureConsumerReleaseBody(dataStorageDevice string) string {
+	return fmt.Sprintf(`data_storage_device=%s
+%s
 %s
 if ! command -v k3s >/dev/null 2>&1 || ! k3s kubectl get --raw=/readyz >/dev/null 2>&1; then exit 0; fi
+teardown_step="delete Flux kustomizations"
 k3s kubectl delete kustomizations.kustomize.toolkit.fluxcd.io --all -A --ignore-not-found=true --wait=true --timeout=2m || true
+teardown_step="delete AgentPool resources"
 if k3s kubectl get crd agentpools.platform.iterabase.com >/dev/null 2>&1; then
   k3s kubectl delete agentpools.platform.iterabase.com --all -A --ignore-not-found=true --wait=true --timeout=5m
 fi
+teardown_step="delete namespaced platform resources"
 namespaced_resources=$(k3s kubectl api-resources --api-group=platform.iterabase.com --namespaced=true --verbs=list,delete -o name)
 while IFS= read -r resource; do
   test -n "$resource" || continue
   test "$resource" = agentpools.platform.iterabase.com && continue
   k3s kubectl delete "$resource" --all -A --ignore-not-found=true --wait=true --timeout=5m
 done <<<"$namespaced_resources"
+teardown_step="uninstall consumer releases"
 if command -v helm >/dev/null 2>&1; then
   while IFS= read -r release; do
     test -n "$release" || continue
     case "$release" in *-cert-manager|*-lvm-storage) continue ;; esac
+    teardown_step="helm uninstall $release"
     uninstall_consumer_release "$release"
   done < <(KUBECONFIG=/etc/rancher/k3s/k3s.yaml helm list -n iterabase-system -q)
 fi
+teardown_step="delete consumer jobs"
 k3s kubectl delete jobs --all -n iterabase-system --ignore-not-found=true --wait=true --timeout=5m
+teardown_step="delete pod consumers"
 while read -r namespace pod; do
   test -n "$namespace" && test -n "$pod" || continue
   k3s kubectl delete pod "$pod" -n "$namespace" --ignore-not-found=true --wait=true --timeout=5m
 done < <(k3s kubectl get pods -A -o go-template="{{range .items}}{{\$namespace := .metadata.namespace}}{{\$pod := .metadata.name}}{{range .spec.volumes}}{{if .persistentVolumeClaim}}{{\$namespace}} {{\$pod}}{{\"\\n\"}}{{end}}{{end}}{{end}}" | sort -u)
+teardown_step="delete consumer PVCs"
 k3s kubectl delete pvc --all -A --ignore-not-found=true --wait=true --timeout=5m
+teardown_step="wait for data-storage convergence"
 for i in $(seq 1 150); do
   volumes=0
   if k3s kubectl get crd lvmvolumes.local.openebs.io >/dev/null 2>&1; then volumes=$((volumes + $(k3s kubectl get lvmvolumes.local.openebs.io -A --no-headers | awk "NF {n++} END {print n+0}"))); fi
@@ -316,7 +374,14 @@ for i in $(seq 1 150); do
   sleep 2
 done
 exit 42
-`, candidateShellQuote(dataStorageDevice), permanentFixtureConsumerHelmUninstallFunction))
+`, candidateShellQuote(dataStorageDevice), permanentFixtureConsumerReleaseFailureReporting, permanentFixtureConsumerHelmUninstallFunction)
+}
+
+// permanentFixtureConsumerReleaseScript runs the purge through `bash -cEeu`.
+// -E is required so the ERR reporter also names failures inside the Helm
+// uninstall function instead of a bare `Process exited with status 1`.
+func permanentFixtureConsumerReleaseScript(dataStorageDevice string) string {
+	return "sudo bash -cEeu " + candidateShellQuote(permanentFixtureConsumerReleaseBody(dataStorageDevice))
 }
 
 func (fixture *permanentFixture) bootID() (string, error) {
@@ -459,8 +524,173 @@ func TestPermanentFixtureConsumerReleaseScriptIsValid(t *testing.T) {
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("consumer-release shell is invalid: %v\n%s", err, output)
 	}
+	if !strings.HasPrefix(script, "sudo bash -cEeu ") {
+		t.Fatal("consumer-release shell must run with errtrace (-E) so the ERR reporter also names failures inside shell functions")
+	}
 	if strings.Contains(script, `helm uninstall "$release" -n iterabase-system --wait --timeout 5m || true`) {
 		t.Fatal("consumer-release shell must not broadly ignore Helm uninstall failures")
+	}
+}
+
+func TestPermanentFixtureConsumerReleaseReportsFailingCommand(t *testing.T) {
+	for _, test := range []struct {
+		name             string
+		k3s              string
+		helm             string
+		wantReports      []string
+		omittedEvidence  string
+		evidenceMarker   string
+		maxEvidenceLines int
+	}{
+		{
+			name: "unexpected helm uninstall error",
+			k3s: `
+if test "$1" != kubectl; then exit 90; fi
+shift
+case "$1" in
+  get)
+    shift
+    test "$1" = --raw=/readyz && exit 0
+    test "$1" = crd && exit 1
+    exit 91
+    ;;
+  delete) exit 0 ;;
+  api-resources) exit 0 ;;
+esac
+exit 92
+`,
+			helm: `
+if test "$1" = list; then
+  printf 'test-release\n'
+  exit 0
+fi
+if test "$1" = uninstall; then
+  index=0
+  while test "$index" -lt 40; do
+    index=$((index + 1))
+    printf 'unexpected helm error line %02d\n' "$index"
+  done
+  exit 1
+fi
+exit 90
+`,
+			wantReports: []string{
+				`permanent-fixture consumer release diagnostic: step=helm-uninstall release=test-release`,
+				`permanent-fixture consumer release failed: step=helm uninstall test-release`,
+				`exit_status=1`,
+				`command=test -n "$scheduled_crd"`,
+				`unexpected helm error line 40`,
+			},
+			omittedEvidence:  "unexpected helm error line 01",
+			evidenceMarker:   "unexpected helm error line",
+			maxEvidenceLines: 10,
+		},
+		{
+			name: "failing platform delete",
+			k3s: `
+if test "$1" != kubectl; then exit 90; fi
+shift
+case "$1" in
+  get)
+    shift
+    test "$1" = --raw=/readyz && exit 0
+    test "$1" = crd && exit 0
+    exit 91
+    ;;
+  delete)
+    shift
+    case "${1:-}" in
+      agentpools.platform.iterabase.com)
+        index=0
+        while test "$index" -lt 40; do
+          index=$((index + 1))
+          printf 'agentpool delete failure %02d\n' "$index"
+        done
+        exit 1
+        ;;
+    esac
+    exit 0
+    ;;
+  api-resources) exit 0 ;;
+esac
+exit 92
+`,
+			helm: "exit 90\n",
+			wantReports: []string{
+				`permanent-fixture consumer release failed: step=delete AgentPool resources`,
+				`exit_status=1`,
+				`command=k3s kubectl delete agentpools.platform.iterabase.com`,
+				`agentpool delete failure 40`,
+			},
+			omittedEvidence:  "agentpool delete failure 01",
+			evidenceMarker:   "agentpool delete failure",
+			maxEvidenceLines: 20,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fakeBin := t.TempDir()
+			writePermanentFixtureFakeCommand(t, fakeBin, "k3s", test.k3s)
+			writePermanentFixtureFakeCommand(t, fakeBin, "helm", test.helm)
+			command := exec.Command("bash", "-cEeu", permanentFixtureConsumerReleaseBody("/dev/disk/by-id/test-data-storage"))
+			command.Env = []string{"PATH=" + fakeBin + ":" + os.Getenv("PATH")}
+			output, err := command.CombinedOutput()
+			if err == nil {
+				t.Fatalf("forced teardown failure unexpectedly succeeded:\n%s", output)
+			}
+			for _, want := range test.wantReports {
+				if !strings.Contains(string(output), want) {
+					t.Fatalf("teardown failure report lacks %q:\n%s", want, output)
+				}
+			}
+			if strings.Contains(string(output), test.omittedEvidence) {
+				t.Fatalf("teardown failure report leaked unbounded evidence %q:\n%s", test.omittedEvidence, output)
+			}
+			if got := strings.Count(string(output), test.evidenceMarker); got > test.maxEvidenceLines {
+				t.Fatalf("teardown failure report is not bounded: %d evidence lines, want at most %d\n%s", got, test.maxEvidenceLines, output)
+			}
+		})
+	}
+}
+
+func TestPermanentFixtureConsumerReleaseSucceedsWithFailureReporting(t *testing.T) {
+	fakeBin := t.TempDir()
+	writePermanentFixtureFakeCommand(t, fakeBin, "k3s", `
+if test "$1" != kubectl; then exit 90; fi
+shift
+case "$1" in
+  get)
+    shift
+    test "$1" = --raw=/readyz && exit 0
+    exit 1
+    ;;
+  delete)
+    printf 'k3s-teardown-step\n'
+    exit 0
+    ;;
+  api-resources) exit 0 ;;
+esac
+exit 92
+`)
+	writePermanentFixtureFakeCommand(t, fakeBin, "helm", `
+if test "$1" = list; then exit 0; fi
+exit 90
+`)
+	writePermanentFixtureFakeCommand(t, fakeBin, "vgs", "exit 1\n")
+	writePermanentFixtureFakeCommand(t, fakeBin, "lvs", "exit 1\n")
+	writePermanentFixtureFakeCommand(t, fakeBin, "lsblk", "printf 'forge-e2e-fake-kernel\\n'\n")
+	writePermanentFixtureFakeCommand(t, fakeBin, "readlink", "printf '/dev/disk/by-id/test-data-storage\\n'\n")
+	writePermanentFixtureFakeCommand(t, fakeBin, "seq", "printf '1\\n'\n")
+	command := exec.Command("bash", "-cEeu", permanentFixtureConsumerReleaseBody("/dev/disk/by-id/test-data-storage"))
+	command.Env = []string{"PATH=" + fakeBin + ":" + os.Getenv("PATH")}
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("successful teardown failed: %v\n%s", err, output)
+	}
+	if !strings.Contains(string(output), "k3s-teardown-step") {
+		t.Fatalf("successful teardown dropped its output:\n%s", output)
+	}
+	if strings.Contains(string(output), "permanent-fixture consumer release failed:") {
+		t.Fatalf("successful teardown reported a failure:\n%s", output)
 	}
 }
 
@@ -484,6 +714,7 @@ func TestPermanentFixtureConsumerHelmUninstallIsAuthoritative(t *testing.T) {
 		{name: "ordinary successful uninstall", helmStatus: 0},
 		{name: "terminating owned empty CRD", helmStatus: 1, helmOutput: terminating, crdObservation: release + "|iterabase-system|2026-09-10T20:00:00Z", wantAcceptedMarker: true},
 		{name: "authoritatively absent CRD", helmStatus: 1, helmOutput: terminating, wantAcceptedMarker: true},
+		{name: "terminating error without context deadline", helmStatus: 1, helmOutput: strings.Split(terminating, "\n")[0], crdObservation: release + "|iterabase-system|2026-09-10T20:00:00Z", wantError: true},
 		{name: "unrelated Helm error", helmStatus: 1, helmOutput: "Error: Kubernetes cluster unreachable", wantError: true},
 		{name: "CRD observation error", helmStatus: 1, helmOutput: terminating, crdStatus: 1, wantError: true},
 		{name: "foreign release owner", helmStatus: 1, helmOutput: terminating, crdObservation: "other-release|iterabase-system|2026-09-10T20:00:00Z", wantError: true},
@@ -565,6 +796,7 @@ func TestPermanentFixtureCleanupCoversTransferredRunState(t *testing.T) {
 		"/tmp/runtime-fixture-image.tar",
 		"/tmp/forge-e2e-data-storage-consumer.pid",
 		"/tmp/forge-e2e-data-storage-consumer.log",
+		"/tmp/forge-e2e-consumer-release.*",
 	} {
 		if !strings.Contains(permanentFixtureHarnessStatePaths, path) {
 			t.Fatalf("permanent fixture cleanup does not cover %s", path)
