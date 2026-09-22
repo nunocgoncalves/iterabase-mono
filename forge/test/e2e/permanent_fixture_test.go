@@ -6,6 +6,7 @@ import (
 	_ "embed"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -240,11 +241,13 @@ func (fixture *permanentFixture) releaseDataStorageConsumers() error {
 // abort in the consumer-release purge observable. It replays a bounded tail of
 // the purge output and names the exact failing command with its step, exit
 // status, source line, and function, so a candidate is never red from
-// `Process exited with status 1` alone. Failures inside a subshell are reported
-// by the enclosing command instead, so a failing process substitution cannot
-// leak a spurious report into an otherwise successful run.
+// `Process exited with status 1` alone. Failures inside a command substitution
+// are reported by the enclosing assignment instead of leaking duplicate
+// reports; a process substitution stays as silent as its reader, which is
+// unchanged for the `helm list` and pod-list loops.
 const permanentFixtureConsumerReleaseFailureReporting = `teardown_evidence_lines=20
 teardown_step="initialize consumer release"
+teardown_reason=""
 teardown_log=$(mktemp "${TMPDIR:-/tmp}/forge-e2e-consumer-release.XXXXXX")
 exec 3>&1
 exec >"$teardown_log" 2>&1
@@ -263,6 +266,9 @@ finish_teardown_report() {
   trap - ERR
   set +e
   if test "$status" -ne 0; then
+    if test -n "$teardown_reason"; then
+      printf 'permanent-fixture consumer release failed: step=%s exit_status=%d reason=%s\n' "$teardown_step" "$status" "$teardown_reason" >&3
+    fi
     printf 'permanent-fixture consumer release evidence (last %s output lines):\n' "$teardown_evidence_lines" >&3
     tail -n "$teardown_evidence_lines" "$teardown_log" >&3
   else
@@ -274,7 +280,14 @@ trap report_teardown_failure ERR
 trap finish_teardown_report EXIT
 `
 
-const permanentFixtureConsumerHelmUninstallFunction = `uninstall_consumer_release() {
+const permanentFixtureConsumerHelmUninstallFunctions = `report_helm_uninstall_evidence() {
+  local release="$1" reason="$2" output="$3" evidence_lines=10
+  printf 'permanent-fixture consumer release diagnostic: step=helm-uninstall release=%s reason=%s\n' "$release" "$reason" >&2
+  printf 'permanent-fixture consumer release evidence: helm uninstall output (last %s lines)\n' "$evidence_lines" >&2
+  printf '%s\n' "$output" | tail -n "$evidence_lines" >&2
+}
+
+uninstall_consumer_release() {
   local release="$1"
   local uninstall_output scheduled_crd expected_uninstall_error
   local crd_observation crd_release crd_remainder crd_namespace crd_deletion instances
@@ -284,17 +297,13 @@ const permanentFixtureConsumerHelmUninstallFunction = `uninstall_consumer_releas
   fi
   scheduled_crd=$(printf "%s\n" "$uninstall_output" | sed -n 's#^Error: uninstallation completed with 1 error(s): resource CustomResourceDefinition//\([a-z0-9][a-z0-9.-]*\) still exists\. status: Terminating, message: Resource scheduled for deletion$#\1#p')
   if test -z "$scheduled_crd"; then
-    printf 'permanent-fixture consumer release diagnostic: step=helm-uninstall release=%s reason=helm uninstall returned an unexpected error\n' "$release" >&2
-    printf 'permanent-fixture consumer release evidence: helm uninstall output (last 10 lines)\n' >&2
-    printf '%s\n' "$uninstall_output" | tail -n 10 >&2
+    report_helm_uninstall_evidence "$release" "helm uninstall returned an unexpected error" "$uninstall_output"
   fi
   test -n "$scheduled_crd"
   expected_uninstall_error="Error: uninstallation completed with 1 error(s): resource CustomResourceDefinition//$scheduled_crd still exists. status: Terminating, message: Resource scheduled for deletion
 context deadline exceeded"
   if test "$uninstall_output" != "$expected_uninstall_error"; then
-    printf 'permanent-fixture consumer release diagnostic: step=helm-uninstall release=%s reason=helm uninstall error did not match the expected terminating-CRD error\n' "$release" >&2
-    printf 'permanent-fixture consumer release evidence: helm uninstall output (last 10 lines)\n' >&2
-    printf '%s\n' "$uninstall_output" | tail -n 10 >&2
+    report_helm_uninstall_evidence "$release" "helm uninstall error did not match the expected terminating-CRD error" "$uninstall_output"
   fi
   test "$uninstall_output" = "$expected_uninstall_error"
 
@@ -373,8 +382,9 @@ for i in $(seq 1 150); do
   test "$volumes" = 0 && test "$lvs_count" = 0 && test "$holders" = 0 && exit 0
   sleep 2
 done
+teardown_reason="data-storage consumers did not converge after 150 attempts"
 exit 42
-`, candidateShellQuote(dataStorageDevice), permanentFixtureConsumerReleaseFailureReporting, permanentFixtureConsumerHelmUninstallFunction)
+`, candidateShellQuote(dataStorageDevice), permanentFixtureConsumerReleaseFailureReporting, permanentFixtureConsumerHelmUninstallFunctions)
 }
 
 // permanentFixtureConsumerReleaseScript runs the purge through `bash -cEeu`.
@@ -675,11 +685,7 @@ exit 92
 if test "$1" = list; then exit 0; fi
 exit 90
 `)
-	writePermanentFixtureFakeCommand(t, fakeBin, "vgs", "exit 1\n")
-	writePermanentFixtureFakeCommand(t, fakeBin, "lvs", "exit 1\n")
-	writePermanentFixtureFakeCommand(t, fakeBin, "lsblk", "printf 'forge-e2e-fake-kernel\\n'\n")
-	writePermanentFixtureFakeCommand(t, fakeBin, "readlink", "printf '/dev/disk/by-id/test-data-storage\\n'\n")
-	writePermanentFixtureFakeCommand(t, fakeBin, "seq", "printf '1\\n'\n")
+	writePermanentFixtureFakeHostTools(t, fakeBin)
 	command := exec.Command("bash", "-cEeu", permanentFixtureConsumerReleaseBody("/dev/disk/by-id/test-data-storage"))
 	command.Env = []string{"PATH=" + fakeBin + ":" + os.Getenv("PATH")}
 	output, err := command.CombinedOutput()
@@ -691,6 +697,52 @@ exit 90
 	}
 	if strings.Contains(string(output), "permanent-fixture consumer release failed:") {
 		t.Fatalf("successful teardown reported a failure:\n%s", output)
+	}
+}
+
+func TestPermanentFixtureConsumerReleaseReportsNonConvergence(t *testing.T) {
+	fakeBin := t.TempDir()
+	writePermanentFixtureFakeCommand(t, fakeBin, "k3s", `
+if test "$1" != kubectl; then exit 90; fi
+shift
+case "$1" in
+  get)
+    shift
+    case "${1:-}" in
+      --raw=/readyz) exit 0 ;;
+      crd) exit 0 ;;
+      lvmvolumes.local.openebs.io) printf 'lvmvolume.local.openebs.io/stuck\n'; exit 0 ;;
+    esac
+    exit 91
+    ;;
+  delete)
+    printf 'k3s-teardown-step\n'
+    exit 0
+    ;;
+  api-resources) exit 0 ;;
+esac
+exit 92
+`)
+	writePermanentFixtureFakeCommand(t, fakeBin, "helm", `
+if test "$1" = list; then exit 0; fi
+exit 90
+`)
+	writePermanentFixtureFakeHostTools(t, fakeBin)
+	command := exec.Command("bash", "-cEeu", permanentFixtureConsumerReleaseBody("/dev/disk/by-id/test-data-storage"))
+	command.Env = []string{"PATH=" + fakeBin + ":" + os.Getenv("PATH")}
+	output, err := command.CombinedOutput()
+	var exitError *exec.ExitError
+	if !errors.As(err, &exitError) || exitError.ExitCode() != 42 {
+		t.Fatalf("non-converging teardown err = %v, want exit status 42:\n%s", err, output)
+	}
+	for _, want := range []string{
+		"permanent-fixture consumer release failed: step=wait for data-storage convergence exit_status=42",
+		"data-storage consumers did not converge after 150 attempts",
+		"permanent-fixture consumer release evidence (last 20 output lines):",
+	} {
+		if !strings.Contains(string(output), want) {
+			t.Fatalf("non-convergence report lacks %q:\n%s", want, output)
+		}
 	}
 }
 
@@ -757,7 +809,7 @@ test "$1" = name
 printf "%s" "${HOR545_FAKE_INSTANCE_OBSERVATION:-}"
 exit "${HOR545_FAKE_INSTANCE_STATUS:-0}"
 `)
-			command := exec.Command("bash", "-ceu", permanentFixtureConsumerHelmUninstallFunction+"\nuninstall_consumer_release "+release)
+			command := exec.Command("bash", "-ceu", permanentFixtureConsumerHelmUninstallFunctions+"\nuninstall_consumer_release "+release)
 			command.Env = []string{
 				"PATH=" + fakeBin + ":" + os.Getenv("PATH"),
 				"HOR545_FAKE_HELM_STATUS=" + fmt.Sprint(test.helmStatus),
@@ -778,6 +830,16 @@ exit "${HOR545_FAKE_INSTANCE_STATUS:-0}"
 			}
 		})
 	}
+}
+
+func writePermanentFixtureFakeHostTools(t *testing.T, fakeBin string) {
+	t.Helper()
+	writePermanentFixtureFakeCommand(t, fakeBin, "vgs", "exit 1\n")
+	writePermanentFixtureFakeCommand(t, fakeBin, "lvs", "exit 1\n")
+	writePermanentFixtureFakeCommand(t, fakeBin, "lsblk", "printf 'forge-e2e-fake-kernel\\n'\n")
+	writePermanentFixtureFakeCommand(t, fakeBin, "readlink", "printf '/dev/disk/by-id/test-data-storage\\n'\n")
+	writePermanentFixtureFakeCommand(t, fakeBin, "seq", "printf '1\\n'\n")
+	writePermanentFixtureFakeCommand(t, fakeBin, "sleep", "exit 0\n")
 }
 
 func writePermanentFixtureFakeCommand(t *testing.T, dir, name, body string) {
