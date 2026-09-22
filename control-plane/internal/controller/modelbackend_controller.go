@@ -19,7 +19,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	"github.com/nunocgoncalves/iterabase-mono/control-plane/api/v1alpha1"
 	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/catalog"
@@ -213,7 +212,9 @@ func (r *ModelBackendReconciler) reconcileVLLM(ctx context.Context, mb *v1alpha1
 
 // reconcileExternal records an external provider backend. No workload is
 // deployed; reachability validation is deferred to HOR-307, so healthy is
-// assumed true in the skeleton.
+// assumed true in the skeleton. It requeues on the health interval so an
+// out-of-band rewrite of this controller-owned status is repaired within one
+// interval: the primary watch filters status-only updates (HOR-559).
 func (r *ModelBackendReconciler) reconcileExternal(ctx context.Context, mb *v1alpha1.ModelBackend) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 	if mb.Spec.External == nil || mb.Spec.External.BaseURL == "" {
@@ -227,7 +228,10 @@ func (r *ModelBackendReconciler) reconcileExternal(ctx context.Context, mb *v1al
 		return ctrl.Result{}, err
 	}
 	logger.Info("recorded external backend", "key", backendKey(mb), "baseURL", serviceURL)
-	return ctrl.Result{}, nil
+	// Requeue on the health interval, mirroring vLLM: external status is static
+	// today, so this is the bounded self-heal fallback rather than an
+	// observation refresh.
+	return ctrl.Result{RequeueAfter: healthRequeueInterval}, nil
 }
 
 // reconcileStub materializes a backend row for a recognized-but-unimplemented
@@ -602,20 +606,14 @@ func modelBackendStatusChanged(status *v1alpha1.ModelBackendStatus, generation i
 		status.Message != message
 }
 
-// modelBackendPrimaryWatchPredicates filters the primary ModelBackend watch to
-// spec (metadata.generation) changes, so the controller's own status writes do
-// not re-enqueue a reconcile (HOR-559). The Owns watches stay unfiltered: pod
-// and claim status transitions are the convergence signal the reconciler
-// observes, and the health requeue covers time-based refreshes.
-func modelBackendPrimaryWatchPredicates() []predicate.Predicate {
-	return []predicate.Predicate{predicate.GenerationChangedPredicate{}}
-}
-
 // SetupWithManager registers the reconciler with the controller-runtime manager
 // and watches owned Deployments, Services, and managed claims for convergence.
 func (r *ModelBackendReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&v1alpha1.ModelBackend{}, builder.WithPredicates(modelBackendPrimaryWatchPredicates()...)).
+		// Status-only updates must not re-enqueue (HOR-559); the health fallback
+		// requeue on observed-state paths repairs out-of-band status writes, and
+		// the Owns watches below stay unfiltered.
+		For(&v1alpha1.ModelBackend{}, builder.WithPredicates(generationChangedPredicates()...)).
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.Service{}).
 		Owns(&corev1.PersistentVolumeClaim{}).

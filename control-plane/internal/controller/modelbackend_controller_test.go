@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -24,7 +23,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
-	"sigs.k8s.io/controller-runtime/pkg/event"
 
 	"github.com/nunocgoncalves/iterabase-mono/control-plane/api/v1alpha1"
 	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/catalog"
@@ -35,23 +33,6 @@ import (
 // regression test. The reconcile counter is keyed to it so fallback requeues of
 // other backends in this test cannot perturb the count.
 const hor559BackendName = "be-hor559"
-
-// modelBackendGetCounter counts ModelBackendReconciler.Reconcile invocations for
-// one ModelBackend: every reconcile starts by loading the primary CR, and the
-// reconciler loads a ModelBackend nowhere else. It observes enqueues without
-// instrumenting production code (HOR-559).
-type modelBackendGetCounter struct {
-	client.Client
-	name  string
-	count atomic.Int64
-}
-
-func (c *modelBackendGetCounter) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
-	if _, ok := obj.(*v1alpha1.ModelBackend); ok && key.Name == c.name {
-		c.count.Add(1)
-	}
-	return c.Client.Get(ctx, key, obj, opts...)
-}
 
 // newCatalogStore returns a Store backed by a fresh migrated Postgres.
 func newCatalogStore(t *testing.T) *catalog.Store {
@@ -95,12 +76,13 @@ func TestModelBackendReconcile(t *testing.T) {
 
 	mgr, err := ctrl.NewManager(saCfg, ctrl.Options{Scheme: scheme})
 	require.NoError(t, err)
-	tracking := &modelBackendGetCounter{Client: mgr.GetClient(), name: hor559BackendName}
-	require.NoError(t, (&ModelBackendReconciler{
+	tracking := &primaryGetCounter[*v1alpha1.ModelBackend]{Client: mgr.GetClient(), name: hor559BackendName}
+	reconciler := &ModelBackendReconciler{
 		Client: tracking,
 		Scheme: scheme,
 		Store:  store,
-	}).SetupWithManager(mgr))
+	}
+	require.NoError(t, reconciler.SetupWithManager(mgr))
 
 	mgrCtx, cancel := context.WithCancel(ctx)
 	t.Cleanup(cancel)
@@ -290,6 +272,14 @@ func TestModelBackendReconcile(t *testing.T) {
 		assert.Equal(t, "https://api.anthropic.com", b.ServiceURL)
 		assert.True(t, b.Deployed)
 		assert.True(t, b.Healthy, "external healthy assumed true; reachability deferred to HOR-307")
+
+		// HOR-559 review: external status is controller-owned and static, so the
+		// filtered primary watch no longer re-enqueues a status-only rewrite; the
+		// reconciler must keep the bounded health requeue as the repair path.
+		res, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: nn})
+		require.NoError(t, err)
+		assert.Equal(t, healthRequeueInterval, res.RequeueAfter,
+			"external backends must re-arm the health requeue like vLLM")
 	})
 
 	// HOR-559 regression: the ModelBackend reconciler had the same latent
@@ -943,30 +933,6 @@ func TestValidateReservedVolumeNames(t *testing.T) {
 			[]corev1.VolumeMount{{Name: "dshm", MountPath: "/x"}},
 		))
 	})
-}
-
-// TestModelBackendPrimaryWatchPredicates pins the HOR-559 watch contract:
-// status-only updates (including the controller's own status writes) are
-// filtered, while create/delete and spec (generation) changes still enqueue.
-func TestModelBackendPrimaryWatchPredicates(t *testing.T) {
-	old := &v1alpha1.ModelBackend{
-		ObjectMeta: metav1.ObjectMeta{Name: "mb", Namespace: "default", Generation: 2},
-		Status:     v1alpha1.ModelBackendStatus{Deployed: true, Healthy: true, ObservedGeneration: 2},
-	}
-	statusOnly := old.DeepCopy()
-	statusOnly.Status.Healthy = false
-	statusOnly.Status.LastReconciled = &metav1.Time{Time: time.Now()}
-	specChange := old.DeepCopy()
-	specChange.Generation = 3
-
-	for _, p := range modelBackendPrimaryWatchPredicates() {
-		assert.True(t, p.Create(event.CreateEvent{Object: old}), "create events must enqueue")
-		assert.True(t, p.Delete(event.DeleteEvent{Object: old}), "delete events must enqueue")
-		assert.False(t, p.Update(event.UpdateEvent{ObjectOld: old, ObjectNew: statusOnly}),
-			"status-only updates must not enqueue a reconcile (HOR-559)")
-		assert.True(t, p.Update(event.UpdateEvent{ObjectOld: old, ObjectNew: specChange}),
-			"generation changes must enqueue a reconcile")
-	}
 }
 
 // TestModelBackendStatusChanged pins the conditional status write (HOR-559): a
