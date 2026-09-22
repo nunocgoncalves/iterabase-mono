@@ -8,18 +8,15 @@ import (
 )
 
 // hostInotifySummary is the compact observed-versus-required inotify evidence
-// surfaced by the apply plan, the apply/upgrade result, and status.
+// surfaced by the apply plan, the apply/upgrade result, and status. It is a
+// thin wrapper over the shared evidence fragments so the status and
+// fail-closed surfaces cannot drift.
 func hostInotifySummary(state *provisioner.HostInotifyState) string {
 	if state == nil {
 		return "unavailable"
 	}
-	dropIn := "missing"
-	if state.DropInPresent {
-		dropIn = fmt.Sprintf("present regular=%t owner=%s mode=%s canonical=%t", state.DropInRegular, state.DropInOwner, state.DropInMode, state.DropInCanonical)
-	}
-	return fmt.Sprintf("%s (effective=%d required=%d persisted=%d drop-in %s)",
-		boolLabel(state.Ready(), "ready", "drift"), state.Effective,
-		provisioner.InotifyMaxUserInstancesRequired, state.Persisted, dropIn)
+	return fmt.Sprintf("%s (%s drop-in %s)",
+		boolLabel(state.Ready(), "ready", "drift"), state.CapacityEvidence(), state.DropInEvidence())
 }
 
 func printHostInotifyStatus(out io.Writer, state *provisioner.HostInotifyState) {

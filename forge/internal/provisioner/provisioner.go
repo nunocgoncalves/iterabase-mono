@@ -106,14 +106,26 @@ func (s HostInotifyState) Ready() bool {
 	return s.Effective >= InotifyMaxUserInstancesRequired && s.DropInCanonical
 }
 
-// String returns actionable observed-versus-required evidence for plan,
-// dry-run, status, and failure output.
-func (s HostInotifyState) String() string {
-	dropIn := "missing"
-	if s.DropInPresent {
-		dropIn = fmt.Sprintf("present regular=%t owner=%s mode=%s canonical=%t", s.DropInRegular, s.DropInOwner, s.DropInMode, s.DropInCanonical)
+// CapacityEvidence renders the live observed-versus-required counters shared
+// by the human status surface and the fail-closed evidence string.
+func (s HostInotifyState) CapacityEvidence() string {
+	return fmt.Sprintf("effective=%d required=%d persisted=%d", s.Effective, InotifyMaxUserInstancesRequired, s.Persisted)
+}
+
+// DropInEvidence renders the Forge-owned drop-in descriptor shared by the
+// human status surface and the fail-closed evidence string.
+func (s HostInotifyState) DropInEvidence() string {
+	if !s.DropInPresent {
+		return "missing"
 	}
-	return fmt.Sprintf("effective=%d required=%d persisted=%d drop-in=%s ready=%t", s.Effective, InotifyMaxUserInstancesRequired, s.Persisted, dropIn, s.Ready())
+	return fmt.Sprintf("present regular=%t owner=%s mode=%s canonical=%t", s.DropInRegular, s.DropInOwner, s.DropInMode, s.DropInCanonical)
+}
+
+// String returns actionable observed-versus-required evidence for plan,
+// dry-run, status, and failure output. It is a thin wrapper over the shared
+// evidence fragments so the status and fail-closed surfaces cannot drift.
+func (s HostInotifyState) String() string {
+	return fmt.Sprintf("%s drop-in=%s ready=%t", s.CapacityEvidence(), s.DropInEvidence(), s.Ready())
 }
 
 // PreflightResult is the read-only host readiness check outcome.
