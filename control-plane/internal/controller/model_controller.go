@@ -16,7 +16,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	"github.com/nunocgoncalves/iterabase-mono/control-plane/api/v1alpha1"
 	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/catalog"
@@ -200,15 +199,6 @@ func modelStatusChanged(status *v1alpha1.ModelStatus, generation int64, availabl
 		status.Message != message
 }
 
-// modelPrimaryWatchPredicates filters the primary Model watch to spec
-// (metadata.generation) changes. Status-only updates — including this
-// controller's own status writes — must not enqueue a new reconcile; the 30s
-// fallback requeue refreshes observed backend state without a watch feedback
-// loop (HOR-559).
-func modelPrimaryWatchPredicates() []predicate.Predicate {
-	return []predicate.Predicate{predicate.GenerationChangedPredicate{}}
-}
-
 // SetupWithManager registers the reconciler, watches ModelBackends, and indexes
 // Models by backendRef so a backend health change enqueues referencing Models.
 func (r *ModelReconciler) SetupWithManager(mgr ctrl.Manager) error {
@@ -219,7 +209,9 @@ func (r *ModelReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		return fmt.Errorf("index models by backendRef: %w", err)
 	}
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&v1alpha1.Model{}, builder.WithPredicates(modelPrimaryWatchPredicates()...)).
+		// Status-only updates must not re-enqueue (HOR-559); the 30s fallback
+		// requeue is the bounded repair path for observed backend state.
+		For(&v1alpha1.Model{}, builder.WithPredicates(generationChangedPredicates()...)).
 		// The ModelBackend watch is intentionally unfiltered: a backend health
 		// change is a status-only update on the backend CR, and it must still
 		// propagate to referencing Models promptly (HOR-559).

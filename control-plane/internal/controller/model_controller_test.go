@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -19,7 +18,6 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
-	"sigs.k8s.io/controller-runtime/pkg/event"
 
 	"github.com/nunocgoncalves/iterabase-mono/control-plane/api/v1alpha1"
 	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/catalog"
@@ -29,23 +27,6 @@ import (
 // test. The reconcile counter is keyed to it so fallback requeues of other
 // Models in this test cannot perturb the count.
 const hor559ModelName = "m-hor559"
-
-// modelGetCounter counts ModelReconciler.Reconcile invocations for one Model:
-// every reconcile starts by loading the primary CR, and the reconciler loads a
-// Model nowhere else. It observes enqueues without instrumenting production
-// code (HOR-559).
-type modelGetCounter struct {
-	client.Client
-	name  string
-	count atomic.Int64
-}
-
-func (c *modelGetCounter) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
-	if _, ok := obj.(*v1alpha1.Model); ok && key.Name == c.name {
-		c.count.Add(1)
-	}
-	return c.Client.Get(ctx, key, obj, opts...)
-}
 
 // TestModelReconcile exercises the Model reconciler UNDER RBAC: materializing
 // Model CRs into catalog.models, deriving availability from the referenced
@@ -83,7 +64,7 @@ func TestModelReconcile(t *testing.T) {
 
 	mgr, err := ctrl.NewManager(saCfg, ctrl.Options{Scheme: scheme})
 	require.NoError(t, err)
-	tracking := &modelGetCounter{Client: mgr.GetClient(), name: hor559ModelName}
+	tracking := &primaryGetCounter[*v1alpha1.Model]{Client: mgr.GetClient(), name: hor559ModelName}
 	require.NoError(t, (&ModelReconciler{
 		Client: tracking,
 		Scheme: scheme,
@@ -304,31 +285,6 @@ func TestModelReconcile(t *testing.T) {
 				got.Status.ObservedGeneration == got.Generation && got.Status.Message == ""
 		}, 10*time.Second, 100*time.Millisecond, "spec change must be observed and the status repaired")
 	})
-}
-
-// TestModelPrimaryWatchPredicates pins the HOR-559 watch contract: status-only
-// updates (including the controller's own status writes) are filtered, while
-// create/delete and spec (generation) changes still enqueue a reconcile.
-func TestModelPrimaryWatchPredicates(t *testing.T) {
-	old := &v1alpha1.Model{
-		ObjectMeta: metav1.ObjectMeta{Name: "m", Namespace: "default", Generation: 3},
-		Status:     v1alpha1.ModelStatus{Available: true, ObservedGeneration: 3},
-	}
-	statusOnly := old.DeepCopy()
-	statusOnly.Status.Available = false
-	statusOnly.Status.Message = "changed"
-	statusOnly.Status.LastChecked = &metav1.Time{Time: time.Now()}
-	specChange := old.DeepCopy()
-	specChange.Generation = 4
-
-	for _, p := range modelPrimaryWatchPredicates() {
-		assert.True(t, p.Create(event.CreateEvent{Object: old}), "create events must enqueue")
-		assert.True(t, p.Delete(event.DeleteEvent{Object: old}), "delete events must enqueue")
-		assert.False(t, p.Update(event.UpdateEvent{ObjectOld: old, ObjectNew: statusOnly}),
-			"status-only updates must not enqueue a reconcile (HOR-559)")
-		assert.True(t, p.Update(event.UpdateEvent{ObjectOld: old, ObjectNew: specChange}),
-			"generation changes must enqueue a reconcile")
-	}
 }
 
 // TestModelStatusChanged pins the conditional status write (HOR-559): a
