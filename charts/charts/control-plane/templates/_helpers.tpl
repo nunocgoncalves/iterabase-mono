@@ -137,6 +137,90 @@ gateway:
 {{- .Values.tls.caSecretName | default (dig "internalTLS" "caSecretName" "" (.Values.global | default (dict))) | default (printf "%s-internal-ca-root" .Release.Name) -}}
 {{- end -}}
 
+{{- define "control-plane.authBootstrapSecretName" -}}
+{{- default (printf "%s-control-plane-auth-bootstrap" .Release.Name) .Values.auth.bootstrap.existingSecret -}}
+{{- end -}}
+
+{{- define "control-plane.authEmailSecretName" -}}
+{{- default (printf "%s-control-plane-auth-email" .Release.Name) .Values.auth.email.existingSecret -}}
+{{- end -}}
+
+{{- define "control-plane.authGeoIPMountPath" -}}
+/etc/control-plane/geoip
+{{- end -}}
+
+{{- define "control-plane.authGeoIPDatabase" -}}
+{{- if .Values.auth.geoip.databasePath -}}
+{{- .Values.auth.geoip.databasePath -}}
+{{- else if .Values.auth.geoip.existingClaim -}}
+{{- printf "%s/%s" (include "control-plane.authGeoIPMountPath" .) (.Values.auth.geoip.databaseFile | default "GeoLite2-City.mmdb") -}}
+{{- end -}}
+{{- end -}}
+
+# Browser-authentication environment shared by the bootstrap init container and
+# the api container. It fails closed at render time when an enabled surface is
+# missing its approved prerequisites.
+{{- define "control-plane.authEnv" -}}
+{{- if .Values.auth.enabled }}
+{{- if not (has .Values.auth.email.mode (list "starttls" "tls")) }}
+{{- fail "auth.email.mode must be starttls or tls (verified TLS is required)" }}
+{{- end }}
+- name: AUTH_ENABLED
+  value: "true"
+- name: AUTH_PUBLIC_ORIGIN
+  value: {{ required "auth.publicOrigin is required when auth.enabled" .Values.auth.publicOrigin | quote }}
+- name: AUTH_FORWARDED_HEADER
+  value: {{ .Values.auth.forwardedHeader | default "X-Forwarded-For" | quote }}
+- name: AUTH_SMTP_HOST
+  value: {{ required "auth.email.host is required when auth.enabled" .Values.auth.email.host | quote }}
+- name: AUTH_SMTP_PORT
+  value: {{ .Values.auth.email.port | quote }}
+- name: AUTH_SMTP_MODE
+  value: {{ .Values.auth.email.mode | quote }}
+- name: AUTH_SMTP_FROM
+  value: {{ required "auth.email.from is required when auth.enabled" .Values.auth.email.from | quote }}
+{{- if .Values.auth.email.username }}
+- name: AUTH_SMTP_USERNAME
+  value: {{ .Values.auth.email.username | quote }}
+- name: AUTH_SMTP_PASSWORD
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "control-plane.authEmailSecretName" . }}
+      key: {{ .Values.auth.email.passwordKey | default "smtp-password" }}
+{{- end }}
+{{- if .Values.auth.session.idleTTL }}
+- name: AUTH_SESSION_IDLE_TTL
+  value: {{ .Values.auth.session.idleTTL | quote }}
+{{- end }}
+{{- if .Values.auth.session.absoluteTTL }}
+- name: AUTH_SESSION_ABSOLUTE_TTL
+  value: {{ .Values.auth.session.absoluteTTL | quote }}
+{{- end }}
+{{- if .Values.auth.session.recentAuthTTL }}
+- name: AUTH_RECENT_AUTH_TTL
+  value: {{ .Values.auth.session.recentAuthTTL | quote }}
+{{- end }}
+{{- if .Values.auth.trustedProxies }}
+- name: AUTH_TRUSTED_PROXIES
+  value: {{ join "," .Values.auth.trustedProxies | quote }}
+{{- end }}
+{{- if or .Values.auth.geoip.databasePath .Values.auth.geoip.existingClaim }}
+- name: AUTH_GEOIP_DATABASE
+  value: {{ include "control-plane.authGeoIPDatabase" . | quote }}
+{{- end }}
+- name: AUTH_BOOTSTRAP_ADMIN_EMAIL
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "control-plane.authBootstrapSecretName" . }}
+      key: {{ .Values.auth.bootstrap.emailKey | default "admin-email" }}
+- name: AUTH_BOOTSTRAP_ADMIN_LOCALE
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "control-plane.authBootstrapSecretName" . }}
+      key: {{ .Values.auth.bootstrap.localeKey | default "admin-locale" }}
+{{- end }}
+{{- end -}}
+
 {{- define "control-plane.labels" -}}
 app.kubernetes.io/name: control-plane
 app.kubernetes.io/instance: {{ .Release.Name }}
