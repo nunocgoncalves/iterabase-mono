@@ -32,11 +32,21 @@ type Identity struct {
 	DisplayName string
 }
 
-// LocalUser is an identity with a local_users satellite row.
+// LocalUser is an identity with a local_users satellite row. Email is the
+// original validated delivery address; EmailNormalized is the canonical unique
+// key used for lookup.
 type LocalUser struct {
 	Identity
-	Email string
-	Role  string // admin | user
+	Email                   string
+	EmailNormalized         string
+	DisplayName             string
+	Role                    string // admin | operator (legacy `user` normalizes to operator)
+	Locale                  string // en | pt
+	Status                  string // setup_pending | active | disabled
+	PasswordHash            string
+	PasswordChangedAt       *time.Time
+	CreatedAt               time.Time
+	ApprovedAccessRequestID string
 }
 
 // APIKey is a row from identity.api_keys (never includes the full key).
@@ -183,8 +193,13 @@ func (s *Store) GetIdentityByID(ctx context.Context, id string) (Identity, error
 }
 
 // UpsertLocalUser creates or revives a local-user identity keyed by `key`
-// (email), and upserts its local_users satellite row. Idempotent for bootstrap.
+// (canonical normalized email), and upserts its local_users satellite row.
+// Idempotent for the legacy bootstrap/API path.
 func (s *Store) UpsertLocalUser(ctx context.Context, key, email, role string) (LocalUser, error) {
+	delivery, normalized, ok := CanonicalEmail(email)
+	if !ok {
+		return LocalUser{}, fmt.Errorf("invalid email %q", email)
+	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return LocalUser{}, fmt.Errorf("begin: %w", err)
@@ -199,25 +214,34 @@ func (s *Store) UpsertLocalUser(ctx context.Context, key, email, role string) (L
 			SET deleted_at   = NULL,
 			    display_name = EXCLUDED.display_name,
 			    updated_at   = now()
-		RETURNING id`, key, email).Scan(&identID)
+		RETURNING id`, normalized, delivery).Scan(&identID)
 	if err != nil {
 		return LocalUser{}, fmt.Errorf("upsert identity: %w", err)
 	}
 
-	var lu LocalUser
 	err = tx.QueryRow(ctx, `
-		INSERT INTO identity.local_users (identity_id, email, role)
-		VALUES ($1, $2, $3)
+		INSERT INTO identity.local_users (identity_id, email, email_normalized, display_name, role, status)
+		VALUES ($1, $2, $3, $4, $5, 'setup_pending')
 		ON CONFLICT (identity_id) DO UPDATE
-			SET email = EXCLUDED.email, role = EXCLUDED.role, updated_at = now()
-		RETURNING identity_id, email, role`,
-		identID, email, role).Scan(&lu.ID, &lu.Email, &lu.Role)
+			SET email = EXCLUDED.email, email_normalized = EXCLUDED.email_normalized,
+			    role = EXCLUDED.role, updated_at = now()
+		RETURNING identity_id`,
+		identID, delivery, normalized, delivery, role).Scan(&identID)
 	if err != nil {
 		return LocalUser{}, fmt.Errorf("upsert local_user: %w", err)
 	}
 
 	// Backfill the rest of the identity fields for a complete LocalUser.
 	ident, err := s.identityInTx(ctx, tx, identID)
+	if err != nil {
+		return LocalUser{}, err
+	}
+
+	lu, err := scanLocalUser(tx.QueryRow(ctx, `
+		SELECT `+localUserColumns+`
+		FROM identity.local_users lu
+		JOIN identity.identities i ON i.id = lu.identity_id
+		WHERE lu.identity_id = $1`, identID))
 	if err != nil {
 		return LocalUser{}, err
 	}
@@ -346,7 +370,7 @@ func (s *Store) RevokeAPIKey(ctx context.Context, id string) error {
 // ListLocalUsers returns all local users (newest first).
 func (s *Store) ListLocalUsers(ctx context.Context) ([]LocalUser, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT i.id, i.key, i.kind, i.source, i.display_name, lu.email, lu.role
+		SELECT `+localUserColumns+`
 		FROM identity.local_users lu
 		JOIN identity.identities i ON i.id = lu.identity_id
 		WHERE i.deleted_at IS NULL
@@ -358,8 +382,8 @@ func (s *Store) ListLocalUsers(ctx context.Context) ([]LocalUser, error) {
 
 	var out []LocalUser
 	for rows.Next() {
-		var lu LocalUser
-		if err := rows.Scan(&lu.ID, &lu.Key, &lu.Kind, &lu.Source, &lu.DisplayName, &lu.Email, &lu.Role); err != nil {
+		lu, err := scanLocalUser(rows)
+		if err != nil {
 			return nil, err
 		}
 		out = append(out, lu)
@@ -369,14 +393,11 @@ func (s *Store) ListLocalUsers(ctx context.Context) ([]LocalUser, error) {
 
 // GetLocalUser returns the local user for an identity ID.
 func (s *Store) GetLocalUser(ctx context.Context, identityID string) (LocalUser, error) {
-	row := s.pool.QueryRow(ctx, `
-		SELECT i.id, i.key, i.kind, i.source, i.display_name, lu.email, lu.role
+	lu, err := scanLocalUser(s.pool.QueryRow(ctx, `
+		SELECT `+localUserColumns+`
 		FROM identity.local_users lu
 		JOIN identity.identities i ON i.id = lu.identity_id
-		WHERE lu.identity_id = $1 AND i.deleted_at IS NULL`, identityID)
-
-	var lu LocalUser
-	err := row.Scan(&lu.ID, &lu.Key, &lu.Kind, &lu.Source, &lu.DisplayName, &lu.Email, &lu.Role)
+		WHERE lu.identity_id = $1 AND i.deleted_at IS NULL`, identityID))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return LocalUser{}, ErrNotFound
 	}

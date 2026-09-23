@@ -12,6 +12,7 @@ import (
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 
 	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/database"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/testutil"
 )
 
 // TestMigrations applies the schema scaffold against a real pgvector Postgres
@@ -105,25 +106,26 @@ func TestMigrations(t *testing.T) {
 
 	// HOR-489: fresh installs grant only the durable workload-authorization
 	// reads. A migration-22 OPO1 database already has this exact ACL, so moving
-	// down migrations 25, 24, and 23 intentionally preserves it and reapplying them
-	// must be an idempotent metadata advance with no manual role update.
+	// down migrations 26, 25, 24, and 23 intentionally preserves it and
+	// reapplying them must be an idempotent metadata advance with no manual role
+	// update.
 	assertGatewayWorkloadPrivileges(t, ctx, pool)
-	require.NoError(t, database.MigrateDown(connStr, 3))
+	require.NoError(t, database.MigrateDown(connStr, 4))
 	var migrationVersion int
 	require.NoError(t, pool.QueryRow(ctx, `SELECT version FROM schema_migrations`).Scan(&migrationVersion))
 	assert.Equal(t, 22, migrationVersion)
 	assertGatewayWorkloadPrivileges(t, ctx, pool)
 	require.NoError(t, database.MigrateUp(connStr))
 	require.NoError(t, pool.QueryRow(ctx, `SELECT version FROM schema_migrations`).Scan(&migrationVersion))
-	assert.Equal(t, 25, migrationVersion)
+	assert.Equal(t, 26, migrationVersion)
 	assertGatewayWorkloadPrivileges(t, ctx, pool)
 
 	// HOR-254 must migrate an existing gateway ledger without requiring an
-	// unavailable customer-safe summary backfill. Roll back migration 25, 24,
-	// migration 23, the three HOR-396 migrations, plus HOR-425, HOR-397,
+	// unavailable customer-safe summary backfill. Roll back migration 26, 25,
+	// 24, migration 23, the three HOR-396 migrations, plus HOR-425, HOR-397,
 	// HOR-399, and HOR-254; seed a pre-existing write descriptor/invocation; and
-	// apply all ten again.
-	require.NoError(t, database.MigrateDown(connStr, 10))
+	// apply all eleven again.
+	require.NoError(t, database.MigrateDown(connStr, 11))
 	_, err = pool.Exec(ctx, `
 		INSERT INTO toolgateway.tool_versions
 		    (name,version,digest,description,input_schema,effect_class,credential_slots,artifact_capabilities,timeout_ms)
@@ -343,4 +345,55 @@ func waitForPool(t *testing.T, ctx context.Context, connStr string) *pgxpool.Poo
 	}
 	require.NoError(t, fmt.Errorf("database not ready after 30s: %w", lastErr))
 	return nil
+}
+
+// TestAuthJourneyMigrationPreservesLegacyIdentity proves migration 26 keeps
+// existing canonical identities, maps the legacy `user` role to `operator`,
+// requires email setup instead of inventing a password, and leaves explicitly
+// scoped API keys usable.
+func TestAuthJourneyMigrationPreservesLegacyIdentity(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	pool, connStr := testutil.NewPostgres(t)
+	ctx := context.Background()
+
+	// Step back to the pre-HOR-453 schema, seed a legacy install, then upgrade.
+	require.NoError(t, database.MigrateDown(connStr, 1))
+	version, dirty, err := database.MigrateVersion(connStr)
+	require.NoError(t, err)
+	require.False(t, dirty)
+	assert.Equal(t, uint(25), version)
+
+	var identityID string
+	require.NoError(t, pool.QueryRow(ctx, `
+		INSERT INTO identity.identities (key, kind, source, display_name)
+		VALUES ('Legacy.User@Example.com', 'user', 'local', 'Legacy User')
+		RETURNING id`).Scan(&identityID))
+	_, err = pool.Exec(ctx, `
+		INSERT INTO identity.local_users (identity_id, email, role)
+		VALUES ($1, 'Legacy.User@Example.com', 'user')`, identityID)
+	require.NoError(t, err)
+	_, err = pool.Exec(ctx, `
+		INSERT INTO identity.api_keys (identity_id, key_hash, prefix, name, scope)
+		VALUES ($1, 'legacy-hash', 'cp-legacy', 'deployed-e2e', 'work')`, identityID)
+	require.NoError(t, err)
+
+	require.NoError(t, database.MigrateUp(connStr))
+
+	var role, status, normalized, email string
+	require.NoError(t, pool.QueryRow(ctx, `
+		SELECT role, status, email_normalized, email FROM identity.local_users WHERE identity_id = $1`,
+		identityID).Scan(&role, &status, &normalized, &email))
+	assert.Equal(t, "operator", role, "legacy user maps to operator")
+	assert.Equal(t, "setup_pending", status, "existing humans complete email setup")
+	assert.Equal(t, "legacy.user@example.com", normalized)
+	assert.Equal(t, "Legacy.User@Example.com", email, "delivery email is preserved")
+
+	var scope string
+	var revoked *time.Time
+	require.NoError(t, pool.QueryRow(ctx, `
+		SELECT scope, revoked_at FROM identity.api_keys WHERE identity_id = $1`, identityID).Scan(&scope, &revoked))
+	assert.Equal(t, "work", scope, "explicitly scoped API access survives the migration")
+	assert.Nil(t, revoked)
 }
