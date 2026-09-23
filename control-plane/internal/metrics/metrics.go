@@ -38,16 +38,21 @@ type Metrics struct {
 	GatewayInvocationsInFlight *prometheus.GaugeVec
 	GatewayRecoveries          *prometheus.CounterVec
 
-	DispatchWorkerConnections *prometheus.GaugeVec
-	DispatchWorkerStreams     *prometheus.CounterVec
-	DispatchWorkers           *prometheus.GaugeVec
-	DispatchAssignments       *prometheus.CounterVec
-	DispatchPendingWork       *prometheus.GaugeVec
-	DispatchTurns             *prometheus.CounterVec
-	DispatchWorkerLosses      *prometheus.CounterVec
-	DispatchEvents            *prometheus.CounterVec
-	DispatchReconciles        *prometheus.CounterVec
-	DispatchReconcileDuration *prometheus.HistogramVec
+	DispatchWorkerConnections  *prometheus.GaugeVec
+	DispatchWorkerStreams      *prometheus.CounterVec
+	DispatchWorkers            *prometheus.GaugeVec
+	DispatchAssignments        *prometheus.CounterVec
+	DispatchPendingWork        *prometheus.GaugeVec
+	DispatchTurns              *prometheus.CounterVec
+	DispatchWorkerLosses       *prometheus.CounterVec
+	DispatchEvents             *prometheus.CounterVec
+	DispatchReconciles         *prometheus.CounterVec
+	DispatchReconcileDuration  *prometheus.HistogramVec
+	DispatchWorkspaceFreeBytes *prometheus.GaugeVec
+	DispatchWorkspaceCapacity  *prometheus.GaugeVec
+	DispatchWorkspaceFreeRatio *prometheus.GaugeVec
+	DispatchWorkspaceWarning   *prometheus.GaugeVec
+	DispatchWorkspaceGated     *prometheus.GaugeVec
 }
 
 // New creates one isolated registry and registers process, Go, build, HTTP,
@@ -133,6 +138,21 @@ func New(component, version, commit string) *Metrics {
 			Name: "control_plane_dispatch_reconcile_duration_seconds", Help: "Dispatch reconciliation cycle duration.",
 			Buckets: []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5},
 		}, []string{"result"}),
+		DispatchWorkspaceFreeBytes: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "control_plane_dispatch_workspace_free_bytes", Help: "Latest durable available bytes on one AgentPool PVC.",
+		}, []string{"pool"}),
+		DispatchWorkspaceCapacity: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "control_plane_dispatch_workspace_capacity_bytes", Help: "Latest durable total bytes on one AgentPool PVC.",
+		}, []string{"pool"}),
+		DispatchWorkspaceFreeRatio: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "control_plane_dispatch_workspace_free_ratio", Help: "Latest durable available-byte ratio on one AgentPool PVC.",
+		}, []string{"pool"}),
+		DispatchWorkspaceWarning: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "control_plane_dispatch_workspace_capacity_warning", Help: "Whether one AgentPool PVC is below the 25 percent warning threshold.",
+		}, []string{"pool"}),
+		DispatchWorkspaceGated: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "control_plane_dispatch_workspace_credit_gated", Help: "Whether one pool's durable 20/25 percent hysteresis gate withholds fresh credit.",
+		}, []string{"pool"}),
 	}
 	registerer.MustRegister(
 		m.HTTPRequests, m.HTTPDuration, m.HTTPInFlight, m.HTTPResponseBytes,
@@ -142,6 +162,8 @@ func New(component, version, commit string) *Metrics {
 		m.DispatchAssignments, m.DispatchPendingWork,
 		m.DispatchTurns, m.DispatchWorkerLosses, m.DispatchEvents,
 		m.DispatchReconciles, m.DispatchReconcileDuration,
+		m.DispatchWorkspaceFreeBytes, m.DispatchWorkspaceCapacity,
+		m.DispatchWorkspaceFreeRatio, m.DispatchWorkspaceWarning, m.DispatchWorkspaceGated,
 	)
 	m.GatewayRunnerConnections.WithLabelValues().Set(0)
 	m.DispatchWorkerConnections.WithLabelValues().Set(0)

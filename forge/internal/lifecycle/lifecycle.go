@@ -50,6 +50,7 @@ func (a Action) String() string {
 // ReconcilePlan is the read-only reconcile decision (also returned by --dry-run).
 type ReconcilePlan struct {
 	Preflight          *provisioner.PreflightResult
+	HostInotify        *provisioner.HostInotifyState // live inotify instance capacity + Forge drop-in evidence
 	Installed          bool
 	Action             Action
 	Reason             string
@@ -64,26 +65,28 @@ type ReconcilePlan struct {
 	OverlayRef         string // overlay.ref (branch or tag)
 	FluxEnabled        bool   // flux.enabled; the Flux GitOps phase will run
 	FluxVersion        string // flux2 release tag to install (empty => Flux disabled)
+	DataStorage        *provisioner.DataStorageState
 }
 
 // Result is the outcome of a mutating apply.
 type Result struct {
-	Plan                         *ReconcilePlan
-	KubeconfigPath               string
-	NodeReady                    bool
-	CertificateSubstrateApplied  bool
-	RWXStorageMode               string
-	RWXStoragePrerequisitesReady bool
-	RWXStorageSubstrateApplied   bool
-	ChartApplied                 bool
-	GPUOperatorApplied           bool   // nvidia/gpu-operator release installed/upgraded
-	GPUDriverVersion             string // nvidia driver version pinned via driver.version (empty => chart default)
-	GPUReady                     bool   // operator conditions and live node evidence passed the GPU readiness gate
-	OverlayApplied               bool   // overlay cloned + chart applied with overlay values + CRD instances applied
-	OverlayCommit                string // resolved overlay commit SHA
-	SecretsApplied               bool   // declared Secrets materialized from operator env vars
-	FluxInstalled                bool   // Flux components installed + GitRepository/Kustomization applied
-	GitRepositoryStatus          string // gated Ready revision/digest of the forge-applied GitRepository
+	Plan                        *ReconcilePlan
+	HostInotify                 *provisioner.HostInotifyState // post-reconcile host inotify capacity evidence
+	KubeconfigPath              string
+	NodeReady                   bool
+	CertificateSubstrateApplied bool
+	LVMStorageSubstrateApplied  bool
+	DataStorage                 *provisioner.DataStorageState
+	LVMStorageReady             *provisioner.LVMStorageReadiness
+	ChartApplied                bool
+	GPUOperatorApplied          bool   // nvidia/gpu-operator release installed/upgraded
+	GPUDriverVersion            string // nvidia driver version pinned via driver.version (empty => chart default)
+	GPUReady                    bool   // operator conditions and live node evidence passed the GPU readiness gate
+	OverlayApplied              bool   // overlay cloned + chart applied with overlay values + CRD instances applied
+	OverlayCommit               string // resolved overlay commit SHA
+	SecretsApplied              bool   // declared Secrets materialized from operator env vars
+	FluxInstalled               bool   // Flux components installed + GitRepository/Kustomization applied
+	GitRepositoryStatus         string // gated Ready revision/digest of the forge-applied GitRepository
 }
 
 // ApplyOpts configures an apply run.
@@ -132,7 +135,15 @@ func Plan(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner) (
 		return nil, fmt.Errorf("preflight: passwordless sudo required for user %q", host.SSHUser)
 	}
 
-	plan := &ReconcilePlan{Preflight: pf, WantVersion: cfg.Spec.K3s.Version, ChartVersion: cfg.Spec.Chart.Version}
+	storage, err := inspectDataStorage(ctx, cfg, p)
+	if err != nil {
+		return nil, err
+	}
+	inotify, err := p.InspectHostInotify(ctx)
+	if err != nil {
+		return nil, err
+	}
+	plan := &ReconcilePlan{Preflight: pf, HostInotify: inotify, WantVersion: cfg.Spec.K3s.Version, ChartVersion: cfg.Spec.Chart.Version, DataStorage: storage}
 
 	if cfg.Spec.GPU.Enabled {
 		if !pf.HasNVIDIAGPU {
@@ -151,14 +162,8 @@ func Plan(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner) (
 	plan.FluxVersion = cfg.Spec.Flux.Version
 
 	if !pf.Installed {
-		if !pf.HasCurl {
-			return nil, fmt.Errorf("preflight: curl is required to install k3s")
-		}
-		if !pf.HasSystemd {
-			return nil, fmt.Errorf("preflight: systemd is required to run k3s")
-		}
-		if cfg.Spec.K3s.DualStack && !pf.HasIPv6 {
-			return nil, fmt.Errorf("preflight: dualStack enabled but host has no IPv6")
+		if err := validateFreshInstallPreflight(cfg, pf); err != nil {
+			return nil, err
 		}
 		plan.Action = ActionInstall
 		plan.Reason = "k3s is not installed"
@@ -189,6 +194,21 @@ func Plan(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner) (
 	return plan, nil
 }
 
+// validateFreshInstallPreflight keeps the flat reconcile plan readable by
+// grouping the read-only fresh-install prerequisites in one place.
+func validateFreshInstallPreflight(cfg *config.Cluster, pf *provisioner.PreflightResult) error {
+	if !pf.HasCurl {
+		return fmt.Errorf("preflight: curl is required to install k3s")
+	}
+	if !pf.HasSystemd {
+		return fmt.Errorf("preflight: systemd is required to run k3s")
+	}
+	if cfg.Spec.K3s.DualStack && !pf.HasIPv6 {
+		return fmt.Errorf("preflight: dualStack enabled but host has no IPv6")
+	}
+	return nil
+}
+
 // Apply runs Plan and, unless DryRun, executes the install/reconcile, fetches
 // and stores the kubeconfig, and waits for the node to be Ready.
 func Apply(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner, d deployer.Deployer, o overlayer.Overlayer, f fluxer.Fluxer, opts ApplyOpts) (*Result, error) {
@@ -208,6 +228,15 @@ func Apply(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner, 
 		return res, fmt.Errorf("%s; run 'forge destroy' then 'forge apply'", plan.Reason)
 	case ActionRefuseUpgrade:
 		return res, fmt.Errorf("%s", plan.Reason)
+	}
+
+	storage, err := prepareHostBeforeK3s(ctx, cfg, p, d, plan, res)
+	if err != nil {
+		return res, err
+	}
+	res.DataStorage = storage
+
+	switch plan.Action {
 	case ActionInstall:
 		if err := p.Install(ctx, cfg.Spec.K3s.Version, k3s.ServerArgs(cfg)); err != nil {
 			auditFail(cfg, "apply", err)
@@ -241,7 +270,7 @@ func Apply(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner, 
 	}
 
 	// Overlay delivery is deliberately phased: clone + secrets, certificate
-	// substrate, exact Flux source artifact, platform chart, CR instances, then
+	// substrate, LVM storage substrate, exact Flux source artifact, platform chart, CR instances, then
 	// enable continuous Flux reconciliation.
 	if err := applyOverlayPhase(ctx, cfg, p, o, f, d, opts, res); err != nil {
 		return res, err
@@ -253,6 +282,27 @@ func Apply(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner, 
 	return res, nil
 }
 
+func prepareHostBeforeK3s(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner, d deployer.Deployer, plan *ReconcilePlan, res *Result) (*provisioner.DataStorageState, error) {
+	if err := refusePreLVMPlatform(ctx, cfg, d, plan); err != nil {
+		return nil, err
+	}
+	// Host inotify capacity is reconciled before K3s installation and on every
+	// installed reapply, so existing clusters heal without reboot or restart.
+	inotify, err := p.ReconcileHostInotify(ctx)
+	if err != nil {
+		auditFail(cfg, "apply-host-inotify", err)
+		return nil, fmt.Errorf("host inotify capacity: %w (observed before reconcile: %s)", err, plan.HostInotify)
+	}
+	res.HostInotify = inotify
+	if plan.Action == ActionInstall {
+		if err := p.EnsureHostSwapDisabled(ctx); err != nil {
+			auditFail(cfg, "apply-host-swap", err)
+			return nil, fmt.Errorf("host swap hardening: %w", err)
+		}
+	}
+	return reconcileDataStorage(ctx, cfg, p)
+}
+
 const (
 	certificateSubstrateChart        = "cert-manager-substrate"
 	certificateSubstrateFirstVersion = "0.3.0"
@@ -260,6 +310,8 @@ const (
 	certificateMigrationAnnotation   = "forge.horizonshift.io/certificate-substrate-migration"
 	certificateMigrationComplete     = "0.3.0"
 	fluxArtifactFirstVersion         = "0.3.0"
+	lvmStorageSubstrateChart         = provisioner.LVMStorageSubstrateChart
+	lvmStorageSubstrateFirstVersion  = provisioner.LVMStorageSubstrateFirstVersion
 )
 
 func canonicalChartVersion(version string) (string, error) {
@@ -292,6 +344,62 @@ func certificateSubstrateRepository(platformRepository string) (string, error) {
 
 func certificateSubstrateRelease(platformRelease string) string {
 	return platformRelease + "-cert-manager"
+}
+
+func lvmStorageSubstrateRequired(version string) (bool, error) {
+	return chartVersionAtLeast(version, lvmStorageSubstrateFirstVersion)
+}
+
+func lvmStorageSubstrateRepository(platformRepository string) (string, error) {
+	i := strings.LastIndex(platformRepository, "/")
+	if i < 0 || platformRepository[i+1:] != "iterabase-platform" {
+		return "", fmt.Errorf("platform chart repository %q must end in /iterabase-platform to resolve its LVM storage companion", platformRepository)
+	}
+	return platformRepository[:i+1] + lvmStorageSubstrateChart, nil
+}
+
+func lvmStorageSubstrateRelease(platformRelease string) string {
+	return platformRelease + "-lvm-storage"
+}
+
+// lvmStorageManagerIdentity is the exact userInfo.username of the control-plane
+// manager that owns AgentPool workspaces (DES-HOR-545-01). The substrate's
+// admission policy fails closed unless a request creating/updating a PVC in the
+// agentpool class arrives under this service-account identity, so it must match
+// the manager's rendered serviceAccountName exactly.
+func lvmStorageManagerIdentity(platformRelease, namespace string) string {
+	return "system:serviceaccount:" + namespace + ":" + platformRelease + "-control-plane-manager"
+}
+
+// refusePreLVMPlatform enforces HOR-545's clean-install-only boundary before
+// Forge mutates host packages, modules, PVs, or the VG. There is deliberately no
+// local-path-to-LVM chart/PVC migration path.
+func refusePreLVMPlatform(ctx context.Context, cfg *config.Cluster, d deployer.Deployer, plan *ReconcilePlan) error {
+	if plan == nil || !plan.Installed || cfg.Spec.Chart.Version == "" {
+		return nil
+	}
+	required, err := lvmStorageSubstrateRequired(cfg.Spec.Chart.Version)
+	if err != nil || !required {
+		return err
+	}
+	if d == nil {
+		return fmt.Errorf("read installed platform before LVM storage reconciliation: deployer observation is unavailable")
+	}
+	state, err := d.Status(ctx, cfg.Spec.Chart.Release, cfg.Spec.Chart.Namespace)
+	if err != nil {
+		return fmt.Errorf("read installed platform before LVM storage reconciliation: %w", err)
+	}
+	if !state.Installed {
+		return nil
+	}
+	have, err := canonicalChartVersion(state.Version)
+	if err != nil {
+		return fmt.Errorf("installed platform before LVM storage reconciliation: %w", err)
+	}
+	if semver.Compare(have, "v"+lvmStorageSubstrateFirstVersion) < 0 {
+		return fmt.Errorf("installed platform %s predates the OpenEBS LVM storage contract; HOR-545 supports only a clean destroy and fresh install, never local-path migration", state.Version)
+	}
+	return nil
 }
 
 func certificateHookLabelSelector(platformRelease string) string {
@@ -336,10 +444,9 @@ func certificateOwnershipMigrationRequired(ctx context.Context, d deployer.Deplo
 }
 
 // applyCertificateSubstrate installs the same-version companion release before
-// any cert-manager consumers. The release owns the operator, CRDs, webhook, and
-// CSI driver; when internal TLS is selected its ordered hook also creates or
-// verifies the future platform release's internal CA resources before managed
-// storage can request a leaf. The platform remains their Helm owner.
+// any cert-manager consumers. The release owns the operator, CRDs, webhook, CSI
+// driver, and ordered internal-CA bootstrap. The platform remains their Helm
+// owner.
 func applyCertificateSubstrate(ctx context.Context, cfg *config.Cluster, d deployer.Deployer, opts ApplyOpts, res *Result, overlayDest string) error {
 	if d == nil || opts.SkipChart || cfg.Spec.Chart.Version == "" {
 		return nil
@@ -376,6 +483,44 @@ func applyCertificateSubstrate(ctx context.Context, cfg *config.Cluster, d deplo
 		return fmt.Errorf("certificate substrate: %w", err)
 	}
 	res.CertificateSubstrateApplied = true
+	return nil
+}
+
+// applyLVMStorageSubstrate installs the same-version OpenEBS companion after
+// Forge has prepared the exact host VG and before any platform PVC is created.
+func applyLVMStorageSubstrate(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner, d deployer.Deployer, opts ApplyOpts, res *Result) error {
+	if d == nil || opts.SkipChart || cfg.Spec.Chart.Version == "" {
+		return nil
+	}
+	ch := cfg.Spec.Chart
+	required, err := lvmStorageSubstrateRequired(ch.Version)
+	if err != nil || !required {
+		return err
+	}
+	repository, err := lvmStorageSubstrateRepository(ch.Repository)
+	if err != nil {
+		return err
+	}
+	if err := d.Apply(ctx, deployer.ApplyOpts{
+		Release:    lvmStorageSubstrateRelease(ch.Release),
+		Repository: repository,
+		Version:    ch.Version,
+		Namespace:  ch.Namespace,
+		// DES-HOR-545-01: the only principal permitted to create/update PVCs in
+		// the AgentPool workspace class is the control-plane manager. Admission
+		// fails closed unless the request arrives under this exact SA username.
+		Values: []string{"agentpool.authorizedManagerIdentity=" + lvmStorageManagerIdentity(ch.Release, ch.Namespace)},
+	}); err != nil {
+		auditFail(cfg, "apply-lvm-storage-substrate", err)
+		return fmt.Errorf("LVM storage substrate: %w", err)
+	}
+	res.LVMStorageSubstrateApplied = true
+	readiness, err := p.WaitForLVMStorageReady(ctx, ch.Namespace, res.DataStorage)
+	if err != nil {
+		auditFail(cfg, "wait-lvm-storage-substrate", err)
+		return err
+	}
+	res.LVMStorageReady = readiness
 	return nil
 }
 
@@ -474,7 +619,7 @@ func applyCRDInstances(ctx context.Context, d deployer.Deployer, overlayDest str
 }
 
 // applyOverlayPhase runs the ordered delivery path: clone the client fork →
-// secrets → certificate substrate → Flux source → platform → CRs → Flux
+// secrets → certificate substrate → LVM storage substrate → Flux source → platform → CRs → Flux
 // Kustomization. The source precedes Helm because the chart-managed tool runner
 // is intentionally unready until it loads a valid generation.
 func applyOverlayPhase(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner, o overlayer.Overlayer, f fluxer.Fluxer, d deployer.Deployer, opts ApplyOpts, res *Result) error {
@@ -513,7 +658,7 @@ func applyOverlayPhase(ctx context.Context, cfg *config.Cluster, p provisioner.P
 	if err := applyCertificateSubstrate(ctx, cfg, d, opts, res, overlayDest); err != nil {
 		return err
 	}
-	if err := applyRWXStorageSubstrate(ctx, cfg, p, d, o, opts, res, overlayDest); err != nil {
+	if err := applyLVMStorageSubstrate(ctx, cfg, p, d, opts, res); err != nil {
 		return err
 	}
 	if err := applyFluxSourcePhase(ctx, cfg, f, d, opts, res, overlayCommit); err != nil {
@@ -635,6 +780,7 @@ func applyGPU(ctx context.Context, cfg *config.Cluster, p provisioner.Provisione
 		Release:    g.Release,
 		Repository: chartRef,
 		Version:    g.Version,
+		Checksum:   g.SHA256,
 		Namespace:  g.Namespace,
 		Values:     gpuOperatorValues(cfg.Spec.GPU),
 	}); err != nil {
@@ -702,11 +848,19 @@ func waitForGPU(ctx context.Context, p provisioner.Provisioner, requestedDriverV
 // overrides are a fast-follow. CDI is enabled so workloads request
 // nvidia.com/gpu with no runtimeClassName.
 //
-// The driver version is pinned only when the operator set spec.gpu.driver.version
-// (a node-readiness substrate field). An empty version means the gpu-operator
-// chart's own default driver is used — no driver.version --set is emitted — so
-// operators who do not care follow the chart, while a pinned version makes the
-// host driver reproducible across chart bumps and intentional driver moves.
+// GPU Operator v26.3.3 embeds the NFD 0.18.3 subchart. That subchart's supported
+// values can run the compatible NFD v0.19.0 image without replacing chart-owned
+// resources: it retains the same NodeFeature CRDs and master/worker commands,
+// while the disabled topology updater avoids v0.19.0's only mandatory image-only
+// RBAC change. v0.19.0 PR #2415 makes master resyncPeriod drive a full reconcile,
+// so a missed fresh-NodeFeature event is repaired within a bounded interval.
+// PR #2545 also improves node-rebuild relabeling, but is not the basis for the
+// fresh-NodeFeature failure mode or this periodic safety net.
+//
+// The validated driver identity binds both the reported module version and the
+// exact driver-container digest. GPU Operator accepts tag-plus-digest in its
+// version field and therefore does not append a mutable OS tag; readiness
+// normalizes the digest suffix while retaining the requested module version.
 //
 // k3s containerd: the operator does not auto-detect k3s, so the toolkit must be
 // pointed at k3s's containerd config + socket via toolkit.env (the operator
@@ -740,6 +894,19 @@ func waitForGPU(ctx context.Context, p provisioner.Provisioner, requestedDriverV
 // storage, not in emptyDir. A driver upgrade therefore terminates active GPU
 // inference pods, discards their ephemeral state, and forces a model reload;
 // there is no zero-downtime driver upgrade on a single-node cluster (a non-goal).
+const (
+	gpuOperatorImageVersion      = "v26.3.3@sha256:6584c36f153d18cfce284f7e5bc477887ce3c1ac566dc795bd80c9af6c6488f7"
+	gpuValidatorImageVersion     = gpuOperatorImageVersion
+	gpuDriverManagerImageVersion = "v0.11.0@sha256:8aec215a8b159b0162b55e688065efd58ebfa848ebc999c1797221686ff1243d"
+	gpuToolkitImageVersion       = "v1.19.1@sha256:c927adbc9b7755c5cb90022fdcc5c1295f5fe5fe1f38200a2dc65e85632b029c"
+	gpuDevicePluginImageVersion  = "v0.19.3@sha256:25cc340fe6fd53c101e16fc452f503e7a92c219c64a80ed5381784b522dbbf77"
+	gpuDCGMExporterImageVersion  = "4.5.3-4.8.2-distroless@sha256:60d3b00ac80b4ae77f94dae2f943685605585ad9e92fdccda3154d009ae317cc"
+	gpuMIGManagerImageVersion    = "v0.14.2@sha256:313586bfa5c07601a83f310dd700db0007d489df2ad42bb52c611802cbb7a278"
+	gpuNFDImageRepository        = "registry.k8s.io/nfd/node-feature-discovery"
+	gpuNFDImageTag               = "v0.19.0@sha256:2fa1c99ad09bdf2c8ad97706a4ad2fd548c84d5ecd70ba32a6152c667b96c4d2"
+	gpuNFDMasterResyncPeriod     = "30s"
+)
+
 func gpuOperatorValues(g config.GPU) []string {
 	values := []string{
 		"cdi.enabled=true",
@@ -747,6 +914,17 @@ func gpuOperatorValues(g config.GPU) []string {
 		"toolkit.enabled=true",
 		"devicePlugin.enabled=true",
 		"gfd.enabled=true",
+		"operator.version=" + gpuOperatorImageVersion,
+		"validator.version=" + gpuValidatorImageVersion,
+		"driver.manager.version=" + gpuDriverManagerImageVersion,
+		"toolkit.version=" + gpuToolkitImageVersion,
+		"devicePlugin.version=" + gpuDevicePluginImageVersion,
+		"dcgmExporter.version=" + gpuDCGMExporterImageVersion,
+		"gfd.version=" + gpuDevicePluginImageVersion,
+		"migManager.version=" + gpuMIGManagerImageVersion,
+		"node-feature-discovery.image.repository=" + gpuNFDImageRepository,
+		"node-feature-discovery.image.tag=" + gpuNFDImageTag,
+		"node-feature-discovery.master.resyncPeriod=" + gpuNFDMasterResyncPeriod,
 		"toolkit.env[0].name=CONTAINERD_CONFIG",
 		"toolkit.env[0].value=/var/lib/rancher/k3s/agent/etc/containerd/config.toml",
 		"toolkit.env[1].name=CONTAINERD_SOCKET",
@@ -759,24 +937,54 @@ func gpuOperatorValues(g config.GPU) []string {
 		"driver.upgradePolicy.drain.enable=false",
 	}
 	if v := strings.TrimSpace(g.Driver.Version); v != "" {
-		values = append(values, "driver.version="+v)
+		identity := v
+		if checksum := strings.TrimSpace(g.Driver.SHA256); checksum != "" {
+			identity += "@sha256:" + checksum
+		}
+		values = append(values, "driver.version="+identity)
 	}
 	return values
 }
 
 func isUbuntu(os string) bool { return strings.HasPrefix(os, "Ubuntu") }
 
-// Destroy removes the managed stateful substrate only after its strict
-// retained-data guard passes, then removes the stateless/control-plane layers
-// and finally uninstalls k3s. Best-effort cleanup is permitted only after the
-// storage boundary has proved zero consumers and explicit disposition.
+// DestroyOpts controls the two explicit fixture/decommission operations that
+// ordinary destroy must never imply.
+type DestroyOpts struct {
+	PurgeDataStorage bool
+	Reboot           bool
+}
+
+// Destroy removes platform/K3s resources but deliberately preserves the
+// receipt-matching data PVs, iterabase-data VG, LVs, and bytes.
 func Destroy(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner, d deployer.Deployer, o overlayer.Overlayer, f fluxer.Fluxer) error {
-	if err := uninstallRWXStorageBeforeDestroy(ctx, cfg, d); err != nil {
+	return DestroyWithOptions(ctx, cfg, p, d, o, f, DestroyOpts{})
+}
+
+// DestroyWithOptions preserves ordinary destroy semantics and performs an
+// explicitly requested purge only after the existing product/platform/K3s
+// destroy path succeeds. A requested reboot is last, after any purge.
+func DestroyWithOptions(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner, d deployer.Deployer, o overlayer.Overlayer, f fluxer.Fluxer, opts DestroyOpts) error {
+	destroyProductSubstrate(ctx, cfg, d, o, f)
+	if err := p.Uninstall(ctx); err != nil {
 		return err
 	}
+	if opts.PurgeDataStorage {
+		if err := purgeDataStorage(ctx, cfg, p); err != nil {
+			return err
+		}
+	}
+	if opts.Reboot {
+		if err := rebootHost(ctx, p); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
-	// Flux is now safe to stop (reverse of apply's flux-last). Remaining chart
-	// cleanup is best-effort because the stateful guard has already converged.
+// destroyProductSubstrate stops reconcilers and charts in reverse apply order.
+// Cleanup remains best-effort and never mutates the selected data disks or VG.
+func destroyProductSubstrate(ctx context.Context, cfg *config.Cluster, d deployer.Deployer, o overlayer.Overlayer, f fluxer.Fluxer) {
 	if f != nil && cfg.Spec.Flux.Enabled {
 		_ = f.UninstallFlux(ctx)
 	}
@@ -786,6 +994,9 @@ func Destroy(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner
 	if d != nil && cfg.Spec.Chart.Version != "" {
 		ch := cfg.Spec.Chart
 		_ = d.UninstallChart(ctx, ch.Release, ch.Namespace)
+		if required, err := lvmStorageSubstrateRequired(ch.Version); err == nil && required {
+			_ = d.UninstallChart(ctx, lvmStorageSubstrateRelease(ch.Release), ch.Namespace)
+		}
 		if required, err := certificateSubstrateRequired(ch.Version); err == nil && required {
 			_ = d.UninstallChart(ctx, certificateSubstrateRelease(ch.Release), ch.Namespace)
 		}
@@ -794,13 +1005,34 @@ func Destroy(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner
 		g := cfg.Spec.GPU.Operator
 		_ = d.UninstallChart(ctx, g.Release, g.Namespace)
 	}
-	return p.Uninstall(ctx)
+}
+
+func purgeDataStorage(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner) error {
+	purger, ok := p.(provisioner.DataStoragePurger)
+	if !ok {
+		return fmt.Errorf("data-storage purge is unavailable for this provisioner")
+	}
+	if err := purger.PurgeDataStorage(ctx, dataStorageSpec(cfg)); err != nil {
+		return fmt.Errorf("purge data storage: %w", err)
+	}
+	return nil
+}
+
+func rebootHost(ctx context.Context, p provisioner.Provisioner) error {
+	rebooter, ok := p.(provisioner.Rebooter)
+	if !ok {
+		return fmt.Errorf("host reboot is unavailable for this provisioner")
+	}
+	if err := rebooter.Reboot(ctx); err != nil {
+		return fmt.Errorf("reboot host: %w", err)
+	}
+	return nil
 }
 
 // Upgrade re-runs the k3s install script with a new version (in-place upgrade),
 // then refreshes the kubeconfig and waits for the node to be Ready. The host
 // must already have k3s installed (use apply first).
-func Upgrade(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner, to string, opts ApplyOpts) (*Result, error) {
+func Upgrade(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner, d deployer.Deployer, to string, opts ApplyOpts) (*Result, error) {
 	if opts.ReadyTimeout == 0 {
 		opts.ReadyTimeout = 120 * time.Second
 	}
@@ -808,15 +1040,18 @@ func Upgrade(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner
 		opts.ReadyInterval = 2 * time.Second
 	}
 
-	st, err := p.ReadState(ctx)
+	plan, storage, err := validateUpgradeFoundation(ctx, cfg, p, d)
 	if err != nil {
-		return nil, fmt.Errorf("read state: %w", err)
-	}
-	if !st.Installed {
-		return nil, fmt.Errorf("k3s not installed; run 'forge apply' first")
+		return nil, err
 	}
 	if to == "" {
 		to = cfg.Spec.K3s.Version
+	}
+
+	inotify, err := p.ReconcileHostInotify(ctx)
+	if err != nil {
+		auditFail(cfg, "upgrade-host-inotify", err)
+		return nil, fmt.Errorf("host inotify capacity: %w (observed before reconcile: %s)", err, plan.HostInotify)
 	}
 
 	if err := p.Upgrade(ctx, to, k3s.ServerArgs(cfg)); err != nil {
@@ -824,7 +1059,7 @@ func Upgrade(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner
 		return nil, err
 	}
 
-	res := &Result{}
+	res := &Result{Plan: plan, HostInotify: inotify, DataStorage: storage}
 	outPath, err := storeKubeconfig(ctx, cfg, p, opts.KubeconfigOut)
 	if err != nil {
 		auditFail(cfg, "upgrade", err)
@@ -848,6 +1083,36 @@ func Upgrade(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner
 		Action: "upgrade", Result: "success", Version: version.String(),
 	})
 	return res, nil
+}
+
+func validateUpgradeFoundation(ctx context.Context, cfg *config.Cluster, p provisioner.Provisioner, d deployer.Deployer) (*ReconcilePlan, *provisioner.DataStorageState, error) {
+	st, err := p.ReadState(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read state: %w", err)
+	}
+	if !st.Installed {
+		return nil, nil, fmt.Errorf("k3s not installed; run 'forge apply' first")
+	}
+	if diff := immutableDiff(cfg, st); len(diff) > 0 {
+		return nil, nil, fmt.Errorf("refuse unsupported k3s upgrade: immutable field(s) differ: %s; HOR-545 supports clean install, never local-path migration", strings.Join(diff, ", "))
+	}
+	storage, err := inspectDataStorage(ctx, cfg, p)
+	if err != nil {
+		return nil, nil, fmt.Errorf("inspect data storage before upgrade: %w", err)
+	}
+	if storage == nil || storage.State != "complete" || storage.VGName != provisioner.DataVolumeGroupName || storage.VGUUID == "" {
+		return nil, nil, fmt.Errorf("refuse unsupported k3s upgrade: installed cluster lacks the complete receipt-bound OpenEBS LVM storage foundation; HOR-545 supports clean install, never local-path migration")
+	}
+	plan := &ReconcilePlan{Installed: true, WantVersion: cfg.Spec.K3s.Version, ChartVersion: cfg.Spec.Chart.Version, DataStorage: storage}
+	if err := refusePreLVMPlatform(ctx, cfg, d, plan); err != nil {
+		return nil, nil, err
+	}
+	inotify, err := p.InspectHostInotify(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	plan.HostInotify = inotify
+	return plan, storage, nil
 }
 
 // storeKubeconfig fetches the kubeconfig from the host, rewrites the server
@@ -902,6 +1167,9 @@ func immutableDiff(cfg *config.Cluster, st *provisioner.HostState) []string {
 	}
 	if st.DualStack != cfg.Spec.K3s.DualStack {
 		diff = append(diff, "k3s.dualStack")
+	}
+	if !st.LocalStorageDisabled {
+		diff = append(diff, "k3s.disable[local-storage]")
 	}
 	return diff
 }

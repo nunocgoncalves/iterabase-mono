@@ -2,6 +2,7 @@ package e2e_test
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -9,8 +10,6 @@ import (
 	sharede2e "github.com/nunocgoncalves/iterabase-mono/testkit/e2e"
 	"github.com/nunocgoncalves/iterabase-mono/testkit/e2e/kube"
 )
-
-const certificateMigrationSourceVersion = "0.2.2"
 
 func certificateMigrationScenario() sharede2e.Definition {
 	diagnostics, cleanup := scenarioHooks()
@@ -24,7 +23,8 @@ func certificateMigrationScenario() sharede2e.Definition {
 		NewState: newChartState,
 		Stages: []sharede2e.Stage[*chartState]{
 			{Name: "create-kind", Run: createKindStage},
-			{Name: "install-released-owner", DependsOn: []string{"create-kind"}, Run: installReleasedCertificateOwnerStage},
+			{Name: "import-runtime-images", DependsOn: []string{"create-kind"}, Run: importRuntimeImagesStage},
+			{Name: "install-released-owner", DependsOn: []string{"import-runtime-images"}, Run: installReleasedCertificateOwnerStage},
 			{Name: "retire-bundled-substrate", DependsOn: []string{"install-released-owner"}, Run: retireBundledSubstrateStage},
 			{Name: "transfer-crds-to-companion", DependsOn: []string{"retire-bundled-substrate"}, Run: transferCRDsToCompanionStage},
 			{Name: "install-companion-owner", DependsOn: []string{"transfer-crds-to-companion"}, Run: installCompanionOwnerStage},
@@ -55,9 +55,12 @@ func certificateMigrationValues() map[string]any {
 func installReleasedCertificateOwnerStage(t *testing.T, state *chartState) {
 	t.Helper()
 	values := state.writeValues(t, "certificate-migration", certificateMigrationValues())
+	archive := os.Getenv("ITERABASE_E2E_CERTIFICATE_MIGRATION_ARCHIVE")
+	if archive == "" {
+		t.Fatal("composed runtime is missing the certificate migration archive")
+	}
 	args := []string{
-		"install", testRelease, "oci://ghcr.io/nunocgoncalves/iterabase-charts/iterabase-platform",
-		"--version", certificateMigrationSourceVersion,
+		"install", testRelease, archive,
 		"--namespace", testNamespace, "--create-namespace", "--kubeconfig", state.cluster.Kubeconfig,
 		"--wait", "--timeout", "8m", "--values", values,
 	}

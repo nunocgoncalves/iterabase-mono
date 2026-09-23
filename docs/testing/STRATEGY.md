@@ -23,7 +23,7 @@ A dependent layer may retain a composition smoke check, but it does not become d
 | **F0** | Pure/static process, parser, fake, or hermetic mechanics example. |
 | **F1** | Local real process, envtest, testcontainer, or native protocol integration. |
 | **F2** | Fresh isolated Kind cluster with real Kubernetes, Helm, and network boundaries. |
-| **F3** | Fresh ephemeral real CPU/GPU host reconciled through its real substrate path. |
+| **F3** | Founder-owned permanent real CPU/GPU fixture reset through a verified destroy/purge/reboot lifecycle before and after each scenario. |
 | **P** | Mutable production confirmation that satisfies the strict criteria below. |
 
 Tier is compiled scenario metadata, not an estimate of importance. A higher tier supplements rather than replaces faster owner authority.
@@ -32,8 +32,8 @@ Tier is compiled scenario metadata, not an estimate of importance. A higher tier
 
 Every suite execution records exactly one mode:
 
-- **`source`** — one full source SHA plus an explicit dirty-worktree bit for local development. Local charts/images may be built from that checkout; every unselected dependency remains explicitly pinned. Source runs that consume published dependencies explicitly set `ITERABASE_E2E_SOURCE_INPUTS` to an exact checked-in input fixture; the library never loads one implicitly. Candidate fixtures reject dirty source.
-- **`candidate`** — the release candidate plan's full source SHA, selected candidate identities, checksum/digest-pinned published baselines, and any owner-declared checksum-pinned transition predecessor required by a selected lifecycle scenario.
+- **`source`** — one full source SHA plus an explicit dirty-worktree bit for local development. Local charts/images may be built from that checkout; every unselected release-capable dependency comes from the once-resolved complete published snapshot. Checked-in input files may support local F0 history but are not required-run baseline authority. Candidate fixtures reject dirty source.
+- **`candidate`** — the release candidate plan's full source SHA, selected candidate identities, one exact parent anchor/snapshot hash, digest/checksum-pinned published cohorts, and snapshot-pinned transition fixtures required by selected lifecycle scenarios.
 - **`published`** — explicit immutable semantic versions and, where available, digests/checksums.
 
 There is no default inside the library, floating `latest`, matching-branch lookup, coordinated-ref fallback, or silent source→published fallback. Owner Make targets explicitly choose source mode for local use. Candidate and published workflows override it with their exact retained inputs. The fixture record is printed before scenarios execute and retained in candidate evidence.
@@ -122,33 +122,33 @@ Component artifacts are fail-closed:
 
 That declaration is required for Playwright screenshots/traces and is part of the reviewable scenario code. The control-plane fixture is wholly synthetic; its owner sanitizes trace archive entries before declaration, deletes raw evidence, and independently rejects retained work-key literals before shared collection. Customer/production browser artifacts do not qualify.
 
-A normal F2 failure bundle includes cluster resources, events, pod describes, current/previous logs, Helm list/state, revision history, effective values, hooks, status, process output, and declared component evidence. Forge F3 uses the same collector against its fetched kubeconfig, adds SSH/cloud-init and GPU-operator evidence, and records whether the failure belongs to provisioning, Forge substrate/reconciliation/handoff, dependent smoke, or cleanup. Diagnostics are best effort and do not suppress teardown.
+A normal F2 failure bundle includes cluster resources, events, pod describes, current/previous logs, Helm list/state, revision history, effective values, hooks, status, process output, and declared component evidence. Forge F3 uses the same collector against its fetched kubeconfig, adds strictly pinned SSH, boot-ID, workspace/model-cache, and GPU-operator evidence, and records whether failure belongs to fixture readiness, Forge substrate/reconciliation/handoff, dependent smoke, or cleanup. Diagnostics are best effort and run before unconditional teardown.
 
 ## CI and release gates
 
 Pull requests run affected owner checks and deterministic selected E2E. Control-plane or chart changes select all five control-plane-owned fresh-Kind/browser scenarios independently, preserving failure localization while each gets a fresh cluster. Changes to `testkit/e2e`, catalogue discovery, or shared CI selection fan out conservatively because they can invalidate every owner and release decision. Required checks do not silently skip selected deterministic scenarios.
 
-The nightly schedule and explicit `complete_catalogue` manual rehearsal compile the catalogue from their exact source SHA and select every F2/F3 scenario exactly once under its registered owner. Every required scenario must declare source mode, a Make target, and a positive bound; every F3 entry must also declare mandatory named capacity. The retained complete-catalogue plan records the source SHA, selected IDs, owner totals, fixture mode, and dynamic Kind/browser and real-machine matrices. Source execution records its immutable published dependency fixtures, so this orchestration never resolves a floating coordinated fallback or creates a second scenario list.
+Pull-request and master execution use the same changed-path selection contract. Every required scenario must declare source mode, a Make target, and a positive bound; every F3 entry must also declare mandatory named capacity. The retained plan records the source SHA, selected IDs, owner totals, fixture mode, and dynamic Kind/browser and real-machine matrices. Source execution records its immutable published dependency fixtures, so orchestration never resolves a floating coordinated fallback or creates a second scenario list. There is no scheduled nightly, ordinary complete-catalogue dispatch, or ticket-specific intentional-red job.
 
-Complete-catalogue Kind/browser work has bounded parallelism and isolated owner fixtures. CPU and GPU jobs use capacity-scoped non-canceling concurrency, require credentials and capacity, and fail rather than skip when either is unavailable. The schedule/manual aggregate requires selection, shared-harness validation, the complete Kind/browser matrix, and the complete real-machine matrix to succeed; skipped, failed, or canceled required jobs are incomplete. Owner cleanup and redacted diagnostics remain active on failure/cancellation, and the independent Forge reaper remains the backstop for interrupted cloud cleanup.
+Kind/browser work has bounded parallelism and isolated owner fixtures. Permanent-fixture work uses the identical literal `iterabase-permanent-fixture-<capacity>` non-canceling group across PR, master, and candidate workflows. Work targeting one host is serialized while independent CPU and GPU hosts may overlap. A selected job requires its fixture-scoped key and fixed repository configuration and fails rather than skips on host, purge, reboot, cache, or identity failure. The required aggregate treats skipped, failed, or canceled selected jobs as incomplete. Owner diagnostics run before unconditional destroy/purge/reboot cleanup. An interrupted run is recovered by the next preflight for that capacity while SSH remains healthy; otherwise founder-operated provider recovery is required.
 
 Release planning takes an explicit non-empty target set and selects the union of every compiled scenario whose `release_targets` intersects it. It does not use changed-file narrowing. The compiled metadata supplies owner, Kind and real-machine Make targets, bounds, and capacity requirements. Chart releases execute the chart owner's complete exact-candidate matrix through the reusable chart workflow; image-only releases can select chart-owned scenarios through the owner-aware generic candidate matrix without duplicating chart-release jobs.
 
 The release gate preserves these invariants:
 
 - all selected artifacts are exact candidates built once;
-- unselected runtime dependencies are immutable manifest/plan-pinned published baselines;
-- lifecycle predecessors come from owner-local immutable fixture authority, are copied into the generated candidate plan, and are checksum-verified before execution;
+- unselected runtime dependencies come from one complete Latest-anchored, plan-pinned immutable snapshot;
+- lifecycle predecessors come from that same snapshot, while owner-local files remain non-authoritative F0 inputs;
 - coordinated target sets execute the deduplicated scenario union;
 - Forge and platform-chart release coverage includes both CPU and GPU F3 scenarios;
-- missing mandatory CPU/GPU credentials or capacity is incomplete/failing, never passing;
-- generated candidate evidence binds the selected compiled catalogue metadata and stages.
+- missing mandatory CPU/GPU fixture credentials, identity, readiness, or cleanup is incomplete/failing, never passing;
+- generated candidate evidence binds the selected compiled catalogue metadata, stages, host boot/SSH/workspace identity, and GPU model-cache revision/hash.
 
 Fixture tests in `.github/scripts/test_release.py` assert equivalent-or-stronger coverage for every target and the complete coordinated union.
 
 ## Production-only criteria
 
-A check may remain tier P only when a representative ephemeral fixture cannot establish the claimed behavior without one of:
+A check may remain tier P only when a representative isolated fixture cannot establish the claimed behavior without one of:
 
 - the actual GPU/hardware or customer resource envelope;
 - public DNS and ACME authorization;

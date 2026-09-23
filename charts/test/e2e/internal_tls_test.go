@@ -18,14 +18,16 @@ func internalTLSScenario() sharede2e.Definition {
 			"internal-tls",
 			"Installs the minimal internal-TLS platform and proves issued identities, distinct verified control-plane edge/backend TLS, gateway dependency readiness, and real Redis/PostgreSQL transport enforcement.",
 			"test-e2e-internal-tls", 30,
-			[]string{"HOR-371", "HOR-416", "HOR-469", "HOR-475", "HOR-507"},
+			[]string{"HOR-371", "HOR-416", "HOR-475", "HOR-507", "HOR-545", "DES-HOR-545-01"},
 			[]string{"control-plane", "inference-gateway", "control-plane-chart", "inference-gateway-chart", "iterabase-platform-chart"},
 		),
 		NewState: newChartState,
 		Stages: []sharede2e.Stage[*chartState]{
 			{Name: "create-kind", Run: createKindStage},
-			{Name: "install-certificate-substrate", DependsOn: []string{"create-kind"}, Run: installInternalTLSCertificateSubstrateStage},
-			{Name: "install-internal-tls-platform", DependsOn: []string{"install-certificate-substrate"}, Run: installInternalTLSPlatformStage},
+			{Name: "import-runtime-images", DependsOn: []string{"create-kind"}, Run: importRuntimeImagesStage},
+			{Name: "install-certificate-substrate", DependsOn: []string{"import-runtime-images"}, Run: installInternalTLSCertificateSubstrateStage},
+			{Name: "install-lvm-storage-substrate", DependsOn: []string{"install-certificate-substrate"}, Run: installLVMStorageStage},
+			{Name: "install-internal-tls-platform", DependsOn: []string{"install-lvm-storage-substrate"}, Run: installInternalTLSPlatformStage},
 			{Name: "assert-internal-identities", DependsOn: []string{"install-internal-tls-platform"}, Run: assertInternalIdentitiesStage},
 			{Name: "assert-gateway-dependencies", DependsOn: []string{"assert-internal-identities"}, Run: assertGatewayDependenciesStage},
 			{Name: "assert-control-plane-verified-https", DependsOn: []string{"assert-internal-identities"}, Run: assertControlPlaneVerifiedHTTPSStage},
@@ -183,7 +185,7 @@ spec:
   restartPolicy: Never
   containers:
     - name: probe
-      image: redis:7-alpine
+      image: redis:7-alpine@sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf
       env:
         - name: REDIS_PASSWORD
           valueFrom:
@@ -226,7 +228,7 @@ spec:
   restartPolicy: Never
   containers:
     - name: probe
-      image: postgres:16-alpine
+      image: postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
       env:
         - name: PGPASSWORD
           valueFrom:

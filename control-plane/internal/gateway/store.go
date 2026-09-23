@@ -251,6 +251,18 @@ type CallerResolution struct {
 	CallerScopeID         string // validated turn_id / run_step_id
 }
 
+// WorkspaceCapacityStatus is the manager-readable projection of one pool's
+// durable AgentPool-PVC capacity gate (DES-HOR-545-01).
+type WorkspaceCapacityStatus struct {
+	Observed      bool
+	FreeBytes     uint64
+	CapacityBytes uint64
+	FreeRatio     float64
+	Warning       bool
+	CreditGated   bool
+	ObservedAt    *time.Time
+}
+
 // Store reads and writes the toolgateway schema via a pgx connection pool.
 type Store struct {
 	pool *pgxpool.Pool
@@ -259,6 +271,50 @@ type Store struct {
 // NewStore wraps a pool for tool-gateway operations.
 func NewStore(pool *pgxpool.Pool) *Store {
 	return &Store{pool: pool}
+}
+
+// WorkspaceCapacityStatus reads the durable state for one AgentPool key. A
+// materialized pool without an observation starts unobserved and fail-closed.
+func (s *Store) WorkspaceCapacityStatus(ctx context.Context, poolKey string) (WorkspaceCapacityStatus, error) {
+	var status WorkspaceCapacityStatus
+	var free, capacity int64
+	err := s.pool.QueryRow(ctx, `
+		SELECT COALESCE(s.observed, false), COALESCE(s.free_bytes, 0),
+		       COALESCE(s.capacity_bytes, 0), COALESCE(s.free_ratio, 0),
+		       COALESCE(s.warning, true), COALESCE(s.credit_gated, true), s.observed_at
+		FROM toolgateway.pools p
+		LEFT JOIN runtime.workspace_capacity_state s ON s.pool_id = p.id
+		WHERE p.key = $1 AND p.deleted_at IS NULL`, poolKey).Scan(
+		&status.Observed, &free, &capacity, &status.FreeRatio, &status.Warning, &status.CreditGated, &status.ObservedAt)
+	if err != nil {
+		return WorkspaceCapacityStatus{}, fmt.Errorf("read workspace capacity status for pool %q: %w", poolKey, err)
+	}
+	if free < 0 || capacity < 0 {
+		return WorkspaceCapacityStatus{}, fmt.Errorf("workspace capacity status contains negative bytes")
+	}
+	status.FreeBytes = uint64(free)
+	status.CapacityBytes = uint64(capacity)
+	return status, nil
+}
+
+// SetAgentPoolStorageAuthorized is the manager-to-dispatch fail-closed gate for
+// fresh work. Capacity observations cannot change this bit: only a successful
+// authoritative Kubernetes/OpenEBS storage assessment may reopen it.
+func (s *Store) SetAgentPoolStorageAuthorized(ctx context.Context, poolKey string, authorized bool) error {
+	result, err := s.pool.Exec(ctx, `
+		INSERT INTO runtime.workspace_capacity_state (pool_id, storage_authorized)
+		SELECT id, $2
+		FROM toolgateway.pools
+		WHERE key = $1 AND deleted_at IS NULL
+		ON CONFLICT (pool_id) DO UPDATE
+		SET storage_authorized = EXCLUDED.storage_authorized`, poolKey, authorized)
+	if err != nil {
+		return fmt.Errorf("set AgentPool storage authorization for %q: %w", poolKey, err)
+	}
+	if result.RowsAffected() != 1 {
+		return fmt.Errorf("set AgentPool storage authorization for %q: %w", poolKey, ErrNotFound)
+	}
+	return nil
 }
 
 // RegisterToolVersion inserts an immutable descriptor on first sight of a
@@ -1412,6 +1468,11 @@ func (s *Store) SoftDeletePoolByKey(ctx context.Context, key string) error {
 		UPDATE toolgateway.credential_bindings SET deleted_at = now()
 		WHERE pool_id = $1::uuid AND deleted_at IS NULL`, poolID); err != nil {
 		return fmt.Errorf("soft-delete credential bindings: %w", err)
+	}
+	// A future pool revival receives a new PVC and must not inherit the deleted
+	// claim's hysteresis authority. Its first observation starts fail-closed.
+	if _, err := tx.Exec(ctx, `DELETE FROM runtime.workspace_capacity_state WHERE pool_id = $1::uuid`, poolID); err != nil {
+		return fmt.Errorf("soft-delete pool workspace capacity: %w", err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {

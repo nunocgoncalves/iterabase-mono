@@ -19,7 +19,7 @@ func setupStore(t *testing.T) (*PGStore, *pgxpool.Pool) {
 		t.Skip("skipping integration test in short mode")
 	}
 	ctx := context.Background()
-	pgC, err := postgres.Run(ctx, "postgres:16-alpine",
+	pgC, err := postgres.Run(ctx, "postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685",
 		postgres.WithDatabase("gw"), postgres.WithUsername("t"), postgres.WithPassword("t"),
 		testcontainers.WithWaitStrategy(wait.ForLog("database system is ready to accept connections").
 			WithOccurrence(2).WithStartupTimeout(30*time.Second)))

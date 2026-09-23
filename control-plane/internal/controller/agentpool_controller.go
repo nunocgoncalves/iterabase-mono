@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -54,6 +55,7 @@ func (e *secretDependencyReadError) Unwrap() error {
 type agentPoolStorageMutationError struct {
 	reason  string
 	message string
+	quiesce bool
 }
 
 func (e *agentPoolStorageMutationError) Error() string { return e.message }
@@ -67,10 +69,11 @@ const (
 	// defaultProbePort mirrors the harness probe default (harness/src/config.ts).
 	defaultAgentPoolProbePort int32 = 8081
 	// supervisorUID is the supervisor's runAsUser. Root (0) is required so the
-	// supervisor can read the cert-manager CSI driver's root-owned 0600 tls.key
-	// and launch the per-turn child as the session UID via setpriv. The child
+	// supervisor can read the cert-manager CSI driver's root-owned 0440 resolved
+	// tls.key target and launch the per-turn child as the session UID via setpriv. The child
 	// (session UID, supplementary groups cleared, no_new_privs) cannot read the
-	// root-owned key. PSS baseline permits runAsUser=0 + CAP_SETUID/SETGID.
+	// root-owned key. PSS baseline permits runAsUser=0; the rendered container
+	// retains runtime-default capabilities and explicitly adds SETUID/SETGID.
 	supervisorUID int64 = 0
 
 	// workerTemplateHashAnnotation records a hash of the desired worker pod
@@ -79,11 +82,15 @@ const (
 	// attempting a forbidden spec mutation that also drops scheduler-owned
 	// state (e.g. nodeName).
 	workerTemplateHashAnnotation = "platform.iterabase.com/pod-template-hash"
+	// agentPoolResizeStartedAnnotation requires a statfs observation newer than
+	// the latest grow-in-place request before StorageReady and dispatch storage
+	// authorization may reopen.
+	agentPoolResizeStartedAnnotation          = "platform.iterabase.com/resize-requested-at"
+	agentPoolResizeBaselineCapacityAnnotation = "platform.iterabase.com/resize-baseline-capacity-bytes"
 )
 
-// AgentPoolReconciler maintains a bounded set of isolated warm-worker pods +
-// the shared sandbox PVC (RWX or RWO per the pool's access mode) + a
-// deny-by-default NetworkPolicy for each
+// AgentPoolReconciler maintains isolated warm-worker pods plus one fixed-class
+// node-local RWO sandbox PVC and a deny-by-default NetworkPolicy for each
 // AgentPool CR (HOR-245). Per-pod SPIFFE certs are issued by the cert-manager
 // CSI driver (annotated on each pod); the operator never holds the CA key.
 type AgentPoolReconciler struct {
@@ -100,6 +107,15 @@ type AgentPoolReconciler struct {
 	// flaky fake). Optional: when nil, gateway materialization is skipped
 	// (e.g. envtest without Postgres).
 	Store PoolMaterializer
+	// CapacityReader projects dispatch's durable per-AgentPool-PVC workspace
+	// hysteresis state into every AgentPool condition. It is separate from the
+	// authorization materializer contract so isolated controller tests may
+	// supply only the capability under test.
+	CapacityReader WorkspaceCapacityReader
+	// StorageGate records whether the latest authoritative Kubernetes/OpenEBS
+	// assessment permits fresh dispatch credit. It does not quiesce workers or
+	// alter the independent capacity hysteresis state.
+	StorageGate WorkspaceStorageGate
 }
 
 // +kubebuilder:rbac:groups=platform.iterabase.com,resources=agentpools,verbs=get;list;watch;create;update;patch;delete
@@ -111,7 +127,7 @@ type AgentPoolReconciler struct {
 // +kubebuilder:rbac:groups="",resources=persistentvolumes,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get
 // +kubebuilder:rbac:groups=storage.k8s.io,resources=storageclasses,verbs=get;list;watch
-// +kubebuilder:rbac:groups=longhorn.io,resources=volumes,verbs=get;list;watch
+// +kubebuilder:rbac:groups=local.openebs.io,resources=lvmnodes;lvmvolumes,verbs=get;list;watch
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
 
 // PoolMaterializer is the contract by which the AgentPool reconciler
@@ -125,6 +141,28 @@ type AgentPoolReconciler struct {
 type PoolMaterializer interface {
 	MaterializePool(ctx context.Context, key, name, spiffePrefix string, grants []gateway.PoolGrantInput, bindings []gateway.CredentialBindingInput) error
 	SoftDeletePoolByKey(ctx context.Context, key string) error
+}
+
+// WorkspaceCapacityReader is the Postgres-backed bridge from dispatch's
+// durable per-AgentPool-PVC observation to the matching operator status.
+type WorkspaceCapacityReader interface {
+	WorkspaceCapacityStatus(ctx context.Context, poolKey string) (gateway.WorkspaceCapacityStatus, error)
+}
+
+// WorkspaceStorageGate is the existing Postgres bridge used to stop dispatch
+// from consuming a retained Ready credit while storage identity is unknown.
+type WorkspaceStorageGate interface {
+	SetAgentPoolStorageAuthorized(ctx context.Context, poolKey string, authorized bool) error
+}
+
+func (r *AgentPoolReconciler) setDispatchStorageAuthorized(ctx context.Context, pool *v1alpha1.AgentPool, authorized bool) error {
+	if r.StorageGate == nil {
+		return nil
+	}
+	if err := r.StorageGate.SetAgentPoolStorageAuthorized(ctx, agentPoolKey(pool), authorized); err != nil {
+		return fmt.Errorf("set AgentPool dispatch storage authorization: %w", err)
+	}
+	return nil
 }
 
 // Reconcile handles AgentPool create/update/delete events.
@@ -206,6 +244,42 @@ func (r *AgentPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		_ = r.patchStatus(ctx, &pool, false, 0, fmt.Sprintf("materialize gateway: %v", err), false)
 		return ctrl.Result{}, err
 	}
+	// Validate the fixed expandable StorageClass before creating or mutating a
+	// claim. A missing, wrong, default, or non-expandable class fails closed.
+	storage := r.assessAgentPoolStorage(ctx, &pool)
+	var storageGateErr error
+	if !storage.Ready {
+		storageGateErr = r.setDispatchStorageAuthorized(ctx, &pool, false)
+		if storageGateErr != nil {
+			storage.Message += fmt.Sprintf("; failed to withdraw fresh dispatch credit through the durable storage gate: %v", storageGateErr)
+		}
+	}
+	if !storage.CanMount {
+		// Unknown API/cache/transport observations withdraw readiness and credit but
+		// do not destructively delete healthy workers. Only positively observed
+		// class/PVC/PV/OpenEBS drift authorizes quiescence. Publish the fail-closed
+		// status before any list/delete so a quiesce failure cannot leave Ready or
+		// live-credit state visible.
+		hadWorkers := r.countReadyWorkers(ctx, &pool) > 0 || storageWasOperationallyReady(&pool)
+		if hadWorkers && storageQuiescenceRequired(storage) {
+			storage.ReplacementPending = true
+			storage.Message += "; existing workers are being removed to stop scheduling credit, and recovery requires healthy storage plus fresh workers without automatic turn/effect replay"
+		} else if storage.ObservationUnknown {
+			storage.Message += "; readiness and fresh credit are withdrawn, but existing workers are retained until storage identity can be observed authoritatively"
+		}
+		statusErr := r.patchStatus(ctx, &pool, false, 0, storage.Message, false, &storage)
+		if storage.ObservationUnknown {
+			return ctrl.Result{}, stderrors.Join(statusErr, storageGateErr, fmt.Errorf("observe AgentPool storage: %w", storage.ObservationErr))
+		}
+		if storageQuiescenceRequired(storage) {
+			return ctrl.Result{RequeueAfter: healthRequeueInterval}, stderrors.Join(statusErr, storageGateErr, r.quiesceWorkers(ctx, &pool))
+		}
+		return ctrl.Result{RequeueAfter: healthRequeueInterval}, stderrors.Join(statusErr, storageGateErr)
+	}
+	if storageGateErr != nil {
+		statusErr := r.patchStatus(ctx, &pool, false, 0, storage.Message, false, &storage)
+		return ctrl.Result{}, stderrors.Join(statusErr, storageGateErr)
+	}
 	if err := r.ensurePVC(ctx, &pool); err != nil {
 		var mutationErr *agentPoolStorageMutationError
 		if stderrors.As(err, &mutationErr) {
@@ -214,16 +288,30 @@ func (r *AgentPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 				Message:   mutationErr.message,
 				ClassName: pool.Spec.Sandbox.StorageClassName,
 			}
-			hadWorkers := r.countReadyWorkers(ctx, &pool) > 0 || storageWasReady(&pool)
-			if hadWorkers {
-				assessment.Message += "; scheduling credit was removed before worker quiescing, and recovery requires a reviewed storage migration or a corrected declarative value without automatic turn/effect replay"
+			hadWorkers := r.countReadyWorkers(ctx, &pool) > 0 || storageWasOperationallyReady(&pool)
+			if hadWorkers && mutationErr.quiesce {
+				assessment.Message += "; scheduling credit was removed before worker quiescing, and recovery requires corrected identity without automatic turn/effect replay"
+			} else if hadWorkers {
+				assessment.Message += "; existing mounted workers and bytes are retained while readiness and fresh credits remain closed"
+			}
+			gateErr := r.setDispatchStorageAuthorized(ctx, &pool, false)
+			if gateErr != nil {
+				assessment.Message += fmt.Sprintf("; failed to withdraw fresh dispatch credit through the durable storage gate: %v", gateErr)
 			}
 			// Publish the fail-closed condition independently of pod deletion. A
 			// transient list/delete error must not leave Ready or StorageReady=True
 			// visible while the immutable storage mutation is being rejected.
-			statusErr := r.patchStatus(ctx, &pool, false, 0, assessment.Message, true, assessment)
-			quiesceErr := r.quiesceWorkers(ctx, &pool)
-			if err := stderrors.Join(statusErr, quiesceErr); err != nil {
+			readyReplicas := r.countReadyWorkers(ctx, &pool)
+			if mutationErr.quiesce {
+				assessment.ReplacementPending = hadWorkers
+				readyReplicas = 0
+			}
+			statusErr := r.patchStatus(ctx, &pool, false, readyReplicas, assessment.Message, true, assessment)
+			var quiesceErr error
+			if mutationErr.quiesce {
+				quiesceErr = r.quiesceWorkers(ctx, &pool)
+			}
+			if err := stderrors.Join(statusErr, gateErr, quiesceErr); err != nil {
 				return ctrl.Result{}, err
 			}
 			return ctrl.Result{}, nil
@@ -232,18 +320,6 @@ func (r *AgentPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, err
 	}
 
-	storage := r.assessAgentPoolStorage(ctx, &pool)
-	if !storage.CanMount {
-		hadWorkers := r.countReadyWorkers(ctx, &pool) > 0 || storageWasReady(&pool)
-		if err := r.quiesceWorkers(ctx, &pool); err != nil {
-			return ctrl.Result{}, err
-		}
-		if hadWorkers {
-			storage.Message += "; workers were removed to stop scheduling credit, and recovery requires healthy storage plus fresh workers without automatic turn/effect replay"
-		}
-		_ = r.patchStatus(ctx, &pool, false, 0, storage.Message, false, &storage)
-		return ctrl.Result{RequeueAfter: healthRequeueInterval}, nil
-	}
 	if err := r.ensureNetworkPolicy(ctx, &pool); err != nil {
 		_ = r.patchStatus(ctx, &pool, false, 0, fmt.Sprintf("ensure NetworkPolicy: %v", err), false, &storage)
 		return ctrl.Result{}, err
@@ -254,35 +330,26 @@ func (r *AgentPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 
 	readyReplicas := r.countReadyWorkers(ctx, &pool)
-	storage = r.assessAgentPoolStorage(ctx, &pool)
 	if !storage.Ready {
-		if storageWasReady(&pool) || !storage.CanMount {
-			if err := r.quiesceWorkers(ctx, &pool); err != nil {
-				return ctrl.Result{}, err
+		if storage.SafeResize {
+			// Mounted publication is required for online XFS growth. Keep healthy
+			// workers (and any active turn) alive while StorageReady and all fresh
+			// credit remain closed; a resize request alone never grants capacity.
+			return ctrl.Result{RequeueAfter: healthRequeueInterval}, r.patchStatus(ctx, &pool, false, readyReplicas, storage.Message, false, &storage)
+		}
+		wasOperationallyReady := storageWasOperationallyReady(&pool)
+		if wasOperationallyReady || !storage.CanMount {
+			if wasOperationallyReady || readyReplicas > 0 {
+				storage.ReplacementPending = true
 			}
 			readyReplicas = 0
 			storage.Reason = storageReasonRecoveryPending
-			storage.Message += "; existing workers were removed to stop scheduling credit and recovery requires healthy storage plus fresh workers"
+			storage.Message += "; existing workers are being removed to stop scheduling credit and recovery requires healthy storage plus fresh workers"
+			statusErr := r.patchStatus(ctx, &pool, false, readyReplicas, storage.Message, false, &storage)
+			return ctrl.Result{RequeueAfter: healthRequeueInterval}, stderrors.Join(statusErr, r.quiesceWorkers(ctx, &pool))
 		}
-		_ = r.patchStatus(ctx, &pool, false, readyReplicas, storage.Message, false, &storage)
-		return ctrl.Result{RequeueAfter: healthRequeueInterval}, nil
+		return ctrl.Result{RequeueAfter: healthRequeueInterval}, r.patchStatus(ctx, &pool, false, readyReplicas, storage.Message, false, &storage)
 	}
-	if storage.Mode == storageModeManagedLonghorn && (readyReplicas > 0 || storageWasReady(&pool)) {
-		if failure := r.managedLonghornVolumeHealth(ctx, storage.VolumeHandle, true); failure != nil {
-			failure.Mode = storage.Mode
-			failure.ClassName = storage.ClassName
-			failure.PVName = storage.PVName
-			failure.VolumeHandle = storage.VolumeHandle
-			if err := r.quiesceWorkers(ctx, &pool); err != nil {
-				return ctrl.Result{}, err
-			}
-			failure.Reason = storageReasonRecoveryPending
-			failure.Message += "; workers were removed and no turn/effect will be replayed automatically"
-			_ = r.patchStatus(ctx, &pool, false, 0, failure.Message, false, failure)
-			return ctrl.Result{RequeueAfter: healthRequeueInterval}, nil
-		}
-	}
-
 	ready := readyReplicas > 0 || pool.Spec.Replicas == 0
 	msg := storage.Message
 	if pool.Spec.Replicas == 0 {
@@ -297,6 +364,11 @@ func (r *AgentPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			msg = "storage predicates pass; waiting for worker pods to mount, validate root ownership/mode, and become Ready"
 		}
 	}
+	if err := r.setDispatchStorageAuthorized(ctx, &pool, storage.Ready); err != nil {
+		msg += fmt.Sprintf("; failed to publish the durable fresh-credit storage gate: %v", err)
+		statusErr := r.patchStatus(ctx, &pool, false, readyReplicas, msg, false, &storage)
+		return ctrl.Result{}, stderrors.Join(statusErr, err)
+	}
 	if err := r.patchStatus(ctx, &pool, ready, readyReplicas, msg, true, &storage); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -307,8 +379,8 @@ func (r *AgentPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 }
 
 // validateSpec validates structural correctness (ARCH-018): required fields,
-// sandbox access mode (RWX multi-worker / RWO single-worker with replicas==1),
-// egress mode, no duplicate gateway grants, and existence of referenced
+// fixed dedicated-class RWO storage, egress mode, no duplicate gateway grants,
+// and existence of referenced
 // Secrets (credential bindings + CA). Semantic validation that a granted tool
 // is registered is the gateway's responsibility (HOR-392/397).
 //
@@ -323,27 +395,11 @@ func (r *AgentPoolReconciler) validateSpec(ctx context.Context, pool *v1alpha1.A
 	if pool.Spec.PodSecurity != "baseline" {
 		return fmt.Errorf("spec.podSecurity must be \"baseline\" (per-turn UID launch requires CAP_SETUID/SETGID, which PSS restricted forbids)")
 	}
-	if pool.Spec.Sandbox.StorageClassName == "" {
-		return fmt.Errorf("spec.sandbox.storageClassName is required")
+	if pool.Spec.Sandbox.StorageClassName != agentPoolWorkspaceStorageClass {
+		return fmt.Errorf("spec.sandbox.storageClassName must be %q; default, alternate, and BYO classes are unsupported", agentPoolWorkspaceStorageClass)
 	}
-	switch pool.Spec.Sandbox.AccessMode {
-	case corev1.ReadWriteMany:
-		// RWX is required for interchangeable/concurrent workers and supports
-		// any replica count (HOR-427 preserves existing multi-worker behavior).
-	case corev1.ReadWriteOnce:
-		// RWO is a single-worker deployment mode only: a bound RWO PVC can be
-		// mounted by exactly one node/pod, so more than one replica would break
-		// at schedule time. Reject both creating a multi-replica RWO pool and
-		// changing a live multi-replica pool to RWO before any workload is
-		// rolled out (HOR-427). A scaled-to-zero (replicas == 0) pool is
-		// permitted so an operator can pause the single RWO worker without
-		// switching the sandbox to RWX (user-approved rescope of the literal
-		// "== 1" wording).
-		if pool.Spec.Replicas > 1 {
-			return fmt.Errorf("spec.sandbox.accessMode ReadWriteOnce supports at most one replica (single-worker RWO mode); set replicas to 0 or 1, or use ReadWriteMany")
-		}
-	default:
-		return fmt.Errorf("spec.sandbox.accessMode must be ReadWriteMany or ReadWriteOnce")
+	if pool.Spec.Sandbox.AccessMode != corev1.ReadWriteOnce {
+		return fmt.Errorf("spec.sandbox.accessMode must be ReadWriteOnce; RWO permits multiple pods on the supported single node")
 	}
 	if pool.Spec.Sandbox.Size.IsZero() {
 		return fmt.Errorf("spec.sandbox.size is required and must be positive")
@@ -595,38 +651,78 @@ func (r *AgentPoolReconciler) secretExists(ctx context.Context, ns, name string)
 	return nil
 }
 
-// ensurePVC creates/updates the shared sandbox PVC (RWX or RWO per the
-// pool's spec.sandbox.accessMode).
+// ensurePVC creates the one fixed-class RWO sandbox PVC or patches only its
+// existing storage request upward. It never adopts or replaces another claim.
+//
+//nolint:gocyclo // ordered ownership/identity/grow-only predicates intentionally fail closed.
 func (r *AgentPoolReconciler) ensurePVC(ctx context.Context, pool *v1alpha1.AgentPool) error {
 	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: sandboxPVCName(pool), Namespace: pool.Namespace}}
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, pvc, func() error {
-		if err := controllerutil.SetControllerReference(pool, pvc, r.Scheme); err != nil {
+		existing := !pvc.CreationTimestamp.IsZero() || pvc.ResourceVersion != ""
+		if existing {
+			owner := metav1.GetControllerOf(pvc)
+			if owner == nil || owner.APIVersion != v1alpha1.GroupVersion.String() || owner.Kind != "AgentPool" || owner.Name != pool.Name || owner.UID != pool.UID {
+				return &agentPoolStorageMutationError{
+					reason:  storageReasonClassMismatch,
+					message: fmt.Sprintf("refusing to adopt unrelated sandbox PVC %s/%s; the deterministic claim must remain owned by AgentPool %s uid=%s", pvc.Namespace, pvc.Name, pool.Name, pool.UID),
+				}
+			}
+		} else if err := controllerutil.SetControllerReference(pool, pvc, r.Scheme); err != nil {
 			return err
 		}
 		sc := pool.Spec.Sandbox.StorageClassName
 		access := []corev1.PersistentVolumeAccessMode{pool.Spec.Sandbox.AccessMode}
-		if !pvc.CreationTimestamp.IsZero() {
+		volumeMode := corev1.PersistentVolumeFilesystem
+		if existing {
 			if pvc.Spec.StorageClassName == nil || *pvc.Spec.StorageClassName != sc {
 				return &agentPoolStorageMutationError{
 					reason:  storageReasonClassMismatch,
 					message: fmt.Sprintf("immutable sandbox PVC storageClassName is %v, requested %q; migrate through a separately reviewed copy/cutover plan instead of recreating the claim", pointerValue(pvc.Spec.StorageClassName), sc),
 				}
 			}
-			if len(pvc.Spec.AccessModes) != 1 || pvc.Spec.AccessModes[0] != pool.Spec.Sandbox.AccessMode {
+			if len(pvc.Spec.AccessModes) != 1 || pvc.Spec.AccessModes[0] != pool.Spec.Sandbox.AccessMode || pvc.Spec.VolumeMode == nil || *pvc.Spec.VolumeMode != corev1.PersistentVolumeFilesystem {
 				return &agentPoolStorageMutationError{
 					reason:  storageReasonClassMismatch,
-					message: fmt.Sprintf("immutable sandbox PVC accessModes are %v, requested %s; do not recreate the claim", pvc.Spec.AccessModes, pool.Spec.Sandbox.AccessMode),
+					message: fmt.Sprintf("immutable sandbox PVC accessModes/volumeMode are %v/%v, requested ReadWriteOnce/Filesystem; do not recreate the claim", pvc.Spec.AccessModes, pointerValue(pvc.Spec.VolumeMode)),
 				}
 			}
 			current := pvc.Spec.Resources.Requests[corev1.ResourceStorage]
 			if current.Cmp(pool.Spec.Sandbox.Size) > 0 {
 				return &agentPoolStorageMutationError{
-					reason:  storageReasonPVCExpansionFailed,
-					message: fmt.Sprintf("PVCExpansionFailed: sandbox PVC shrink from %s to %s is unsupported; create/copy/cut over under a reviewed migration plan", current.String(), pool.Spec.Sandbox.Size.String()),
+					reason:  storageReasonPVCShrinkRefused,
+					message: fmt.Sprintf("PVCShrinkRefused: OpenEBS thick XFS sandbox PVC may only grow (current %s requested %s); the same claim, mounted workers, and bytes were preserved", current.String(), pool.Spec.Sandbox.Size.String()),
 				}
+			}
+			if current.Cmp(pool.Spec.Sandbox.Size) < 0 {
+				if (pvc.Status.Phase == corev1.ClaimPending || pvc.Status.Phase == "") && pvc.Spec.VolumeName == "" {
+					// Kubernetes permits expansion only after binding. Preserve the
+					// initial request and let workers trigger WaitForFirstConsumer;
+					// the next bound reconcile patches the same claim upward.
+					return nil
+				}
+				if pvc.Annotations == nil {
+					pvc.Annotations = map[string]string{}
+				}
+				baseline := uint64(0)
+				currentCapacity := pvc.Status.Capacity[corev1.ResourceStorage]
+				if observed := currentCapacity.Value(); observed > 0 {
+					baseline = uint64(observed)
+				}
+				if r.CapacityReader != nil {
+					status, statusErr := r.CapacityReader.WorkspaceCapacityStatus(ctx, pool.Namespace+"/"+pool.Name)
+					if statusErr == nil && workspaceCapacityStatusValid(status) && status.ObservedAt != nil && time.Since(*status.ObservedAt) <= workspaceCapacityObservationFreshness {
+						baseline = status.CapacityBytes
+					}
+				}
+				if baseline == 0 {
+					return fmt.Errorf("PVCExpansionPending: wait for an authoritative pre-resize filesystem/PVC capacity observation before growing %s/%s", pvc.Namespace, pvc.Name)
+				}
+				pvc.Annotations[agentPoolResizeBaselineCapacityAnnotation] = strconv.FormatUint(baseline, 10)
+				pvc.Annotations[agentPoolResizeStartedAnnotation] = time.Now().UTC().Format(time.RFC3339Nano)
 			}
 		} else {
 			pvc.Spec.AccessModes = access
+			pvc.Spec.VolumeMode = &volumeMode
 			pvc.Spec.StorageClassName = &sc
 		}
 		if pvc.Spec.Resources.Requests == nil {
@@ -791,12 +887,13 @@ func (r *AgentPoolReconciler) countReadyWorkers(ctx context.Context, pool *v1alp
 }
 
 // buildWorkerPodSpec renders the warm-worker pod: supervisor container with
-// the cert-manager CSI TLS volume, the shared sandbox PVC (RWX or RWO per
-// the pool spec), the WAL
+// the cert-manager CSI TLS volume, the shared node-local RWO sandbox PVC, the WAL
 // emptyDir, the per-pod config ConfigMap, and read-only piDirs (placeholder
 // mounts; overlay content is HOR-393). The supervisor runs as root (UID 0) to
-// read the CSI driver's root-owned 0600 key and launch the per-turn child as
-// the session UID via setpriv (PSS baseline: CAP_SETUID/SETGID allowed).
+// read the cert-manager CSI AtomicWriter chain's exact root:root 0440 resolved
+// tls.key and launch the per-turn child as the session UID via setpriv. It
+// retains runtime-default capabilities and explicitly adds SETUID/SETGID; no pod
+// fsGroup grants key or PVC access.
 func buildWorkerPodSpec(pool *v1alpha1.AgentPool, name string) corev1.PodSpec {
 	probePort := pool.Spec.Probe.Port
 	if probePort == 0 {
@@ -1085,8 +1182,13 @@ func isDesiredWorker(pool *v1alpha1.AgentPool, name string) bool {
 	return false
 }
 
-// podIsReady reports whether a pod has a Ready condition True.
+// podIsReady reports whether a non-terminating pod has a Ready condition True.
+// Kubernetes may preserve Ready=True during asynchronous deletion; those pods
+// must never restore AgentPool scheduling credit or satisfy backend recovery.
 func podIsReady(p *corev1.Pod) bool {
+	if !p.DeletionTimestamp.IsZero() {
+		return false
+	}
 	for _, c := range p.Status.Conditions {
 		if c.Type == corev1.PodReady {
 			return c.Status == corev1.ConditionTrue
@@ -1096,12 +1198,17 @@ func podIsReady(p *corev1.Pod) bool {
 }
 
 func (r *AgentPoolReconciler) patchStatus(ctx context.Context, pool *v1alpha1.AgentPool, ready bool, readyReplicas int32, message string, recordObserved bool, storage ...*agentPoolStorageAssessment) error {
+	wasOperationallyReady := storageWasOperationallyReady(pool)
+	replacementPending := storageWorkerReplacementPending(pool)
+	previousObservedGeneration := pool.Status.ObservedGeneration
 	base := pool.DeepCopy()
 	pool.Status.Ready = ready
 	pool.Status.ReadyReplicas = readyReplicas
+	storageReady := false
+	markReplacementPending := false
 	if len(storage) > 0 && storage[0] != nil {
 		condition := metav1.Condition{
-			Type:               "StorageReady",
+			Type:               storageConditionReady,
 			Status:             metav1.ConditionFalse,
 			Reason:             storage[0].Reason,
 			Message:            storage[0].Message,
@@ -1109,8 +1216,27 @@ func (r *AgentPoolReconciler) patchStatus(ctx context.Context, pool *v1alpha1.Ag
 		}
 		if storage[0].Ready {
 			condition.Status = metav1.ConditionTrue
+			storageReady = true
 		}
 		meta.SetStatusCondition(&pool.Status.Conditions, condition)
+		markReplacementPending = storage[0].ReplacementPending
+	}
+	operationallyReadyNow := ready && readyReplicas > 0 && storageReady
+	setStorageWorkerReplacementCondition(pool, replacementPending, markReplacementPending, operationallyReadyNow)
+	operationalCondition := meta.FindStatusCondition(pool.Status.Conditions, storageConditionOperationalReadinessReached)
+	if (wasOperationallyReady || operationallyReadyNow) &&
+		(operationalCondition == nil || operationalCondition.Status != metav1.ConditionTrue) {
+		observedGeneration := previousObservedGeneration
+		if operationallyReadyNow || observedGeneration == 0 {
+			observedGeneration = pool.Generation
+		}
+		meta.SetStatusCondition(&pool.Status.Conditions, metav1.Condition{
+			Type:               storageConditionOperationalReadinessReached,
+			Status:             metav1.ConditionTrue,
+			Reason:             storageReasonOperationalReadinessReached,
+			Message:            "at least one worker reached Ready while storage was healthy; later storage loss remains fail-closed until fresh workers replace the affected set",
+			ObservedGeneration: observedGeneration,
+		})
 	}
 	// ObservedGeneration is advanced only on definitive outcomes: a successful
 	// reconcile or a structural validation rejection (no retry until the spec
@@ -1120,8 +1246,36 @@ func (r *AgentPoolReconciler) patchStatus(ctx context.Context, pool *v1alpha1.Ag
 	if recordObserved {
 		pool.Status.ObservedGeneration = pool.Generation
 	}
+	if capacityNotice := r.setWorkspaceCapacityCondition(ctx, pool); capacityNotice != "" {
+		if message != "" {
+			message += "; "
+		}
+		message += capacityNotice
+	}
 	pool.Status.Message = message
 	return r.Status().Patch(ctx, pool, client.MergeFrom(base))
+}
+
+func setStorageWorkerReplacementCondition(pool *v1alpha1.AgentPool, replacementPending, markPending, operationallyReady bool) {
+	if markPending {
+		replacementPending = true
+		meta.SetStatusCondition(&pool.Status.Conditions, metav1.Condition{
+			Type:               storageConditionWorkerReplacementPending,
+			Status:             metav1.ConditionTrue,
+			Reason:             storageReasonRecoveryPending,
+			Message:            "workers affected by storage loss were removed; keep scheduling closed while healthy storage attaches to fresh replacement workers",
+			ObservedGeneration: pool.Generation,
+		})
+	}
+	if operationallyReady && replacementPending {
+		meta.SetStatusCondition(&pool.Status.Conditions, metav1.Condition{
+			Type:               storageConditionWorkerReplacementPending,
+			Status:             metav1.ConditionFalse,
+			Reason:             storageReasonFreshWorkersReady,
+			Message:            "fresh replacement workers reached Ready after OpenEBS LVM volume, node topology, and mount health verification",
+			ObservedGeneration: pool.Generation,
+		})
+	}
 }
 
 // SetupWithManager registers the reconciler and watches owned

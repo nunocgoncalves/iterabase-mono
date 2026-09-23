@@ -26,6 +26,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -39,11 +40,23 @@ import (
 var (
 	// ErrNotFound is returned when no row matches.
 	ErrNotFound = errors.New("dispatch: not found")
+	// ErrPoolStorageUnauthorized is returned when the manager has not positively
+	// authorized the assigned pool's current Kubernetes/OpenEBS storage identity.
+	ErrPoolStorageUnauthorized = errors.New("dispatch: AgentPool storage is not authorized for fresh work")
 	// ErrAlreadyAssigned is returned when a turn already has an active assignment.
 	ErrAlreadyAssigned = errors.New("dispatch: turn already actively assigned")
 	// ErrAssignmentNotActive is returned when an assignment exists but is not
 	// active (fenced/terminal) — gateways treat this as denial.
 	ErrAssignmentNotActive = errors.New("dispatch: assignment not active")
+	// ErrSessionUIDUnavailable is returned when assignment cannot bind the run's
+	// session to an in-use durable UID allocation.
+	ErrSessionUIDUnavailable = errors.New("dispatch: session UID allocation is not in use")
+	// ErrSessionIdentityMismatch is returned when the assigned sandbox identity
+	// disagrees with the run session or its durable UID allocation.
+	ErrSessionIdentityMismatch = errors.New("dispatch: assigned sandbox identity mismatch")
+	// ErrSessionUIDActive is returned when lifecycle cleanup attempts to release
+	// a UID while any turn for that session remains actively assigned.
+	ErrSessionUIDActive = errors.New("dispatch: session UID has an active assignment")
 	// ErrOutOfOrderSequence is returned when a worker presents a TurnEvent
 	// sequence with a gap (greater than highest+1). The HOR-381 source-order
 	// contract is strictly monotonic, one-based and gapless; a gap is a sender
@@ -92,6 +105,9 @@ type AssignmentInput struct {
 	AttemptID           string
 	ScopeIdentityID     string
 	AgentPoolKey        string
+	SessionID           string
+	SandboxUID          uint32
+	SandboxGID          uint32
 	ModelPermission     json.RawMessage
 	CapabilityRequest   json.RawMessage
 	ToolVersionSnapshot json.RawMessage
@@ -134,10 +150,48 @@ func (s *Store) MaxFencingGeneration(ctx context.Context) (uint64, error) {
 
 // CreateAssignment records the active assignment for a turn (state=active). A
 // turn may have at most one active assignment; a conflict (the turn is already
-// actively assigned) returns ErrAlreadyAssigned. Called by dispatch on
-// AssignTurn, atomically with consuming the worker's dispatch credit.
+// actively assigned) returns ErrAlreadyAssigned. The allocation row is locked
+// through the insert so a concurrent SessionEnd cannot free the UID between
+// allocation and assignment. Missing, freed, or mismatched session identities
+// fail closed before AssignTurn can enter the worker stream.
 func (s *Store) CreateAssignment(ctx context.Context, in AssignmentInput) (Assignment, error) {
-	row := s.pool.QueryRow(ctx, `
+	if in.SessionID == "" || in.SandboxUID == 0 || in.SandboxUID != in.SandboxGID {
+		return Assignment{}, ErrSessionIdentityMismatch
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Assignment{}, fmt.Errorf("create assignment begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var runSessionID string
+	if err := tx.QueryRow(ctx, `SELECT session_id FROM runtime.workflow_runs WHERE id=$1`, in.RunID).Scan(&runSessionID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Assignment{}, ErrNotFound
+		}
+		return Assignment{}, fmt.Errorf("resolve assignment session: %w", err)
+	}
+	if runSessionID != in.SessionID {
+		return Assignment{}, ErrSessionIdentityMismatch
+	}
+	var allocatedUID uint32
+	var allocationState string
+	if err := tx.QueryRow(ctx, `
+		SELECT uid, state FROM runtime.session_uid_allocations
+		WHERE session_id=$1 FOR UPDATE`, in.SessionID).Scan(&allocatedUID, &allocationState); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Assignment{}, ErrSessionUIDUnavailable
+		}
+		return Assignment{}, fmt.Errorf("lock assignment session uid: %w", err)
+	}
+	if allocationState != "in_use" {
+		return Assignment{}, ErrSessionUIDUnavailable
+	}
+	if allocatedUID != in.SandboxUID {
+		return Assignment{}, ErrSessionIdentityMismatch
+	}
+
+	row := tx.QueryRow(ctx, `
 		INSERT INTO runtime.turn_assignments
 			(turn_id, run_id, pool_id, worker_id, fencing_generation, attempt_id,
 			 scope_identity_id, agent_pool_key, model_permission, capability_request,
@@ -155,6 +209,9 @@ func (s *Store) CreateAssignment(ctx context.Context, in AssignmentInput) (Assig
 			return Assignment{}, ErrAlreadyAssigned
 		}
 		return Assignment{}, fmt.Errorf("create assignment: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Assignment{}, fmt.Errorf("create assignment commit: %w", err)
 	}
 	return a, nil
 }
@@ -624,16 +681,139 @@ func (s *Store) SessionUID(ctx context.Context, sessionID string) (uint32, error
 
 // ReleaseSessionUID marks a session's UID freed (non-recyclable until grace
 // elapses), so the allocator does not recycle it while the supervisor reaps the
-// sandbox. Called after dispatch sends SessionEnd. Idempotent.
+// sandbox. Called after dispatch sends SessionEnd. It serializes with assignment
+// creation and refuses to release while any turn for the session remains active.
+// Missing or already-freed rows remain idempotent no-ops.
 func (s *Store) ReleaseSessionUID(ctx context.Context, sessionID string) error {
-	_, err := s.pool.Exec(ctx, `
-		UPDATE runtime.session_uid_allocations
-		   SET state = 'freed', freed_at = now()
-		 WHERE session_id = $1 AND state = 'in_use'`, sessionID)
+	tx, err := s.pool.Begin(ctx)
 	if err != nil {
+		return fmt.Errorf("release session uid begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var state string
+	if err := tx.QueryRow(ctx, `
+		SELECT state FROM runtime.session_uid_allocations
+		WHERE session_id=$1 FOR UPDATE`, sessionID).Scan(&state); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		return fmt.Errorf("lock released session uid: %w", err)
+	}
+	if state == "freed" {
+		return nil
+	}
+	var active bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM runtime.turn_assignments ta
+			JOIN runtime.workflow_runs wr ON wr.id=ta.run_id
+			WHERE wr.session_id=$1 AND ta.state='active'
+		)`, sessionID).Scan(&active); err != nil {
+		return fmt.Errorf("check active session assignment: %w", err)
+	}
+	if active {
+		return ErrSessionUIDActive
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE runtime.session_uid_allocations
+		   SET state='freed', freed_at=now()
+		 WHERE session_id=$1 AND state='in_use'`, sessionID); err != nil {
 		return fmt.Errorf("release session uid: %w", err)
 	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("release session uid commit: %w", err)
+	}
 	return nil
+}
+
+// WorkspaceCapacityState is one AgentPool PVC's durable hysteresis state.
+type WorkspaceCapacityState struct {
+	PoolID            string
+	Observed          bool
+	FreeBytes         uint64
+	CapacityBytes     uint64
+	FreeRatio         float64
+	Warning           bool
+	CreditGated       bool
+	StorageAuthorized bool
+	ObservedAt        *time.Time
+}
+
+func (s WorkspaceCapacityState) freshCreditGated() bool {
+	return s.CreditGated || !s.StorageAuthorized
+}
+
+// LoadWorkspaceCapacityStates restores every observed pool gate before dispatch
+// accepts worker streams. Pools with no row start fail-closed in memory.
+func (s *Store) LoadWorkspaceCapacityStates(ctx context.Context) (map[string]WorkspaceCapacityState, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT s.pool_id::text, s.observed, s.free_bytes, s.capacity_bytes, s.free_ratio,
+		       s.warning, s.credit_gated, s.storage_authorized, s.observed_at
+		FROM runtime.workspace_capacity_state s
+		JOIN toolgateway.pools p ON p.id = s.pool_id
+		WHERE p.deleted_at IS NULL`)
+	if err != nil {
+		return nil, fmt.Errorf("read durable workspace capacity states: %w", err)
+	}
+	defer rows.Close()
+	states := map[string]WorkspaceCapacityState{}
+	for rows.Next() {
+		state, err := scanWorkspaceCapacityState(rows)
+		if err != nil {
+			return nil, err
+		}
+		states[state.PoolID] = state
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read durable workspace capacity states: %w", err)
+	}
+	return states, nil
+}
+
+// ObserveWorkspaceCapacity serializes one validated AgentPool-PVC observation.
+// Each pool retains its own 20-25 percent hysteresis across replacement workers
+// and dispatch restarts; a first in-band observation starts gated.
+func (s *Store) ObserveWorkspaceCapacity(ctx context.Context, poolID string, free, capacity uint64, ratio float64) (WorkspaceCapacityState, error) {
+	if free > math.MaxInt64 || capacity > math.MaxInt64 {
+		return WorkspaceCapacityState{}, fmt.Errorf("workspace capacity exceeds durable bigint range")
+	}
+	row := s.pool.QueryRow(ctx, `
+		INSERT INTO runtime.workspace_capacity_state
+			(pool_id, observed, free_bytes, capacity_bytes, free_ratio, warning, credit_gated, observed_at)
+		VALUES ($1::uuid, true, $2::bigint, $3::bigint, $4::double precision,
+		        $4::double precision < 0.25::double precision,
+		        $4::double precision < 0.25::double precision, now())
+		ON CONFLICT (pool_id) DO UPDATE
+		SET observed = true,
+		    free_bytes = EXCLUDED.free_bytes,
+		    capacity_bytes = EXCLUDED.capacity_bytes,
+		    free_ratio = EXCLUDED.free_ratio,
+		    warning = EXCLUDED.warning,
+		    credit_gated = CASE
+		      WHEN EXCLUDED.free_ratio <= 0.20::double precision THEN true
+		      WHEN EXCLUDED.free_ratio >= 0.25::double precision THEN false
+		      ELSE runtime.workspace_capacity_state.credit_gated
+		    END,
+		    observed_at = now()
+		RETURNING pool_id::text, observed, free_bytes, capacity_bytes, free_ratio,
+		          warning, credit_gated, storage_authorized, observed_at`,
+		poolID, int64(free), int64(capacity), ratio)
+	return scanWorkspaceCapacityState(row)
+}
+
+func scanWorkspaceCapacityState(row pgx.Row) (WorkspaceCapacityState, error) {
+	var state WorkspaceCapacityState
+	var free, capacity int64
+	if err := row.Scan(&state.PoolID, &state.Observed, &free, &capacity, &state.FreeRatio, &state.Warning, &state.CreditGated, &state.StorageAuthorized, &state.ObservedAt); err != nil {
+		return WorkspaceCapacityState{}, fmt.Errorf("read durable workspace capacity state: %w", err)
+	}
+	if state.PoolID == "" || free < 0 || capacity < 0 {
+		return WorkspaceCapacityState{}, fmt.Errorf("durable workspace capacity state contains an invalid pool or byte count")
+	}
+	state.FreeBytes = uint64(free)
+	state.CapacityBytes = uint64(capacity)
+	return state, nil
 }
 
 // --- pool resolution (toolgateway.pools read) ---
@@ -685,16 +865,25 @@ func (s *Store) AssignRunToPool(ctx context.Context, runID, poolID string) error
 	return nil
 }
 
-// PoolForRun returns the pool a run is assigned to, or ErrNotFound.
+// PoolForRun returns the pool a run is assigned to only when the manager has
+// positively authorized its current Kubernetes/OpenEBS storage identity. This
+// durable check occurs before an existing idle credit can be consumed.
 func (s *Store) PoolForRun(ctx context.Context, runID string) (string, error) {
 	var poolID string
+	var storageAuthorized bool
 	err := s.pool.QueryRow(ctx, `
-		SELECT pool_id::text FROM runtime.run_pool_assignments WHERE run_id = $1::uuid`, runID).Scan(&poolID)
+		SELECT a.pool_id::text, COALESCE(s.storage_authorized, false)
+		FROM runtime.run_pool_assignments a
+		LEFT JOIN runtime.workspace_capacity_state s ON s.pool_id = a.pool_id
+		WHERE a.run_id = $1::uuid`, runID).Scan(&poolID, &storageAuthorized)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", ErrNotFound
 	}
 	if err != nil {
 		return "", err
+	}
+	if !storageAuthorized {
+		return "", ErrPoolStorageUnauthorized
 	}
 	return poolID, nil
 }

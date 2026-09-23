@@ -10,7 +10,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file iterabase/harness/v1/harness.proto.
  */
 export const file_iterabase_harness_v1_harness: GenFile = /*@__PURE__*/
-  fileDesc("CiJpdGVyYWJhc2UvaGFybmVzcy92MS9oYXJuZXNzLnByb3RvEhRpdGVyYWJhc2UuaGFybmVzcy52MSKZAgoNV29ya2VyTWVzc2FnZRIsCgVoZWxsbxgBIAEoCzIbLml0ZXJhYmFzZS5oYXJuZXNzLnYxLkhlbGxvSAASLAoFcmVhZHkYAiABKAsyGy5pdGVyYWJhc2UuaGFybmVzcy52MS5SZWFkeUgAEjQKCWhlYXJ0YmVhdBgDIAEoCzIfLml0ZXJhYmFzZS5oYXJuZXNzLnYxLkhlYXJ0YmVhdEgAEjUKCnR1cm5fZXZlbnQYBCABKAsyHy5pdGVyYWJhc2UuaGFybmVzcy52MS5UdXJuRXZlbnRIABI3Cgt0b2tlbl9kZWx0YRgFIAEoCzIgLml0ZXJhYmFzZS5oYXJuZXNzLnYxLlRva2VuRGVsdGFIAEIGCgRraW5kInIKBUhlbGxvEhEKCXdvcmtlcl9pZBgBIAEoCRIPCgdwb29sX2lkGAIgASgJEhUKDWJ1aWxkX3ZlcnNpb24YAyABKAkSGAoQcHJvdG9jb2xfdmVyc2lvbhgEIAEoCRIUCgxjYXBhYmlsaXRpZXMYBSADKAkiBwoFUmVhZHkirwEKCUhlYXJ0YmVhdBIwCgVzdGF0ZRgBIAEoDjIhLml0ZXJhYmFzZS5oYXJuZXNzLnYxLldvcmtlclN0YXRlEg8KB3R1cm5faWQYAiABKAkSLwoIcGlfcGhhc2UYAyABKA4yHS5pdGVyYWJhc2UuaGFybmVzcy52MS5QaVBoYXNlEhQKDHRvb2xfY2FsbF9pZBgEIAEoCRIYChBoaWdoZXN0X3NlcXVlbmNlGAUgASgEIsAHCglUdXJuRXZlbnQSDwoHdHVybl9pZBgBIAEoCRIQCghzZXF1ZW5jZRgCIAEoBBIUCgx0aW1lc3RhbXBfbXMYAyABKAMSQwoRZXhlY3V0aW9uX3N0YXJ0ZWQYCiABKAsyJi5pdGVyYWJhc2UuaGFybmVzcy52MS5FeGVjdXRpb25TdGFydGVkSAASRAoSbW9kZWxfY2FsbF9zdGFydGVkGAsgASgLMiYuaXRlcmFiYXNlLmhhcm5lc3MudjEuTW9kZWxDYWxsU3RhcnRlZEgAEkMKEWFzc2lzdGFudF9tZXNzYWdlGAwgASgLMiYuaXRlcmFiYXNlLmhhcm5lc3MudjEuQXNzaXN0YW50TWVzc2FnZUgAEkIKEW1vZGVsX2NhbGxfZmFpbGVkGA0gASgLMiUuaXRlcmFiYXNlLmhhcm5lc3MudjEuTW9kZWxDYWxsRmFpbGVkSAASSgoVbW9kZWxfcmV0cnlfc2NoZWR1bGVkGA4gASgLMikuaXRlcmFiYXNlLmhhcm5lc3MudjEuTW9kZWxSZXRyeVNjaGVkdWxlZEgAEkgKFG1vZGVsX3JldHJ5X2ZpbmlzaGVkGA8gASgLMiguaXRlcmFiYXNlLmhhcm5lc3MudjEuTW9kZWxSZXRyeUZpbmlzaGVkSAASQgoRdG9vbF9jYWxsX3N0YXJ0ZWQYECABKAsyJS5pdGVyYWJhc2UuaGFybmVzcy52MS5Ub29sQ2FsbFN0YXJ0ZWRIABI3Cgt0b29sX3Jlc3VsdBgRIAEoCzIgLml0ZXJhYmFzZS5oYXJuZXNzLnYxLlRvb2xSZXN1bHRIABJFChJjb21wYWN0aW9uX3N0YXJ0ZWQYEiABKAsyJy5pdGVyYWJhc2UuaGFybmVzcy52MS5Db21wYWN0aW9uU3RhcnRlZEgAEkcKE2NvbXBhY3Rpb25fZmluaXNoZWQYEyABKAsyKC5pdGVyYWJhc2UuaGFybmVzcy52MS5Db21wYWN0aW9uRmluaXNoZWRIABI7Cg1oYXJuZXNzX2Vycm9yGBQgASgLMiIuaXRlcmFiYXNlLmhhcm5lc3MudjEuSGFybmVzc0Vycm9ySAASPQoOd29ya2VyX291dGNvbWUYFSABKAsyIy5pdGVyYWJhc2UuaGFybmVzcy52MS5Xb3JrZXJPdXRjb21lSAASPwoPc3RlcF9jb21wbGV0aW9uGBYgASgLMiQuaXRlcmFiYXNlLmhhcm5lc3MudjEuU3RlcENvbXBsZXRpb25IAEIGCgRraW5kIlkKEEV4ZWN1dGlvblN0YXJ0ZWQSEgoKc2Vzc2lvbl9pZBgBIAEoCRIxCgdzYW5kYm94GAIgASgLMiAuaXRlcmFiYXNlLmhhcm5lc3MudjEuU2FuZGJveFJlZiI5ChBNb2RlbENhbGxTdGFydGVkEg0KBW1vZGVsGAEgASgJEhYKDnRoaW5raW5nX2xldmVsGAIgASgJIqsBChBBc3Npc3RhbnRNZXNzYWdlEgwKBHRleHQYASABKAkSMgoKdG9vbF9jYWxscxgCIAMoCzIeLml0ZXJhYmFzZS5oYXJuZXNzLnYxLlRvb2xDYWxsEioKBXVzYWdlGAMgASgLMhsuaXRlcmFiYXNlLmhhcm5lc3MudjEuVXNhZ2USEwoLc3RvcF9yZWFzb24YBCABKAkSFAoMdGltZXN0YW1wX21zGAUgASgDIjwKCFRvb2xDYWxsEgoKAmlkGAEgASgJEgwKBG5hbWUYAiABKAkSFgoOYXJndW1lbnRzX2pzb24YAyABKAkiUgoPVG9vbENhbGxTdGFydGVkEhQKDHRvb2xfY2FsbF9pZBgBIAEoCRIRCgl0b29sX25hbWUYAiABKAkSFgoOYXJndW1lbnRzX2pzb24YAyABKAkiigEKClRvb2xSZXN1bHQSFAoMdG9vbF9jYWxsX2lkGAEgASgJEhEKCXRvb2xfbmFtZRgCIAEoCRIWCg5hcmd1bWVudHNfanNvbhgDIAEoCRITCgtyZXN1bHRfdGV4dBgEIAEoCRIQCghpc19lcnJvchgFIAEoCBIUCgx0aW1lc3RhbXBfbXMYBiABKAMifQoFVXNhZ2USFAoMaW5wdXRfdG9rZW5zGAEgASgDEhUKDW91dHB1dF90b2tlbnMYAiABKAMSGQoRY2FjaGVfcmVhZF90b2tlbnMYAyABKAMSGgoSY2FjaGVfd3JpdGVfdG9rZW5zGAQgASgDEhAKCGNvc3RfdXNkGAUgASgBIkMKD01vZGVsQ2FsbEZhaWxlZBIwCgVlcnJvchgBIAEoCzIhLml0ZXJhYmFzZS5oYXJuZXNzLnYxLkVycm9yRGV0YWlsImUKE01vZGVsUmV0cnlTY2hlZHVsZWQSDwoHYXR0ZW1wdBgBIAEoDRIUCgxtYXhfYXR0ZW1wdHMYAiABKA0SEAoIZGVsYXlfbXMYAyABKAMSFQoNZXJyb3JfbWVzc2FnZRgEIAEoCSJLChJNb2RlbFJldHJ5RmluaXNoZWQSDwoHc3VjY2VzcxgBIAEoCBIPCgdhdHRlbXB0GAIgASgNEhMKC2ZpbmFsX2Vycm9yGAMgASgJIiMKEUNvbXBhY3Rpb25TdGFydGVkEg4KBnJlYXNvbhgBIAEoCSJgChJDb21wYWN0aW9uRmluaXNoZWQSDgoGcmVhc29uGAEgASgJEg8KB2Fib3J0ZWQYAiABKAgSEgoKd2lsbF9yZXRyeRgDIAEoCBIVCg1lcnJvcl9tZXNzYWdlGAQgASgJIkAKDEhhcm5lc3NFcnJvchIwCgVlcnJvchgBIAEoCzIhLml0ZXJhYmFzZS5oYXJuZXNzLnYxLkVycm9yRGV0YWlsInwKC0Vycm9yRGV0YWlsEgwKBGNvZGUYASABKAkSDwoHbWVzc2FnZRgCIAEoCRI4CgxyZXRyeWFiaWxpdHkYAyABKA4yIi5pdGVyYWJhc2UuaGFybmVzcy52MS5SZXRyeWFiaWxpdHkSFAoMZGV0YWlsc19qc29uGAQgASgJIoUBCg5TdGVwQ29tcGxldGlvbhIPCgdvdXRjb21lGAEgASgJEg8KB3N1bW1hcnkYAiABKAkSEwoLb3V0cHV0X2pzb24YAyABKAkSPAoNYXJ0aWZhY3RfcmVmcxgEIAMoCzIlLml0ZXJhYmFzZS5oYXJuZXNzLnYxLlN0ZXBBcnRpZmFjdFJlZiJLCg9TdGVwQXJ0aWZhY3RSZWYSEwoLYXJ0aWZhY3RfaWQYASABKAkSDAoEcm9sZRgCIAEoCRIVCg1tZXRhZGF0YV9qc29uGAMgASgJIlAKDVdvcmtlck91dGNvbWUSLgoHb3V0Y29tZRgBIAEoDjIdLml0ZXJhYmFzZS5oYXJuZXNzLnYxLk91dGNvbWUSDwoHbWVzc2FnZRgCIAEoCSJyCgpUb2tlbkRlbHRhEg8KB3R1cm5faWQYASABKAkSFQoNY29udGVudF9pbmRleBgCIAEoBRItCgR0eXBlGAMgASgOMh8uaXRlcmFiYXNlLmhhcm5lc3MudjEuRGVsdGFUeXBlEg0KBWRlbHRhGAQgASgJIqgCCg5Db250cm9sTWVzc2FnZRIwCgd3ZWxjb21lGAEgASgLMh0uaXRlcmFiYXNlLmhhcm5lc3MudjEuV2VsY29tZUgAEjcKC2Fzc2lnbl90dXJuGAIgASgLMiAuaXRlcmFiYXNlLmhhcm5lc3MudjEuQXNzaWduVHVybkgAEjUKCmFib3J0X3R1cm4YAyABKAsyHy5pdGVyYWJhc2UuaGFybmVzcy52MS5BYm9ydFR1cm5IABIzCglldmVudF9hY2sYBCABKAsyHi5pdGVyYWJhc2UuaGFybmVzcy52MS5FdmVudEFja0gAEjcKC3Nlc3Npb25fZW5kGAUgASgLMiAuaXRlcmFiYXNlLmhhcm5lc3MudjEuU2Vzc2lvbkVuZEgAQgYKBGtpbmQieAoHV2VsY29tZRIYChBwcm90b2NvbF92ZXJzaW9uGAEgASgJEhoKEmZlbmNpbmdfZ2VuZXJhdGlvbhgCIAEoBBIdChVoZWFydGJlYXRfaW50ZXJ2YWxfbXMYAyABKAUSGAoQbGVhc2VfdGltZW91dF9tcxgEIAEoBSK/BAoKQXNzaWduVHVybhIPCgd0dXJuX2lkGAEgASgJEhIKCnNlc3Npb25faWQYAiABKAkSMQoHc2FuZGJveBgDIAEoCzIgLml0ZXJhYmFzZS5oYXJuZXNzLnYxLlNhbmRib3hSZWYSDwoHcGVyc29uYRgEIAEoCRIwCgVtb2RlbBgFIAEoCzIhLml0ZXJhYmFzZS5oYXJuZXNzLnYxLk1vZGVsQ29uZmlnEhcKD3dvcmtzcGFjZV90b29scxgGIAEoCBIZChFzY29wZV9pZGVudGl0eV9pZBgHIAEoCRIPCgdtZXNzYWdlGAggASgJEisKBmltYWdlcxgJIAMoCzIbLml0ZXJhYmFzZS5oYXJuZXNzLnYxLkltYWdlEg4KBnJ1bl9pZBgKIAEoCRIZChFub2RlX2V4ZWN1dGlvbl9pZBgLIAEoCRIQCghub2RlX2tleRgMIAEoCRIUCgxjb250ZXh0X2pzb24YDSABKAkSGwoTY29tcGxldGlvbl9vdXRjb21lcxgOIAMoCRIlCh1jb21wbGV0aW9uX291dHB1dF9zY2hlbWFfanNvbhgPIAEoCRIuCgZza2lsbHMYECADKAsyHi5pdGVyYWJhc2UuaGFybmVzcy52MS5Ta2lsbFJlZhIUCgx3b3JrX2l0ZW1faWQYESABKAkSRwoQbWF0ZXJpYWxpemF0aW9ucxgSIAMoCzItLml0ZXJhYmFzZS5oYXJuZXNzLnYxLkFydGlmYWN0TWF0ZXJpYWxpemF0aW9uIjkKCFNraWxsUmVmEgwKBG5hbWUYASABKAkSDwoHdmVyc2lvbhgCIAEoCRIOCgZkaWdlc3QYAyABKAkiWQoLQXJ0aWZhY3RSZWYSEwoLYXJ0aWZhY3RfaWQYASABKAkSEQoJbWltZV90eXBlGAIgASgJEhIKCnNpemVfYnl0ZXMYAyABKAMSDgoGZGlnZXN0GAQgASgJImAKF0FydGlmYWN0TWF0ZXJpYWxpemF0aW9uEi4KA3JlZhgBIAEoCzIhLml0ZXJhYmFzZS5oYXJuZXNzLnYxLkFydGlmYWN0UmVmEhUKDXJlbGF0aXZlX3BhdGgYAiABKAkiTwoKU2FuZGJveFJlZhISCgpzYW5kYm94X2lkGAEgASgJEgsKA3VpZBgCIAEoDRILCgNnaWQYAyABKA0SEwoLd29ya2luZ19kaXIYBCABKAkicQoLTW9kZWxDb25maWcSCgoCaWQYASABKAkSCwoDYXBpGAIgASgJEhYKDmNvbnRleHRfd2luZG93GAMgASgFEhkKEW1heF9vdXRwdXRfdG9rZW5zGAQgASgFEhYKDnRoaW5raW5nX2xldmVsGAUgASgJIigKBUltYWdlEgwKBGRhdGEYASABKAwSEQoJbWltZV90eXBlGAIgASgJImAKCUFib3J0VHVybhIPCgd0dXJuX2lkGAEgASgJEjEKBnJlYXNvbhgCIAEoDjIhLml0ZXJhYmFzZS5oYXJuZXNzLnYxLkFib3J0UmVhc29uEg8KB21lc3NhZ2UYAyABKAkiNQoIRXZlbnRBY2sSDwoHdHVybl9pZBgBIAEoCRIYChB0aHJvdWdoX3NlcXVlbmNlGAIgASgEIjoKClNlc3Npb25FbmQSEgoKc2FuZGJveF9pZBgBIAEoCRILCgN1aWQYAiABKA0SCwoDZ2lkGAMgASgNKsgBCgtXb3JrZXJTdGF0ZRIcChhXT1JLRVJfU1RBVEVfVU5TUEVDSUZJRUQQABIVChFXT1JLRVJfU1RBVEVfSURMRRABEhkKFVdPUktFUl9TVEFURV9TVEFSVElORxACEhgKFFdPUktFUl9TVEFURV9SVU5OSU5HEAMSGQoVV09SS0VSX1NUQVRFX0FCT1JUSU5HEAQSGQoVV09SS0VSX1NUQVRFX0NMRUFOSU5HEAUSGQoVV09SS0VSX1NUQVRFX0RSQUlOSU5HEAYqvAEKB1BpUGhhc2USGAoUUElfUEhBU0VfVU5TUEVDSUZJRUQQABIaChZQSV9QSEFTRV9TRVNTSU9OX1NFVFVQEAESFwoTUElfUEhBU0VfTU9ERUxfQ0FMTBACEhYKElBJX1BIQVNFX1RPT0xfQ0FMTBADEhcKE1BJX1BIQVNFX0NPTVBBQ1RJT04QBBIaChZQSV9QSEFTRV9SRVRSWV9CQUNLT0ZGEAUSFQoRUElfUEhBU0VfU0hVVERPV04QBiqCAQoMUmV0cnlhYmlsaXR5EhwKGFJFVFJZQUJJTElUWV9VTlNQRUNJRklFRBAAEhoKFlJFVFJZQUJJTElUWV9SRVRSWUFCTEUQARIeChpSRVRSWUFCSUxJVFlfTk9OX1JFVFJZQUJMRRACEhgKFFJFVFJZQUJJTElUWV9VTktOT1dOEAMqYgoHT3V0Y29tZRIXChNPVVRDT01FX1VOU1BFQ0lGSUVEEAASFQoRT1VUQ09NRV9DT01QTEVURUQQARITCg9PVVRDT01FX0FCT1JURUQQAhISCg5PVVRDT01FX0ZBSUxFRBADKlUKCURlbHRhVHlwZRIaChZERUxUQV9UWVBFX1VOU1BFQ0lGSUVEEAASEwoPREVMVEFfVFlQRV9URVhUEAESFwoTREVMVEFfVFlQRV9USElOS0lORxACKq4BCgtBYm9ydFJlYXNvbhIcChhBQk9SVF9SRUFTT05fVU5TUEVDSUZJRUQQABIcChhBQk9SVF9SRUFTT05fVVNFUl9DQU5DRUwQARIgChxBQk9SVF9SRUFTT05fV09SS0ZMT1dfQ0FOQ0VMEAISHgoaQUJPUlRfUkVBU09OX0xFQVNFX0VYUElSRUQQAxIhCh1BQk9SVF9SRUFTT05fV09SS0ZMT1dfVElNRU9VVBAEMmAKB0hhcm5lc3MSVQoEV29yaxIjLml0ZXJhYmFzZS5oYXJuZXNzLnYxLldvcmtlck1lc3NhZ2UaJC5pdGVyYWJhc2UuaGFybmVzcy52MS5Db250cm9sTWVzc2FnZSgBMAFChQIKGGNvbS5pdGVyYWJhc2UuaGFybmVzcy52MUIMSGFybmVzc1Byb3RvUAFaaWdpdGh1Yi5jb20vbnVub2Nnb25jYWx2ZXMvaXRlcmFiYXNlLW1vbm8vY29udHJvbC1wbGFuZS9pbnRlcm5hbC9oYXJuZXNzcnBjL2l0ZXJhYmFzZS9oYXJuZXNzL3YxO2hhcm5lc3N2MaICA0lIWKoCFEl0ZXJhYmFzZS5IYXJuZXNzLlYxygIUSXRlcmFiYXNlXEhhcm5lc3NcVjHiAiBJdGVyYWJhc2VcSGFybmVzc1xWMVxHUEJNZXRhZGF0YeoCFkl0ZXJhYmFzZTo6SGFybmVzczo6VjFiBnByb3RvMw");
+  fileDesc("CiJpdGVyYWJhc2UvaGFybmVzcy92MS9oYXJuZXNzLnByb3RvEhRpdGVyYWJhc2UuaGFybmVzcy52MSLcAgoNV29ya2VyTWVzc2FnZRIsCgVoZWxsbxgBIAEoCzIbLml0ZXJhYmFzZS5oYXJuZXNzLnYxLkhlbGxvSAASLAoFcmVhZHkYAiABKAsyGy5pdGVyYWJhc2UuaGFybmVzcy52MS5SZWFkeUgAEjQKCWhlYXJ0YmVhdBgDIAEoCzIfLml0ZXJhYmFzZS5oYXJuZXNzLnYxLkhlYXJ0YmVhdEgAEjUKCnR1cm5fZXZlbnQYBCABKAsyHy5pdGVyYWJhc2UuaGFybmVzcy52MS5UdXJuRXZlbnRIABI3Cgt0b2tlbl9kZWx0YRgFIAEoCzIgLml0ZXJhYmFzZS5oYXJuZXNzLnYxLlRva2VuRGVsdGFIABJBChB3b3Jrc3BhY2Vfc3RhdHVzGAYgASgLMiUuaXRlcmFiYXNlLmhhcm5lc3MudjEuV29ya3NwYWNlU3RhdHVzSABCBgoEa2luZCJyCgVIZWxsbxIRCgl3b3JrZXJfaWQYASABKAkSDwoHcG9vbF9pZBgCIAEoCRIVCg1idWlsZF92ZXJzaW9uGAMgASgJEhgKEHByb3RvY29sX3ZlcnNpb24YBCABKAkSFAoMY2FwYWJpbGl0aWVzGAUgAygJIgcKBVJlYWR5IngKD1dvcmtzcGFjZVN0YXR1cxISCgpmcmVlX2J5dGVzGAEgASgEEhYKDmNhcGFjaXR5X2J5dGVzGAIgASgEEhIKCmZyZWVfcmF0aW8YAyABKAESDwoHd2FybmluZxgEIAEoCBIUCgxjcmVkaXRfZ2F0ZWQYBSABKAgirwEKCUhlYXJ0YmVhdBIwCgVzdGF0ZRgBIAEoDjIhLml0ZXJhYmFzZS5oYXJuZXNzLnYxLldvcmtlclN0YXRlEg8KB3R1cm5faWQYAiABKAkSLwoIcGlfcGhhc2UYAyABKA4yHS5pdGVyYWJhc2UuaGFybmVzcy52MS5QaVBoYXNlEhQKDHRvb2xfY2FsbF9pZBgEIAEoCRIYChBoaWdoZXN0X3NlcXVlbmNlGAUgASgEIsAHCglUdXJuRXZlbnQSDwoHdHVybl9pZBgBIAEoCRIQCghzZXF1ZW5jZRgCIAEoBBIUCgx0aW1lc3RhbXBfbXMYAyABKAMSQwoRZXhlY3V0aW9uX3N0YXJ0ZWQYCiABKAsyJi5pdGVyYWJhc2UuaGFybmVzcy52MS5FeGVjdXRpb25TdGFydGVkSAASRAoSbW9kZWxfY2FsbF9zdGFydGVkGAsgASgLMiYuaXRlcmFiYXNlLmhhcm5lc3MudjEuTW9kZWxDYWxsU3RhcnRlZEgAEkMKEWFzc2lzdGFudF9tZXNzYWdlGAwgASgLMiYuaXRlcmFiYXNlLmhhcm5lc3MudjEuQXNzaXN0YW50TWVzc2FnZUgAEkIKEW1vZGVsX2NhbGxfZmFpbGVkGA0gASgLMiUuaXRlcmFiYXNlLmhhcm5lc3MudjEuTW9kZWxDYWxsRmFpbGVkSAASSgoVbW9kZWxfcmV0cnlfc2NoZWR1bGVkGA4gASgLMikuaXRlcmFiYXNlLmhhcm5lc3MudjEuTW9kZWxSZXRyeVNjaGVkdWxlZEgAEkgKFG1vZGVsX3JldHJ5X2ZpbmlzaGVkGA8gASgLMiguaXRlcmFiYXNlLmhhcm5lc3MudjEuTW9kZWxSZXRyeUZpbmlzaGVkSAASQgoRdG9vbF9jYWxsX3N0YXJ0ZWQYECABKAsyJS5pdGVyYWJhc2UuaGFybmVzcy52MS5Ub29sQ2FsbFN0YXJ0ZWRIABI3Cgt0b29sX3Jlc3VsdBgRIAEoCzIgLml0ZXJhYmFzZS5oYXJuZXNzLnYxLlRvb2xSZXN1bHRIABJFChJjb21wYWN0aW9uX3N0YXJ0ZWQYEiABKAsyJy5pdGVyYWJhc2UuaGFybmVzcy52MS5Db21wYWN0aW9uU3RhcnRlZEgAEkcKE2NvbXBhY3Rpb25fZmluaXNoZWQYEyABKAsyKC5pdGVyYWJhc2UuaGFybmVzcy52MS5Db21wYWN0aW9uRmluaXNoZWRIABI7Cg1oYXJuZXNzX2Vycm9yGBQgASgLMiIuaXRlcmFiYXNlLmhhcm5lc3MudjEuSGFybmVzc0Vycm9ySAASPQoOd29ya2VyX291dGNvbWUYFSABKAsyIy5pdGVyYWJhc2UuaGFybmVzcy52MS5Xb3JrZXJPdXRjb21lSAASPwoPc3RlcF9jb21wbGV0aW9uGBYgASgLMiQuaXRlcmFiYXNlLmhhcm5lc3MudjEuU3RlcENvbXBsZXRpb25IAEIGCgRraW5kIlkKEEV4ZWN1dGlvblN0YXJ0ZWQSEgoKc2Vzc2lvbl9pZBgBIAEoCRIxCgdzYW5kYm94GAIgASgLMiAuaXRlcmFiYXNlLmhhcm5lc3MudjEuU2FuZGJveFJlZiI5ChBNb2RlbENhbGxTdGFydGVkEg0KBW1vZGVsGAEgASgJEhYKDnRoaW5raW5nX2xldmVsGAIgASgJIqsBChBBc3Npc3RhbnRNZXNzYWdlEgwKBHRleHQYASABKAkSMgoKdG9vbF9jYWxscxgCIAMoCzIeLml0ZXJhYmFzZS5oYXJuZXNzLnYxLlRvb2xDYWxsEioKBXVzYWdlGAMgASgLMhsuaXRlcmFiYXNlLmhhcm5lc3MudjEuVXNhZ2USEwoLc3RvcF9yZWFzb24YBCABKAkSFAoMdGltZXN0YW1wX21zGAUgASgDIjwKCFRvb2xDYWxsEgoKAmlkGAEgASgJEgwKBG5hbWUYAiABKAkSFgoOYXJndW1lbnRzX2pzb24YAyABKAkiUgoPVG9vbENhbGxTdGFydGVkEhQKDHRvb2xfY2FsbF9pZBgBIAEoCRIRCgl0b29sX25hbWUYAiABKAkSFgoOYXJndW1lbnRzX2pzb24YAyABKAkiigEKClRvb2xSZXN1bHQSFAoMdG9vbF9jYWxsX2lkGAEgASgJEhEKCXRvb2xfbmFtZRgCIAEoCRIWCg5hcmd1bWVudHNfanNvbhgDIAEoCRITCgtyZXN1bHRfdGV4dBgEIAEoCRIQCghpc19lcnJvchgFIAEoCBIUCgx0aW1lc3RhbXBfbXMYBiABKAMifQoFVXNhZ2USFAoMaW5wdXRfdG9rZW5zGAEgASgDEhUKDW91dHB1dF90b2tlbnMYAiABKAMSGQoRY2FjaGVfcmVhZF90b2tlbnMYAyABKAMSGgoSY2FjaGVfd3JpdGVfdG9rZW5zGAQgASgDEhAKCGNvc3RfdXNkGAUgASgBIkMKD01vZGVsQ2FsbEZhaWxlZBIwCgVlcnJvchgBIAEoCzIhLml0ZXJhYmFzZS5oYXJuZXNzLnYxLkVycm9yRGV0YWlsImUKE01vZGVsUmV0cnlTY2hlZHVsZWQSDwoHYXR0ZW1wdBgBIAEoDRIUCgxtYXhfYXR0ZW1wdHMYAiABKA0SEAoIZGVsYXlfbXMYAyABKAMSFQoNZXJyb3JfbWVzc2FnZRgEIAEoCSJLChJNb2RlbFJldHJ5RmluaXNoZWQSDwoHc3VjY2VzcxgBIAEoCBIPCgdhdHRlbXB0GAIgASgNEhMKC2ZpbmFsX2Vycm9yGAMgASgJIiMKEUNvbXBhY3Rpb25TdGFydGVkEg4KBnJlYXNvbhgBIAEoCSJgChJDb21wYWN0aW9uRmluaXNoZWQSDgoGcmVhc29uGAEgASgJEg8KB2Fib3J0ZWQYAiABKAgSEgoKd2lsbF9yZXRyeRgDIAEoCBIVCg1lcnJvcl9tZXNzYWdlGAQgASgJIkAKDEhhcm5lc3NFcnJvchIwCgVlcnJvchgBIAEoCzIhLml0ZXJhYmFzZS5oYXJuZXNzLnYxLkVycm9yRGV0YWlsInwKC0Vycm9yRGV0YWlsEgwKBGNvZGUYASABKAkSDwoHbWVzc2FnZRgCIAEoCRI4CgxyZXRyeWFiaWxpdHkYAyABKA4yIi5pdGVyYWJhc2UuaGFybmVzcy52MS5SZXRyeWFiaWxpdHkSFAoMZGV0YWlsc19qc29uGAQgASgJIoUBCg5TdGVwQ29tcGxldGlvbhIPCgdvdXRjb21lGAEgASgJEg8KB3N1bW1hcnkYAiABKAkSEwoLb3V0cHV0X2pzb24YAyABKAkSPAoNYXJ0aWZhY3RfcmVmcxgEIAMoCzIlLml0ZXJhYmFzZS5oYXJuZXNzLnYxLlN0ZXBBcnRpZmFjdFJlZiJLCg9TdGVwQXJ0aWZhY3RSZWYSEwoLYXJ0aWZhY3RfaWQYASABKAkSDAoEcm9sZRgCIAEoCRIVCg1tZXRhZGF0YV9qc29uGAMgASgJIlAKDVdvcmtlck91dGNvbWUSLgoHb3V0Y29tZRgBIAEoDjIdLml0ZXJhYmFzZS5oYXJuZXNzLnYxLk91dGNvbWUSDwoHbWVzc2FnZRgCIAEoCSJyCgpUb2tlbkRlbHRhEg8KB3R1cm5faWQYASABKAkSFQoNY29udGVudF9pbmRleBgCIAEoBRItCgR0eXBlGAMgASgOMh8uaXRlcmFiYXNlLmhhcm5lc3MudjEuRGVsdGFUeXBlEg0KBWRlbHRhGAQgASgJIqgCCg5Db250cm9sTWVzc2FnZRIwCgd3ZWxjb21lGAEgASgLMh0uaXRlcmFiYXNlLmhhcm5lc3MudjEuV2VsY29tZUgAEjcKC2Fzc2lnbl90dXJuGAIgASgLMiAuaXRlcmFiYXNlLmhhcm5lc3MudjEuQXNzaWduVHVybkgAEjUKCmFib3J0X3R1cm4YAyABKAsyHy5pdGVyYWJhc2UuaGFybmVzcy52MS5BYm9ydFR1cm5IABIzCglldmVudF9hY2sYBCABKAsyHi5pdGVyYWJhc2UuaGFybmVzcy52MS5FdmVudEFja0gAEjcKC3Nlc3Npb25fZW5kGAUgASgLMiAuaXRlcmFiYXNlLmhhcm5lc3MudjEuU2Vzc2lvbkVuZEgAQgYKBGtpbmQieAoHV2VsY29tZRIYChBwcm90b2NvbF92ZXJzaW9uGAEgASgJEhoKEmZlbmNpbmdfZ2VuZXJhdGlvbhgCIAEoBBIdChVoZWFydGJlYXRfaW50ZXJ2YWxfbXMYAyABKAUSGAoQbGVhc2VfdGltZW91dF9tcxgEIAEoBSK/BAoKQXNzaWduVHVybhIPCgd0dXJuX2lkGAEgASgJEhIKCnNlc3Npb25faWQYAiABKAkSMQoHc2FuZGJveBgDIAEoCzIgLml0ZXJhYmFzZS5oYXJuZXNzLnYxLlNhbmRib3hSZWYSDwoHcGVyc29uYRgEIAEoCRIwCgVtb2RlbBgFIAEoCzIhLml0ZXJhYmFzZS5oYXJuZXNzLnYxLk1vZGVsQ29uZmlnEhcKD3dvcmtzcGFjZV90b29scxgGIAEoCBIZChFzY29wZV9pZGVudGl0eV9pZBgHIAEoCRIPCgdtZXNzYWdlGAggASgJEisKBmltYWdlcxgJIAMoCzIbLml0ZXJhYmFzZS5oYXJuZXNzLnYxLkltYWdlEg4KBnJ1bl9pZBgKIAEoCRIZChFub2RlX2V4ZWN1dGlvbl9pZBgLIAEoCRIQCghub2RlX2tleRgMIAEoCRIUCgxjb250ZXh0X2pzb24YDSABKAkSGwoTY29tcGxldGlvbl9vdXRjb21lcxgOIAMoCRIlCh1jb21wbGV0aW9uX291dHB1dF9zY2hlbWFfanNvbhgPIAEoCRIuCgZza2lsbHMYECADKAsyHi5pdGVyYWJhc2UuaGFybmVzcy52MS5Ta2lsbFJlZhIUCgx3b3JrX2l0ZW1faWQYESABKAkSRwoQbWF0ZXJpYWxpemF0aW9ucxgSIAMoCzItLml0ZXJhYmFzZS5oYXJuZXNzLnYxLkFydGlmYWN0TWF0ZXJpYWxpemF0aW9uIjkKCFNraWxsUmVmEgwKBG5hbWUYASABKAkSDwoHdmVyc2lvbhgCIAEoCRIOCgZkaWdlc3QYAyABKAkiWQoLQXJ0aWZhY3RSZWYSEwoLYXJ0aWZhY3RfaWQYASABKAkSEQoJbWltZV90eXBlGAIgASgJEhIKCnNpemVfYnl0ZXMYAyABKAMSDgoGZGlnZXN0GAQgASgJImAKF0FydGlmYWN0TWF0ZXJpYWxpemF0aW9uEi4KA3JlZhgBIAEoCzIhLml0ZXJhYmFzZS5oYXJuZXNzLnYxLkFydGlmYWN0UmVmEhUKDXJlbGF0aXZlX3BhdGgYAiABKAkiTwoKU2FuZGJveFJlZhISCgpzYW5kYm94X2lkGAEgASgJEgsKA3VpZBgCIAEoDRILCgNnaWQYAyABKA0SEwoLd29ya2luZ19kaXIYBCABKAkicQoLTW9kZWxDb25maWcSCgoCaWQYASABKAkSCwoDYXBpGAIgASgJEhYKDmNvbnRleHRfd2luZG93GAMgASgFEhkKEW1heF9vdXRwdXRfdG9rZW5zGAQgASgFEhYKDnRoaW5raW5nX2xldmVsGAUgASgJIigKBUltYWdlEgwKBGRhdGEYASABKAwSEQoJbWltZV90eXBlGAIgASgJImAKCUFib3J0VHVybhIPCgd0dXJuX2lkGAEgASgJEjEKBnJlYXNvbhgCIAEoDjIhLml0ZXJhYmFzZS5oYXJuZXNzLnYxLkFib3J0UmVhc29uEg8KB21lc3NhZ2UYAyABKAkiNQoIRXZlbnRBY2sSDwoHdHVybl9pZBgBIAEoCRIYChB0aHJvdWdoX3NlcXVlbmNlGAIgASgEIjoKClNlc3Npb25FbmQSEgoKc2FuZGJveF9pZBgBIAEoCRILCgN1aWQYAiABKA0SCwoDZ2lkGAMgASgNKsgBCgtXb3JrZXJTdGF0ZRIcChhXT1JLRVJfU1RBVEVfVU5TUEVDSUZJRUQQABIVChFXT1JLRVJfU1RBVEVfSURMRRABEhkKFVdPUktFUl9TVEFURV9TVEFSVElORxACEhgKFFdPUktFUl9TVEFURV9SVU5OSU5HEAMSGQoVV09SS0VSX1NUQVRFX0FCT1JUSU5HEAQSGQoVV09SS0VSX1NUQVRFX0NMRUFOSU5HEAUSGQoVV09SS0VSX1NUQVRFX0RSQUlOSU5HEAYqvAEKB1BpUGhhc2USGAoUUElfUEhBU0VfVU5TUEVDSUZJRUQQABIaChZQSV9QSEFTRV9TRVNTSU9OX1NFVFVQEAESFwoTUElfUEhBU0VfTU9ERUxfQ0FMTBACEhYKElBJX1BIQVNFX1RPT0xfQ0FMTBADEhcKE1BJX1BIQVNFX0NPTVBBQ1RJT04QBBIaChZQSV9QSEFTRV9SRVRSWV9CQUNLT0ZGEAUSFQoRUElfUEhBU0VfU0hVVERPV04QBiqCAQoMUmV0cnlhYmlsaXR5EhwKGFJFVFJZQUJJTElUWV9VTlNQRUNJRklFRBAAEhoKFlJFVFJZQUJJTElUWV9SRVRSWUFCTEUQARIeChpSRVRSWUFCSUxJVFlfTk9OX1JFVFJZQUJMRRACEhgKFFJFVFJZQUJJTElUWV9VTktOT1dOEAMqYgoHT3V0Y29tZRIXChNPVVRDT01FX1VOU1BFQ0lGSUVEEAASFQoRT1VUQ09NRV9DT01QTEVURUQQARITCg9PVVRDT01FX0FCT1JURUQQAhISCg5PVVRDT01FX0ZBSUxFRBADKlUKCURlbHRhVHlwZRIaChZERUxUQV9UWVBFX1VOU1BFQ0lGSUVEEAASEwoPREVMVEFfVFlQRV9URVhUEAESFwoTREVMVEFfVFlQRV9USElOS0lORxACKq4BCgtBYm9ydFJlYXNvbhIcChhBQk9SVF9SRUFTT05fVU5TUEVDSUZJRUQQABIcChhBQk9SVF9SRUFTT05fVVNFUl9DQU5DRUwQARIgChxBQk9SVF9SRUFTT05fV09SS0ZMT1dfQ0FOQ0VMEAISHgoaQUJPUlRfUkVBU09OX0xFQVNFX0VYUElSRUQQAxIhCh1BQk9SVF9SRUFTT05fV09SS0ZMT1dfVElNRU9VVBAEMmAKB0hhcm5lc3MSVQoEV29yaxIjLml0ZXJhYmFzZS5oYXJuZXNzLnYxLldvcmtlck1lc3NhZ2UaJC5pdGVyYWJhc2UuaGFybmVzcy52MS5Db250cm9sTWVzc2FnZSgBMAFChQIKGGNvbS5pdGVyYWJhc2UuaGFybmVzcy52MUIMSGFybmVzc1Byb3RvUAFaaWdpdGh1Yi5jb20vbnVub2Nnb25jYWx2ZXMvaXRlcmFiYXNlLW1vbm8vY29udHJvbC1wbGFuZS9pbnRlcm5hbC9oYXJuZXNzcnBjL2l0ZXJhYmFzZS9oYXJuZXNzL3YxO2hhcm5lc3N2MaICA0lIWKoCFEl0ZXJhYmFzZS5IYXJuZXNzLlYxygIUSXRlcmFiYXNlXEhhcm5lc3NcVjHiAiBJdGVyYWJhc2VcSGFybmVzc1xWMVxHUEJNZXRhZGF0YeoCFkl0ZXJhYmFzZTo6SGFybmVzczo6VjFiBnByb3RvMw");
 
 /**
  * @generated from message iterabase.harness.v1.WorkerMessage
@@ -53,6 +53,14 @@ export type WorkerMessage = Message<"iterabase.harness.v1.WorkerMessage"> & {
      */
     value: TokenDelta;
     case: "tokenDelta";
+  } | {
+    /**
+     * actual filesystem capacity + fresh-credit gate
+     *
+     * @generated from field: iterabase.harness.v1.WorkspaceStatus workspace_status = 6;
+     */
+    value: WorkspaceStatus;
+    case: "workspaceStatus";
   } | { case: undefined; value?: undefined };
 };
 
@@ -110,8 +118,9 @@ export const HelloSchema: GenMessage<Hello> = /*@__PURE__*/
   messageDesc(file_iterabase_harness_v1_harness, 1);
 
 /**
- * Ready advertises one dispatch credit. Legal only after Welcome, after any
- * audit replay, with no live child, no pending cleanup, and no unacknowledged
+ * Ready advertises one dispatch credit. Legal only after Welcome and a current
+ * non-gated WorkspaceStatus, after any audit replay, with no live child, no
+ * pending cleanup, and no unacknowledged
  * final outcome. A second assignment before the next Ready is a protocol
  * violation (stream closed fail-closed).
  *
@@ -126,6 +135,50 @@ export type Ready = Message<"iterabase.harness.v1.Ready"> & {
  */
 export const ReadySchema: GenMessage<Ready> = /*@__PURE__*/
   messageDesc(file_iterabase_harness_v1_harness, 2);
+
+/**
+ * WorkspaceStatus reports bounded capacity from statfs on the actual mounted
+ * dedicated workspace filesystem. It is sent after Welcome and periodically,
+ * including while idle and gated, so it renews the worker lease and can revoke
+ * an unspent Ready credit. credit_gated never aborts an active turn; it only
+ * suppresses the next assignment/credit. I/O or zero-space failure closes the
+ * worker through the existing fencing path instead of reporting a healthy gate.
+ *
+ * @generated from message iterabase.harness.v1.WorkspaceStatus
+ */
+export type WorkspaceStatus = Message<"iterabase.harness.v1.WorkspaceStatus"> & {
+  /**
+   * @generated from field: uint64 free_bytes = 1;
+   */
+  freeBytes: bigint;
+
+  /**
+   * @generated from field: uint64 capacity_bytes = 2;
+   */
+  capacityBytes: bigint;
+
+  /**
+   * @generated from field: double free_ratio = 3;
+   */
+  freeRatio: number;
+
+  /**
+   * @generated from field: bool warning = 4;
+   */
+  warning: boolean;
+
+  /**
+   * @generated from field: bool credit_gated = 5;
+   */
+  creditGated: boolean;
+};
+
+/**
+ * Describes the message iterabase.harness.v1.WorkspaceStatus.
+ * Use `create(WorkspaceStatusSchema)` to create a new message.
+ */
+export const WorkspaceStatusSchema: GenMessage<WorkspaceStatus> = /*@__PURE__*/
+  messageDesc(file_iterabase_harness_v1_harness, 3);
 
 /**
  * Heartbeat is ephemeral control data, not a runtime audit event. Any worker
@@ -174,7 +227,7 @@ export type Heartbeat = Message<"iterabase.harness.v1.Heartbeat"> & {
  * Use `create(HeartbeatSchema)` to create a new message.
  */
 export const HeartbeatSchema: GenMessage<Heartbeat> = /*@__PURE__*/
-  messageDesc(file_iterabase_harness_v1_harness, 3);
+  messageDesc(file_iterabase_harness_v1_harness, 4);
 
 /**
  * TurnEvent is a durable worker observation. The supervisor assigns a strictly
@@ -296,7 +349,7 @@ export type TurnEvent = Message<"iterabase.harness.v1.TurnEvent"> & {
  * Use `create(TurnEventSchema)` to create a new message.
  */
 export const TurnEventSchema: GenMessage<TurnEvent> = /*@__PURE__*/
-  messageDesc(file_iterabase_harness_v1_harness, 4);
+  messageDesc(file_iterabase_harness_v1_harness, 5);
 
 /**
  * @generated from message iterabase.harness.v1.ExecutionStarted
@@ -318,7 +371,7 @@ export type ExecutionStarted = Message<"iterabase.harness.v1.ExecutionStarted"> 
  * Use `create(ExecutionStartedSchema)` to create a new message.
  */
 export const ExecutionStartedSchema: GenMessage<ExecutionStarted> = /*@__PURE__*/
-  messageDesc(file_iterabase_harness_v1_harness, 5);
+  messageDesc(file_iterabase_harness_v1_harness, 6);
 
 /**
  * @generated from message iterabase.harness.v1.ModelCallStarted
@@ -344,7 +397,7 @@ export type ModelCallStarted = Message<"iterabase.harness.v1.ModelCallStarted"> 
  * Use `create(ModelCallStartedSchema)` to create a new message.
  */
 export const ModelCallStartedSchema: GenMessage<ModelCallStarted> = /*@__PURE__*/
-  messageDesc(file_iterabase_harness_v1_harness, 6);
+  messageDesc(file_iterabase_harness_v1_harness, 7);
 
 /**
  * AssistantMessage is the durable, complete assistant output for a model turn:
@@ -387,7 +440,7 @@ export type AssistantMessage = Message<"iterabase.harness.v1.AssistantMessage"> 
  * Use `create(AssistantMessageSchema)` to create a new message.
  */
 export const AssistantMessageSchema: GenMessage<AssistantMessage> = /*@__PURE__*/
-  messageDesc(file_iterabase_harness_v1_harness, 7);
+  messageDesc(file_iterabase_harness_v1_harness, 8);
 
 /**
  * @generated from message iterabase.harness.v1.ToolCall
@@ -416,7 +469,7 @@ export type ToolCall = Message<"iterabase.harness.v1.ToolCall"> & {
  * Use `create(ToolCallSchema)` to create a new message.
  */
 export const ToolCallSchema: GenMessage<ToolCall> = /*@__PURE__*/
-  messageDesc(file_iterabase_harness_v1_harness, 8);
+  messageDesc(file_iterabase_harness_v1_harness, 9);
 
 /**
  * ToolCallStarted marks the ambiguous side-effect boundary: an AssistantMessage
@@ -447,7 +500,7 @@ export type ToolCallStarted = Message<"iterabase.harness.v1.ToolCallStarted"> & 
  * Use `create(ToolCallStartedSchema)` to create a new message.
  */
 export const ToolCallStartedSchema: GenMessage<ToolCallStarted> = /*@__PURE__*/
-  messageDesc(file_iterabase_harness_v1_harness, 9);
+  messageDesc(file_iterabase_harness_v1_harness, 10);
 
 /**
  * ToolResult is the granular per-call audit record (pi tool_execution_end).
@@ -495,7 +548,7 @@ export type ToolResult = Message<"iterabase.harness.v1.ToolResult"> & {
  * Use `create(ToolResultSchema)` to create a new message.
  */
 export const ToolResultSchema: GenMessage<ToolResult> = /*@__PURE__*/
-  messageDesc(file_iterabase_harness_v1_harness, 10);
+  messageDesc(file_iterabase_harness_v1_harness, 11);
 
 /**
  * @generated from message iterabase.harness.v1.Usage
@@ -532,7 +585,7 @@ export type Usage = Message<"iterabase.harness.v1.Usage"> & {
  * Use `create(UsageSchema)` to create a new message.
  */
 export const UsageSchema: GenMessage<Usage> = /*@__PURE__*/
-  messageDesc(file_iterabase_harness_v1_harness, 11);
+  messageDesc(file_iterabase_harness_v1_harness, 12);
 
 /**
  * @generated from message iterabase.harness.v1.ModelCallFailed
@@ -549,7 +602,7 @@ export type ModelCallFailed = Message<"iterabase.harness.v1.ModelCallFailed"> & 
  * Use `create(ModelCallFailedSchema)` to create a new message.
  */
 export const ModelCallFailedSchema: GenMessage<ModelCallFailed> = /*@__PURE__*/
-  messageDesc(file_iterabase_harness_v1_harness, 12);
+  messageDesc(file_iterabase_harness_v1_harness, 13);
 
 /**
  * @generated from message iterabase.harness.v1.ModelRetryScheduled
@@ -581,7 +634,7 @@ export type ModelRetryScheduled = Message<"iterabase.harness.v1.ModelRetrySchedu
  * Use `create(ModelRetryScheduledSchema)` to create a new message.
  */
 export const ModelRetryScheduledSchema: GenMessage<ModelRetryScheduled> = /*@__PURE__*/
-  messageDesc(file_iterabase_harness_v1_harness, 13);
+  messageDesc(file_iterabase_harness_v1_harness, 14);
 
 /**
  * @generated from message iterabase.harness.v1.ModelRetryFinished
@@ -610,7 +663,7 @@ export type ModelRetryFinished = Message<"iterabase.harness.v1.ModelRetryFinishe
  * Use `create(ModelRetryFinishedSchema)` to create a new message.
  */
 export const ModelRetryFinishedSchema: GenMessage<ModelRetryFinished> = /*@__PURE__*/
-  messageDesc(file_iterabase_harness_v1_harness, 14);
+  messageDesc(file_iterabase_harness_v1_harness, 15);
 
 /**
  * @generated from message iterabase.harness.v1.CompactionStarted
@@ -629,7 +682,7 @@ export type CompactionStarted = Message<"iterabase.harness.v1.CompactionStarted"
  * Use `create(CompactionStartedSchema)` to create a new message.
  */
 export const CompactionStartedSchema: GenMessage<CompactionStarted> = /*@__PURE__*/
-  messageDesc(file_iterabase_harness_v1_harness, 15);
+  messageDesc(file_iterabase_harness_v1_harness, 16);
 
 /**
  * @generated from message iterabase.harness.v1.CompactionFinished
@@ -663,7 +716,7 @@ export type CompactionFinished = Message<"iterabase.harness.v1.CompactionFinishe
  * Use `create(CompactionFinishedSchema)` to create a new message.
  */
 export const CompactionFinishedSchema: GenMessage<CompactionFinished> = /*@__PURE__*/
-  messageDesc(file_iterabase_harness_v1_harness, 16);
+  messageDesc(file_iterabase_harness_v1_harness, 17);
 
 /**
  * HarnessError is reserved for failures that do not naturally belong to a model
@@ -684,7 +737,7 @@ export type HarnessError = Message<"iterabase.harness.v1.HarnessError"> & {
  * Use `create(HarnessErrorSchema)` to create a new message.
  */
 export const HarnessErrorSchema: GenMessage<HarnessError> = /*@__PURE__*/
-  messageDesc(file_iterabase_harness_v1_harness, 17);
+  messageDesc(file_iterabase_harness_v1_harness, 18);
 
 /**
  * A stable error envelope without inventing unreliable provider enums.
@@ -722,7 +775,7 @@ export type ErrorDetail = Message<"iterabase.harness.v1.ErrorDetail"> & {
  * Use `create(ErrorDetailSchema)` to create a new message.
  */
 export const ErrorDetailSchema: GenMessage<ErrorDetail> = /*@__PURE__*/
-  messageDesc(file_iterabase_harness_v1_harness, 18);
+  messageDesc(file_iterabase_harness_v1_harness, 19);
 
 /**
  * WorkerOutcome is the terminal event for a turn. COMPLETED only after
@@ -763,7 +816,7 @@ export type StepCompletion = Message<"iterabase.harness.v1.StepCompletion"> & {
  * Use `create(StepCompletionSchema)` to create a new message.
  */
 export const StepCompletionSchema: GenMessage<StepCompletion> = /*@__PURE__*/
-  messageDesc(file_iterabase_harness_v1_harness, 19);
+  messageDesc(file_iterabase_harness_v1_harness, 20);
 
 /**
  * @generated from message iterabase.harness.v1.StepArtifactRef
@@ -790,7 +843,7 @@ export type StepArtifactRef = Message<"iterabase.harness.v1.StepArtifactRef"> & 
  * Use `create(StepArtifactRefSchema)` to create a new message.
  */
 export const StepArtifactRefSchema: GenMessage<StepArtifactRef> = /*@__PURE__*/
-  messageDesc(file_iterabase_harness_v1_harness, 20);
+  messageDesc(file_iterabase_harness_v1_harness, 21);
 
 /**
  * @generated from message iterabase.harness.v1.WorkerOutcome
@@ -814,7 +867,7 @@ export type WorkerOutcome = Message<"iterabase.harness.v1.WorkerOutcome"> & {
  * Use `create(WorkerOutcomeSchema)` to create a new message.
  */
 export const WorkerOutcomeSchema: GenMessage<WorkerOutcome> = /*@__PURE__*/
-  messageDesc(file_iterabase_harness_v1_harness, 21);
+  messageDesc(file_iterabase_harness_v1_harness, 22);
 
 /**
  * TokenDelta is an ephemeral live-streaming token chunk (pi message_update ->
@@ -853,7 +906,7 @@ export type TokenDelta = Message<"iterabase.harness.v1.TokenDelta"> & {
  * Use `create(TokenDeltaSchema)` to create a new message.
  */
 export const TokenDeltaSchema: GenMessage<TokenDelta> = /*@__PURE__*/
-  messageDesc(file_iterabase_harness_v1_harness, 22);
+  messageDesc(file_iterabase_harness_v1_harness, 23);
 
 /**
  * @generated from message iterabase.harness.v1.ControlMessage
@@ -900,7 +953,7 @@ export type ControlMessage = Message<"iterabase.harness.v1.ControlMessage"> & {
  * Use `create(ControlMessageSchema)` to create a new message.
  */
 export const ControlMessageSchema: GenMessage<ControlMessage> = /*@__PURE__*/
-  messageDesc(file_iterabase_harness_v1_harness, 23);
+  messageDesc(file_iterabase_harness_v1_harness, 24);
 
 /**
  * Welcome is sent once after Hello auth + registration. A newly accepted
@@ -936,7 +989,7 @@ export type Welcome = Message<"iterabase.harness.v1.Welcome"> & {
  * Use `create(WelcomeSchema)` to create a new message.
  */
 export const WelcomeSchema: GenMessage<Welcome> = /*@__PURE__*/
-  messageDesc(file_iterabase_harness_v1_harness, 24);
+  messageDesc(file_iterabase_harness_v1_harness, 25);
 
 /**
  * AssignTurn carries all per-turn business/session config and no boot infra.
@@ -1078,7 +1131,7 @@ export type AssignTurn = Message<"iterabase.harness.v1.AssignTurn"> & {
  * Use `create(AssignTurnSchema)` to create a new message.
  */
 export const AssignTurnSchema: GenMessage<AssignTurn> = /*@__PURE__*/
-  messageDesc(file_iterabase_harness_v1_harness, 25);
+  messageDesc(file_iterabase_harness_v1_harness, 26);
 
 /**
  * @generated from message iterabase.harness.v1.SkillRef
@@ -1105,7 +1158,7 @@ export type SkillRef = Message<"iterabase.harness.v1.SkillRef"> & {
  * Use `create(SkillRefSchema)` to create a new message.
  */
 export const SkillRefSchema: GenMessage<SkillRef> = /*@__PURE__*/
-  messageDesc(file_iterabase_harness_v1_harness, 26);
+  messageDesc(file_iterabase_harness_v1_harness, 27);
 
 /**
  * @generated from message iterabase.harness.v1.ArtifactRef
@@ -1137,7 +1190,7 @@ export type ArtifactRef = Message<"iterabase.harness.v1.ArtifactRef"> & {
  * Use `create(ArtifactRefSchema)` to create a new message.
  */
 export const ArtifactRefSchema: GenMessage<ArtifactRef> = /*@__PURE__*/
-  messageDesc(file_iterabase_harness_v1_harness, 27);
+  messageDesc(file_iterabase_harness_v1_harness, 28);
 
 /**
  * @generated from message iterabase.harness.v1.ArtifactMaterialization
@@ -1163,10 +1216,11 @@ export type ArtifactMaterialization = Message<"iterabase.harness.v1.ArtifactMate
  * Use `create(ArtifactMaterializationSchema)` to create a new message.
  */
 export const ArtifactMaterializationSchema: GenMessage<ArtifactMaterialization> = /*@__PURE__*/
-  messageDesc(file_iterabase_harness_v1_harness, 28);
+  messageDesc(file_iterabase_harness_v1_harness, 29);
 
 /**
- * SandboxRef identifies the session's private filesystem on the shared RWX PVC.
+ * SandboxRef identifies the session's private filesystem on the pool's shared
+ * node-local RWO PVC. Multiple workers mount it on the one supported node.
  * Under the HOR-381 provisioning rescope (founder-approved 2026-08-02), the
  * supervisor itself provisions this sandbox at AssignTurn: provisionSandbox
  * creates <sandbox-id>/{root,home,tmp,session,workspace} at mode 0700, chowned
@@ -1210,7 +1264,7 @@ export type SandboxRef = Message<"iterabase.harness.v1.SandboxRef"> & {
  * Use `create(SandboxRefSchema)` to create a new message.
  */
 export const SandboxRefSchema: GenMessage<SandboxRef> = /*@__PURE__*/
-  messageDesc(file_iterabase_harness_v1_harness, 29);
+  messageDesc(file_iterabase_harness_v1_harness, 30);
 
 /**
  * @generated from message iterabase.harness.v1.ModelConfig
@@ -1251,7 +1305,7 @@ export type ModelConfig = Message<"iterabase.harness.v1.ModelConfig"> & {
  * Use `create(ModelConfigSchema)` to create a new message.
  */
 export const ModelConfigSchema: GenMessage<ModelConfig> = /*@__PURE__*/
-  messageDesc(file_iterabase_harness_v1_harness, 30);
+  messageDesc(file_iterabase_harness_v1_harness, 31);
 
 /**
  * @generated from message iterabase.harness.v1.Image
@@ -1273,7 +1327,7 @@ export type Image = Message<"iterabase.harness.v1.Image"> & {
  * Use `create(ImageSchema)` to create a new message.
  */
 export const ImageSchema: GenMessage<Image> = /*@__PURE__*/
-  messageDesc(file_iterabase_harness_v1_harness, 31);
+  messageDesc(file_iterabase_harness_v1_harness, 32);
 
 /**
  * AbortTurn is idempotent for the matching turn; it cannot affect a later
@@ -1306,7 +1360,7 @@ export type AbortTurn = Message<"iterabase.harness.v1.AbortTurn"> & {
  * Use `create(AbortTurnSchema)` to create a new message.
  */
 export const AbortTurnSchema: GenMessage<AbortTurn> = /*@__PURE__*/
-  messageDesc(file_iterabase_harness_v1_harness, 32);
+  messageDesc(file_iterabase_harness_v1_harness, 33);
 
 /**
  * EventAck is a cumulative acknowledgment after the CP commits events to
@@ -1333,11 +1387,11 @@ export type EventAck = Message<"iterabase.harness.v1.EventAck"> & {
  * Use `create(EventAckSchema)` to create a new message.
  */
 export const EventAckSchema: GenMessage<EventAck> = /*@__PURE__*/
-  messageDesc(file_iterabase_harness_v1_harness, 33);
+  messageDesc(file_iterabase_harness_v1_harness, 34);
 
 /**
  * SessionEnd tells the worker a session has terminated and its per-session
- * sandbox may be reaped from the shared RWX PVC. The supervisor (which
+ * sandbox may be reaped from the shared node-local RWO PVC. The supervisor (which
  * provisioned the sandbox at AssignTurn under the HOR-245 provisioning
  * rescope) recursively removes `<sandbox-id>/` only after verifying it is a
  * non-symlink directory owned by the session (uid, gid); it never follows
@@ -1396,7 +1450,7 @@ export type SessionEnd = Message<"iterabase.harness.v1.SessionEnd"> & {
  * Use `create(SessionEndSchema)` to create a new message.
  */
 export const SessionEndSchema: GenMessage<SessionEnd> = /*@__PURE__*/
-  messageDesc(file_iterabase_harness_v1_harness, 34);
+  messageDesc(file_iterabase_harness_v1_harness, 35);
 
 /**
  * @generated from enum iterabase.harness.v1.WorkerState

@@ -4,39 +4,69 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 )
 
 // forgeConfigSpec is the shared config fixture for cloud E2E stages. Scenario
 // writers vary only the fields relevant to the contract they exercise, so the
 // common k3s/host recipe cannot drift across files.
-type forgeConfigSpec struct {
-	Name             string
-	Address          string
-	SSHKeyPath       string
-	RunLabel         bool
-	DualStack        bool
-	GPU              bool
-	GPUDriverVersion string
-	ChartVersion     string
-	ChartRepository  string
-	ChartRelease     string
-	ChartNamespace   string
-	OverlayRepo      string
-	OverlayRef       string
-	Flux             bool
+const dataStorageDeviceEnv = "FORGE_E2E_DATA_STORAGE_DEVICES"
+
+var dataStorageDevicesByAddress sync.Map
+
+func rememberDataStorageDevice(address, device string) {
+	if address != "" && device != "" {
+		dataStorageDevicesByAddress.Store(address, device)
+	}
 }
 
-func e2eK3sVersion() string {
-	if os.Getenv(storageChartArchiveEnv) != "" && os.Getenv(forceExternalStorageEnv) != "true" {
-		return "v1.34.10+k3s1"
+type forgeConfigSpec struct {
+	Name              string
+	Address           string
+	SSHUser           string
+	SSHKeyPath        string
+	SSHHostKey        string
+	DataStorageDevice string
+	RunLabel          bool
+	DualStack         bool
+	GPU               bool
+	GPUDriverVersion  string
+	GPUDriverSHA256   string
+	ChartVersion      string
+	ChartRepository   string
+	ChartRelease      string
+	ChartNamespace    string
+	OverlayRepo       string
+	OverlayRef        string
+	Flux              bool
+}
+
+func e2eK3sVersion() string { return "v1.34.10+k3s1" }
+
+func dataStorageDevice(spec forgeConfigSpec) string {
+	if spec.DataStorageDevice != "" {
+		return spec.DataStorageDevice
 	}
-	return "v1.31.5+k3s1"
+	if device := os.Getenv(dataStorageDeviceEnv); device != "" {
+		return device
+	}
+	if device, ok := dataStorageDevicesByAddress.Load(spec.Address); ok {
+		return device.(string)
+	}
+	return "/dev/disk/by-id/scsi-forge-e2e-data-storage"
 }
 
 func writeForgeConfigSpec(t *testing.T, spec forgeConfigSpec) string {
 	t.Helper()
+	if spec.SSHUser == "" {
+		spec.SSHUser = fixtureSSHUser()
+	}
+	if spec.SSHHostKey == "" {
+		spec.SSHHostKey = strings.TrimSpace(os.Getenv(permanentFixtureHostKeyEnv))
+	}
 	var cfg strings.Builder
 	fmt.Fprintf(&cfg, `apiVersion: forge.horizonshift.io/v1alpha1
 kind: Cluster
@@ -44,12 +74,26 @@ metadata:
   name: %s
 spec:
   mode: single-node
-  hosts:
+  dataStorage:
+    devices:
+`, spec.Name)
+	devices := strings.Split(dataStorageDevice(spec), ",")
+	for i := range devices {
+		devices[i] = strings.TrimSpace(devices[i])
+	}
+	slices.Sort(devices)
+	for _, device := range devices {
+		fmt.Fprintf(&cfg, "      - %s\n", device)
+	}
+	fmt.Fprintf(&cfg, `  hosts:
     - address: %s
-      sshUser: forge
+      sshUser: %s
       sshKeyPath: %s
-      role: control-plane+worker
-`, spec.Name, spec.Address, spec.SSHKeyPath)
+`, spec.Address, spec.SSHUser, spec.SSHKeyPath)
+	if spec.SSHHostKey != "" {
+		fmt.Fprintf(&cfg, "      sshHostKey: %q\n", spec.SSHHostKey)
+	}
+	cfg.WriteString("      role: control-plane+worker\n")
 	if spec.RunLabel {
 		fmt.Fprintf(&cfg, `      labels:
         e2e.horizonshift.io/run: %q
@@ -64,18 +108,22 @@ spec:
 	if spec.DualStack {
 		cfg.WriteString(`    clusterCIDRv6: fd42::/48
     serviceCIDRv6: fd43::/112
-    disable: [traefik, servicelb]
 `)
 	}
+	cfg.WriteString("    disable: [traefik, servicelb, local-storage]\n")
 	if spec.GPU {
-		cfg.WriteString(`  gpu:
-    enabled: true
-`)
-		if spec.GPUDriverVersion != "" {
-			fmt.Fprintf(&cfg, `    driver:
-      version: %q
-`, spec.GPUDriverVersion)
+		if spec.GPUDriverVersion == "" {
+			spec.GPUDriverVersion = gpuUpgradeBaselineDriver
 		}
+		if spec.GPUDriverSHA256 == "" {
+			spec.GPUDriverSHA256 = e2eGPUDriverSHA256(t, spec.GPUDriverVersion)
+		}
+		fmt.Fprintf(&cfg, `  gpu:
+    enabled: true
+    driver:
+      version: %q
+      sha256: %s
+`, spec.GPUDriverVersion, spec.GPUDriverSHA256)
 	}
 	if spec.ChartVersion != "" {
 		fmt.Fprintf(&cfg, `  chart:

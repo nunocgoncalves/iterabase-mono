@@ -6,25 +6,36 @@ metadata:
   name: opo1
 spec:
   mode: single-node            # single-node | ha | byokubeconfig (v1: single-node)
+  dataStorage:
+    # This canonical non-empty immutable set is the sole authorization for
+    # receipt-bound PV/VG creation after fail-closed complete-set probes.
+    # Values must be stable blank whole-disk identities in lexical order.
+    devices:
+      - /dev/disk/by-id/scsi-0DO_Volume_iterabase-data-a
+      - /dev/disk/by-id/scsi-0DO_Volume_iterabase-data-b
   hosts:
     - address: 10.20.0.10
       sshUser: forge           # any sudoer user; preflight validates passwordless sudo
       sshKeyPath: ~/.ssh/forge_ed25519
+      # Optional exact OpenSSH host public key; required for permanent automation.
+      # sshHostKey: ssh-ed25519 AAAA... founder-verified-host
       role: control-plane+worker
       labels: {}               # verbatim at install; GPU labels come from the operator's gpu-feature-discovery (HOR-240)
       taints: []
   k3s:
-    version: v1.34.10+k3s1      # HOR-469 reference baseline; full tag (vX.Y.Z+k3sN)
+    version: v1.34.10+k3s1      # Platform V2 reference baseline; full tag (vX.Y.Z+k3sN)
     clusterCIDR: 10.42.0.0/16
     serviceCIDR: 10.43.0.0/16
     dualStack: true
     clusterCIDRv6: fd42::/48
     serviceCIDRv6: fd43::/112
-    disable: [traefik, servicelb]   # umbrella chart owns ingress (HOR-239)
+    disable: [traefik, servicelb, local-storage]   # umbrella chart owns ingress (HOR-239)
     extraArgs: []
   flux:                        # opt-in Flux GitOps (HOR-292); empty/false => Flux phase skipped
     enabled: false              # install Flux + apply GitRepository/Kustomization watching the overlay fork
     version: "v2.4.0"           # flux2 release tag; default if omitted
+    # The root flux-system instance is namespace-scoped (--watch-all-namespaces=false):
+    # root-managed Flux CRs must live in flux-system (or be applied by Forge).
   overlay:                     # client-fork overlay repo; empty => overlay phase skipped (HOR-341)
     repo: ""                   # client-fork git URL (https:// or file://); forge apply --overlay overrides
     ref: master                # branch or tag (default master)
@@ -44,5 +55,7 @@ spec:
       # chart: gpu-operator                             # default
       # release: opo1-gpu-operator                      # default: <metadata.name>-gpu-operator
       # namespace: gpu-operator                         # default
+      # sha256: <64 lowercase hex>                       # required for custom chart input; default chart is content-pinned
     driver:                    # NVIDIA driver the operator loads (HOR-401); node-readiness, not an overlay value
-      # version: "570.186"    # pin a driver version for reproducibility; omit/empty => chart default
+      version: "580.126.20"   # module version expected on the Ubuntu 24.04 GPU node
+      sha256: 16b9830998d2f2795fe72e760169b51bd4185e3b412ea3d0c4e46f453af2cc30 # exact driver image digest

@@ -44,9 +44,10 @@ rules:
   - list
   - watch
 - apiGroups:
-  - longhorn.io
+  - local.openebs.io
   resources:
-  - volumes
+  - lvmnodes
+  - lvmvolumes
   verbs:
   - get
   - list

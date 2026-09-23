@@ -13,6 +13,7 @@ import (
 const (
 	candidateOverlayRepository = "https://github.com/nunocgoncalves/iterabase-overlay.git"
 	candidateOverlayRef        = "e2e"
+	workspaceBehaviorEnv       = "FORGE_E2E_WORKSPACE_BEHAVIOR"
 )
 
 type candidateOverlayPlan struct {
@@ -109,90 +110,60 @@ func prepareCandidateOverlay(t *testing.T, runID, ip, keyPath string) candidateO
 }
 
 func candidateOverlayValues(t *testing.T) string {
-	t.Helper()
 	imageValues := func(repositoryEnv, tagEnv, digestEnv, prefix string) string {
-		digest := os.Getenv(digestEnv)
-		if digest == "" {
+		repository, tag := os.Getenv(repositoryEnv), os.Getenv(tagEnv)
+		if repository == "" || tag == "" {
 			return ""
 		}
-		if !strings.HasPrefix(digest, "sha256:") {
-			t.Fatalf("%s=%q is not a canonical sha256 digest", digestEnv, digest)
+		registryDigestEnv := strings.TrimSuffix(digestEnv, "_DIGEST") + "_REGISTRY_DIGEST"
+		if registryDigest := os.Getenv(registryDigestEnv); registryDigest != "" && !isCanonicalSHA256Digest(registryDigest) {
+			t.Fatalf("registry image %s/%s has invalid selected registry digest %s", repositoryEnv, tagEnv, registryDigest)
 		}
-		repository := os.Getenv(repositoryEnv)
-		tag := os.Getenv(tagEnv)
-		if repository == "" || tag == "" || !strings.HasSuffix(tag, "@"+digest) {
-			t.Fatalf("%s requires repository and immutable tag ending in @%s", digestEnv, digest)
-		}
-		return fmt.Sprintf("%srepository: %q\n%stag: %q\n", prefix, repository, prefix, tag)
+		return fmt.Sprintf("%srepository: %q\n%stag: %q\n%spullPolicy: Never\n", prefix, repository, prefix, tag, prefix)
 	}
 
-	controlPlane := imageValues(
-		"CONTROL_PLANE_IMAGE_REPO", "CONTROL_PLANE_IMAGE_TAG", controlPlaneDigestEnv, "    ",
-	)
-	toolRunner := imageValues(
-		"TOOL_RUNNER_IMAGE_REPO", "TOOL_RUNNER_IMAGE_TAG", toolRunnerDigestEnv, "      ",
-	)
-	inference := imageValues(
-		"INFERENCE_GATEWAY_IMAGE_REPO", "INFERENCE_GATEWAY_IMAGE_TAG", inferenceGatewayDigestEnv, "    ",
-	)
+	controlPlane := imageValues("CONTROL_PLANE_IMAGE_REPO", "CONTROL_PLANE_IMAGE_TAG", controlPlaneDigestEnv, "    ")
+	toolRunner := imageValues("TOOL_RUNNER_IMAGE_REPO", "TOOL_RUNNER_IMAGE_TAG", toolRunnerDigestEnv, "      ")
+	inference := imageValues("INFERENCE_GATEWAY_IMAGE_REPO", "INFERENCE_GATEWAY_IMAGE_TAG", inferenceGatewayDigestEnv, "    ")
 
-	// These real-machine scenarios prove Forge/bootstrap, managed-RWX storage
-	// readiness, and exact candidate installation. Dispatch is enabled only so
-	// two idle harness workers can establish real AgentPool readiness; the
-	// synthetic model permission is never used for a customer turn.
+	// Storage has no overlay-selectable backend, class, path, or access mode.
+	// Forge reconciles the fixed receipt-bound LVM storage substrate before Helm.
 	var values strings.Builder
 	values.WriteString("\n# Forge real-machine fixture values.\n")
-	managedStorage := os.Getenv(storageChartArchiveEnv) != "" && os.Getenv(forceExternalStorageEnv) != "true"
-	storageTLSOnly := os.Getenv(storageTLSOnlyEnv) == "true"
-	if storageTLSOnly && !managedStorage {
-		t.Fatalf("%s=true requires the exact managed storage companion", storageTLSOnlyEnv)
+	// The smallest permanent data VG is 25 GiB. Keep both real thick XFS
+	// platform claims enabled while leaving headroom for AgentPool/lifecycle proof.
+	values.WriteString("control-plane:\n  dispatch:\n    enabled: true\n    defaultModel:\n      id: forge-workspace-model\n      api: openai-completions\n  postgresql:\n    persistence:\n      size: 5Gi\n")
+	if controlPlane != "" {
+		values.WriteString("  image:\n")
+		values.WriteString(controlPlane)
 	}
-	if managedStorage {
-		// The exact-candidate single-node path is the mandatory combined proof for
-		// DES-HOR-469-02: the ordered certificate substrate establishes the
-		// internal CA before Longhorn, and the platform keeps its normal TLS-on
-		// behavior. Reloader owns leaf-renewal restarts for chart workloads.
-		values.WriteString("global:\n  internalTLS:\n    enabled: true\nreloader:\n  enabled: true\n")
+	if toolRunner != "" {
+		values.WriteString("  toolRunner:\n    image:\n")
+		values.WriteString(toolRunner)
 	}
-	values.WriteString("storage:\n  rwx:\n")
-	if managedStorage {
-		values.WriteString("    mode: managed-longhorn\n    storageClassName: iterabase-rwx\n    managedLonghorn:\n      topology: single-node\n")
-	} else {
-		// Ordinary PR source E2E intentionally composes with the published
-		// platform baseline, which predates DES-HOR-469-01. Exact-candidate and
-		// dedicated storage scenarios provide the managed companion archive.
-		values.WriteString("    mode: external\n    storageClassName: external-rwx-required\n")
-	}
-	if storageTLSOnly {
-		// The dedicated DES-HOR-469-02 gate exercises the exact certificate and
-		// storage companions without depending on unpublished product images.
-		// The ordinary CPU scenario retains the complete platform/Forge journey.
-		values.WriteString("redis: {enabled: false}\nminio: {enabled: false}\ninference-gateway: {enabled: false}\ncontrol-plane: {enabled: false}\ningress-nginx: {enabled: false}\ninternal-ingress-nginx: {enabled: false}\nmetallb: {enabled: false}\nmetallb-config: {enabled: false}\ncert-issuers: {enabled: false}\nexternal-dns: {enabled: false}\nobservability: {enabled: false}\n")
-	} else {
-		values.WriteString("control-plane:\n  dispatch:\n    enabled: true\n    defaultModel:\n      id: storage-readiness-fixture\n      api: openai-completions\n")
-		if controlPlane != "" {
-			values.WriteString("  image:\n")
-			values.WriteString(controlPlane)
-		}
-		if toolRunner != "" {
-			values.WriteString("  toolRunner:\n    image:\n")
-			values.WriteString(toolRunner)
-		}
+	values.WriteString("minio:\n  persistence:\n    size: 5Gi\n")
+	if os.Getenv(workspaceBehaviorEnv) == "true" {
+		values.WriteString("inference-gateway:\n  workload:\n    enabled: true\n")
 		if inference != "" {
-			values.WriteString("inference-gateway:\n  image:\n")
+			values.WriteString("  image:\n")
 			values.WriteString(inference)
 		}
+	} else if inference != "" {
+		values.WriteString("inference-gateway:\n  image:\n")
+		values.WriteString(inference)
 	}
 	return values.String()
 }
 
 func TestCandidateOverlayValues(t *testing.T) {
+	t.Setenv(workspaceBehaviorEnv, "true")
 	digest := "sha256:" + strings.Repeat("a", 64)
 	t.Setenv("FORGE_E2E_RELEASE_CANDIDATE", "true")
 	t.Setenv("FORGE_E2E_CHART_REPOSITORY", "oci://ghcr.io/example/candidates/platform")
 	t.Setenv("CONTROL_PLANE_IMAGE_REPO", "ghcr.io/example/control-plane")
-	t.Setenv("CONTROL_PLANE_IMAGE_TAG", "candidate-run@"+digest)
+	t.Setenv("CONTROL_PLANE_IMAGE_TAG", "candidate-run")
 	t.Setenv(controlPlaneDigestEnv, digest)
+	t.Setenv("CONTROL_PLANE_IMAGE_REGISTRY_DIGEST", digest)
 	t.Setenv("TOOL_RUNNER_IMAGE_REPO", "")
 	t.Setenv("TOOL_RUNNER_IMAGE_TAG", "")
 	t.Setenv(toolRunnerDigestEnv, "")
@@ -205,45 +176,68 @@ func TestCandidateOverlayValues(t *testing.T) {
 		t.Fatalf("candidate plan must retain exact public Flux source: %+v", plan)
 	}
 	for expected := range map[string]struct{}{
-		"control-plane:":            {},
-		"dispatch:":                 {},
-		"enabled: true":             {},
-		"storage-readiness-fixture": {},
-		"mode: external":            {},
+		"control-plane:":        {},
+		"dispatch:":             {},
+		"enabled: true":         {},
+		"forge-workspace-model": {},
+		"postgresql:":           {},
+		"minio:":                {},
+		"size: 5Gi":             {},
+		"workload:":             {},
 		"repository: \"ghcr.io/example/control-plane\"": {},
-		"tag: \"candidate-run@" + digest + "\"":         {},
+		"tag: \"candidate-run\"":                        {},
+		"pullPolicy: Never":                             {},
 	} {
 		if !strings.Contains(plan.values, expected) {
 			t.Fatalf("candidate values missing %q:\n%s", expected, plan.values)
 		}
 	}
+	controlPlaneImage := strings.Index(plan.values, "repository: \"ghcr.io/example/control-plane\"")
+	minio := strings.Index(plan.values, "\nminio:\n")
+	if controlPlaneImage < 0 || minio < 0 || controlPlaneImage >= minio {
+		t.Fatalf("control-plane image escaped into the later MinIO mapping:\n%s", plan.values)
+	}
 }
 
-func TestCandidateOverlayValuesSelectManagedStorageOnlyWithExactCompanion(t *testing.T) {
-	t.Setenv(storageChartArchiveEnv, "/tmp/rwx-storage-substrate.tgz")
+func TestArchiveOnlyOverlayValuesRetainImportedTagAndConfigDigest(t *testing.T) {
+	t.Setenv("CONTROL_PLANE_IMAGE_REPO", "iterabase-e2e/control-plane")
+	t.Setenv("CONTROL_PLANE_IMAGE_TAG", "exact-source-sha")
+	t.Setenv(controlPlaneDigestEnv, "sha256:"+strings.Repeat("c", 64))
+
 	values := candidateOverlayValues(t)
-	for _, expected := range []string{"internalTLS:\n    enabled: true", "reloader:\n  enabled: true", "mode: managed-longhorn", "storageClassName: iterabase-rwx", "topology: single-node"} {
-		if !strings.Contains(values, expected) {
-			t.Fatalf("managed exact-candidate values missing %q:\n%s", expected, values)
+	if !strings.Contains(values, "repository: \"iterabase-e2e/control-plane\"") ||
+		!strings.Contains(values, "tag: \"exact-source-sha\"") {
+		t.Fatalf("source overlay lost the exact imported image tag:\n%s", values)
+	}
+	if strings.Contains(values, "tag: \"exact-source-sha@") || !strings.Contains(values, "pullPolicy: Never") {
+		t.Fatalf("archive-only overlay did not pin the imported reference without pulling:\n%s", values)
+	}
+}
+
+func TestCandidateOverlayValuesKeepWorkloadListenerScopedToWorkspaceScenario(t *testing.T) {
+	t.Setenv(workspaceBehaviorEnv, "")
+	t.Setenv("INFERENCE_GATEWAY_IMAGE_REPO", "iterabase-e2e/inference-gateway")
+	t.Setenv("INFERENCE_GATEWAY_IMAGE_TAG", "exact")
+	t.Setenv(inferenceGatewayDigestEnv, "")
+	values := candidateOverlayValues(t)
+	if strings.Contains(values, "workload:\n    enabled: true") {
+		t.Fatalf("non-workspace Forge scenarios must not widen the published migration fixture:\n%s", values)
+	}
+	if !strings.Contains(values, "inference-gateway:\n  image:") {
+		t.Fatalf("non-workspace fixture lost the exact inference image override:\n%s", values)
+	}
+}
+
+func TestCandidateOverlayValuesContainNoStorageBackendSelection(t *testing.T) {
+	values := candidateOverlayValues(t)
+	for _, forbidden := range []string{"storage.rwx", "managed-longhorn", "external-rwx", "iterabase-rwx", "longhorn", "storageclassname", "vgpattern", "local.csi"} {
+		if strings.Contains(strings.ToLower(values), forbidden) {
+			t.Fatalf("candidate values retain obsolete storage selector %q:\n%s", forbidden, values)
 		}
 	}
 }
 
-func TestCandidateOverlayValuesSelectStorageTLSOnlyRuntime(t *testing.T) {
-	t.Setenv(storageChartArchiveEnv, "/tmp/rwx-storage-substrate.tgz")
-	t.Setenv(storageTLSOnlyEnv, "true")
-	values := candidateOverlayValues(t)
-	for _, expected := range []string{"internalTLS:\n    enabled: true", "mode: managed-longhorn", "control-plane: {enabled: false}", "inference-gateway: {enabled: false}", "cert-issuers: {enabled: false}"} {
-		if !strings.Contains(values, expected) {
-			t.Fatalf("managed TLS-only values missing %q:\n%s", expected, values)
-		}
-	}
-	if strings.Contains(values, "storage-readiness-fixture") {
-		t.Fatalf("managed TLS-only values must not enable unpublished product workloads:\n%s", values)
-	}
-}
-
-func TestCandidateOverlayValuesEnableOnlySyntheticStorageReadinessDispatch(t *testing.T) {
+func TestCandidateOverlayValuesEnableDispatchForRealWorkspaceBehavior(t *testing.T) {
 	for _, fixture := range []struct {
 		name             string
 		mode             string
@@ -254,6 +248,7 @@ func TestCandidateOverlayValuesEnableOnlySyntheticStorageReadinessDispatch(t *te
 		{name: "release-candidate", mode: "source", releaseCandidate: "true"},
 	} {
 		t.Run(fixture.name, func(t *testing.T) {
+			t.Setenv(workspaceBehaviorEnv, "true")
 			t.Setenv("ITERABASE_E2E_FIXTURE_MODE", fixture.mode)
 			t.Setenv("FORGE_E2E_RELEASE_CANDIDATE", fixture.releaseCandidate)
 			t.Setenv(controlPlaneDigestEnv, "")
@@ -261,8 +256,8 @@ func TestCandidateOverlayValuesEnableOnlySyntheticStorageReadinessDispatch(t *te
 			t.Setenv(inferenceGatewayDigestEnv, "")
 
 			values := candidateOverlayValues(t)
-			if !strings.Contains(values, "control-plane:\n  dispatch:\n    enabled: true\n    defaultModel:\n      id: storage-readiness-fixture") {
-				t.Fatalf("%s machine fixture must use only the synthetic storage-readiness dispatch permission:\n%s", fixture.name, values)
+			if !strings.Contains(values, "control-plane:\n  dispatch:\n    enabled: true\n    defaultModel:\n      id: forge-workspace-model") {
+				t.Fatalf("%s machine fixture must enable dispatch for the exact-candidate real-workspace scenario:\n%s", fixture.name, values)
 			}
 		})
 	}
@@ -271,8 +266,9 @@ func TestCandidateOverlayValuesEnableOnlySyntheticStorageReadinessDispatch(t *te
 func TestCandidateOverlayCheckoutKeepsExactSourceCommit(t *testing.T) {
 	digest := "sha256:" + strings.Repeat("b", 64)
 	t.Setenv("CONTROL_PLANE_IMAGE_REPO", "ghcr.io/example/control-plane")
-	t.Setenv("CONTROL_PLANE_IMAGE_TAG", "candidate-run@"+digest)
+	t.Setenv("CONTROL_PLANE_IMAGE_TAG", "candidate-run")
 	t.Setenv(controlPlaneDigestEnv, digest)
+	t.Setenv("CONTROL_PLANE_IMAGE_REGISTRY_DIGEST", digest)
 	t.Setenv(toolRunnerDigestEnv, "")
 	t.Setenv(inferenceGatewayDigestEnv, "")
 	plan := candidateOverlayPlanForEnvironment(t)

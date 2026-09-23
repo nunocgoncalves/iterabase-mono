@@ -43,7 +43,7 @@ spec:
       {{- end }}
       containers:
         - name: redis-exporter
-          image: "{{ .Values.metrics.image.repository }}:{{ .Values.metrics.image.tag }}"
+          image: '{{ .Values.metrics.image.repository }}:{{ .Values.metrics.image.tag }}@{{ required "metrics.image.digest is required" .Values.metrics.image.digest }}'
           imagePullPolicy: {{ .Values.metrics.image.pullPolicy }}
           # redis_exporter v1.67.0 has no --tls flag ("flag provided but not
           # defined: -tls" -> CrashLoop). Enable TLS via the rediss:// scheme on

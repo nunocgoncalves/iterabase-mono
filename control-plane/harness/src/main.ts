@@ -9,13 +9,14 @@
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { create } from "@bufbuild/protobuf";
-import { HelloSchema, WorkerMessageSchema } from "./gen/iterabase/harness/v1/harness_pb.js";
+import { HelloSchema, WorkerMessageSchema, WorkspaceStatusSchema } from "./gen/iterabase/harness/v1/harness_pb.js";
 import { loadConfig } from "./config.js";
 import { Probes } from "./probes.js";
 import { Supervisor } from "./supervisor.js";
 import { createChildFactory } from "./child-process.js";
 import { HarnessMetrics } from "./metrics.js";
-import { checkSandboxStorageHealth } from "./storage-health.js";
+import { checkSandboxStorageHealth, WorkspaceCapacityGate, type WorkspaceCapacity } from "./storage-health.js";
+import { TLSKeyError, validateSupervisorTLSKey } from "./tls-key.js";
 
 /** The compiled pi child entry, sibling to this module's output. */
 const CHILD_SCRIPT = join(dirname(fileURLToPath(import.meta.url)), "child.js");
@@ -23,11 +24,27 @@ const CHILD_SCRIPT = join(dirname(fileURLToPath(import.meta.url)), "child.js");
 export async function runWorker(): Promise<void> {
   const cfg = loadConfig();
   const metrics = new HarnessMetrics();
-  // Ensure the shared RWX sandbox mount root is 0711 root-owned and prove a
-  // complete filesystem transaction before opening dispatch credit.
-  checkSandboxStorageHealth(cfg.sandboxRoot, cfg.worker.workerId);
-  metrics.storageChecks.labels("pass").inc();
-  metrics.storageReady.set(1);
+  // Observe only: never chmod/chown/mirror/replace projected credentials. Only
+  // DES-HOR-538-03's contained cert-manager AtomicWriter chain and exact
+  // root:root 0440 resolved target pass before network startup; periodic checks
+  // safely re-resolve rotation and withdraw readiness on any drift.
+  validateSupervisorTLSKey(cfg.tls.key);
+  // The gate file lives on the AgentPool's shared PVC so replacement workers
+  // retain 20/25 hysteresis instead of reopening credit inside the band.
+  const capacityGate = new WorkspaceCapacityGate(cfg.sandboxRoot);
+  const observeWorkspace = (): WorkspaceCapacity => {
+    const observed = checkSandboxStorageHealth(cfg.sandboxRoot, cfg.worker.workerId);
+    const capacity = capacityGate.observe(observed.freeBytes, observed.capacityBytes);
+    metrics.storageChecks.labels("pass").inc();
+    metrics.storageReady.set(1);
+    metrics.workspaceFreeBytes.set(capacity.freeBytes);
+    metrics.workspaceCapacityBytes.set(capacity.capacityBytes);
+    metrics.workspaceFreeRatio.set(capacity.freeRatio);
+    metrics.workspaceCapacityWarning.set(capacity.warning ? 1 : 0);
+    metrics.workspaceCreditGated.set(capacity.creditGated ? 1 : 0);
+    return capacity;
+  };
+  const initialCapacity = observeWorkspace();
   const probes = new Probes(metrics.registry);
   await probes.start(cfg.probe.port);
 
@@ -43,12 +60,20 @@ export async function runWorker(): Promise<void> {
     },
   });
 
+  const toWorkspaceStatus = (capacity: WorkspaceCapacity) => create(WorkspaceStatusSchema, {
+    freeBytes: BigInt(capacity.freeBytes),
+    capacityBytes: BigInt(capacity.capacityBytes),
+    freeRatio: capacity.freeRatio,
+    warning: capacity.warning,
+    creditGated: capacity.creditGated,
+  });
   const sup = new Supervisor({
     cfg,
     hello,
     childFactory: createChildFactory(cfg, CHILD_SCRIPT),
     probes,
     metrics,
+    workspaceStatus: toWorkspaceStatus(initialCapacity),
   });
 
   let draining = false;
@@ -61,35 +86,35 @@ export async function runWorker(): Promise<void> {
   process.on("SIGTERM", () => void drain("SIGTERM"));
   process.on("SIGINT", () => void drain("SIGINT"));
 
-  let storageFailure: Error | undefined;
-  const storageMonitor = setInterval(() => {
-    if (storageFailure || draining) return;
+  let readinessFailure: Error | undefined;
+  const readinessMonitor = setInterval(() => {
+    if (readinessFailure || draining) return;
     try {
-      checkSandboxStorageHealth(cfg.sandboxRoot, cfg.worker.workerId);
-      metrics.storageChecks.labels("pass").inc();
-      metrics.storageReady.set(1);
+      validateSupervisorTLSKey(cfg.tls.key);
+      const capacity = observeWorkspace();
+      sup.updateWorkspaceStatus(toWorkspaceStatus(capacity));
     } catch (error) {
-      storageFailure = error as Error;
-      console.error(`sandbox storage became unavailable: ${storageFailure.message}`);
-      metrics.storageChecks.labels("fail").inc();
+      readinessFailure = error as Error;
+      console.error(`supervisor readiness invariant failed: ${readinessFailure.message}`);
+      if (!(readinessFailure instanceof TLSKeyError)) metrics.storageChecks.labels("fail").inc();
       metrics.storageReady.set(0);
       probes.setReady(false);
       probes.setHealthy(false);
-      clearInterval(storageMonitor);
+      clearInterval(readinessMonitor);
       // Drain closes dispatch credit and aborts/fences an active turn. The
       // process then exits non-zero below so Kubernetes replaces this client
-      // only after the operator observes healthy backend storage.
+      // only after the operator observes healthy storage and identity material.
       void sup.drain().catch((drainError) => {
-        console.error(`storage-failure drain failed: ${(drainError as Error).message}`);
+        console.error(`readiness-failure drain failed: ${(drainError as Error).message}`);
       });
     }
   }, 10_000);
 
   try {
     await sup.run();
-    if (storageFailure) throw storageFailure;
+    if (readinessFailure) throw readinessFailure;
   } finally {
-    clearInterval(storageMonitor);
+    clearInterval(readinessMonitor);
     await probes.stop();
   }
 }

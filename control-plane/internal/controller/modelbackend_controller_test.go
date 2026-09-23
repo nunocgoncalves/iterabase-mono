@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -27,6 +28,11 @@ import (
 	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/catalog"
 	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/testutil"
 )
+
+// hor559BackendName is the ModelBackend used by the HOR-559 self-trigger
+// regression test. The reconcile counter is keyed to it so fallback requeues of
+// other backends in this test cannot perturb the count.
+const hor559BackendName = "be-hor559"
 
 // newCatalogStore returns a Store backed by a fresh migrated Postgres.
 func newCatalogStore(t *testing.T) *catalog.Store {
@@ -65,15 +71,18 @@ func TestModelBackendReconcile(t *testing.T) {
 
 	adminClient, err := client.New(cfg, client.Options{Scheme: scheme})
 	require.NoError(t, err)
+	require.NoError(t, adminClient.Create(ctx, lvmModelBackendClass()))
 	saCfg := rbacManagerConfig(t, ctx, cfg, scheme)
 
 	mgr, err := ctrl.NewManager(saCfg, ctrl.Options{Scheme: scheme})
 	require.NoError(t, err)
-	require.NoError(t, (&ModelBackendReconciler{
-		Client: mgr.GetClient(),
+	tracking := &primaryGetCounter[*v1alpha1.ModelBackend]{Client: mgr.GetClient(), name: hor559BackendName}
+	reconciler := &ModelBackendReconciler{
+		Client: tracking,
 		Scheme: scheme,
 		Store:  store,
-	}).SetupWithManager(mgr))
+	}
+	require.NoError(t, reconciler.SetupWithManager(mgr))
 
 	mgrCtx, cancel := context.WithCancel(ctx)
 	t.Cleanup(cancel)
@@ -193,6 +202,44 @@ func TestModelBackendReconcile(t *testing.T) {
 		assert.ErrorIs(t, err, catalog.ErrNotFound, "soft-deleted backend should not be active")
 	})
 
+	t.Run("managed volumes create deterministic owned WFFC claims under RBAC", func(t *testing.T) {
+		mb := managedModelBackend()
+		mb.Name = "vllm-managed"
+		mb.Namespace = "default"
+		mb.UID = ""
+		require.NoError(t, adminClient.Create(ctx, mb))
+		nn := types.NamespacedName{Name: mb.Name, Namespace: mb.Namespace}
+		require.Eventually(t, func() bool {
+			var got v1alpha1.ModelBackend
+			return adminClient.Get(ctx, nn, &got) == nil && got.Status.Deployed && !got.Status.Healthy && strings.Contains(got.Status.Message, "first serving consumer")
+		}, 15*time.Second, 200*time.Millisecond, "managed WFFC backend should deploy a consumer while remaining unhealthy")
+
+		var got v1alpha1.ModelBackend
+		require.NoError(t, adminClient.Get(ctx, nn, &got))
+		for _, declaration := range got.Spec.PersistentVolumes {
+			var pvc corev1.PersistentVolumeClaim
+			require.NoError(t, adminClient.Get(ctx, types.NamespacedName{Name: modelBackendPVCName(&got, declaration.Name), Namespace: got.Namespace}, &pvc))
+			assert.True(t, modelBackendControllerOwner(&pvc, &got))
+			assert.Equal(t, modelBackendStorageClass, *pvc.Spec.StorageClassName)
+		}
+		var dep appsv1.Deployment
+		require.NoError(t, adminClient.Get(ctx, nn, &dep))
+		claims := 0
+		for _, volume := range dep.Spec.Template.Spec.Volumes {
+			assert.Nil(t, volume.HostPath)
+			if volume.PersistentVolumeClaim != nil {
+				claims++
+			}
+		}
+		assert.Equal(t, 2, claims)
+
+		require.NoError(t, adminClient.Delete(ctx, &got))
+		require.Eventually(t, func() bool {
+			var deleted v1alpha1.ModelBackend
+			return errors.IsNotFound(adminClient.Get(ctx, nn, &deleted))
+		}, 15*time.Second, 200*time.Millisecond)
+	})
+
 	t.Run("external records a baseURL with no workload", func(t *testing.T) {
 		mb := &v1alpha1.ModelBackend{
 			ObjectMeta: metav1.ObjectMeta{Name: "ext-anthropic", Namespace: "default"},
@@ -225,6 +272,58 @@ func TestModelBackendReconcile(t *testing.T) {
 		assert.Equal(t, "https://api.anthropic.com", b.ServiceURL)
 		assert.True(t, b.Deployed)
 		assert.True(t, b.Healthy, "external healthy assumed true; reachability deferred to HOR-307")
+
+		// HOR-559 review: external status is controller-owned and static, so the
+		// filtered primary watch no longer re-enqueues a status-only rewrite; the
+		// reconciler must keep the bounded health requeue as the repair path.
+		res, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: nn})
+		require.NoError(t, err)
+		assert.Equal(t, healthRequeueInterval, res.RequeueAfter,
+			"external backends must re-arm the health requeue like vLLM")
+	})
+
+	// HOR-559 regression: the ModelBackend reconciler had the same latent
+	// self-trigger shape as the Model reconciler (an unconditional
+	// status.lastReconciled write plus an unfiltered primary watch). A
+	// status-only update must not enqueue a reconcile; a spec change still must.
+	t.Run("status-only update does not trigger a reconcile", func(t *testing.T) {
+		mb := &v1alpha1.ModelBackend{
+			ObjectMeta: metav1.ObjectMeta{Name: hor559BackendName, Namespace: "default"},
+			Spec: v1alpha1.ModelBackendSpec{
+				Kind:     "external",
+				External: &v1alpha1.ExternalBackendSpec{BaseURL: "https://hor559.example"},
+			},
+		}
+		require.NoError(t, adminClient.Create(ctx, mb))
+		nn := types.NamespacedName{Name: hor559BackendName, Namespace: "default"}
+		require.Eventually(t, func() bool {
+			var got v1alpha1.ModelBackend
+			return adminClient.Get(ctx, nn, &got) == nil && got.Status.Deployed && got.Status.Healthy
+		}, 15*time.Second, 200*time.Millisecond, "external backend should be deployed+healthy")
+
+		// Drain any in-flight setup events so the baseline is steady.
+		require.Eventually(t, func() bool {
+			stable := tracking.count.Load()
+			time.Sleep(250 * time.Millisecond)
+			return tracking.count.Load() == stable
+		}, 10*time.Second, 250*time.Millisecond, "reconcile count should quiesce before the status-only update")
+
+		var got v1alpha1.ModelBackend
+		require.NoError(t, adminClient.Get(ctx, nn, &got))
+		base := got.DeepCopy()
+		got.Status.Message = "out-of-band status write"
+		require.NoError(t, adminClient.Status().Patch(ctx, &got, client.MergeFrom(base)))
+		before := tracking.count.Load()
+		require.Never(t, func() bool { return tracking.count.Load() != before },
+			2*time.Second, 100*time.Millisecond, "status-only update must not trigger a reconcile")
+
+		// Positive control: a spec change still reconciles.
+		require.NoError(t, adminClient.Get(ctx, nn, &got))
+		base = got.DeepCopy()
+		got.Spec.External.BaseURL = "https://hor559.example/v2"
+		require.NoError(t, adminClient.Patch(ctx, &got, client.MergeFrom(base)))
+		require.Eventually(t, func() bool { return tracking.count.Load() > before },
+			10*time.Second, 100*time.Millisecond, "spec change must trigger a reconcile")
 	})
 
 	t.Run("SGLang is a recognized stub", func(t *testing.T) {
@@ -553,8 +652,11 @@ func TestBuildDeploymentSpecDevShm(t *testing.T) {
 		}
 		spec := buildDeploymentSpec(mb, port)
 
-		// The hf-cache hostPath volume must be preserved alongside the new dshm.
-		assert.NotNil(t, findVol(spec, "hf-cache"), "hf-cache volume must be preserved")
+		// Undeclared HF storage remains plug-and-play through an ephemeral emptyDir.
+		hf := findVol(spec, "hf-cache")
+		require.NotNil(t, hf, "ephemeral hf-cache volume must be present")
+		require.NotNil(t, hf.EmptyDir)
+		assert.Nil(t, hf.HostPath, "serving persistence must never fall back to hostPath")
 
 		vol := findVol(spec, devShmVolumeName)
 		require.NotNil(t, vol, "vLLM pod must mount a dshm volume")
@@ -831,4 +933,17 @@ func TestValidateReservedVolumeNames(t *testing.T) {
 			[]corev1.VolumeMount{{Name: "dshm", MountPath: "/x"}},
 		))
 	})
+}
+
+// TestModelBackendStatusChanged pins the conditional status write (HOR-559): a
+// steady-state reconcile must be a no-op, while every observed transition still
+// patches the CR.
+func TestModelBackendStatusChanged(t *testing.T) {
+	current := &v1alpha1.ModelBackendStatus{Deployed: true, Healthy: true, ServiceURL: "http://x", ObservedGeneration: 2}
+	assert.False(t, modelBackendStatusChanged(current, 2, true, true, "http://x", ""), "steady state must not patch status")
+	assert.True(t, modelBackendStatusChanged(current, 3, true, true, "http://x", ""), "generation advance must patch")
+	assert.True(t, modelBackendStatusChanged(current, 2, false, true, "http://x", ""), "deployed change must patch")
+	assert.True(t, modelBackendStatusChanged(current, 2, true, false, "http://x", ""), "health change must patch")
+	assert.True(t, modelBackendStatusChanged(current, 2, true, true, "http://y", ""), "serviceURL change must patch")
+	assert.True(t, modelBackendStatusChanged(current, 2, true, true, "http://x", "waiting"), "message change must patch")
 }

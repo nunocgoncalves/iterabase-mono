@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -38,6 +40,37 @@ func (f *fakeScopeChecker) Check(_ context.Context, token []byte, repo string) e
 	f.gotToken = token
 	f.gotRepo = repo
 	return f.err
+}
+
+func TestGitHubScopeCheckerFallsBackToExactRepositoryForInstallationToken(t *testing.T) {
+	var paths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		switch r.URL.Path {
+		case "/user":
+			w.WriteHeader(http.StatusForbidden)
+		case "/repos/example/overlay":
+			w.WriteHeader(http.StatusOK)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	checker := githubScopeChecker{client: server.Client(), apiBaseURL: server.URL}
+	require.NoError(t, checker.Check(context.Background(), []byte("installation-token"), "https://github.com/example/overlay.git"))
+	assert.Equal(t, []string{"/user", "/repos/example/overlay"}, paths)
+}
+
+func TestGitHubScopeCheckerRejectsInstallationTokenWithoutRepositoryAccess(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer server.Close()
+
+	checker := githubScopeChecker{client: server.Client(), apiBaseURL: server.URL}
+	err := checker.Check(context.Background(), []byte("wrong-installation-token"), "https://github.com/example/overlay.git")
+	require.ErrorContains(t, err, "repository access check")
 }
 
 func TestResolveOverlayToken_EnvVar(t *testing.T) {

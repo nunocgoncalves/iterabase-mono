@@ -17,11 +17,18 @@ type workerConn struct {
 	gen      int64  // fencing generation (CP-assigned, monotonic)
 	stream   *connect.BidiStream[v1.WorkerMessage, v1.ControlMessage]
 
-	mu         sync.Mutex
-	closed     bool
-	idle       bool   // has an unspent Ready credit
-	activeTurn string // turn_id currently assigned ("" when idle)
-	lastSeen   time.Time
+	mu                sync.Mutex
+	closed            bool
+	idle              bool   // has an unspent, currently usable Ready credit
+	creditAdvertised  bool   // worker's one Ready intent, retained while capacity-gated
+	activeTurn        string // turn_id currently assigned ("" when idle)
+	lastSeen          time.Time
+	workspaceObserved bool
+	workspaceGated    bool
+	workspaceWarning  bool
+	workspaceFree     uint64
+	workspaceCapacity uint64
+	workspaceRatio    float64
 
 	// sendMu serializes all server->worker ControlMessage sends. The connect
 	// bidi writer ultimately shares the HTTP response writer; concurrent sends
@@ -119,12 +126,41 @@ func (w *workerConn) markClosed() {
 func (w *workerConn) tryConsumeCredit(turnID string) bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if w.closed || !w.idle || w.activeTurn != "" {
+	if w.closed || !w.idle || !w.creditAdvertised || w.activeTurn != "" {
 		return false
 	}
 	w.idle = false
+	w.creditAdvertised = false
 	w.activeTurn = turnID
 	return true
+}
+
+// restoreCreditAfterPreDeliveryFailure returns a reserved Ready intent to the
+// same worker only when AssignTurn never entered the stream send. The harness
+// is still armed in this case and deliberately does not advertise another
+// Ready. A concurrent capacity gate retains the restored intent but keeps it
+// unusable until the durable global reopen.
+func (w *workerConn) restoreCreditAfterPreDeliveryFailure(turnID string) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.closed || w.activeTurn != turnID {
+		return false
+	}
+	w.activeTurn = ""
+	w.creditAdvertised = true
+	w.idle = w.workspaceObserved && !w.workspaceGated
+	return w.idle
+}
+
+// releaseAssignmentFailure restores only a proven-undelivered reservation.
+// Once stream delivery was attempted, receipt is ambiguous and the Ready
+// intent stays consumed while the active reservation is released.
+func (w *workerConn) releaseAssignmentFailure(turnID string, deliveryAttempted bool) bool {
+	if !deliveryAttempted {
+		return w.restoreCreditAfterPreDeliveryFailure(turnID)
+	}
+	w.releaseTurn()
+	return false
 }
 
 // releaseTurn clears the active turn after terminalization. The worker is NOT
@@ -135,32 +171,113 @@ func (w *workerConn) releaseTurn() {
 	w.mu.Unlock()
 }
 
-// grantCreditIfIdle atomically checks the worker is not busy and grants the
-// Ready credit. Returns false (and is a protocol violation) if a turn is
-// active; the caller closes the stream fail-closed. The busy check and credit
-// grant are one locked operation so the reconciler cannot race a concurrent
-// assignment between the check and the grant.
-func (w *workerConn) grantCreditIfIdle() bool {
+// grantCreditIfIdle records the worker's one Ready intent. Capacity gating may
+// make that credit temporarily unusable, but the server retains the unspent
+// intent and restores it on the durable global reopen. A Ready while a turn is
+// active remains a protocol violation.
+func (w *workerConn) grantCreditIfIdle() (granted, valid bool) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if w.closed || w.activeTurn != "" {
-		return false
+	if w.closed || w.activeTurn != "" || !w.workspaceObserved {
+		return false, false
+	}
+	w.lastSeen = time.Now()
+	w.creditAdvertised = true
+	if w.workspaceGated {
+		w.idle = false
+		return false, true
 	}
 	w.idle = true
-	w.lastSeen = time.Now()
-	return true
+	return true, true
+}
+
+// updateWorkspaceStatus stores one bounded actual-filesystem observation and
+// revokes/restores only an unspent credit. It never changes an active assignment.
+func (w *workerConn) updateWorkspaceStatus(free, capacity uint64, ratio float64, warning, gated bool) bool {
+	return w.applyWorkspaceStatus(free, capacity, ratio, warning, gated, true)
+}
+
+// applyWorkspaceStatus returns true only when an already-advertised, unspent
+// credit becomes usable on this update and dispatch should reconcile queued work.
+func (w *workerConn) applyWorkspaceStatus(free, capacity uint64, ratio float64, warning, gated, observedByWorker bool) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	wasIdle := w.idle
+	w.workspaceObserved = w.workspaceObserved || observedByWorker
+	w.workspaceFree = free
+	w.workspaceCapacity = capacity
+	w.workspaceRatio = ratio
+	w.workspaceWarning = warning
+	w.workspaceGated = gated
+	if observedByWorker {
+		w.lastSeen = time.Now()
+	}
+	if w.activeTurn == "" {
+		w.idle = !gated && w.creditAdvertised
+	}
+	return !wasIdle && w.idle
 }
 
 // workerPool tracks live worker connections keyed by (pool, worker). At most
 // one conn per key; a reconnect fences the prior conn (returned by add).
 type workerPool struct {
-	mu    sync.Mutex
-	conns map[string]*workerConn // key = poolID + "/" + workerID
+	mu             sync.Mutex
+	conns          map[string]*workerConn // key = poolID + "/" + workerID
+	workspaceGated map[string]bool        // durable per-pool gate restored by Service.SeedGeneration
 }
 
-func newWorkerPool() *workerPool { return &workerPool{conns: make(map[string]*workerConn)} }
+// Every pool starts gated until its own durable state or a fresh >=25%
+// observation opens it.
+func newWorkerPool() *workerPool {
+	return &workerPool{conns: make(map[string]*workerConn), workspaceGated: make(map[string]bool)}
+}
 
 func workerKey(poolID, workerID string) string { return poolID + "/" + workerID }
+
+func (p *workerPool) seedWorkspaceCapacity(states map[string]WorkspaceCapacityState) {
+	p.mu.Lock()
+	for poolID, state := range states {
+		p.workspaceGated[poolID] = state.freshCreditGated()
+	}
+	p.mu.Unlock()
+}
+
+// syncWorkspaceCapacity converges process-local gate state to the active
+// durable rows. Soft-deleted pools have no capacity row and are removed so a
+// later same-UUID revival starts fail-closed rather than inheriting the old PVC.
+func (p *workerPool) syncWorkspaceCapacity(states map[string]WorkspaceCapacityState) []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	removed := make([]string, 0)
+	for poolID := range p.workspaceGated {
+		if _, active := states[poolID]; !active {
+			delete(p.workspaceGated, poolID)
+			removed = append(removed, poolID)
+		}
+	}
+	for poolID, state := range states {
+		p.workspaceGated[poolID] = state.freshCreditGated()
+	}
+	return removed
+}
+
+// applyWorkspaceStatus publishes the durable decision only to workers mounting
+// the same AgentPool PVC. Other pools remain independently eligible.
+func (p *workerPool) applyWorkspaceStatus(source *workerConn, free, capacity uint64, ratio float64, warning, gated bool) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.workspaceGated[source.poolID] = gated
+	creditRestored := false
+	for _, w := range p.conns {
+		if w.poolID != source.poolID {
+			continue
+		}
+		if w.applyWorkspaceStatus(free, capacity, ratio, warning, gated, w == source) {
+			creditRestored = true
+		}
+	}
+	return creditRestored
+}
 
 // add registers a new connection. If a prior connection exists for the same
 // (pool, worker), it is returned for fencing (caller closes it + fences its
@@ -170,6 +287,11 @@ func (p *workerPool) add(w *workerConn) *workerConn {
 	defer p.mu.Unlock()
 	key := workerKey(w.poolID, w.workerID)
 	old := p.conns[key]
+	gated, observed := p.workspaceGated[w.poolID]
+	if !observed {
+		gated = true
+	}
+	w.workspaceGated = gated
 	p.conns[key] = w
 	return old
 }

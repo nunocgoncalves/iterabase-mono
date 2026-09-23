@@ -37,6 +37,10 @@ See [`docs/source-authority.md`](docs/source-authority.md) for the cutover audit
 - Open a pull request when validation is complete; only the user may approve and merge it.
 - Pull request bodies use `## Summary`, `## Validation`, `## Production impact`, and `## Ticket state`, with real Markdown line breaks and `None`/`N/A` where appropriate.
 - After pushing, watch required CI to completion. A review is not addressable-complete and a ticket is not complete while required CI is failing.
+- Required PR CI is the baseline gate, but it does not exercise Release candidate-only behavior equivalently. A change that affects Release candidate execution, planning, artifact custody, published-baseline resolution, composition, reconciliation, or retention behavior beyond what required PR CI actually exercises must additionally pass an exact-head `Release candidate` rehearsal before review is requested or the ticket is moved to In Review.
+- Dispatch the rehearsal from the ticket branch with `rehearsal: true`, `master_sha` equal to the exact current branch/PR head SHA, and the explicit affected release-target set. Link the successful rehearsal run in the pull request before requesting review or moving the ticket to In Review. A later source commit that still affects the candidate-only boundary invalidates that proof and requires a new rehearsal at the new exact head.
+- A failed rehearsal is fail-closed: the work remains in, or returns to, In Progress until the failure is triaged, corrected where necessary, and successful exact-head rehearsal evidence exists. PR CI alone does not satisfy this gate.
+- These rules preserve the existing contract: only the user approves and merges, required CI must pass, merge is not publication, and architecture decisions still require explicit approval. See `docs/release.md` and `.github/workflows/release-candidate.yml` for the dispatch contract.
 - The repository is the source of truth for non-secret infrastructure intent and architecture. Linear is the source of truth for ticket state, ownership, sequencing, and completion.
 
 ## Architecture decisions

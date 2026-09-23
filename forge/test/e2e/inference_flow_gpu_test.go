@@ -1,5 +1,5 @@
 // Package e2e inference-flow GPU scenario: a full request→completion happy
-// path on a real GPU droplet — forge bootstraps k3s + the GPU operator + the
+// path on the real permanent GPU fixture — Forge bootstraps K3s + the GPU operator + the
 // iterabase-platform chart, the control-plane deploys a real vLLM backend, and
 // a curl to the gateway with an API key returns a real completion.
 package e2e
@@ -16,8 +16,11 @@ import (
 	"testing"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
+
 	"github.com/nunocgoncalves/iterabase-mono/forge/test/e2e/internal/remotecluster"
 	"github.com/nunocgoncalves/iterabase-mono/testkit/e2e/httpx"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -25,31 +28,27 @@ import (
 // path that proves the Forge-readied GPU can serve after exact chart/image
 // handoff. Portable ModelBackend rendering, identity, catalogue, authorization,
 // and inference correctness remain authoritative in control-plane E2E.
-func applyInferencePlatformStage(t *testing.T, state *digitalOceanGPUState) {
-	prepareCandidateChart(t, state.vm.IP, state.privKeyPath)
-	loginCandidateRegistry(t, state.vm.IP, state.privKeyPath)
-	plan := prepareCandidateOverlay(t, state.runID, state.vm.IP, state.privKeyPath)
+func applyInferencePlatformStage(t *testing.T, state *permanentGPUFixtureState) {
+	prepareCandidateChart(t, state.host.IP, state.privKeyPath)
+	state.runtimeImageDigests = prepareCandidateImages(t, state.host.IP, state.privKeyPath)
+	plan := prepareCandidateOverlay(t, state.runID, state.host.IP, state.privKeyPath)
 	// GPU readiness was already proven on this host. Reconcile the same config
 	// with the platform chart while skipping a redundant GPU-operator upgrade.
 	candidateConfig := writeForgeConfigInferenceGPU(
-		t, state.runID, state.vm.IP, state.privKeyPath, state.chartVersion, plan,
+		t, state.runID, state.host.IP, state.privKeyPath, state.chartVersion, plan,
 	)
 	out := applyOnceArgs(t, state.forgeBin, state.forgeHome, candidateConfig, "--skip-gpu")
-	markers := []string{"action:     skip", "node ready: true", "certificate substrate applied: true",
+	state.bindKubeconfigTunnel(t)
+	markers := []string{"action:     skip", "node ready: true", "data storage: iterabase-data", "LVM storage ready: true", "certificate substrate applied: true", "LVM storage substrate applied: true",
 		"chart applied: true", "overlay applied: true", "flux installed: true", "gitrepository: ready=True"}
-	if os.Getenv(storageChartArchiveEnv) != "" && os.Getenv(forceExternalStorageEnv) != "true" {
-		markers = append(markers, "rwx storage mode: managed-longhorn", "rwx storage prerequisites ready: true", "rwx storage substrate applied: true")
-	} else {
-		markers = append(markers, "rwx storage mode: external")
-	}
 	assertApplyMarkers(t, out, markers...)
 	t.Logf("apply output:\n%s", out)
 	candidateCluster := remotecluster.Use(t, filepath.Join(state.forgeHome, state.runID, "kubeconfig.yaml"))
-	assertCandidateImageDigests(t, candidateCluster, "iterabase-system",
+	assertCandidateImageDigests(t, candidateCluster, "iterabase-system", state.runtimeImageDigests,
 		controlPlaneDigestEnv, inferenceGatewayDigestEnv, toolRunnerDigestEnv)
 }
 
-func runInferenceGPUStage(t *testing.T, state *digitalOceanGPUState) {
+func runInferenceGPUStage(t *testing.T, state *permanentGPUFixtureState) {
 	runID := state.runID
 	forgeHome := state.forgeHome
 
@@ -67,9 +66,13 @@ func runInferenceGPUStage(t *testing.T, state *digitalOceanGPUState) {
 		svcPort     = 8080
 	)
 
-	// 4. apply a ModelBackend (vLLM, Qwen/Qwen3.5-0.8B) + a Model (alias). The
-	//    control-plane deploys vLLM on the GPU node (requests nvidia.com/gpu: 1,
-	//    downloads the model, serves on /health).
+	// 4. Create controller-owned managed claims while holding the serving
+	// Deployment unschedulable, then copy the separately verified harness cache
+	// into the general-class HF PVC. The host disk is seed evidence only: the
+	// serving pod receives no hostPath and mounts only its managed PVCs.
+	modelAuthority, err := loadModelCacheAuthority()
+	require.NoError(t, err)
+	seedManagedModelBackendCache(t, c, namespace, mbName, modelAuthority)
 	catManifest := fmt.Sprintf(`apiVersion: platform.iterabase.com/v1alpha1
 kind: ModelBackend
 metadata:
@@ -77,7 +80,11 @@ metadata:
   namespace: %s
 spec:
   kind: vLLM
-  model: Qwen/Qwen3.5-0.8B
+  model: %s
+  extraArgs: ["--revision", "%s"]
+  persistentVolumes:
+    - {name: hf-cache, mountPath: /data/hf-cache, storageClassName: iterabase-lvm-xfs, size: 4Gi}
+    - {name: generic-cache, mountPath: /cache, storageClassName: iterabase-lvm-xfs, size: 1Gi}
 ---
 apiVersion: platform.iterabase.com/v1alpha1
 kind: Model
@@ -90,10 +97,11 @@ spec:
   backendRef: %s
   transforms:
     rewrite_model_name: true
-`, mbName, namespace, mbName, namespace, alias, mbName)
+`, mbName, namespace, modelAuthority.ModelID, modelAuthority.Revision, mbName, namespace, alias, mbName)
 	catPath := filepath.Join(t.TempDir(), "catalog.yaml")
 	require.NoError(t, os.WriteFile(catPath, []byte(catManifest), 0o600))
 	c.Kubectl(t, "apply", "-f", catPath, "-n", namespace)
+	assertModelBackendServingUsesManagedPVCs(t, c, namespace, mbName)
 
 	// 5. capture the control-plane admin key (bootstrap init container) + apply
 	//    an IdentityMapping CR (the identity — CRD path).
@@ -136,7 +144,7 @@ spec:
 	t.Logf("issued gateway-scoped API key (prefix=%s)", keyPrefix(gatewayKey))
 
 	// 7. get the gateway's admin key + port-forward the gateway. Port-forward
-	//    (not the droplet IP / ingress) so the readiness poll + the completion
+	//    (not the fixture address / ingress) so the readiness poll + the completion
 	//    request depend only on the gateway pod being up — not on ingress-nginx
 	//    scheduling on the GPU node (which can lag or be tainted differently).
 	gatewayAdminKey := getSecretKey(t, c, namespace, release+"-gateway-admin", "adminApiKey")
@@ -165,11 +173,274 @@ spec:
 	if content == "" {
 		t.Fatalf("completion response has no content:\n%s", body)
 	}
+	growManagedModelBackendClaims(t, c, namespace, mbName, modelAuthority, gwClient, gwBase, gatewayAdminKey, gatewayKey, alias)
+	reapplyManagedModelBackendEvidence(t, state, c, namespace, mbName, modelAuthority)
+	deleteManagedModelBackendClaimsEvidence(t, state, c, namespace, mbName)
 	preview := content
 	if len(preview) > 120 {
 		preview = preview[:120] + "…"
 	}
 	t.Logf("real completion (%s): %q", alias, preview)
+}
+
+func seedManagedModelBackendCache(t *testing.T, cluster *remotecluster.Cluster, namespace, mbName string, authority modelCacheAuthority) {
+	t.Helper()
+	modelDir := strings.Split(authority.WeightPath, "/")[0]
+	require.NotEmpty(t, modelDir)
+	holdManifest := fmt.Sprintf(`apiVersion: platform.iterabase.com/v1alpha1
+kind: ModelBackend
+metadata: {name: %s, namespace: %s}
+spec:
+  kind: vLLM
+  model: %s
+  extraArgs: ["--revision", "%s"]
+  nodeSelector: {iterabase.com/model-seed-hold: "true"}
+  persistentVolumes:
+    - {name: hf-cache, mountPath: /data/hf-cache, storageClassName: iterabase-lvm-xfs, size: 4Gi}
+    - {name: generic-cache, mountPath: /cache, storageClassName: iterabase-lvm-xfs, size: 1Gi}
+`, mbName, namespace, authority.ModelID, authority.Revision)
+	holdPath := filepath.Join(t.TempDir(), "managed-modelbackend-hold.yaml")
+	require.NoError(t, os.WriteFile(holdPath, []byte(holdManifest), 0o600))
+	cluster.Kubectl(t, "apply", "-f", holdPath, "-n", namespace)
+	for _, claim := range []string{mbName + "-hf-cache", mbName + "-generic-cache"} {
+		cluster.Kubectl(t, "wait", "-n", namespace, "--for=create", "pvc/"+claim, "--timeout=3m")
+	}
+
+	seedManifest := fmt.Sprintf(`apiVersion: v1
+kind: Pod
+metadata: {name: %s-cache-seed, namespace: %s}
+spec:
+  restartPolicy: Never
+  containers:
+    - name: seed
+      image: busybox:1.37.0@sha256:9db7b59979c38555a39def84a31fb98b5296952f9e3afd4f6f11f05b07adfab0
+      command: [sh, -ceu]
+      args:
+        - |
+          cp -a /seed/%s /managed/
+          printf managed-generic-cache=seeded > /cache/seed-marker
+          sync
+          printf '%s  /managed/%s\n' | sha256sum -c -
+      volumeMounts:
+        - {name: seed, mountPath: /seed, readOnly: true}
+        - {name: managed, mountPath: /managed}
+        - {name: cache, mountPath: /cache}
+  volumes:
+    - name: seed
+      hostPath: {path: /data/hf-cache, type: Directory}
+    - name: managed
+      persistentVolumeClaim: {claimName: %s-hf-cache}
+    - name: cache
+      persistentVolumeClaim: {claimName: %s-generic-cache}
+`, mbName, namespace, modelDir, authority.SHA256, authority.WeightPath, mbName, mbName)
+	seedPath := filepath.Join(t.TempDir(), "managed-modelbackend-seed.yaml")
+	require.NoError(t, os.WriteFile(seedPath, []byte(seedManifest), 0o600))
+	cluster.Kubectl(t, "apply", "-f", seedPath, "-n", namespace)
+	cluster.Kubectl(t, "wait", "-n", namespace, "--for=jsonpath={.status.phase}=Succeeded", "pod/"+mbName+"-cache-seed", "--timeout=15m")
+	cluster.Kubectl(t, "delete", "pod/"+mbName+"-cache-seed", "-n", namespace, "--wait=true", "--timeout=3m")
+}
+
+func assertModelBackendServingUsesManagedPVCs(t *testing.T, cluster *remotecluster.Cluster, namespace, mbName string) {
+	t.Helper()
+	cluster.Kubectl(t, "wait", "-n", namespace, "--for=create", "deployment/"+mbName, "--timeout=3m")
+	var deployment appsv1.Deployment
+	require.NoError(t, json.Unmarshal([]byte(cluster.Kubectl(t, "get", "deployment/"+mbName, "-n", namespace, "-o", "json")), &deployment))
+	claims := map[string]string{}
+	for _, volume := range deployment.Spec.Template.Spec.Volumes {
+		assert.Nil(t, volume.HostPath, "serving deployment must never mount the harness seed disk")
+		if volume.PersistentVolumeClaim != nil {
+			claims[volume.Name] = volume.PersistentVolumeClaim.ClaimName
+		}
+	}
+	require.Len(t, claims, 2)
+	mounts := map[string]string{}
+	for _, mount := range deployment.Spec.Template.Spec.Containers[0].VolumeMounts {
+		mounts[mount.MountPath] = claims[mount.Name]
+	}
+	assert.Equal(t, mbName+"-hf-cache", mounts["/data/hf-cache"])
+	assert.Equal(t, mbName+"-generic-cache", mounts["/cache"])
+	for _, env := range deployment.Spec.Template.Spec.Containers[0].Env {
+		if env.Name == "HF_HOME" {
+			assert.Equal(t, "/data/hf-cache", env.Value)
+			return
+		}
+	}
+	t.Fatal("serving deployment omitted controller-managed HF_HOME")
+}
+
+func growManagedModelBackendClaims(
+	t *testing.T,
+	cluster *remotecluster.Cluster,
+	namespace, mbName string,
+	authority modelCacheAuthority,
+	gatewayClient *http.Client,
+	gatewayBase, gatewayAdminKey, gatewayKey, alias string,
+) {
+	t.Helper()
+	pod := cluster.FirstPodName(t, namespace, "platform.iterabase.com/modelbackend="+mbName)
+	podUID := strings.TrimSpace(cluster.Kubectl(t, "get", "pod/"+pod, "-n", namespace, "-o", "jsonpath={.metadata.uid}"))
+	beforeHF := strings.TrimSpace(cluster.Kubectl(t, "exec", "-n", namespace, pod, "--", "df", "-B1", "--output=size", "/data/hf-cache"))
+	beforeCache := strings.TrimSpace(cluster.Kubectl(t, "exec", "-n", namespace, pod, "--", "df", "-B1", "--output=size", "/cache"))
+	cluster.Kubectl(t, "exec", "-n", namespace, pod, "--", "sh", "-ceu", "printf HOR-557-managed-cache > /cache/growth-marker; sync")
+	identities := map[string]string{}
+	for _, claim := range []string{mbName + "-hf-cache", mbName + "-generic-cache"} {
+		identities[claim] = strings.TrimSpace(cluster.Kubectl(t, "get", "pvc/"+claim, "-n", namespace, "-o", `jsonpath={.metadata.uid}|{.spec.volumeName}`))
+	}
+
+	patch := `{"spec":{"persistentVolumes":[{"name":"hf-cache","mountPath":"/data/hf-cache","storageClassName":"iterabase-lvm-xfs","size":"6Gi"},{"name":"generic-cache","mountPath":"/cache","storageClassName":"iterabase-lvm-xfs","size":"2Gi"}]}}`
+	cluster.Kubectl(t, "patch", "modelbackend/"+mbName, "-n", namespace, "--type=merge", "-p", patch)
+
+	deadline := time.Now().Add(3 * time.Minute)
+	observedClosed := false
+	for time.Now().Before(deadline) {
+		out, err := kubectlAllowFail(t, cluster.Kubeconfig, "get", "modelbackend/"+mbName, "-n", namespace, "-o", `jsonpath={.status.healthy}|{.status.message}`)
+		if err == nil && !strings.HasPrefix(strings.TrimSpace(out), "true|") && strings.Contains(out, "managed PVC") {
+			observedClosed = true
+			break
+		}
+		time.Sleep(2 * time.Second)
+	}
+	if !observedClosed {
+		t.Fatal("ModelBackend never exposed the non-routable managed resize state")
+	}
+	if current := strings.TrimSpace(cluster.Kubectl(t, "get", "pod/"+pod, "-n", namespace, "-o", "jsonpath={.metadata.uid}")); current != podUID {
+		t.Fatalf("safe online ModelBackend resize replaced the serving pod: before=%s after=%s", podUID, current)
+	}
+	for deadline := time.Now().Add(2 * time.Minute); time.Now().Before(deadline); {
+		catalog, status, err := snapshotCatalog(gatewayClient, gatewayBase, gatewayAdminKey)
+		if err == nil && status == http.StatusOK {
+			for _, entry := range catalog {
+				if entry.ModelID == alias && !entry.Available {
+					status, _ := chatCompletionsStatus(t, gatewayClient, gatewayBase, gatewayKey, alias)
+					if status == http.StatusOK {
+						t.Fatal("gateway routed new traffic while managed storage resize was not converged")
+					}
+					goto unavailableObserved
+				}
+			}
+		}
+		time.Sleep(2 * time.Second)
+	}
+	t.Fatal("gateway catalogue did not close while managed storage was resizing")
+
+unavailableObserved:
+	for claim, wanted := range map[string]string{mbName + "-hf-cache": "6Gi", mbName + "-generic-cache": "2Gi"} {
+		cluster.Kubectl(t, "wait", "pvc/"+claim, "-n", namespace, "--for=jsonpath={.status.capacity.storage}="+wanted, "--timeout=15m")
+		if after := strings.TrimSpace(cluster.Kubectl(t, "get", "pvc/"+claim, "-n", namespace, "-o", `jsonpath={.metadata.uid}|{.spec.volumeName}`)); after != identities[claim] {
+			t.Fatalf("managed claim identity changed during growth: claim=%s before=%s after=%s", claim, identities[claim], after)
+		}
+		pv := strings.Split(identities[claim], "|")[1]
+		handle := strings.TrimSpace(cluster.Kubectl(t, "get", "pv/"+pv, "-o", "jsonpath={.spec.csi.volumeHandle}"))
+		capacity := strings.TrimSpace(cluster.Kubectl(t, "get", "lvmvolume.local.openebs.io/"+handle, "-n", namespace, "-o", "jsonpath={.spec.capacity}|{.status.state}"))
+		assertLVMVolumeCapacity(t, capacity, wanted)
+	}
+	cluster.Kubectl(t, "wait", "modelbackend/"+mbName, "-n", namespace, "--for=jsonpath={.status.healthy}=true", "--timeout=15m")
+	if current := strings.TrimSpace(cluster.Kubectl(t, "get", "pod/"+pod, "-n", namespace, "-o", "jsonpath={.metadata.uid}")); current != podUID {
+		t.Fatalf("converged online ModelBackend resize replaced the serving pod: before=%s after=%s", podUID, current)
+	}
+	afterHF := strings.TrimSpace(cluster.Kubectl(t, "exec", "-n", namespace, pod, "--", "df", "-B1", "--output=size", "/data/hf-cache"))
+	afterCache := strings.TrimSpace(cluster.Kubectl(t, "exec", "-n", namespace, pod, "--", "df", "-B1", "--output=size", "/cache"))
+	if beforeHF == afterHF || beforeCache == afterCache {
+		t.Fatalf("mounted filesystems did not report growth: hf=%q->%q cache=%q->%q", beforeHF, afterHF, beforeCache, afterCache)
+	}
+	cluster.Kubectl(t, "exec", "-n", namespace, pod, "--", "sh", "-ceu", fmt.Sprintf("test \"$(sha256sum /data/hf-cache/%s | awk '{print $1}')\" = %s; test \"$(cat /cache/growth-marker)\" = HOR-557-managed-cache", authority.WeightPath, authority.SHA256))
+
+	cluster.Kubectl(t, "delete", "pod/"+pod, "-n", namespace, "--wait=true", "--timeout=5m")
+	var replacement string
+	for deadline := time.Now().Add(10 * time.Minute); time.Now().Before(deadline); {
+		out, err := kubectlAllowFail(t, cluster.Kubeconfig, "get", "pods", "-n", namespace, "-l", "platform.iterabase.com/modelbackend="+mbName, "-o", `jsonpath={.items[0].metadata.name}|{.items[0].metadata.uid}`)
+		parts := strings.Split(strings.TrimSpace(out), "|")
+		if err == nil && len(parts) == 2 && parts[0] != "" && parts[1] != "" && parts[1] != podUID {
+			replacement = parts[0]
+			break
+		}
+		time.Sleep(2 * time.Second)
+	}
+	if replacement == "" {
+		t.Fatal("serving pod replacement did not appear")
+	}
+	cluster.Kubectl(t, "wait", "pod/"+replacement, "-n", namespace, "--for=condition=Ready", "--timeout=15m")
+	cluster.Kubectl(t, "exec", "-n", namespace, replacement, "--", "sh", "-ceu", fmt.Sprintf("test \"$(sha256sum /data/hf-cache/%s | awk '{print $1}')\" = %s; test \"$(cat /cache/growth-marker)\" = HOR-557-managed-cache", authority.WeightPath, authority.SHA256))
+	if _, ok := waitForModelAvailable(t, cluster.Kubeconfig, namespace, mbName, gatewayClient, gatewayBase, gatewayAdminKey, alias, 3*time.Minute); !ok {
+		t.Fatal("managed ModelBackend catalogue did not reopen after pod replacement")
+	}
+	status, body := chatCompletionsStatus(t, gatewayClient, gatewayBase, gatewayKey, alias)
+	if status != http.StatusOK || extractCompletion(body) == "" {
+		t.Fatalf("managed ModelBackend did not reopen after growth and pod replacement: status=%d body=%s", status, body)
+	}
+}
+
+func reapplyManagedModelBackendEvidence(t *testing.T, state *permanentGPUFixtureState, cluster *remotecluster.Cluster, namespace, mbName string, authority modelCacheAuthority) {
+	t.Helper()
+	claims := []string{mbName + "-hf-cache", mbName + "-generic-cache"}
+	identities := map[string]string{}
+	for _, claim := range claims {
+		identities[claim] = strings.TrimSpace(cluster.Kubectl(t, "get", "pvc/"+claim, "-n", namespace, "-o", `jsonpath={.metadata.uid}|{.spec.volumeName}`))
+	}
+	pod := cluster.FirstPodName(t, namespace, "platform.iterabase.com/modelbackend="+mbName)
+	podUID := strings.TrimSpace(cluster.Kubectl(t, "get", "pod/"+pod, "-n", namespace, "-o", "jsonpath={.metadata.uid}"))
+
+	reapplyInferencePlatformStage(t, state)
+	for _, claim := range claims {
+		if after := strings.TrimSpace(cluster.Kubectl(t, "get", "pvc/"+claim, "-n", namespace, "-o", `jsonpath={.metadata.uid}|{.spec.volumeName}`)); after != identities[claim] {
+			t.Fatalf("exact Forge/chart reapply replaced managed claim %s: before=%s after=%s", claim, identities[claim], after)
+		}
+	}
+	if after := strings.TrimSpace(cluster.Kubectl(t, "get", "pod/"+pod, "-n", namespace, "-o", "jsonpath={.metadata.uid}")); after != podUID {
+		t.Fatalf("exact Forge/chart reapply replaced healthy serving pod: before=%s after=%s", podUID, after)
+	}
+	cluster.Kubectl(t, "exec", "-n", namespace, pod, "--", "sh", "-ceu", fmt.Sprintf("test \"$(sha256sum /data/hf-cache/%s | awk '{print $1}')\" = %s; test \"$(cat /cache/growth-marker)\" = HOR-557-managed-cache", authority.WeightPath, authority.SHA256))
+	assertModelBackendServingUsesManagedPVCs(t, cluster, namespace, mbName)
+}
+
+func reapplyInferencePlatformStage(t *testing.T, state *permanentGPUFixtureState) {
+	t.Helper()
+	prepareCandidateChart(t, state.host.IP, state.privKeyPath)
+	plan := prepareCandidateOverlay(t, state.runID, state.host.IP, state.privKeyPath)
+	candidateConfig := writeForgeConfigInferenceGPU(
+		t, state.runID, state.host.IP, state.privKeyPath, state.chartVersion, plan,
+	)
+	out := applyOnceArgs(t, state.forgeBin, state.forgeHome, candidateConfig, "--skip-gpu")
+	state.bindKubeconfigTunnel(t)
+	markers := []string{"action:     skip", "node ready: true", "data storage: iterabase-data", "LVM storage ready: true", "certificate substrate applied: true", "LVM storage substrate applied: true",
+		"chart applied: true", "overlay applied: true", "flux installed: true", "gitrepository: ready=True"}
+	assertApplyMarkers(t, out, markers...)
+	candidateCluster := remotecluster.Use(t, filepath.Join(state.forgeHome, state.runID, "kubeconfig.yaml"))
+	assertCandidateImageDigests(t, candidateCluster, "iterabase-system", state.runtimeImageDigests,
+		controlPlaneDigestEnv, inferenceGatewayDigestEnv, toolRunnerDigestEnv)
+}
+
+func deleteManagedModelBackendClaimsEvidence(t *testing.T, state *permanentGPUFixtureState, cluster *remotecluster.Cluster, namespace, mbName string) {
+	t.Helper()
+	type identity struct{ pv, handle string }
+	identities := map[string]identity{}
+	for _, claim := range []string{mbName + "-hf-cache", mbName + "-generic-cache"} {
+		pv := strings.TrimSpace(cluster.Kubectl(t, "get", "pvc/"+claim, "-n", namespace, "-o", "jsonpath={.spec.volumeName}"))
+		handle := strings.TrimSpace(cluster.Kubectl(t, "get", "pv/"+pv, "-o", "jsonpath={.spec.csi.volumeHandle}"))
+		if pv == "" || handle == "" {
+			t.Fatalf("managed claim %s has incomplete deletion identity: pv=%q handle=%q", claim, pv, handle)
+		}
+		identities[claim] = identity{pv: pv, handle: handle}
+	}
+	cluster.Kubectl(t, "delete", "model/"+mbName, "modelbackend/"+mbName, "-n", namespace, "--wait=true", "--timeout=5m")
+	client, err := sshDial(state.host.IP, state.privKeyPath)
+	if err != nil {
+		t.Fatalf("ssh for managed ModelBackend deletion evidence: %v", err)
+	}
+	defer client.Close()
+	for claim, identity := range identities {
+		command := fmt.Sprintf(`for i in $(seq 1 300); do
+  ! sudo k3s kubectl get pvc %s -n %s >/dev/null 2>&1 &&
+  ! sudo k3s kubectl get pv %s >/dev/null 2>&1 &&
+  ! sudo k3s kubectl get lvmvolume.local.openebs.io %s -n %s >/dev/null 2>&1 &&
+  ! sudo lvs --noheadings -o lv_name iterabase-data | awk '{$1=$1;if(NF)print}' | grep -Fxq %s && exit 0
+  sleep 2
+done
+exit 1`, candidateShellQuote(claim), candidateShellQuote(namespace), candidateShellQuote(identity.pv), candidateShellQuote(identity.handle), candidateShellQuote(namespace), candidateShellQuote(identity.handle))
+		if output, err := sshOutput(client, command); err != nil {
+			t.Fatalf("ModelBackend Delete lifecycle leaked claim identity %s/%s: %v\n%s", claim, identity.handle, err, output)
+		}
+	}
 }
 
 // writeForgeConfigInferenceGPU writes the current production-ordered GPU
@@ -188,7 +459,7 @@ func writeForgeConfigInferenceGPU(
 
 // waitForModelAvailable polls the gateway's /admin/v1/snapshot until the given
 // alias is present AND available=true (vLLM ready). The generous timeout covers
-// the vLLM image pull + model download + startup on the GPU droplet. Logs the
+// the vLLM image pull + model load + startup on the permanent GPU fixture. Logs the
 // last status + body periodically, and dumps vLLM pod diagnostics once at the
 // 5m mark (so a crash/image-pull issue is visible without waiting the full
 // timeout). Returns (entry, false) on timeout so the caller can dump final

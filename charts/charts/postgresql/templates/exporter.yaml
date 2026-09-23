@@ -51,7 +51,7 @@ spec:
         {{- end }}
       containers:
         - name: postgres-exporter
-          image: "{{ .Values.metrics.image.repository }}:{{ .Values.metrics.image.tag }}"
+          image: '{{ .Values.metrics.image.repository }}:{{ .Values.metrics.image.tag }}@{{ required "metrics.image.digest is required" .Values.metrics.image.digest }}'
           imagePullPolicy: {{ .Values.metrics.image.pullPolicy }}
           # Build DATA_SOURCE_NAME at runtime from the mounted password file so
           # the generated password is never templated into the chart. The DSN

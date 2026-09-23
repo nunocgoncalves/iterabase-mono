@@ -16,6 +16,7 @@ import {
   EventAckSchema,
   AssistantMessageSchema,
   SessionEndSchema,
+  WorkspaceStatusSchema,
   Outcome,
   type AssignTurn,
   type WorkerMessage,
@@ -202,6 +203,82 @@ describe("Supervisor turn loop", () => {
       expect(st.mode & 0o777).toBe(0o700);
     }
   });
+
+  it("does not duplicate Ready while a server-consumed assignment is in flight during a capacity observation", async () => {
+    const received: WorkerMessage[] = [];
+    let assignmentConsumed!: () => void;
+    const consumed = new Promise<void>((resolve) => { assignmentConsumed = resolve; });
+    let releaseAssignment!: () => void;
+    const assignmentGate = new Promise<void>((resolve) => { releaseAssignment = resolve; });
+    let assignmentSent = false;
+    let secondReadyReceived!: () => void;
+    const postTurnReady = new Promise<void>((resolve) => { secondReadyReceived = resolve; });
+
+    const transport = createRouterTransport((router) => {
+      router.service(Harness, {
+        async *work(req) {
+          yield create(ControlMessageSchema, {
+            kind: { case: "welcome", value: create(WelcomeSchema, { fencingGeneration: 1n }) } as never,
+          });
+          for await (const m of req) {
+            received.push(m);
+            if (m.kind.case === "ready" && !assignmentSent) {
+              // Model dispatch's exact race window: the server has consumed the
+              // one Ready credit, but AssignTurn is deliberately withheld.
+              assignmentSent = true;
+              assignmentConsumed();
+              await assignmentGate;
+              yield assignTurn(sandboxId);
+            } else if (m.kind.case === "ready") {
+              secondReadyReceived();
+            } else if (m.kind.case === "turnEvent" && m.kind.value.kind.case === "workerOutcome") {
+              yield create(ControlMessageSchema, {
+                kind: {
+                  case: "eventAck",
+                  value: create(EventAckSchema, { turnId: m.kind.value.turnId, throughSequence: m.kind.value.sequence }),
+                },
+              });
+            }
+          }
+        },
+      });
+    });
+
+    const openStatus = create(WorkspaceStatusSchema, {
+      freeBytes: 30n,
+      capacityBytes: 100n,
+      freeRatio: 0.30,
+      warning: false,
+      creditGated: false,
+    });
+    let credits = 0;
+    const sup = new Supervisor({
+      cfg: makeCfg(sandboxParent, walDir),
+      hello: create(WorkerMessageSchema, {
+        kind: { case: "hello", value: create(HelloSchema, { workerId: "pod-1", poolId: "pool-1" }) },
+      }),
+      childFactory: () => fakeChild([], Outcome.COMPLETED),
+      probes,
+      transport: () => transport,
+      gatewayClient: fakeGatewayClient(),
+      modelStream: fakeModelStream(),
+      workspaceStatus: openStatus,
+      onCreditAdvertised: () => { credits += 1; },
+    });
+
+    const runP = sup.run();
+    await consumed;
+    sup.updateWorkspaceStatus(openStatus);
+    await Promise.resolve();
+    expect(credits).toBe(1);
+
+    releaseAssignment();
+    await postTurnReady;
+    await sup.drain();
+    await runP;
+
+    expect(received.filter((m) => m.kind.case === "ready")).toHaveLength(2);
+  }, 5_000);
 
   it("reaps the per-session sandbox on SessionEnd after a completed turn (HOR-245 cleanup)", async () => {
     let assignTurnSent = false;

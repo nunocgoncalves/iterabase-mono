@@ -1,166 +1,101 @@
-// Package e2e runs the forge end-to-end test against an ephemeral
-// DigitalOcean droplet. It is a separate module so godo/client-go stay out of
-// the main module's dependency graph.
-//
-// Run: make test-e2e   (requires DIGITALOCEAN_TOKEN)
+// Package e2e runs Forge's composed scenarios against fixed, pinned permanent
+// fixtures. The separate module keeps client-go and harness-only dependencies
+// out of Forge's production module.
 package e2e
 
 import (
 	"context"
-	"crypto/ed25519"
-	"crypto/rand"
 	"crypto/tls"
 	"encoding/json"
-	"encoding/pem"
 	"fmt"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/digitalocean/godo"
 	"golang.org/x/crypto/ssh"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 )
 
 const (
-	region      = "fra1"
-	size        = "s-2vcpu-4gb" // published/external baseline; s-1vcpu-2gb timed out on helm --wait
-	managedSize = "s-4vcpu-8gb" // full platform plus Longhorn's approved 4-vCPU minimum needs independent headroom
-	image       = "ubuntu-24-04-x64"
-	k3sPort     = 6443
+	k3sPort                           = 6443
+	permanentCPUScenarioName          = "permanent-fixture-cpu"
+	permanentCPUWorkspaceScenarioName = "permanent-fixture-cpu-workspace"
+	permanentGPUScenarioName          = "permanent-fixture-gpu"
 )
 
-type cpuVMProvisioner interface {
-	Create(context.Context, string, string) (*godo.Droplet, error)
-	PublicIP(context.Context, int) (string, error)
-	Destroy(context.Context, int) error
+type permanentCPUFixtureState struct {
+	fixture               *permanentFixture
+	runID                 string
+	privKeyPath           string
+	ip                    string
+	forgeBin              string
+	forgeHome             string
+	chartVersion          string
+	dataStorageDevice     string
+	freshInstall          bool
+	storagePVCUID         string
+	storagePV             string
+	agentPoolPVCUID       string
+	initialWorkerPodUID   string
+	inotifyDropInIdentity string
+	workspaceAdminKey     string
+	workspaceWorkKey      string
+	runtimeImageDigests   map[string]importedRuntimeIdentity
+	diagnostics           forgeDiagnostics
 }
 
-type doCPUVMProvisioner struct {
-	client *godo.Client
-	size   string
+func newPermanentCPUFixtureState(t *testing.T) *permanentCPUFixtureState {
+	return newPermanentCPUFixtureStateForScenario(t, permanentCPUScenarioName)
 }
 
-func (provisioner *doCPUVMProvisioner) Create(ctx context.Context, runID, pubKey string) (*godo.Droplet, error) {
-	request := newCPUDropletRequest(runID, pubKey)
-	if provisioner.size != "" {
-		request.Size = provisioner.size
+func newPermanentCPUWorkspaceFixtureState(t *testing.T) *permanentCPUFixtureState {
+	t.Setenv(workspaceBehaviorEnv, "true")
+	return newPermanentCPUFixtureStateForScenario(t, permanentCPUWorkspaceScenarioName)
+}
+
+func newPermanentCPUFixtureStateForScenario(t *testing.T, scenario string) *permanentCPUFixtureState {
+	fixture := requirePermanentFixture(t, "cpu")
+	state := &permanentCPUFixtureState{
+		fixture:             fixture,
+		runID:               fixture.installName(),
+		privKeyPath:         fixture.sshKeyPath,
+		ip:                  fixture.address,
+		forgeHome:           t.TempDir(),
+		dataStorageDevice:   fixture.dataStorageDevice,
+		freshInstall:        true,
+		runtimeImageDigests: make(map[string]importedRuntimeIdentity),
+		diagnostics:         newForgeDiagnostics(t, scenario),
 	}
-	droplet, _, err := provisioner.client.Droplets.Create(ctx, request)
-	return droplet, err
-}
-
-func (provisioner *doCPUVMProvisioner) PublicIP(ctx context.Context, id int) (string, error) {
-	return waitForIP(ctx, provisioner.client, id)
-}
-
-func (provisioner *doCPUVMProvisioner) Destroy(ctx context.Context, id int) error {
-	_, err := provisioner.client.Droplets.Delete(ctx, id)
-	return err
-}
-
-type digitalOceanCPUState struct {
-	ctx                 context.Context
-	provisioner         cpuVMProvisioner
-	ready               func(context.Context, string, string) error
-	runID               string
-	keep                bool
-	pubKey              string
-	privKeyPath         string
-	droplet             *godo.Droplet
-	ip                  string
-	forgeBin            string
-	forgeHome           string
-	chartVersion        string
-	managedRWX          bool
-	storagePVCUID       string
-	storagePV           string
-	agentPoolPVCUID     string
-	initialWorkerPodUID string
-	diagnostics         forgeDiagnostics
-}
-
-func newDigitalOceanCPUState(t *testing.T) *digitalOceanCPUState {
-	return newDigitalOceanCPUStateForScenario(t, "digitalocean-cpu")
-}
-
-func newDigitalOceanRWXTLSState(t *testing.T) *digitalOceanCPUState {
-	return newDigitalOceanCPUStateForScenario(t, "digitalocean-rwx-tls")
-}
-
-func newDigitalOceanCPUStateForScenario(t *testing.T, scenario string) *digitalOceanCPUState {
-	token := os.Getenv("DIGITALOCEAN_TOKEN")
-	if token == "" {
-		if os.Getenv("FORGE_E2E_REQUIRE_CAPACITY") == "true" {
-			t.Fatal("mandatory CPU release validation incomplete — DIGITALOCEAN_TOKEN not set")
-		}
-		t.Skip("DIGITALOCEAN_TOKEN not set; skipping DigitalOcean CPU scenario")
+	if githubToken := os.Getenv("GITHUB_TOKEN"); githubToken != "" {
+		state.diagnostics.redactor.Add(githubToken)
 	}
-
-	managedRWX := os.Getenv(storageChartArchiveEnv) != "" && os.Getenv(forceExternalStorageEnv) != "true"
-	state := &digitalOceanCPUState{
-		ctx:         context.Background(),
-		provisioner: &doCPUVMProvisioner{client: godo.NewFromToken(token), size: cpuScenarioSize(managedRWX)},
-		ready:       waitForHostReady,
-		runID:       fmt.Sprintf("forge-e2e-%d", time.Now().Unix()),
-		keep:        os.Getenv("FORGE_E2E_KEEP") != "",
-		forgeHome:   t.TempDir(),
-		managedRWX:  managedRWX,
-		diagnostics: newForgeDiagnostics(t, scenario),
-	}
-	state.pubKey, state.privKeyPath = generateKey(t)
 	state.forgeBin = buildForge(t)
 	state.chartVersion = platformChartVersion(t, "")
-	if os.Getenv(requireManagedTLSEnv) == "true" && !state.managedRWX {
-		t.Fatalf("mandatory managed-storage/internal-TLS evidence requires %s and forbids %s=true", storageChartArchiveEnv, forceExternalStorageEnv)
-	}
-	t.Logf("run %s (keep=%v managedRWX=%v)", state.runID, state.keep, state.managedRWX)
+	t.Logf("run %s on the permanent CPU fixture", state.runID)
 	return state
 }
 
-func cpuScenarioSize(managedRWX bool) string {
-	if managedRWX {
-		return managedSize
-	}
-	return size
-}
-
-func provisionCPUStage(t *testing.T, state *digitalOceanCPUState) {
+func resetPermanentCPUFixtureStage(t *testing.T, state *permanentCPUFixtureState) {
 	t.Helper()
-	if err := provisionCPUHost(state); err != nil {
+	if err := state.fixture.reset(t, state.forgeBin, state.forgeHome); err != nil {
 		t.Fatal(err)
 	}
-	t.Logf("droplet ip %s", state.ip)
+	rememberDataStorageDevice(state.ip, state.dataStorageDevice)
+	t.Logf("permanent CPU fixture %s data-storage=%s", state.ip, state.dataStorageDevice)
 }
 
-func provisionCPUHost(state *digitalOceanCPUState) error {
-	droplet, err := state.provisioner.Create(state.ctx, state.runID, state.pubKey)
-	if err != nil {
-		return fmt.Errorf("create droplet: %w", err)
-	}
-	// Retain the resource identity immediately so shared scenario cleanup owns
-	// every failure after the cloud API accepts creation.
-	state.droplet = droplet
-	ip, err := state.provisioner.PublicIP(state.ctx, droplet.ID)
-	if err != nil {
-		return fmt.Errorf("wait for droplet IP: %w", err)
-	}
-	state.ip = ip
-	if err := state.ready(state.ctx, ip, state.privKeyPath); err != nil {
-		return fmt.Errorf("wait for host readiness: %w", err)
-	}
-	return nil
-}
-
-func rejectGPUOnCPUStage(t *testing.T, state *digitalOceanCPUState) {
+func rejectGPUOnCPUStage(t *testing.T, state *permanentCPUFixtureState) {
 	t.Helper()
 	cfgPath := writeForgeConfigGPU(t, state.runID, state.ip, state.privKeyPath)
 	out, err := runForgeE(state.forgeBin, state.forgeHome, "apply", "--config", cfgPath)
@@ -172,28 +107,11 @@ func rejectGPUOnCPUStage(t *testing.T, state *digitalOceanCPUState) {
 	}
 }
 
-func applyBaselineStage(t *testing.T, state *digitalOceanCPUState) {
-	t.Helper()
-	writeEdgeOverlayOnHost(t, state.ip, state.privKeyPath)
-	out := applyOnce(t, state.forgeBin, state.forgeHome,
-		writeForgeConfig(t, state.runID, state.ip, state.privKeyPath, certificateMigrationSourceVersion))
-	assertApplyMarkers(t, out, "node ready: true", "chart applied: true", "overlay applied: true")
-	t.Logf("apply output:\n%s", out)
-}
-
-func assertBaselineStage(t *testing.T, state *digitalOceanCPUState) {
-	t.Helper()
-	kcPath := filepath.Join(state.forgeHome, state.runID, "kubeconfig.yaml")
-	checkNodeViaKubeconfig(t, kcPath, state.runID)
-	checkGatewayRunning(t, kcPath)
-	checkGatewayHealth(t, state.ip)
-}
-
 // assertCurrentPlatformStage proves Forge handed the exact desired releases and
 // source artifact to a minimally healthy dependent layer. Chart ownership,
 // rollout, certificate, gateway, and tool-runner correctness remains in the
 // chart/control-plane owner suites.
-func assertCurrentPlatformStage(t *testing.T, state *digitalOceanCPUState) {
+func assertCurrentPlatformStage(t *testing.T, state *permanentCPUFixtureState) {
 	t.Helper()
 	sc, err := sshDial(state.ip, state.privKeyPath)
 	if err != nil {
@@ -203,9 +121,97 @@ func assertCurrentPlatformStage(t *testing.T, state *digitalOceanCPUState) {
 
 	assertRemoteHelmChartVersion(t, sc, state.runID, "iterabase-system", state.chartVersion)
 	assertRemoteHelmChartVersion(t, sc, state.runID+"-cert-manager", "iterabase-system", state.chartVersion)
-	if state.managedRWX {
-		assertRemoteHelmChartVersion(t, sc, state.runID+"-rwx-storage", "longhorn-system", state.chartVersion)
+	assertRemoteHelmChartVersion(t, sc, state.runID+"-lvm-storage", "iterabase-system", state.chartVersion)
+	for _, obsolete := range []string{"longhorn-system", "local-path-storage"} {
+		if _, err := sshOutput(sc, "sudo k3s kubectl get namespace "+obsolete); err == nil {
+			t.Fatalf("obsolete storage namespace %s exists in the OpenEBS LVM release", obsolete)
+		}
 	}
+	if _, err := sshOutput(sc, "sudo k3s kubectl get deployment/local-path-provisioner -n kube-system"); err == nil {
+		t.Fatal("K3s local-path provisioner exists despite local-storage disablement")
+	}
+	mustSSHOutput(t, sc, `sudo bash -ceu '
+auth_exact() {
+  identity=$1 verb=$2 expected=$3
+  if output=$(k3s kubectl auth can-i "$verb" lvmsnapshots.local.openebs.io --all-namespaces --as="$identity" 2>/dev/null); then rc=0; else rc=$?; fi
+  test "$output" = "$expected"
+  if test "$expected" = yes; then test "$rc" = 0; else test "$rc" = 1; fi
+}
+test "$(k3s kubectl get crd lvmsnapshots.local.openebs.io -o name)" = customresourcedefinition.apiextensions.k8s.io/lvmsnapshots.local.openebs.io
+test -z "$(k3s kubectl get lvmsnapshots.local.openebs.io -A -o name)"
+for crd in volumesnapshotclasses.snapshot.storage.k8s.io volumesnapshotcontents.snapshot.storage.k8s.io volumesnapshots.snapshot.storage.k8s.io; do
+  test -z "$(k3s kubectl get crd "$crd" --ignore-not-found=true -o name)"
+done
+for resource in clusterrole/openebs-lvm-snapshotter-role clusterrolebinding/openebs-lvm-snapshotter-binding; do
+  test -z "$(k3s kubectl get "$resource" --ignore-not-found=true -o name)"
+done
+policy=$(k3s kubectl get validatingadmissionpolicy iterabase-lvmsnapshot-create-deny -o jsonpath="{.spec.failurePolicy}|{.spec.matchConstraints.resourceRules[0].apiGroups[0]}|{.spec.matchConstraints.resourceRules[0].apiVersions[0]}|{.spec.matchConstraints.resourceRules[0].operations[0]}|{.spec.matchConstraints.resourceRules[0].resources[0]}|{.spec.validations[0].expression}")
+test "$policy" = "Fail|local.openebs.io|v1alpha1|CREATE|lvmsnapshots|false"
+test "$(k3s kubectl get validatingadmissionpolicybinding iterabase-lvmsnapshot-create-deny -o jsonpath="{.spec.policyName}|{.spec.validationActions[0]}")" = "iterabase-lvmsnapshot-create-deny|Deny"
+for identity in system:serviceaccount:iterabase-system:openebs-lvm-controller-sa system:serviceaccount:iterabase-system:openebs-lvm-node-sa; do
+  for verb in list watch; do auth_exact "$identity" "$verb" yes; done
+  for verb in get create update patch delete; do auth_exact "$identity" "$verb" no; done
+done
+blocked=$(mktemp)
+trap "rm -f -- $blocked" EXIT
+if k3s kubectl create -f - >"$blocked" 2>&1 <<EOF
+apiVersion: local.openebs.io/v1alpha1
+kind: LVMSnapshot
+metadata:
+  name: forbidden-lvmsnapshot
+  namespace: iterabase-system
+spec:
+  ownerNodeID: forbidden
+  volGroup: iterabase-data
+status: {}
+EOF
+then
+  echo "LVMSnapshot creation unexpectedly succeeded" >&2
+  exit 42
+fi
+grep -Fq "LVMSnapshot creation is disabled by DES-HOR-545-05" "$blocked"
+test -z "$(k3s kubectl get lvmsnapshots.local.openebs.io -A -o name)"
+containers=$(k3s kubectl get deployment -n iterabase-system -l app=openebs-lvm-controller -o jsonpath="{range .items[*].spec.template.spec.containers[*]}{.name}{\" \"}{.image}{\"\\n\"}{end}")
+! printf "%s\n" "$containers" | grep -qi snapshot
+test ! -e /etc/modules-load.d/iterabase-data.conf
+! grep -q "^dm_snapshot " /proc/modules
+'`)
+	classes := strings.Fields(mustSSHOutput(t, sc, `sudo k3s kubectl get storageclass -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'`))
+	if len(classes) != 2 || !slices.Contains(classes, "iterabase-lvm-xfs") || !slices.Contains(classes, "iterabase-agentpool-lvm-xfs") {
+		t.Fatalf("managed StorageClass set = %v, want exactly the two OpenEBS LVM classes", classes)
+	}
+	for class, shared := range map[string]string{"iterabase-lvm-xfs": "no", "iterabase-agentpool-lvm-xfs": "yes"} {
+		observed := strings.TrimSpace(mustSSHOutput(t, sc, fmt.Sprintf(`sudo k3s kubectl get storageclass %s -o jsonpath='{.provisioner}|{.reclaimPolicy}|{.volumeBindingMode}|{.allowVolumeExpansion}|{.parameters.storage}|{.parameters.vgpattern}|{.parameters.fsType}|{.parameters.thinProvision}|{.parameters.shared}|{.metadata.annotations.storageclass\.kubernetes\.io/is-default-class}'`, class)))
+		want := "local.csi.openebs.io|Delete|WaitForFirstConsumer|true|lvm|^iterabase-data$|xfs|no|" + shared + "|false"
+		if observed != want {
+			t.Fatalf("StorageClass %s contract = %q, want %q", class, observed, want)
+		}
+	}
+	lvm := strings.TrimSpace(mustSSHOutput(t, sc, fmt.Sprintf(`sudo bash -ceu '
+receipt=/var/lib/iterabase/data-storage.receipt
+test -f "$receipt" && test ! -L "$receipt" && test "$(stat -c "%%u:%%g:%%a" "$receipt")" = 0:0:600
+selected=%s
+device=$(readlink -f -- "$selected")
+pv=$(pvs --noheadings --separator "|" -o pv_uuid,vg_name -- "$device" | awk -F"|" "{\$1=\$1;\$2=\$2;print \$1 \"|\" \$2}")
+vg=$(vgs --noheadings --separator "|" --units b --nosuffix -o vg_uuid,vg_size,vg_free,pv_count,lv_count iterabase-data | awk -F"|" "BEGIN{OFS=\"|\"} {for(i=1;i<=NF;i++){gsub(/^ +| +$/,\"\",\$i)}; print}")
+printf "%%s|%%s\n" "$pv" "$vg"
+'`, candidateShellQuote(state.dataStorageDevice))))
+	parts := strings.Split(lvm, "|")
+	if len(parts) != 7 || parts[0] == "" || parts[1] != "iterabase-data" || parts[2] == "" || parts[5] != "1" {
+		t.Fatalf("receipt-bound PV/VG evidence is malformed: %q", lvm)
+	}
+	lvmNode := strings.TrimSpace(mustSSHOutput(t, sc, `sudo k3s kubectl get lvmnodes.local.openebs.io -n iterabase-system -o jsonpath='{range .items[*].volumeGroups[?(@.name=="iterabase-data")]}{.name}|{.uuid}|{.pvCount}|{.missingPvCount}|{.thinPools}{"\n"}{end}'`))
+	if !strings.HasPrefix(lvmNode, "iterabase-data|"+parts[2]+"|1|0|") {
+		t.Fatalf("OpenEBS LVMNode does not match receipt VG: %q receipt=%q", lvmNode, lvm)
+	}
+
+	pvcClasses := strings.Fields(mustSSHOutput(t, sc, `sudo k3s kubectl get pvc -A -o jsonpath='{range .items[*]}{.metadata.namespace}/{.metadata.name}={.spec.storageClassName}{"\n"}{end}'`))
+	for _, claim := range pvcClasses {
+		if !strings.HasSuffix(claim, "=iterabase-lvm-xfs") {
+			t.Fatalf("chart-owned data claim did not use the general LVM class: %s", claim)
+		}
+	}
+
 	owner := strings.TrimSpace(mustSSHOutput(t, sc,
 		`sudo k3s kubectl get crd certificates.cert-manager.io -o jsonpath='{.metadata.annotations.meta\.helm\.sh/release-name}'`))
 	wantOwner := state.runID + "-cert-manager"
@@ -217,28 +223,14 @@ func assertCurrentPlatformStage(t *testing.T, state *digitalOceanCPUState) {
 		t.Fatalf("current platform has no exact Ready Flux artifact: ready=%v revision=%q digest=%q", ready, revision, digest)
 	}
 	mustSSHOutput(t, sc, fmt.Sprintf("sudo k3s kubectl rollout status -n iterabase-system deployment/%s-tool-runner --timeout=300s", state.runID))
-	if state.managedRWX {
-		storageClass := strings.TrimSpace(mustSSHOutput(t, sc, `sudo k3s kubectl get storageclass iterabase-rwx -o jsonpath='{.provisioner}|{.reclaimPolicy}|{.allowVolumeExpansion}|{.parameters.dataEngine}|{.parameters.numberOfReplicas}'`))
-		if storageClass != "driver.longhorn.io|Retain|true|v1|1" {
-			t.Fatalf("managed RWX StorageClass contract = %q", storageClass)
-		}
-		attestations := strings.TrimSpace(mustSSHOutput(t, sc, `sudo k3s kubectl get configmap -n iterabase-system -l platform.iterabase.com/storage-conformance=true -o jsonpath='{range .items[*]}{.data.storageClassName}|{.data.contractVersion}|{.data.result}{"\n"}{end}'`))
-		if !strings.Contains(attestations, "iterabase-rwx|HOR-469/v1|pass") {
-			t.Fatalf("managed RWX conformance attestation missing: %q", attestations)
-		}
-	}
 
 	kcPath := filepath.Join(state.forgeHome, state.runID, "kubeconfig.yaml")
 	checkGatewayRunning(t, kcPath)
 	checkGatewayNodePortHealth(t, kcPath, state.ip)
 }
 
-func seedManagedRWXReapplyStage(t *testing.T, state *digitalOceanCPUState) {
+func seedLVMReapplyStage(t *testing.T, state *permanentCPUFixtureState) {
 	t.Helper()
-	if !state.managedRWX {
-		t.Log("published platform baseline predates managed RWX; dedicated exact-candidate storage gates own this stage")
-		return
-	}
 	sc, err := sshDial(state.ip, state.privKeyPath)
 	if err != nil {
 		t.Fatalf("ssh dial %s: %v", state.ip, err)
@@ -248,18 +240,19 @@ func seedManagedRWXReapplyStage(t *testing.T, state *digitalOceanCPUState) {
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: forge-rwx-reapply
+  name: forge-lvm-reapply
   namespace: iterabase-system
 spec:
-  accessModes: [ReadWriteMany]
-  storageClassName: iterabase-rwx
+  accessModes: [ReadWriteOnce]
+  volumeMode: Filesystem
+  storageClassName: iterabase-lvm-xfs
   resources:
     requests: {storage: 1Gi}
 ---
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: forge-rwx-writer
+  name: forge-lvm-writer
   namespace: iterabase-system
 spec:
   backoffLimit: 0
@@ -270,41 +263,109 @@ spec:
         - name: writer
           image: debian:13-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132
           command: [bash, -ceu]
-          args: ['printf HOR-469-reapply > /sessions/marker && sync -f /sessions/marker']
+          args: ['printf HOR-545-reapply > /sessions/marker && sync -f /sessions/marker']
           volumeMounts: [{name: sessions, mountPath: /sessions}]
       volumes:
         - name: sessions
-          persistentVolumeClaim: {claimName: forge-rwx-reapply}
+          persistentVolumeClaim: {claimName: forge-lvm-reapply}
 YAML`
 	mustSSHOutput(t, sc, manifest)
-	mustSSHOutput(t, sc, "sudo k3s kubectl wait -n iterabase-system --for=condition=complete job/forge-rwx-writer --timeout=10m")
-	identity := strings.TrimSpace(mustSSHOutput(t, sc, `sudo k3s kubectl get pvc forge-rwx-reapply -n iterabase-system -o jsonpath='{.metadata.uid}|{.spec.volumeName}'`))
+	mustSSHOutput(t, sc, "sudo k3s kubectl wait -n iterabase-system --for=condition=complete job/forge-lvm-writer --timeout=10m")
+	identity := strings.TrimSpace(mustSSHOutput(t, sc, `sudo k3s kubectl get pvc forge-lvm-reapply -n iterabase-system -o jsonpath='{.metadata.uid}|{.spec.volumeName}'`))
 	parts := strings.Split(identity, "|")
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		t.Fatalf("managed RWX seed claim has incomplete identity: %q", identity)
+		t.Fatalf("LVM seed claim has incomplete identity: %q", identity)
 	}
 	state.storagePVCUID, state.storagePV = parts[0], parts[1]
+	volume := strings.TrimSpace(mustSSHOutput(t, sc, fmt.Sprintf(`sudo k3s kubectl get pv %s -o jsonpath='{.spec.csi.driver}|{.spec.csi.fsType}|{.spec.csi.volumeAttributes.openebs\.io/volgroup}|{.spec.csi.volumeHandle}'`, state.storagePV)))
+	volumeParts := strings.Split(volume, "|")
+	if len(volumeParts) != 4 || volumeParts[0] != "local.csi.openebs.io" || volumeParts[1] != "xfs" || volumeParts[2] != "iterabase-data" || volumeParts[3] == "" {
+		t.Fatalf("general LVM PV contract is invalid: %q", volume)
+	}
+	lvmVolume := strings.TrimSpace(mustSSHOutput(t, sc, fmt.Sprintf(`sudo k3s kubectl get lvmvolume.local.openebs.io %s -n iterabase-system -o jsonpath='{.status.state}|{.spec.volGroup}|{.spec.vgPattern}|{.spec.thinProvision}|{.spec.shared}'`, volumeParts[3])))
+	if lvmVolume != "Ready|iterabase-data|^iterabase-data$|no|no" {
+		t.Fatalf("general LVMVolume contract is invalid: %q", lvmVolume)
+	}
 }
 
-func assertManagedRWXReapplyStage(t *testing.T, state *digitalOceanCPUState) {
+func growGeneralLVMClaimStage(t *testing.T, state *permanentCPUFixtureState) {
 	t.Helper()
-	if !state.managedRWX {
-		return
-	}
 	sc, err := sshDial(state.ip, state.privKeyPath)
 	if err != nil {
 		t.Fatalf("ssh dial %s: %v", state.ip, err)
 	}
 	defer sc.Close()
-	identity := strings.TrimSpace(mustSSHOutput(t, sc, `sudo k3s kubectl get pvc forge-rwx-reapply -n iterabase-system -o jsonpath='{.metadata.uid}|{.spec.volumeName}'`))
+	manifest := `cat <<'YAML' | sudo k3s kubectl apply -f -
+apiVersion: v1
+kind: Pod
+metadata: {name: forge-lvm-resize-holder, namespace: iterabase-system}
+spec:
+  containers:
+    - name: hold
+      image: debian:13-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132
+      command: [bash, -ceu]
+      args: ['test "$(cat /data/marker)" = HOR-545-reapply; sleep 1200']
+      volumeMounts: [{name: data, mountPath: /data}]
+  volumes: [{name: data, persistentVolumeClaim: {claimName: forge-lvm-reapply}}]
+YAML`
+	mustSSHOutput(t, sc, manifest)
+	mustSSHOutput(t, sc, "sudo k3s kubectl wait -n iterabase-system --for=condition=Ready pod/forge-lvm-resize-holder --timeout=10m")
+	beforeFS := strings.TrimSpace(mustSSHOutput(t, sc, `sudo k3s kubectl exec -n iterabase-system forge-lvm-resize-holder -- df -B1 --output=size /data | tail -1 | tr -d ' '`))
+	handle := strings.TrimSpace(mustSSHOutput(t, sc, fmt.Sprintf(`sudo k3s kubectl get pv %s -o jsonpath='{.spec.csi.volumeHandle}'`, state.storagePV)))
+	hostIdentity := strings.TrimSpace(mustSSHOutput(t, sc, fmt.Sprintf(`sudo bash -ceu 'lv=/dev/iterabase-data/%s; printf "%%s|%%s" "$(lvs --noheadings -o lv_uuid "$lv" | xargs)" "$(blkid -s UUID -o value "$lv")"'`, candidateShellQuote(handle))))
+	mustSSHOutput(t, sc, `sudo k3s kubectl patch pvc/forge-lvm-reapply -n iterabase-system --type=merge -p '{"spec":{"resources":{"requests":{"storage":"2Gi"}}}}'`)
+	mustSSHOutput(t, sc, `sudo k3s kubectl wait pvc/forge-lvm-reapply -n iterabase-system --for=jsonpath='{.status.capacity.storage}'=2Gi --timeout=15m`)
+	afterFS := strings.TrimSpace(mustSSHOutput(t, sc, `for i in $(seq 1 300); do value=$(sudo k3s kubectl exec -n iterabase-system forge-lvm-resize-holder -- df -B1 --output=size /data | tail -1 | tr -d ' '); test "$value" -gt 1073741824 && { printf '%s' "$value"; exit 0; }; sleep 2; done; exit 1`))
+	beforeBytes, beforeErr := strconv.ParseUint(beforeFS, 10, 64)
+	afterBytes, afterErr := strconv.ParseUint(afterFS, 10, 64)
+	if beforeErr != nil || afterErr != nil || afterBytes <= beforeBytes {
+		t.Fatalf("general mounted XFS did not grow: before=%q after=%q errors=%v/%v", beforeFS, afterFS, beforeErr, afterErr)
+	}
+	identity := strings.TrimSpace(mustSSHOutput(t, sc, `sudo k3s kubectl get pvc forge-lvm-reapply -n iterabase-system -o jsonpath='{.metadata.uid}|{.spec.volumeName}'`))
 	if identity != state.storagePVCUID+"|"+state.storagePV {
-		t.Fatalf("managed RWX reapply replaced the claim: before=%s|%s after=%s", state.storagePVCUID, state.storagePV, identity)
+		t.Fatalf("general growth replaced PVC/PV identity: before=%s|%s after=%s", state.storagePVCUID, state.storagePV, identity)
+	}
+	lvm := strings.TrimSpace(mustSSHOutput(t, sc, fmt.Sprintf(`sudo k3s kubectl get lvmvolume.local.openebs.io %s -n iterabase-system -o jsonpath='{.spec.capacity}|{.status.state}'`, handle)))
+	assertLVMVolumeCapacity(t, lvm, "2Gi")
+	if after := strings.TrimSpace(mustSSHOutput(t, sc, fmt.Sprintf(`sudo bash -ceu 'lv=/dev/iterabase-data/%s; printf "%%s|%%s" "$(lvs --noheadings -o lv_uuid "$lv" | xargs)" "$(blkid -s UUID -o value "$lv")"'`, candidateShellQuote(handle)))); after != hostIdentity {
+		t.Fatalf("general growth replaced LV/filesystem identity: before=%s after=%s", hostIdentity, after)
+	}
+	mustSSHOutput(t, sc, `sudo k3s kubectl exec -n iterabase-system forge-lvm-resize-holder -- bash -ceu 'test "$(cat /data/marker)" = HOR-545-reapply'`)
+	mustSSHOutput(t, sc, "sudo k3s kubectl delete pod/forge-lvm-resize-holder -n iterabase-system --wait=true --timeout=5m")
+}
+
+func assertLVMVolumeCapacity(t *testing.T, observed, wanted string) {
+	t.Helper()
+	parts := strings.Split(observed, "|")
+	if len(parts) != 2 || parts[1] != "Ready" {
+		t.Fatalf("LVMVolume capacity/state is malformed: %q", observed)
+	}
+	got, err := resource.ParseQuantity(parts[0])
+	if err != nil {
+		t.Fatalf("parse LVMVolume capacity %q: %v", parts[0], err)
+	}
+	want := resource.MustParse(wanted)
+	if got.Cmp(want) != 0 {
+		t.Fatalf("LVMVolume capacity=%s state=Ready want=%s", got.String(), wanted)
+	}
+}
+
+func assertLVMReapplyStage(t *testing.T, state *permanentCPUFixtureState) {
+	t.Helper()
+	sc, err := sshDial(state.ip, state.privKeyPath)
+	if err != nil {
+		t.Fatalf("ssh dial %s: %v", state.ip, err)
+	}
+	defer sc.Close()
+	identity := strings.TrimSpace(mustSSHOutput(t, sc, `sudo k3s kubectl get pvc forge-lvm-reapply -n iterabase-system -o jsonpath='{.metadata.uid}|{.spec.volumeName}'`))
+	if identity != state.storagePVCUID+"|"+state.storagePV {
+		t.Fatalf("Forge reapply replaced the LVM claim: before=%s|%s after=%s", state.storagePVCUID, state.storagePV, identity)
 	}
 	manifest := `cat <<'YAML' | sudo k3s kubectl apply -f -
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: forge-rwx-replacement
+  name: forge-lvm-replacement
   namespace: iterabase-system
 spec:
   backoffLimit: 0
@@ -315,28 +376,79 @@ spec:
         - name: reader
           image: debian:13-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132
           command: [bash, -ceu]
-          args: ['test "$(cat /sessions/marker)" = HOR-469-reapply && printf replacement-persistence=pass']
+          args: ['test "$(cat /sessions/marker)" = HOR-545-reapply && printf replacement-persistence=pass']
           volumeMounts: [{name: sessions, mountPath: /sessions}]
       volumes:
         - name: sessions
-          persistentVolumeClaim: {claimName: forge-rwx-reapply}
+          persistentVolumeClaim: {claimName: forge-lvm-reapply}
 YAML`
 	mustSSHOutput(t, sc, manifest)
-	mustSSHOutput(t, sc, "sudo k3s kubectl wait -n iterabase-system --for=condition=complete job/forge-rwx-replacement --timeout=10m")
-	logs := mustSSHOutput(t, sc, "sudo k3s kubectl logs -n iterabase-system job/forge-rwx-replacement")
+	mustSSHOutput(t, sc, "sudo k3s kubectl wait -n iterabase-system --for=condition=complete job/forge-lvm-replacement --timeout=10m")
+	logs := mustSSHOutput(t, sc, "sudo k3s kubectl logs -n iterabase-system job/forge-lvm-replacement")
 	if !strings.Contains(logs, "replacement-persistence=pass") {
-		t.Fatalf("replacement worker did not preserve committed RWX bytes: %s", logs)
+		t.Fatalf("replacement pod did not preserve committed LVM/XFS bytes: %s", logs)
 	}
 }
 
-func setupManagedAgentPoolStage(t *testing.T, state *digitalOceanCPUState) {
+func deleteLVMClaimStage(t *testing.T, state *permanentCPUFixtureState) {
 	t.Helper()
-	if !state.managedRWX {
-		return
+	sc, err := sshDial(state.ip, state.privKeyPath)
+	if err != nil {
+		t.Fatalf("ssh dial %s: %v", state.ip, err)
 	}
+	defer sc.Close()
+	handle := strings.TrimSpace(mustSSHOutput(t, sc, fmt.Sprintf(`sudo k3s kubectl get pv %s -o jsonpath='{.spec.csi.volumeHandle}'`, state.storagePV)))
+	if handle == "" {
+		t.Fatal("general LVM claim has no volume handle before deletion")
+	}
+	mustSSHOutput(t, sc, "sudo k3s kubectl delete job/forge-lvm-writer job/forge-lvm-replacement -n iterabase-system --ignore-not-found=true --wait=true --timeout=5m")
+	mustSSHOutput(t, sc, "sudo k3s kubectl delete pvc/forge-lvm-reapply -n iterabase-system --wait=true --timeout=5m")
+	command := fmt.Sprintf(`for i in $(seq 1 150); do
+  ! sudo k3s kubectl get pv %s >/dev/null 2>&1 &&
+  ! sudo k3s kubectl get lvmvolume.local.openebs.io %s -n iterabase-system >/dev/null 2>&1 &&
+  ! sudo lvs --noheadings -o lv_name iterabase-data | awk '{$1=$1;if(NF)print}' | grep -Fxq %s && exit 0
+  sleep 2
+done
+exit 1`, state.storagePV, handle, candidateShellQuote(handle))
+	if output, err := sshOutput(sc, command); err != nil {
+		t.Fatalf("Delete reclaim left PV/LVMVolume/LV %s: %v\n%s", handle, err, output)
+	}
+}
+
+func destroyPreservesDataStorageStage(t *testing.T, state *permanentCPUFixtureState) {
+	t.Helper()
+	if err := state.fixture.releaseDataStorageConsumers(); err != nil {
+		t.Fatalf("release claims through Kubernetes before ordinary Forge destroy: %v", err)
+	}
+	plan := prepareCandidateOverlay(t, state.runID, state.ip, state.privKeyPath)
+	cfgPath := writeCurrentOverlayForgeConfig(t, state.runID, state.ip, state.privKeyPath, state.chartVersion, plan)
+	out, err := runForgeE(state.forgeBin, state.forgeHome, "destroy", "--config", cfgPath, "--yes")
+	if err != nil {
+		t.Fatalf("ordinary Forge destroy failed: %v\n%s", err, out)
+	}
+	sc, err := sshDial(state.ip, state.privKeyPath)
+	if err != nil {
+		t.Fatalf("ssh after ordinary destroy: %v", err)
+	}
+	defer sc.Close()
+	preserved := mustSSHOutput(t, sc, fmt.Sprintf(`sudo bash -ceu '
+test ! -e /etc/rancher/k3s/k3s.yaml
+test -f /var/lib/iterabase/data-storage.receipt
+test "$(vgs --noheadings -o vg_name iterabase-data | awk "{\$1=\$1;print}")" = iterabase-data
+device=$(readlink -f -- %s)
+test "$(pvs --noheadings -o vg_name "$device" | awk "{\$1=\$1;print}")" = iterabase-data
+printf ordinary-destroy-vg-preserved=pass
+'`, candidateShellQuote(state.dataStorageDevice)))
+	if !strings.Contains(preserved, "ordinary-destroy-vg-preserved=pass") {
+		t.Fatalf("ordinary destroy did not preserve receipt-matching VG: %s", preserved)
+	}
+}
+
+func setupLVMSharedAgentPoolStage(t *testing.T, state *permanentCPUFixtureState) {
+	t.Helper()
 	repository, tag := os.Getenv("HARNESS_IMAGE_REPO"), os.Getenv("HARNESS_IMAGE_TAG")
 	if repository == "" || tag == "" {
-		t.Fatal("managed AgentPool readiness evidence requires an exact HARNESS_IMAGE_REPO/HARNESS_IMAGE_TAG fixture")
+		t.Fatal("composed CPU runtime requires the exact harness image")
 	}
 	sc, err := sshDial(state.ip, state.privKeyPath)
 	if err != nil {
@@ -357,8 +469,8 @@ spec:
     trustDomain: iterabase.local
     caSecretRef: {name: %s-control-plane-gateway-ca}
   sandbox:
-    storageClassName: iterabase-rwx
-    accessMode: ReadWriteMany
+    storageClassName: iterabase-agentpool-lvm-xfs
+    accessMode: ReadWriteOnce
     size: 2Gi
   gateways:
     controlPlane:
@@ -374,92 +486,208 @@ spec:
       serverName: %s-gateway.iterabase-system.svc
       selector: {podSelector: {matchLabels: {app.kubernetes.io/name: inference-gateway}}}
   networkPolicy: {egress: denied}
-  workspaceTools: false
+  workspaceTools: true
 YAML`, repository, tag, state.runID, state.runID, state.runID, state.runID, state.runID, state.runID, state.runID)
 	mustSSHOutput(t, sc, manifest)
-	mustSSHOutput(t, sc, "sudo k3s kubectl wait -n iterabase-system --for=jsonpath='{.status.ready}'=true agentpool/forge-storage-pool --timeout=10m")
+	waitForLVMSharedAgentPoolReady(t, sc, 10*time.Minute)
 	status := strings.TrimSpace(mustSSHOutput(t, sc, `sudo k3s kubectl get agentpool forge-storage-pool -n iterabase-system -o jsonpath='{.status.readyReplicas}|{.status.conditions[?(@.type=="StorageReady")].reason}'`))
 	if status != "2|StorageReady" {
-		t.Fatalf("managed AgentPool readiness = %q, want 2|StorageReady", status)
+		t.Fatalf("OpenEBS shared-LVM AgentPool readiness = %q, want 2|StorageReady", status)
 	}
 	state.agentPoolPVCUID = strings.TrimSpace(mustSSHOutput(t, sc, `sudo k3s kubectl get pvc forge-storage-pool-sandbox -n iterabase-system -o jsonpath='{.metadata.uid}'`))
 	state.initialWorkerPodUID = strings.TrimSpace(mustSSHOutput(t, sc, `sudo k3s kubectl get pods -n iterabase-system -l platform.iterabase.com/agentpool=forge-storage-pool -o jsonpath='{range .items[*]}{.metadata.uid}{"\n"}{end}'`))
 	if state.agentPoolPVCUID == "" || len(strings.Fields(state.initialWorkerPodUID)) != 2 {
-		t.Fatalf("managed AgentPool identities incomplete: pvc=%q workers=%q", state.agentPoolPVCUID, state.initialWorkerPodUID)
+		t.Fatalf("OpenEBS shared-LVM AgentPool identities incomplete: pvc=%q workers=%q", state.agentPoolPVCUID, state.initialWorkerPodUID)
+	}
+	second := strings.ReplaceAll(manifest, "forge-storage-pool", "forge-storage-pool-b")
+	second = strings.Replace(second, "replicas: 2", "replicas: 1", 1)
+	mustSSHOutput(t, sc, second)
+	mustSSHOutput(t, sc, "sudo k3s kubectl wait -n iterabase-system --for=jsonpath='{.status.readyReplicas}'=1 agentpool/forge-storage-pool-b --timeout=10m")
+	claims := strings.Fields(mustSSHOutput(t, sc, `sudo k3s kubectl get pvc forge-storage-pool-sandbox forge-storage-pool-b-sandbox -n iterabase-system -o jsonpath='{range .items[*]}{.metadata.uid}|{.spec.volumeName}{"\n"}{end}'`))
+	if len(claims) != 2 || claims[0] == claims[1] {
+		t.Fatalf("separate AgentPools did not receive separate PVC/PV identities: %v", claims)
 	}
 }
 
-func exerciseManagedShareManagerFailureStage(t *testing.T, state *digitalOceanCPUState) {
+func waitForLVMSharedAgentPoolReady(t *testing.T, client *ssh.Client, timeout time.Duration) {
 	t.Helper()
-	if !state.managedRWX {
+	command := fmt.Sprintf("sudo k3s kubectl wait -n iterabase-system --for=jsonpath='{.status.readyReplicas}'=2 agentpool/forge-storage-pool --timeout=%s", timeout)
+	output, err := sshOutput(client, command)
+	if err == nil {
 		return
+	}
+	diagnostics, diagnosticsErr := sshOutput(client, `{
+  sudo k3s kubectl get agentpool forge-storage-pool -n iterabase-system -o yaml || true
+  sudo k3s kubectl get pods,pvc -n iterabase-system -l platform.iterabase.com/agentpool=forge-storage-pool -o wide || true
+  pv=$(sudo k3s kubectl get pvc forge-storage-pool-sandbox -n iterabase-system -o jsonpath='{.spec.volumeName}' 2>/dev/null || true)
+  test -z "$pv" || sudo k3s kubectl get pv "$pv" -o yaml || true
+  sudo k3s kubectl get events -n iterabase-system --sort-by=.metadata.creationTimestamp | tail -100 || true
+} 2>&1`)
+	if diagnosticsErr != nil {
+		diagnostics += "\ncollect AgentPool timeout diagnostics: " + diagnosticsErr.Error()
+	}
+	t.Fatalf("OpenEBS shared-LVM AgentPool did not become Ready within %s: %v\n%s\n%s", timeout, err, output, diagnostics)
+}
+
+func exerciseWorkspaceCapacityGateStage(t *testing.T, state *permanentCPUFixtureState) {
+	t.Helper()
+	if os.Getenv("HARNESS_IMAGE_REPO") == "" {
+		t.Fatal("workspace capacity stage requires the composed harness image")
 	}
 	sc, err := sshDial(state.ip, state.privKeyPath)
 	if err != nil {
 		t.Fatalf("ssh dial %s: %v", state.ip, err)
 	}
 	defer sc.Close()
-	volume := strings.TrimSpace(mustSSHOutput(t, sc, `pv=$(sudo k3s kubectl get pvc forge-storage-pool-sandbox -n iterabase-system -o jsonpath='{.spec.volumeName}'); sudo k3s kubectl get pv "$pv" -o jsonpath='{.spec.csi.volumeHandle}'`))
-	if volume == "" {
-		t.Fatal("managed AgentPool PV has no Longhorn volume handle")
-	}
-	shareManager := strings.TrimSpace(mustSSHOutput(t, sc, fmt.Sprintf(`sudo k3s kubectl get pods -n longhorn-system -l longhorn.io/component=share-manager -o name | grep %s | head -1`, volume)))
-	if shareManager == "" {
-		t.Fatalf("no active share-manager for %s", volume)
-	}
-	mustSSHOutput(t, sc, fmt.Sprintf("sudo k3s kubectl delete -n longhorn-system %s --grace-period=0 --force --wait=false", shareManager))
-	mustSSHOutput(t, sc, fmt.Sprintf("sudo k3s kubectl annotate agentpool forge-storage-pool -n iterabase-system --overwrite platform.iterabase.com/storage-fault-trigger=%d", time.Now().UnixNano()))
-
-	deadline := time.Now().Add(3 * time.Minute)
-	last := ""
-	for time.Now().Before(deadline) {
-		out, commandErr := sshOutput(sc, `sudo k3s kubectl get agentpool forge-storage-pool -n iterabase-system -o jsonpath='{.status.ready}|{.status.readyReplicas}|{.status.conditions[?(@.type=="StorageReady")].reason}|{.status.message}'`)
-		last = strings.TrimSpace(out)
-		parts := strings.SplitN(last, "|", 4)
-		if commandErr == nil && len(parts) == 4 && parts[0] == "false" && parts[1] == "0" && parts[2] == "StorageRecoveryPending" {
-			break
+	const filler = "/data/sandboxes/.forge-e2e-capacity-fill"
+	pod := strings.Fields(mustSSHOutput(t, sc, `sudo k3s kubectl get pods -n iterabase-system -l platform.iterabase.com/agentpool=forge-storage-pool -o name`))[0]
+	fill := fmt.Sprintf(`sudo k3s kubectl exec -n iterabase-system %s -- bash -ceu '
+mount=/data/sandboxes
+read -r size avail < <(df -B1 --output=size,avail "$mount" | tail -1)
+target=$((size * 19 / 100))
+allocate=$((avail - target))
+test "$allocate" -gt 0
+fallocate -l "$allocate" %s
+sync -f %s
+'`, pod, filler, filler)
+	mustSSHOutput(t, sc, fill)
+	t.Cleanup(func() {
+		if cleanup, dialErr := sshDial(state.ip, state.privKeyPath); dialErr == nil {
+			_, _ = sshOutput(cleanup, fmt.Sprintf("sudo k3s kubectl exec -n iterabase-system %s -- rm -f %s", pod, filler))
+			cleanup.Close()
 		}
-		time.Sleep(time.Second)
+	})
+	waitMetrics := func(want string) {
+		t.Helper()
+		command := fmt.Sprintf(`for i in $(seq 1 60); do
+  ok=0; total=0
+  for pod in $(sudo k3s kubectl get pods -n iterabase-system -l platform.iterabase.com/agentpool=forge-storage-pool -o name | cut -d/ -f2); do
+    total=$((total+1))
+    metrics=$(sudo k3s kubectl get --raw "/api/v1/namespaces/iterabase-system/pods/$pod:8081/proxy/metrics" 2>/dev/null || true)
+    if printf '%%s\n' "$metrics" | grep -Eq '^control_plane_harness_workspace_credit_gated %s(\\.0+)?$'; then ok=$((ok+1)); fi
+  done
+  test "$total" -ge 2 && test "$ok" = "$total" && exit 0
+  sleep 2
+done
+exit 1`, want)
+		if output, commandErr := sshOutput(sc, command); commandErr != nil {
+			t.Fatalf("workspace capacity gate did not reach %s on every worker: %v\n%s", want, commandErr, output)
+		}
 	}
-	if !strings.HasPrefix(last, "false|0|StorageRecoveryPending|") {
-		t.Fatalf("AgentPool did not fail closed on share-manager loss: %q", last)
+	waitMetrics("1")
+	metrics := mustSSHOutput(t, sc, `pod=$(sudo k3s kubectl get pods -n iterabase-system -l platform.iterabase.com/agentpool=forge-storage-pool -o jsonpath='{.items[0].metadata.name}'); sudo k3s kubectl get --raw "/api/v1/namespaces/iterabase-system/pods/$pod:8081/proxy/metrics"`)
+	if !strings.Contains(metrics, "control_plane_harness_workspace_capacity_warning 1") {
+		t.Fatalf("controlled fill gated credit without the 25%% warning metric:\n%s", metrics)
 	}
-	if count := strings.TrimSpace(mustSSHOutput(t, sc, `sudo k3s kubectl get pods -n iterabase-system -l platform.iterabase.com/agentpool=forge-storage-pool --no-headers 2>/dev/null | wc -l`)); count != "0" {
-		t.Fatalf("storage-unready AgentPool retained %s worker pods/scheduling credits", count)
-	}
+	mustSSHOutput(t, sc, fmt.Sprintf("sudo k3s kubectl exec -n iterabase-system %s -- bash -ceu 'rm -f %s && sync'", pod, filler))
+	waitMetrics("0")
 }
 
-func assertManagedStorageRecoveryStage(t *testing.T, state *digitalOceanCPUState) {
+func replaceWorkspaceWorkerStage(t *testing.T, state *permanentCPUFixtureState) {
 	t.Helper()
-	if !state.managedRWX {
-		return
+	if os.Getenv("HARNESS_IMAGE_REPO") == "" {
+		t.Fatal("worker replacement stage requires the composed harness image")
 	}
 	sc, err := sshDial(state.ip, state.privKeyPath)
 	if err != nil {
 		t.Fatalf("ssh dial %s: %v", state.ip, err)
 	}
 	defer sc.Close()
-	mustSSHOutput(t, sc, "sudo k3s kubectl wait -n iterabase-system --for=jsonpath='{.status.ready}'=true agentpool/forge-storage-pool --timeout=10m")
+	pod := strings.Fields(mustSSHOutput(t, sc, `sudo k3s kubectl get pods -n iterabase-system -l platform.iterabase.com/agentpool=forge-storage-pool -o name`))[0]
+	mustSSHOutput(t, sc, "sudo k3s kubectl delete -n iterabase-system "+pod+" --wait=true --timeout=5m")
+	waitForReplacement := fmt.Sprintf(`before=%s
+for i in $(seq 1 300); do
+  workers=$(k3s kubectl get pods -n iterabase-system -l platform.iterabase.com/agentpool=forge-storage-pool -o jsonpath='{range .items[*]}{.metadata.uid}{"\n"}{end}')
+  count=$(printf "%%s\n" "$workers" | awk 'NF {n++} END {print n+0}')
+  fresh=$(printf "%%s\n" "$workers" | grep -Fvx -f <(printf "%%s\n" "$before") || true)
+  replicas=$(k3s kubectl get agentpool forge-storage-pool -n iterabase-system -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)
+  if test "$count" = 2 && test -n "$fresh" && test "$replicas" = 2 && k3s kubectl wait -n iterabase-system --for=condition=Ready pods -l platform.iterabase.com/agentpool=forge-storage-pool --timeout=1s >/dev/null 2>&1; then
+    printf "%%s\n" "$workers"
+    exit 0
+  fi
+  sleep 2
+done
+exit 1`, candidateShellQuote(state.initialWorkerPodUID))
+	workers, err := sshOutput(sc, "sudo bash -ceu "+candidateShellQuote(waitForReplacement))
+	if err != nil {
+		t.Fatalf("worker replacement did not produce a fresh Ready two-worker set: before=%q: %v\n%s", state.initialWorkerPodUID, err, workers)
+	}
+	workers = strings.TrimSpace(workers)
 	identity := strings.TrimSpace(mustSSHOutput(t, sc, `sudo k3s kubectl get pvc forge-storage-pool-sandbox -n iterabase-system -o jsonpath='{.metadata.uid}'`))
 	if identity != state.agentPoolPVCUID {
-		t.Fatalf("storage recovery replaced the AgentPool PVC: before=%s after=%s", state.agentPoolPVCUID, identity)
+		t.Fatalf("worker replacement changed AgentPool PVC: before=%s after=%s", state.agentPoolPVCUID, identity)
 	}
-	workers := strings.TrimSpace(mustSSHOutput(t, sc, `sudo k3s kubectl get pods -n iterabase-system -l platform.iterabase.com/agentpool=forge-storage-pool -o jsonpath='{range .items[*]}{.metadata.uid}{"\n"}{end}'`))
 	if len(strings.Fields(workers)) != 2 {
-		t.Fatalf("storage recovery has incomplete fresh worker set: %q", workers)
-	}
-	for _, oldUID := range strings.Fields(state.initialWorkerPodUID) {
-		if strings.Contains(workers, oldUID) {
-			t.Fatalf("storage recovery reused affected worker %s instead of a fresh worker set", oldUID)
-		}
-	}
-	status := strings.TrimSpace(mustSSHOutput(t, sc, `sudo k3s kubectl get agentpool forge-storage-pool -n iterabase-system -o jsonpath='{.status.ready}|{.status.readyReplicas}|{.status.conditions[?(@.type=="StorageReady")].reason}'`))
-	if status != "true|2|StorageReady" {
-		t.Fatalf("managed storage recovery status=%q", status)
+		t.Fatalf("worker replacement returned an invalid Ready worker set: %q", workers)
 	}
 }
 
-func reapplyCurrentPlatformStage(t *testing.T, state *digitalOceanCPUState) {
+func rebootPreservesLVMStorageStage(t *testing.T, state *permanentCPUFixtureState) {
+	t.Helper()
+	before, err := state.fixture.bootID()
+	if err != nil {
+		t.Fatalf("read boot ID before storage reboot: %v", err)
+	}
+	client, err := sshDial(state.ip, state.privKeyPath)
+	if err != nil {
+		t.Fatalf("ssh before storage reboot: %v", err)
+	}
+	handle := strings.TrimSpace(mustSSHOutput(t, client, fmt.Sprintf(`sudo k3s kubectl get pv %s -o jsonpath='{.spec.csi.volumeHandle}'`, state.storagePV)))
+	hostIdentity := strings.TrimSpace(mustSSHOutput(t, client, fmt.Sprintf(`sudo bash -ceu 'lv=/dev/iterabase-data/%s; printf "%%s|%%s" "$(lvs --noheadings -o lv_uuid "$lv" | xargs)" "$(blkid -s UUID -o value "$lv")"'`, candidateShellQuote(handle))))
+	mustSSHOutput(t, client, `cat <<'YAML' | sudo k3s kubectl apply -f -
+apiVersion: v1
+kind: Pod
+metadata: {name: forge-lvm-interrupted-resize, namespace: iterabase-system}
+spec:
+  containers:
+    - name: hold
+      image: debian:13-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132
+      command: [bash, -ceu]
+      args: ['test "$(cat /data/marker)" = HOR-545-reapply; sleep 1200']
+      volumeMounts: [{name: data, mountPath: /data}]
+  volumes: [{name: data, persistentVolumeClaim: {claimName: forge-lvm-reapply}}]
+YAML`)
+	mustSSHOutput(t, client, "sudo k3s kubectl wait -n iterabase-system --for=condition=Ready pod/forge-lvm-interrupted-resize --timeout=10m")
+	mustSSHOutput(t, client, `sudo k3s kubectl patch pvc/forge-lvm-reapply -n iterabase-system --type=merge -p '{"spec":{"resources":{"requests":{"storage":"3Gi"}}}}'`)
+	if request := strings.TrimSpace(mustSSHOutput(t, client, `sudo k3s kubectl get pvc forge-lvm-reapply -n iterabase-system -o jsonpath='{.spec.resources.requests.storage}'`)); request != "3Gi" {
+		t.Fatalf("interrupted growth intent was not accepted before reboot: %q", request)
+	}
+	_, _ = sshOutput(client, "sudo systemctl reboot")
+	client.Close()
+	after, readyClient, err := state.fixture.waitForReboot(before)
+	if err != nil {
+		t.Fatalf("wait for storage reboot: %v", err)
+	}
+	readyClient.Close()
+	client, err = waitForHostReady(context.Background(), state.ip, state.privKeyPath)
+	if err != nil {
+		t.Fatalf("wait for host readiness after storage reboot: %v", err)
+	}
+	defer client.Close()
+	command := fmt.Sprintf(`for i in $(seq 1 450); do
+  test -f /var/lib/iterabase/data-storage.receipt &&
+  test "$(vgs --noheadings -o vg_name iterabase-data | awk '{$1=$1;print}')" = iterabase-data &&
+  test "$(k3s kubectl get --raw=/readyz 2>/dev/null)" = ok &&
+  test "$(k3s kubectl get pvc forge-lvm-reapply -n iterabase-system -o jsonpath='{.metadata.uid}|{.spec.volumeName}' 2>/dev/null)" = %s &&
+  test "$(k3s kubectl get pvc forge-lvm-reapply -n iterabase-system -o jsonpath='{.status.capacity.storage}' 2>/dev/null)" = 3Gi &&
+  test "$(k3s kubectl get pod forge-lvm-interrupted-resize -n iterabase-system -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)" = True && exit 0
+  sleep 2
+done
+exit 1`, candidateShellQuote(state.storagePVCUID+"|"+state.storagePV))
+	if output, err := sshOutput(client, "sudo bash -ceu "+candidateShellQuote(command)); err != nil {
+		t.Fatalf("reboot did not preserve and converge receipt/VG/PVC/PV growth intent: %v\n%s", err, output)
+	}
+	lvm := strings.TrimSpace(mustSSHOutput(t, client, fmt.Sprintf(`sudo k3s kubectl get lvmvolume.local.openebs.io %s -n iterabase-system -o jsonpath='{.spec.capacity}|{.status.state}'`, handle)))
+	assertLVMVolumeCapacity(t, lvm, "3Gi")
+	if identity := strings.TrimSpace(mustSSHOutput(t, client, fmt.Sprintf(`sudo bash -ceu 'lv=/dev/iterabase-data/%s; printf "%%s|%%s" "$(lvs --noheadings -o lv_uuid "$lv" | xargs)" "$(blkid -s UUID -o value "$lv")"'`, candidateShellQuote(handle)))); identity != hostIdentity {
+		t.Fatalf("rebooted growth replaced LV/filesystem identity: before=%s after=%s", hostIdentity, identity)
+	}
+	mustSSHOutput(t, client, `sudo k3s kubectl exec -n iterabase-system forge-lvm-interrupted-resize -- bash -ceu 'test "$(cat /data/marker)" = HOR-545-reapply'`)
+	mustSSHOutput(t, client, "sudo k3s kubectl delete pod/forge-lvm-interrupted-resize -n iterabase-system --wait=true --timeout=5m")
+	t.Logf("storage reboot preserved and converged grow-only identity: boot %s -> %s", before, after)
+}
+
+func reapplyCurrentPlatformStage(t *testing.T, state *permanentCPUFixtureState) {
 	t.Helper()
 	prepareCandidateChart(t, state.ip, state.privKeyPath)
 	plan := prepareCandidateOverlay(t, state.runID, state.ip, state.privKeyPath)
@@ -467,12 +695,7 @@ func reapplyCurrentPlatformStage(t *testing.T, state *digitalOceanCPUState) {
 		t, state.runID, state.ip, state.privKeyPath, state.chartVersion, plan,
 	)
 	out := applyOnce(t, state.forgeBin, state.forgeHome, cfgPath)
-	markers := []string{"action:     skip", "node ready: true", "certificate substrate applied: true", "chart applied: true", "overlay applied: true"}
-	if state.managedRWX {
-		markers = append(markers, "rwx storage mode: managed-longhorn", "rwx storage prerequisites ready: true", "rwx storage substrate applied: true")
-	} else {
-		markers = append(markers, "rwx storage mode: external")
-	}
+	markers := []string{"action:     skip", "node ready: true", "data storage: iterabase-data", "LVM storage ready: true", "certificate substrate applied: true", "LVM storage substrate applied: true", "chart applied: true", "overlay applied: true"}
 	if plan.flux {
 		markers = append(markers, "flux installed: true")
 	}
@@ -502,108 +725,23 @@ func assertApplyMarkers(t *testing.T, out string, markers ...string) {
 	}
 }
 
-func (state *digitalOceanCPUState) cleanup(t *testing.T) {
+func (state *permanentCPUFixtureState) resetAfterScenario(t *testing.T) {
 	t.Helper()
-	if state.droplet == nil {
-		return
-	}
-	if state.keep {
-		t.Logf("keeping droplet %d (run %s) for debugging", state.droplet.ID, state.runID)
-		return
-	}
-	if err := state.destroyCPUHost(); err != nil {
-		t.Errorf("destroy CPU droplet %d: %v (tagged reaper remains the crash-safety fallback)", state.droplet.ID, err)
+	state.diagnostics.setDomain(failureDomainFixtureReset)
+	dataStorageDevicesByAddress.Delete(state.ip)
+	if err := state.fixture.reset(t, state.forgeBin, state.forgeHome); err != nil {
+		t.Errorf("reset permanent CPU fixture after diagnostics: %v", err)
 	}
 }
 
-func (state *digitalOceanCPUState) destroyCPUHost() error {
-	state.diagnostics.setDomain(failureDomainCleanup)
-	return state.provisioner.Destroy(state.ctx, state.droplet.ID)
-}
-
-func generateKey(t *testing.T) (pubKeyStr, privKeyPath string) {
-	t.Helper()
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatalf("generate key: %v", err)
-	}
-	pubSSH, err := ssh.NewPublicKey(pub)
-	if err != nil {
-		t.Fatalf("new public key: %v", err)
-	}
-	pubKeyStr = strings.TrimSpace(string(ssh.MarshalAuthorizedKey(pubSSH)))
-
-	block, err := ssh.MarshalPrivateKey(priv, "")
-	if err != nil {
-		t.Fatalf("marshal private key: %v", err)
-	}
-	privPEM := pem.EncodeToMemory(block)
-
-	privKeyPath = filepath.Join(t.TempDir(), "id_ed25519")
-	if err := os.WriteFile(privKeyPath, privPEM, 0o600); err != nil {
-		t.Fatalf("write key file: %v", err)
-	}
-	return pubKeyStr, privKeyPath
-}
-
-func cloudInit(pubKeyStr string) string {
-	return fmt.Sprintf(`#cloud-config
-packages: [curl]
-users:
-  - name: forge
-    sudo: ALL=(ALL) NOPASSWD:ALL
-    shell: /bin/bash
-    ssh_authorized_keys:
-      - %s
-`, pubKeyStr)
-}
-
-func createDroplet(ctx context.Context, client *godo.Client, name, pubKeyStr string) (*godo.Droplet, error) {
-	d, _, err := client.Droplets.Create(ctx, newCPUDropletRequest(name, pubKeyStr))
-	return d, err
-}
-
-func newCPUDropletRequest(name, pubKeyStr string) *godo.DropletCreateRequest {
-	return &godo.DropletCreateRequest{
-		Name:     name,
-		Region:   region,
-		Size:     size,
-		UserData: cloudInit(pubKeyStr),
-		IPv6:     true,
-		Tags:     []string{"forge-e2e", name},
-		Image:    godo.DropletCreateImage{Slug: image},
-	}
-}
-
-func waitForIP(ctx context.Context, client *godo.Client, id int) (string, error) {
-	deadline := time.Now().Add(3 * time.Minute)
-	for {
-		d, _, err := client.Droplets.Get(ctx, id)
-		if err != nil {
-			return "", err
-		}
-		if d.Status == "active" {
-			for _, n := range d.Networks.V4 {
-				if n.Type == "public" {
-					return n.IPAddress, nil
-				}
-			}
-		}
-		if time.Now().After(deadline) {
-			return "", fmt.Errorf("droplet %d never became active with a public IP", id)
-		}
-		time.Sleep(5 * time.Second)
-	}
-}
-
-// waitForHostReady waits until the droplet accepts SSH AND cloud-init has
-// finished applying its user-data (the forge user, passwordless sudo, curl).
+// waitForHostReady waits until the permanent fixture accepts SSH AND cloud-init
+// has finished applying its baseline (the forge user, passwordless sudo, curl).
 // Returning only once cloud-init reports "done" prevents forge's preflight from
 // racing cloud-init — e.g. `sudo -n true` failing with "passwordless sudo
 // required" before the sudoers rule is applied, or curl being absent before
 // `packages: [curl]` completes. The forge user is created by cloud-init, so SSH
 // can only succeed once cloud-init has at least started.
-func waitForHostReady(ctx context.Context, ip, keyPath string) error {
+func waitForHostReady(ctx context.Context, ip, keyPath string) (*ssh.Client, error) {
 	const deadline = 5 * time.Minute
 	end := time.Now().Add(deadline)
 	var lastStatus string
@@ -612,24 +750,26 @@ func waitForHostReady(ctx context.Context, ip, keyPath string) error {
 		client, err := sshDial(ip, keyPath)
 		if err == nil {
 			out, statusErr := sshOutput(client, "cloud-init status")
-			client.Close()
 			lastStatus, lastErr = strings.TrimSpace(out), statusErr
 			switch {
 			case strings.Contains(out, "status: done"):
-				return nil
+				return client, nil
 			case strings.Contains(out, "status: error"):
-				return fmt.Errorf("cloud-init failed on %s: %s", ip, lastStatus)
+				client.Close()
+				return nil, fmt.Errorf("cloud-init failed on %s: %s", ip, lastStatus)
+			default:
+				client.Close()
 			}
 		} else {
 			lastErr = err
 		}
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return nil, ctx.Err()
 		case <-time.After(5 * time.Second):
 		}
 	}
-	return fmt.Errorf("host %s never became ready (SSH up + cloud-init done) within %s (last status %q, last error %v)", ip, deadline, lastStatus, lastErr)
+	return nil, fmt.Errorf("host %s never became ready (SSH up + cloud-init done) within %s (last status %q, last error %v)", ip, deadline, lastStatus, lastErr)
 }
 
 // sshOutput runs a command over an SSH client and returns its combined output.
@@ -652,22 +792,29 @@ func sshDial(ip, keyPath string) (*ssh.Client, error) {
 	if err != nil {
 		return nil, err
 	}
+	hostKeyCallback := ssh.InsecureIgnoreHostKey() //nolint:gosec // legacy non-fixture E2E paths only
+	var hostKeyAlgorithms []string
+	if pin := strings.TrimSpace(os.Getenv(permanentFixtureHostKeyEnv)); pin != "" {
+		publicKey, _, _, rest, parseErr := ssh.ParseAuthorizedKey([]byte(pin + "\n"))
+		if parseErr != nil || len(strings.TrimSpace(string(rest))) != 0 {
+			return nil, fmt.Errorf("parse pinned fixture SSH host key: %w", parseErr)
+		}
+		hostKeyCallback = ssh.FixedHostKey(publicKey)
+		hostKeyAlgorithms = []string{publicKey.Type()}
+	}
 	cfg := &ssh.ClientConfig{
-		User:            "forge",
-		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(), //nolint:gosec // ephemeral test droplet
-		Timeout:         10 * time.Second,
+		User:              fixtureSSHUser(),
+		Auth:              []ssh.AuthMethod{ssh.PublicKeys(signer)},
+		HostKeyCallback:   hostKeyCallback,
+		HostKeyAlgorithms: hostKeyAlgorithms,
+		Timeout:           10 * time.Second,
 	}
 	return ssh.Dial("tcp", ip+":22", cfg)
 }
 
 func buildForge(t *testing.T) string {
 	t.Helper()
-	breakEmptyDirPolicy := os.Getenv("FORGE_E2E_BREAK_DELETE_EMPTYDIR") == "true"
 	if candidate := os.Getenv("FORGE_E2E_BINARY"); candidate != "" {
-		if breakEmptyDirPolicy {
-			t.Fatal("FORGE_E2E_BREAK_DELETE_EMPTYDIR cannot mutate an exact candidate Forge binary")
-		}
 		absolute, err := filepath.Abs(candidate)
 		if err != nil {
 			t.Fatalf("resolve FORGE_E2E_BINARY: %v", err)
@@ -680,43 +827,16 @@ func buildForge(t *testing.T) string {
 		t.Logf("using exact candidate Forge binary %s", absolute)
 		return absolute
 	}
+	if os.Getenv("ITERABASE_E2E_REQUIRED") == "true" {
+		t.Fatal("required real-machine execution has no composer-supplied Forge binary")
+	}
 	wd, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("getwd: %v", err)
 	}
 	repoRoot := filepath.Join(wd, "..", "..")
 	bin := filepath.Join(t.TempDir(), "forge")
-	args := []string{"build"}
-	if breakEmptyDirPolicy {
-		sourcePath, err := filepath.Abs(filepath.Join(repoRoot, "internal", "lifecycle", "lifecycle.go"))
-		if err != nil {
-			t.Fatalf("resolve lifecycle source for mutation: %v", err)
-		}
-		source, err := os.ReadFile(sourcePath)
-		if err != nil {
-			t.Fatalf("read lifecycle source for mutation: %v", err)
-		}
-		const enabled = `"driver.upgradePolicy.gpuPodDeletion.deleteEmptyDir=true",`
-		const disabled = `"driver.upgradePolicy.gpuPodDeletion.deleteEmptyDir=false",`
-		if strings.Count(string(source), enabled) != 1 {
-			t.Fatalf("expected one deleteEmptyDir policy value to mutate")
-		}
-		mutatedPath := filepath.Join(t.TempDir(), "lifecycle.go")
-		if err := os.WriteFile(mutatedPath, []byte(strings.Replace(string(source), enabled, disabled, 1)), 0o600); err != nil {
-			t.Fatalf("write mutated lifecycle source: %v", err)
-		}
-		overlayPath := filepath.Join(t.TempDir(), "overlay.json")
-		overlay, err := json.Marshal(map[string]map[string]string{"Replace": {sourcePath: mutatedPath}})
-		if err != nil {
-			t.Fatalf("encode Go build overlay: %v", err)
-		}
-		if err := os.WriteFile(overlayPath, overlay, 0o600); err != nil {
-			t.Fatalf("write Go build overlay: %v", err)
-		}
-		args = append(args, "-overlay", overlayPath)
-		t.Log("building intentional HOR-411 mutation with deleteEmptyDir=false")
-	}
-	args = append(args, "-o", bin, "./cmd/forge")
+	args := []string{"build", "-o", bin, "./cmd/forge"}
 	cmd := exec.Command("go", args...)
 	cmd.Dir = repoRoot
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -736,6 +856,13 @@ func writeForgeConfig(t *testing.T, name, ip, keyPath, chartVersion string) stri
 func runForgeE(bin, forgeHome string, args ...string) (string, error) {
 	cmd := exec.Command(bin, args...)
 	cmd.Env = append(os.Environ(), "FORGE_HOME="+forgeHome)
+	// Required cloud E2E uses the workflow's ephemeral GitHub token for the
+	// public exact-overlay clone when no explicit Forge token was supplied. This
+	// avoids anonymous smart-HTTP edge failures from short-lived cloud IPs while
+	// exercising Forge's credential-helper path without persisting the token.
+	if os.Getenv("FORGE_OVERLAY_TOKEN") == "" && os.Getenv("GITHUB_TOKEN") != "" {
+		cmd.Env = append(cmd.Env, "FORGE_OVERLAY_TOKEN="+os.Getenv("GITHUB_TOKEN"))
+	}
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }
@@ -893,8 +1020,8 @@ func checkGatewayHealthOnPort(t *testing.T, ip string, port int) {
 	t.Fatalf("gateway /health not 200 via %s (ip %s port %d)", url, ip, port)
 }
 
-// writeEdgeOverlayOnHost creates a file:// overlay git repo on the droplet with
-// the MetalLB L2 edge values (IPAddressPool = the droplet's public IP). forge
+// writeEdgeOverlayOnHost creates a file:// overlay git repo on the fixture host
+// with the MetalLB L2 edge values (IPAddressPool = the fixture's public IP). Forge
 // apply clones it (file://, tokenless) and feeds values.yaml to the platform
 // chart. git is pre-installed by cloud-init. The scaffold matches what forge
 // validates: values.yaml + values.client.yaml + crds/client/kustomization.yaml.

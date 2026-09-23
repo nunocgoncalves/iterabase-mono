@@ -133,10 +133,8 @@ spec:
 
 func installExecutionPlatformStage(t *testing.T, state *deployedState) {
 	t.Helper()
-	pullPolicy := "IfNotPresent"
-	if os.Getenv("ITERABASE_E2E_FIXTURE_MODE") == "source" {
-		pullPolicy = "Never"
-	}
+	// The shared composer materializes every selected or baseline image locally.
+	pullPolicy := "Never"
 	values := map[string]any{
 		"global":         map[string]any{"internalTLS": map[string]any{"enabled": true}},
 		"external-dns":   map[string]any{"enabled": false},
@@ -234,6 +232,24 @@ export async function invoke(context,args){
 				"credentialSlots":      []any{map[string]any{"name": "fixture_token", "scheme": "bearer", "required": true}},
 				"artifactCapabilities": map[string]any{"writesArtifacts": true, "acceptedMimeTypes": []string{"text/plain"}},
 			},
+		},
+		{
+			name: "platform.fixture_barrier", effect: "read_only",
+			bundle: fmt.Sprintf(`export const identity={name:"platform.fixture_barrier",version:%q};
+const waiters=[];
+export async function invoke(){
+ return await new Promise((resolve,reject)=>{
+  const entry={resolve,reject,timer:null};
+  entry.timer=setTimeout(()=>{const i=waiters.indexOf(entry);if(i>=0)waiters.splice(i,1);reject(new Error("concurrency barrier timeout"));},8000);
+  waiters.push(entry);
+  if(waiters.length>=2){
+   const batch=waiters.splice(0,waiters.length);
+   for(const waiter of batch){clearTimeout(waiter.timer);waiter.resolve({result:{simultaneous:true,participants:batch.length}});}
+  }
+ });
+}
+`, version),
+			extra: map[string]any{"timeoutMs": 10000},
 		},
 		{
 			name: "platform.fixture_upsert", effect: "idempotent_write",

@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -17,7 +18,8 @@ func validCluster() *Cluster {
 		Kind:       Kind,
 		Metadata:   Metadata{Name: "opo1"},
 		Spec: Spec{
-			Mode: ModeSingleNode,
+			Mode:        ModeSingleNode,
+			DataStorage: DataStorage{Devices: []string{"/dev/disk/by-id/scsi-data-a", "/dev/disk/by-id/scsi-data-b"}},
 			Hosts: []Host{{
 				Address:    "10.20.0.10",
 				SSHUser:    "forge",
@@ -60,11 +62,13 @@ func TestParse_Valid(t *testing.T) {
 	h := c.Spec.Hosts[0]
 	assert.Equal(t, "10.20.0.10", h.Address)
 	assert.Equal(t, "forge", h.SSHUser)
+	assert.Equal(t, "", h.SSHHostKey)
 	assert.Equal(t, "test", h.Labels["forge.horizonshift.io/env"])
 	require.Len(t, h.Taints, 1)
 	assert.Equal(t, "NoSchedule", h.Taints[0].Effect)
 	assert.True(t, c.Spec.K3s.DualStack)
 	assert.Equal(t, []string{"traefik", "servicelb"}, c.Spec.K3s.Disable)
+	assert.Equal(t, []string{"/dev/disk/by-id/scsi-data-a", "/dev/disk/by-id/scsi-data-b"}, c.Spec.DataStorage.Devices)
 }
 
 func TestParse_DualStackDisabledNoV6Required(t *testing.T) {
@@ -75,6 +79,38 @@ func TestParse_DualStackDisabledNoV6Required(t *testing.T) {
 	}))
 	require.NoError(t, err)
 	assert.False(t, c.Spec.K3s.DualStack)
+}
+
+func TestParse_RejectsUnreviewedK3sVersion(t *testing.T) {
+	_, err := Parse(yamlFor(t, func(c *Cluster) { c.Spec.K3s.Version = "v1.32.0" }))
+	require.ErrorContains(t, err, "no repository-reviewed executable/runtime identity")
+}
+
+func TestParseRejectsK3sStorageAuthorityOverrides(t *testing.T) {
+	for _, args := range [][]string{
+		{"--disable="},
+		{"--data-dir=/srv/k3s"},
+		{"--kubelet-arg=root-dir=/srv/kubelet"},
+		{"--kubelet-arg", "root-dir=/srv/kubelet"},
+		{"--kubelet-arg"},
+		{"--kubelet-arg", "--node-label=role=worker"},
+	} {
+		t.Run(strings.Join(args, "_"), func(t *testing.T) {
+			_, err := Parse(yamlFor(t, func(c *Cluster) { c.Spec.K3s.ExtraArgs = args }))
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "k3s.extraArgs")
+		})
+	}
+}
+
+func TestParseAcceptsReviewedNonRootKubeletArgForms(t *testing.T) {
+	for _, args := range [][]string{
+		{"--kubelet-arg=serialize-image-pulls=false"},
+		{"--kubelet-arg", "serialize-image-pulls=false", "--node-label=role=worker"},
+	} {
+		_, err := Parse(yamlFor(t, func(c *Cluster) { c.Spec.K3s.ExtraArgs = args }))
+		require.NoError(t, err)
+	}
 }
 
 func TestParse_BadAPIVersion(t *testing.T) {
@@ -101,6 +137,27 @@ func TestParse_InvalidMode(t *testing.T) {
 	assert.Contains(t, err.Error(), "invalid")
 }
 
+func TestParseDataStorageRequiresCanonicalStableUniqueSet(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		devices []string
+		want    string
+	}{
+		{name: "missing", want: "at least one"},
+		{name: "volatile", devices: []string{"/dev/sdb"}, want: "/dev/disk/by-id"},
+		{name: "partition", devices: []string{"/dev/disk/by-id/scsi-data-part1"}, want: "whole disk"},
+		{name: "nested", devices: []string{"/dev/disk/by-id/nested/device"}, want: "stable"},
+		{name: "duplicate", devices: []string{"/dev/disk/by-id/scsi-a", "/dev/disk/by-id/scsi-a"}, want: "duplicate"},
+		{name: "order drift", devices: []string{"/dev/disk/by-id/scsi-b", "/dev/disk/by-id/scsi-a"}, want: "canonical lexical order"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Parse(yamlFor(t, func(c *Cluster) { c.Spec.DataStorage.Devices = tc.devices }))
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.want)
+		})
+	}
+}
+
 func TestParse_NoHosts(t *testing.T) {
 	_, err := Parse(yamlFor(t, func(c *Cluster) { c.Spec.Hosts = nil }))
 	require.Error(t, err)
@@ -119,6 +176,16 @@ func TestParse_MissingSSHUser(t *testing.T) {
 	_, err := Parse(yamlFor(t, func(c *Cluster) { c.Spec.Hosts[0].SSHUser = "" }))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "sshUser")
+}
+
+func TestParse_PinnedSSHHostKey(t *testing.T) {
+	const key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixturePinnedHostIdentity HOR-540"
+	cluster, err := Parse(yamlFor(t, func(c *Cluster) { c.Spec.Hosts[0].SSHHostKey = key }))
+	require.NoError(t, err)
+	assert.Equal(t, key, cluster.Spec.Hosts[0].SSHHostKey)
+
+	_, err = Parse(yamlFor(t, func(c *Cluster) { c.Spec.Hosts[0].SSHHostKey = key + "\nsecond-key" }))
+	require.ErrorContains(t, err, "one OpenSSH public host key line")
 }
 
 func TestParse_BadRole(t *testing.T) {
@@ -184,7 +251,7 @@ func TestParse_ChartEmptySkipsDefaults(t *testing.T) {
 
 func TestParse_GPUDefaults(t *testing.T) {
 	c, err := Parse(yamlFor(t, func(cc *Cluster) {
-		cc.Spec.GPU = GPU{Enabled: true}
+		cc.Spec.GPU = GPU{Enabled: true, Driver: GPUDriver{Version: "570.186", SHA256: strings.Repeat("a", 64)}}
 	}))
 	require.NoError(t, err)
 	assert.True(t, c.Spec.GPU.Enabled)
@@ -193,6 +260,7 @@ func TestParse_GPUDefaults(t *testing.T) {
 	assert.Equal(t, defaultGPUOperatorChart, c.Spec.GPU.Operator.Chart)
 	assert.Equal(t, "opo1-gpu-operator", c.Spec.GPU.Operator.Release)
 	assert.Equal(t, defaultGPUOperatorNamespace, c.Spec.GPU.Operator.Namespace)
+	assert.Equal(t, defaultGPUOperatorSHA256, c.Spec.GPU.Operator.SHA256)
 }
 
 func TestParse_GPUDisabledNoDefaults(t *testing.T) {
@@ -202,22 +270,25 @@ func TestParse_GPUDisabledNoDefaults(t *testing.T) {
 	assert.Empty(t, c.Spec.GPU.Operator.Version)
 }
 
-func TestParse_GPUDriverEmptyByDefault(t *testing.T) {
-	// Empty driver version is valid and stays empty — no forge-pinned default;
-	// empty means the gpu-operator chart's own default driver is used.
-	c, err := Parse(yamlFor(t, func(cc *Cluster) {
-		cc.Spec.GPU = GPU{Enabled: true}
-	}))
-	require.NoError(t, err)
-	assert.Empty(t, c.Spec.GPU.Driver.Version)
-}
+func TestParse_GPUDriverRequiresCompleteContentIdentity(t *testing.T) {
+	for _, driver := range []GPUDriver{
+		{},
+		{Version: "570.186"},
+		{Version: "570.186", SHA256: "invalid"},
+	} {
+		_, err := Parse(yamlFor(t, func(cc *Cluster) {
+			cc.Spec.GPU = GPU{Enabled: true, Driver: driver}
+		}))
+		require.Error(t, err)
+	}
 
-func TestParse_GPUDriverExplicitPassthrough(t *testing.T) {
+	digest := strings.Repeat("a", 64)
 	c, err := Parse(yamlFor(t, func(cc *Cluster) {
-		cc.Spec.GPU = GPU{Enabled: true, Driver: GPUDriver{Version: "570.186"}}
+		cc.Spec.GPU = GPU{Enabled: true, Driver: GPUDriver{Version: "570.186", SHA256: digest}}
 	}))
 	require.NoError(t, err)
 	assert.Equal(t, "570.186", c.Spec.GPU.Driver.Version)
+	assert.Equal(t, digest, c.Spec.GPU.Driver.SHA256)
 }
 
 func TestGPUValidate_RequiresSingleNode(t *testing.T) {
@@ -231,7 +302,7 @@ func TestGPUValidate_DisabledRejectsDriverVersion(t *testing.T) {
 	// pin is inert when no operator runs, so it must not be silently ignored.
 	err := GPU{Enabled: false, Driver: GPUDriver{Version: "570.186"}}.validate(ModeSingleNode)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "gpu.driver.version")
+	assert.Contains(t, err.Error(), "gpu.driver identity")
 	assert.Contains(t, err.Error(), "gpu.enabled is false")
 
 	// Disabled with no driver pin remains valid.
@@ -295,13 +366,12 @@ func TestParse_FluxDisabledNoDefaults(t *testing.T) {
 	assert.Empty(t, c.Spec.Flux.Version, "no default version when Flux disabled")
 }
 
-func TestParse_FluxKeepsExplicitVersion(t *testing.T) {
-	c, err := Parse(yamlFor(t, func(cc *Cluster) {
+func TestParse_FluxRejectsUnreviewedVersion(t *testing.T) {
+	_, err := Parse(yamlFor(t, func(cc *Cluster) {
 		cc.Spec.Overlay = Overlay{Repo: "https://github.com/example/iterabase-overlay.git"}
 		cc.Spec.Flux = Flux{Enabled: true, Version: "v9.9.9"}
 	}))
-	require.NoError(t, err)
-	assert.Equal(t, "v9.9.9", c.Spec.Flux.Version, "explicit version preserved")
+	require.ErrorContains(t, err, "no repository-reviewed executable/runtime identity")
 }
 
 func TestFluxValidate_RequiresOverlay(t *testing.T) {

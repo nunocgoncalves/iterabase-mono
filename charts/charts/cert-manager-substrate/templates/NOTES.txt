@@ -1,6 +1,6 @@
 Certificate substrate {{ .Chart.Version }} installed as release "{{ .Release.Name }}" in namespace "{{ .Release.Namespace }}".
 
-Wait for this release before installing the same-version managed RWX companion or iterabase-platform release.
+Wait for this release before installing the same-version iterabase-platform release.
 {{- if dig "internalTLS" "enabled" false (.Values.global | default (dict)) }}
 The ordered internal CA bootstrap completed for platform release "{{ include "cert-manager-substrate.platformRelease" . }}".
 {{- end }}

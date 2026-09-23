@@ -1,6 +1,7 @@
 package e2e
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -54,46 +55,103 @@ func TestFixtureFromEnvRecordsSourceAndPublishedModes(t *testing.T) {
 	})
 }
 
-func TestCandidateFixtureFromPlanRecordsSelectedAndPinnedInputs(t *testing.T) {
-	for _, prefix := range []string{"CONTROL_PLANE", "INFERENCE_GATEWAY", "TOOL_RUNNER"} {
-		t.Setenv(prefix+"_IMAGE_DIGEST", "")
-		t.Setenv(prefix+"_IMAGE_REPO", "")
-		t.Setenv(prefix+"_IMAGE_TAG", "")
+func TestObservedRuntimeImageIdentitiesReconcilePassedResult(t *testing.T) {
+	t.Setenv(RequiredEnv, "true")
+	t.Setenv(ResultOutputEnv, filepath.Join(t.TempDir(), "result.json"))
+	configDigest := "sha256:" + strings.Repeat("a", 64)
+	artifacts := []RuntimeArtifact{
+		{Name: "control-plane-image", Kind: "image", Digest: configDigest, ConfigDigest: configDigest},
+		{Name: "platform-chart", Kind: "chart", Checksum: strings.Repeat("b", 64)},
 	}
-	path := filepath.Join(t.TempDir(), "candidate-plan.json")
-	plan := `{
-  "source_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-  "releases":[{"target":"control-plane","version":"1.2.3"}],
-  "baseline_dependencies":{
-    "images":[{"name":"inference-gateway","repository":"ghcr.io/example/gateway","version":"2.0.0","digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}],
-    "charts":[{"chart":"iterabase-platform","repository":"oci://example/platform","version":"3.0.0","sha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}]
-  },
-  "transition_baselines":{
-    "charts":[{"name":"supported-platform-predecessor","chart":"iterabase-platform","repository":"oci://example/platform","version":"2.9.0","sha256":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"}]
-  }
-}`
-	if err := os.WriteFile(path, []byte(plan), 0o600); err != nil {
+	runtimeDigest := "sha256:" + strings.Repeat("c", 64)
+	if err := RecordRuntimeImageIdentity("control-plane-image", runtimeDigest); err != nil {
 		t.Fatal(err)
 	}
-	fixture, err := CandidateFixtureFromPlan(path)
+	observed, err := resultArtifactsWithRuntimeIdentities(artifacts, true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fixture.Mode != FixtureCandidate || len(fixture.Inputs) != 4 {
-		t.Fatalf("candidate fixture = %+v", fixture)
+	if observed[0].RuntimeDigest != runtimeDigest {
+		t.Fatalf("observed runtime digest=%q", observed[0].RuntimeDigest)
 	}
-	if fixture.Inputs[0].Kind != "candidate" || fixture.Inputs[1].Kind != "published-chart" || fixture.Inputs[2].Name != "supported-platform-predecessor" || fixture.Inputs[3].Kind != "published-image" {
-		t.Fatalf("candidate inputs are not deterministically sorted: %+v", fixture.Inputs)
+	if err := RecordRuntimeImageIdentity("control-plane-image", runtimeDigest); err == nil {
+		t.Fatal("duplicate observed runtime identity unexpectedly passed")
 	}
+}
 
-	t.Setenv("CONTROL_PLANE_IMAGE_REPO", "ghcr.io/example/control-plane")
-	t.Setenv("CONTROL_PLANE_IMAGE_TAG", strings.Repeat("a", 40)+"@sha256:"+strings.Repeat("d", 64))
-	t.Setenv("CONTROL_PLANE_IMAGE_DIGEST", "sha256:"+strings.Repeat("d", 64))
-	fixture, err = CandidateFixtureFromPlan(path)
+func TestPassedResultRejectsMissingRuntimeImageIdentity(t *testing.T) {
+	t.Setenv(RequiredEnv, "true")
+	t.Setenv(ResultOutputEnv, filepath.Join(t.TempDir(), "result.json"))
+	_, err := resultArtifactsWithRuntimeIdentities([]RuntimeArtifact{{Name: "control-plane-image", Kind: "image"}}, true)
+	if err == nil || !strings.Contains(err.Error(), "no observed runtime identity") {
+		t.Fatalf("missing runtime identity error=%v", err)
+	}
+}
+
+func TestRuntimeBundleRetainsCompleteArtifactIdentity(t *testing.T) {
+	hash := strings.Repeat("a", 64)
+	want := RuntimeArtifact{
+		Name: "platform-chart", Kind: "chart", Custody: "selected-candidate", Version: "1.2.3",
+		SourceSHA: strings.Repeat("b", 40), Reference: "platform-1.2.3.tgz", Checksum: hash,
+		RecipeHash: strings.Repeat("c", 64), PlannedReference: "oci://registry/platform:1.2.3",
+		PlannedDigest: "sha256:" + hash, PlannedChecksum: hash, PlannedOCIDigest: "sha256:" + hash,
+		PlannedFilename: "platform-1.2.3.tgz", PlannedSize: 123,
+		PlannedBaselineSnapshotSHA256: strings.Repeat("d", 64),
+	}
+	bundle := RuntimeBundle{
+		SchemaVersion: 1, Intent: IntentCandidate, SourceSHA: want.SourceSHA,
+		PlanSHA256: strings.Repeat("e", 64), CatalogueSHA256: strings.Repeat("f", 64),
+		Artifacts: []RuntimeArtifact{want},
+	}
+	data, err := json.Marshal(bundle)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(fixture.Inputs) != 5 || fixture.Inputs[1].Kind != "candidate-image" {
-		t.Fatalf("candidate image identity was not recorded: %+v", fixture.Inputs)
+	path := filepath.Join(t.TempDir(), "runtime-bundle.json")
+	if err := os.WriteFile(path, append(data, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, _, err := loadRuntimeBundle(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := loaded.Artifacts[0]
+	if got.Version != want.Version || got.PlannedOCIDigest != want.PlannedOCIDigest || got.PlannedFilename != want.PlannedFilename || got.PlannedSize != want.PlannedSize || got.PlannedBaselineSnapshotSHA256 != want.PlannedBaselineSnapshotSHA256 {
+		t.Fatalf("complete runtime identity was not retained: got=%+v want=%+v", got, want)
+	}
+}
+
+func TestFixtureFromRuntimeBundleRecordsSelectedAndBaselineInputs(t *testing.T) {
+	for _, intent := range []ExecutionIntent{IntentPR, IntentCandidate} {
+		t.Run(string(intent), func(t *testing.T) {
+			bundle := RuntimeBundle{
+				SchemaVersion: 1, Intent: intent, SourceSHA: strings.Repeat("a", 40),
+				PlanSHA256: strings.Repeat("b", 64), CatalogueSHA256: strings.Repeat("c", 64),
+				Artifacts: []RuntimeArtifact{
+					{Name: "control-plane-image", Kind: "image", Custody: "selected-temporary", Version: "source", SourceSHA: strings.Repeat("a", 40), Reference: "registry/control-plane:source", Digest: "sha256:" + strings.Repeat("d", 64), ConfigDigest: "sha256:" + strings.Repeat("2", 64), RecipeHash: strings.Repeat("e", 64)},
+					{Name: "platform-chart", Kind: "chart", Custody: "published-baseline", Version: "1.2.3", BaselineProvenance: "release-manifest", Reference: "oci://registry/platform:1.2.3", Checksum: strings.Repeat("f", 64), RecipeHash: strings.Repeat("1", 64)},
+				},
+			}
+			if intent == IntentCandidate {
+				bundle.Artifacts[0].Custody = "selected-candidate"
+			}
+			data, err := json.Marshal(bundle)
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(t.TempDir(), "runtime-bundle.json")
+			if err := os.WriteFile(path, append(data, '\n'), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv(RuntimeBundleEnv, path)
+			fixture := FixtureFromEnv(t)
+			wantMode := FixtureSource
+			if intent == IntentCandidate {
+				wantMode = FixtureCandidate
+			}
+			if fixture.Mode != wantMode || fixture.SourceSHA != bundle.SourceSHA || len(fixture.Inputs) != 2 || fixture.Inputs[0].Name != "control-plane-image" || fixture.Inputs[1].Custody != "published-baseline" {
+				t.Fatalf("runtime fixture = %+v", fixture)
+			}
+		})
 	}
 }

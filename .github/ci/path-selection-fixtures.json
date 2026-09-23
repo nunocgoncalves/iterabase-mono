@@ -26,7 +26,7 @@
   {
     "name": "protobuf contract fans out to generated consumers",
     "paths": ["control-plane/proto/iterabase/harness/v1/harness.proto"],
-    "true": ["control_plane", "harness", "tool_runner", "proto", "images"],
+    "true": ["control_plane", "harness", "tool_runner", "proto", "forge_e2e", "forge_real_e2e", "images"],
     "images": ["control-plane", "control-plane-harness", "control-plane-tool-runner"]
   },
   {

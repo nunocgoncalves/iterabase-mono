@@ -581,6 +581,24 @@ export function parseAssignment(raw: unknown): Assignment | undefined {
 }
 
 /**
+ * Decide which active-attempt artifact references a discovered tool may
+ * receive, from the descriptor's non-secret read capability and accepted MIME
+ * types (HOR-546). Read-disabled tools forward none; a tool with no accepted
+ * MIME list forwards everything it can read; otherwise non-matching MIME
+ * references are filtered. The gateway re-validates and authorizes the exact
+ * refs before the effect boundary — this is forwarding/filtering only.
+ */
+export function selectArtifactInputs(
+  d: Pick<GatewayToolDescriptor, "readsArtifacts" | "acceptedArtifactMimeTypes">,
+  artifactInputs: ArtifactInputRefFrame[],
+): ArtifactInputRefFrame[] {
+  if (!d.readsArtifacts) return [];
+  const accepted = d.acceptedArtifactMimeTypes;
+  if (!accepted?.length) return artifactInputs;
+  return artifactInputs.filter((ref) => accepted.includes(ref.mimeType));
+}
+
+/**
  * Build a pi ToolDefinition stub for one gateway descriptor (ARCH-006). The
  * stub forwards execute() over fd 4/fd 5 to the supervisor, which stamps
  * durable caller context + idempotency and calls InvokeTool over mTLS
@@ -603,9 +621,7 @@ function gatewayToolStub(rpc: ChildRpc, completion: StepCompletionState, artifac
             toolName: d.name,
             toolVersionDigest: d.digest,
             argumentsJson: JSON.stringify(params),
-            artifactInputRefs: d.readsArtifacts
-              ? artifactInputs.filter((ref) => !d.acceptedArtifactMimeTypes?.length || d.acceptedArtifactMimeTypes.includes(ref.mimeType))
-              : [],
+            artifactInputRefs: selectArtifactInputs(d, artifactInputs),
             idempotencyKey: toolCallId,
           },
           signal,

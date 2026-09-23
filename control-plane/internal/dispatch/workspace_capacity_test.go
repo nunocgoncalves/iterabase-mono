@@ -1,0 +1,149 @@
+package dispatch
+
+import (
+	"context"
+	"testing"
+
+	v1 "github.com/nunocgoncalves/iterabase-mono/control-plane/internal/harnessrpc/iterabase/harness/v1"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/runtime"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func TestWorkspaceCapacityGateRevokesOnlyUnspentCredit(t *testing.T) {
+	w := &workerConn{}
+	w.updateWorkspaceStatus(30, 100, 0.30, false, false)
+	granted, valid := w.grantCreditIfIdle()
+	require.True(t, valid)
+	require.True(t, granted)
+	require.True(t, w.idle)
+
+	w.updateWorkspaceStatus(20, 100, 0.20, true, true)
+	assert.False(t, w.idle, "an unspent credit is revoked at the floor")
+	granted, valid = w.grantCreditIfIdle()
+	assert.True(t, valid)
+	assert.False(t, granted)
+
+	restored := w.updateWorkspaceStatus(25, 100, 0.25, false, false)
+	assert.True(t, restored, "the server restores the already-advertised unspent credit")
+	assert.True(t, w.idle)
+	assert.True(t, w.creditAdvertised)
+}
+
+func TestWorkspaceCapacityGateAppliesOnlyWithinPoolAndSurvivesReplacement(t *testing.T) {
+	workers := newWorkerPool()
+	first := &workerConn{poolID: "pool-a", workerID: "worker-a"}
+	sibling := &workerConn{poolID: "pool-a", workerID: "worker-a-2"}
+	other := &workerConn{poolID: "pool-b", workerID: "worker-b"}
+	workers.add(first)
+	workers.add(sibling)
+	workers.add(other)
+	for _, worker := range []*workerConn{first, sibling, other} {
+		worker.updateWorkspaceStatus(30, 100, 0.30, false, false)
+		_, _ = worker.grantCreditIfIdle()
+	}
+
+	workers.applyWorkspaceStatus(first, 20, 100, 0.20, true, true)
+	assert.False(t, first.idle)
+	assert.False(t, sibling.idle, "same-pool workers mount one PVC and share its gate")
+	assert.True(t, sibling.workspaceGated)
+	assert.True(t, other.idle, "a different AgentPool PVC remains independently eligible")
+	assert.False(t, other.workspaceGated)
+
+	replacement := &workerConn{poolID: "pool-a", workerID: "worker-a"}
+	workers.add(replacement)
+	workers.applyWorkspaceStatus(replacement, 24, 100, 0.24, true, true)
+	granted, valid := replacement.grantCreditIfIdle()
+	assert.True(t, valid)
+	assert.False(t, granted, "replacement remains gated inside its pool's 20-25 percent band")
+
+	restored := workers.applyWorkspaceStatus(replacement, 25, 100, 0.25, false, false)
+	assert.True(t, restored)
+	assert.True(t, replacement.idle, "durable reopen restores the retained Ready without duplicate advertisement")
+	assert.True(t, replacement.creditAdvertised)
+}
+
+func TestWorkspaceCapacityDeletionClearsGateAndRevivalStartsFailClosed(t *testing.T) {
+	workers := newWorkerPool()
+	workers.seedWorkspaceCapacity(map[string]WorkspaceCapacityState{
+		"pool-a": {PoolID: "pool-a", CreditGated: true},
+	})
+	removed := workers.syncWorkspaceCapacity(map[string]WorkspaceCapacityState{})
+	assert.Equal(t, []string{"pool-a"}, removed)
+	assert.NotContains(t, workers.workspaceGated, "pool-a")
+
+	revived := &workerConn{poolID: "pool-a", workerID: "worker-new"}
+	workers.add(revived)
+	assert.True(t, revived.workspaceGated, "same-UUID revival without a new PVC observation must start fail-closed")
+}
+
+func TestWorkspaceCapacityObservationAfterCreditConsumptionDoesNotRegrant(t *testing.T) {
+	w := &workerConn{}
+	w.updateWorkspaceStatus(30, 100, 0.30, false, false)
+	granted, valid := w.grantCreditIfIdle()
+	require.True(t, valid)
+	require.True(t, granted)
+	require.True(t, w.tryConsumeCredit("turn-in-flight"))
+
+	restored := w.updateWorkspaceStatus(30, 100, 0.30, false, false)
+	assert.False(t, restored, "an observation between server-side consumption and AssignTurn delivery cannot mint another credit")
+	assert.False(t, w.idle)
+	assert.False(t, w.creditAdvertised)
+	assert.Equal(t, "turn-in-flight", w.activeTurn)
+	assert.False(t, w.releaseAssignmentFailure("turn-in-flight", true), "an attempted delivery remains consumed")
+	assert.Empty(t, w.activeTurn)
+	assert.False(t, w.idle)
+	assert.False(t, w.creditAdvertised)
+}
+
+func TestPreDeliveryAssignmentFailureRestoresReadyIntent(t *testing.T) {
+	w := &workerConn{poolID: "pool-a", workerID: "worker-a"}
+	w.updateWorkspaceStatus(30, 100, 0.30, false, false)
+	granted, valid := w.grantCreditIfIdle()
+	require.True(t, valid)
+	require.True(t, granted)
+	require.True(t, w.tryConsumeCredit("turn-undelivered"))
+
+	// Reproduce the reported interleaving: a periodic open-capacity observation
+	// arrives after server-side reservation but before AssignTurn delivery. It
+	// must not mint a duplicate credit while the assignment is in flight.
+	assert.False(t, w.updateWorkspaceStatus(30, 100, 0.30, false, false))
+
+	// A missing model is a deterministic pre-send assignment failure. Both the
+	// graph and legacy paths use this deliveryAttempted boundary before deciding
+	// whether the same armed-worker Ready intent is safe to restore.
+	svc := &Service{cfg: Config{}}
+	deliveryAttempted, err := svc.assign(context.Background(), runtime.Turn{ID: "turn-undelivered"}, runtime.Run{ID: "run-a"}, "pool-a", w)
+	require.Error(t, err)
+	require.False(t, deliveryAttempted)
+
+	restored := w.releaseAssignmentFailure("turn-undelivered", deliveryAttempted)
+	assert.True(t, restored)
+	assert.Empty(t, w.activeTurn)
+	assert.True(t, w.idle)
+	assert.True(t, w.creditAdvertised)
+	assert.True(t, w.tryConsumeCredit("turn-retry"), "the same worker remains schedulable without another Ready")
+}
+
+func TestWorkspaceCapacityCrossingDoesNotAbortActiveTurn(t *testing.T) {
+	w := &workerConn{}
+	w.updateWorkspaceStatus(30, 100, 0.30, false, false)
+	granted, valid := w.grantCreditIfIdle()
+	require.True(t, valid)
+	require.True(t, granted)
+	require.True(t, w.tryConsumeCredit("turn-1"))
+
+	w.updateWorkspaceStatus(20, 100, 0.20, true, true)
+	assert.Equal(t, "turn-1", w.activeTurn, "threshold-only gating preserves active ownership")
+	w.releaseTurn()
+	granted, valid = w.grantCreditIfIdle()
+	assert.True(t, valid)
+	assert.False(t, granted, "the next fresh credit is withheld after terminalization")
+}
+
+func TestValidateWorkspaceStatusThresholdContract(t *testing.T) {
+	assert.NoError(t, validateWorkspaceStatus(&v1.WorkspaceStatus{FreeBytes: 24, CapacityBytes: 100, FreeRatio: 0.24, Warning: true}))
+	assert.NoError(t, validateWorkspaceStatus(&v1.WorkspaceStatus{FreeBytes: 20, CapacityBytes: 100, FreeRatio: 0.20, Warning: true, CreditGated: true}))
+	assert.Error(t, validateWorkspaceStatus(&v1.WorkspaceStatus{FreeBytes: 20, CapacityBytes: 100, FreeRatio: 0.20, Warning: true, CreditGated: false}))
+	assert.Error(t, validateWorkspaceStatus(&v1.WorkspaceStatus{FreeBytes: 30, CapacityBytes: 100, FreeRatio: 0.20, Warning: true, CreditGated: true}))
+}

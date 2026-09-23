@@ -1,0 +1,21 @@
+name: Set up checksummed Playwright Chromium
+description: Restore and verify the exact browser, headless shell, and FFmpeg archives for Playwright.
+inputs:
+  version:
+    description: Exact Playwright package version from package-lock.json.
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Bind the reviewed browser manifest
+      id: authority
+      shell: bash
+      run: echo "sha256=$(sha256sum .github/inputs/remote-content.json | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+    - name: Restore exact reviewed Playwright archives
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.cache/iterabase/playwright
+        key: ${{ runner.os }}-${{ runner.arch }}-playwright-${{ inputs.version }}-${{ steps.authority.outputs.sha256 }}
+    - name: Install checksummed Playwright runtime
+      shell: bash
+      run: .github/scripts/install_playwright.sh '${{ inputs.version }}'

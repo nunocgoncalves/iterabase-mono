@@ -58,9 +58,12 @@ vet: ## Run go vet against code.
 test-unit: ## Run unit tests (skips integration/Docker tests via -short).
 	go test -short -race -count=1 ./...
 
+ENVTEST_DEPENDENCY := $(if $(KUBEBUILDER_ASSETS),,setup-envtest)
 .PHONY: test
-test: manifests generate fmt vet setup-envtest ## Run tests (unit + envtest + integration) fresh, without cached results.
-	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test -count=1 -coverprofile cover.out ./...
+test: manifests generate fmt vet $(ENVTEST_DEPENDENCY) ## Run tests (unit + envtest + integration) fresh, without cached results.
+	@assets="$(KUBEBUILDER_ASSETS)"; \
+	if [ -z "$$assets" ]; then assets="$$($(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)"; fi; \
+	KUBEBUILDER_ASSETS="$$assets" go test -count=1 -coverprofile cover.out ./...
 
 E2E_SOURCE_SHA ?= $(shell git rev-parse HEAD)
 E2E_SOURCE_DIRTY ?= $(if $(shell git status --porcelain),true,false)
@@ -69,23 +72,20 @@ E2E_ENV := ITERABASE_E2E_FIXTURE_MODE=$(ITERABASE_E2E_FIXTURE_MODE) \
 	ITERABASE_E2E_SOURCE_SHA=$(E2E_SOURCE_SHA) \
 	ITERABASE_E2E_SOURCE_DIRTY=$(E2E_SOURCE_DIRTY) \
 	ITERABASE_REPOSITORY_ROOT=$(abspath ..)
-ifeq ($(ITERABASE_E2E_FIXTURE_MODE),source)
-E2E_BUILD_DEPS := e2e-build-deps
-else
+# Required source and candidate runs receive the same composer-produced bundle.
 E2E_BUILD_DEPS :=
-endif
 
 PLAYWRIGHT_INSTALL_ARGS ?= chromium
 
-.PHONY: test-e2e-unit test-e2e test-e2e-identity test-e2e-work test-e2e-artifact test-e2e-execution test-e2e-browser playwright-browser-deps e2e-build-deps
+.PHONY: test-e2e-unit test-e2e test-e2e-identity test-e2e-work test-e2e-artifact test-e2e-execution test-e2e-browser playwright-browser-deps
 
 test-e2e-unit: ## Compile the owner E2E entrypoint and run hermetic helper tests.
 	cd test/e2e && $(E2E_ENV) go test -race -count=1 -run '^TestE2E$$/^hermetic-example$$' .
 	cd test/e2e && $(E2E_ENV) go test -race -count=1 -skip '^TestE2E$$' .
+	cd test/e2e && go test -race -count=1 ./fixtures/runtime
 
-# Each product contract gets a fresh isolated Kind cluster. Source mode builds
-# the current control-plane image inside the Go scenario; candidate mode uses
-# the exact digest and composed chart fixture prepared by the release gate.
+# Each product contract gets a fresh isolated Kind cluster and consumes the
+# same exact composer-produced runtime bundle in source and candidate modes.
 test-e2e: test-e2e-identity test-e2e-work test-e2e-artifact test-e2e-execution test-e2e-browser
 
 test-e2e-identity: $(E2E_BUILD_DEPS)
@@ -102,14 +102,17 @@ test-e2e-execution: $(E2E_BUILD_DEPS)
 
 playwright-browser-deps:
 	cd test/e2e/playwright && npm ci && npm run lint
-	cd test/e2e/playwright && npx --no-install playwright install $(PLAYWRIGHT_INSTALL_ARGS)
+	@if [ "$(E2E_SKIP_BUILD_DEPS)" = true ]; then \
+		test -n "$$PLAYWRIGHT_BROWSERS_PATH"; \
+		test -f "$$PLAYWRIGHT_BROWSERS_PATH/chromium-1234/INSTALLATION_COMPLETE"; \
+		test -f "$$PLAYWRIGHT_BROWSERS_PATH/chromium_headless_shell-1234/INSTALLATION_COMPLETE"; \
+		test -f "$$PLAYWRIGHT_BROWSERS_PATH/ffmpeg-1011/INSTALLATION_COMPLETE"; \
+	else \
+		cd test/e2e/playwright && npx --no-install playwright install $(PLAYWRIGHT_INSTALL_ARGS); \
+	fi
 
 test-e2e-browser: $(E2E_BUILD_DEPS) playwright-browser-deps
 	cd test/e2e && $(E2E_ENV) go test -v -race -count=1 -timeout 45m -run '^TestE2E$$/^deployed-browser-journeys$$' .
-
-e2e-build-deps:
-	../.github/scripts/add_helm_repositories.sh
-	$(MAKE) -C ../charts build-deps
 
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter
@@ -227,22 +230,21 @@ proto-tools: buf-tool protoc-gen-go-tool protoc-gen-connect-go-tool protoc-gen-e
 	@PATH="$(LOCALBIN):$$PATH" $(BUF) --version
 
 buf-tool: $(LOCALBIN)
-	$(call go-install-tool,$(BUF),github.com/bufbuild/buf/cmd/buf,$(BUF_VERSION))
+	$(call go-install-tool,$(BUF),github.com/bufbuild/buf/cmd/buf,$(BUF_VERSION),../.github/tools/control-plane)
 
 protoc-gen-go-tool: $(LOCALBIN)
-	$(call go-install-tool,$(PROTOC_GEN_GO),google.golang.org/protobuf/cmd/protoc-gen-go,$(PROTOC_GEN_GO_VERSION))
+	$(call go-install-tool,$(PROTOC_GEN_GO),google.golang.org/protobuf/cmd/protoc-gen-go,$(PROTOC_GEN_GO_VERSION),../.github/tools/control-plane)
 
 protoc-gen-connect-go-tool: $(LOCALBIN)
-	$(call go-install-tool,$(PROTOC_GEN_CONNECT_GO),connectrpc.com/connect/cmd/protoc-gen-connect-go,$(PROTOC_GEN_CONNECT_GO_VERSION))
+	$(call go-install-tool,$(PROTOC_GEN_CONNECT_GO),connectrpc.com/connect/cmd/protoc-gen-connect-go,$(PROTOC_GEN_CONNECT_GO_VERSION),../.github/tools/control-plane)
 
 protoc-gen-es-tool: $(LOCALBIN)
-	@set -e; \
-	prefix="$(LOCALBIN)/protoc-gen-es-$(PROTOC_GEN_ES_VERSION)"; \
-	if [ ! -x "$$prefix/node_modules/.bin/protoc-gen-es" ]; then \
-		rm -rf "$$prefix"; \
-		npm install --silent --no-save --prefix "$$prefix" @bufbuild/protoc-gen-es@$(PROTOC_GEN_ES_VERSION); \
-	fi; \
-	ln -sf "$$prefix/node_modules/.bin/protoc-gen-es" "$(PROTOC_GEN_ES)"
+	@if [ "$(ITERABASE_CI_EXACT_TOOLS)" = true ]; then \
+		test -x "$(PROTOC_GEN_ES)"; \
+	else \
+		npm ci --ignore-scripts --prefix ../.github/tools/protobuf; \
+		ln -sf "$$(realpath ../.github/tools/protobuf/node_modules/.bin/protoc-gen-es)" "$(PROTOC_GEN_ES)"; \
+	fi
 
 .PHONY: proto
 proto: proto-tools ## Generate Go+TS stubs from proto/: harness -> internal/harnessrpc + harness/src/gen; gateway -> internal/gatewayrpc.
@@ -287,11 +289,12 @@ harness-image: ## Build the harness container image.
 harness-isolation-image: ## Build the Linux sandbox isolation fixture image.
 	$(CONTAINER_TOOL) build -t $(HARNESS_ISOLATION_IMG) -f harness/isolation/Dockerfile harness/
 
-harness-isolation-test: harness-isolation-image ## Require the Linux setpriv/UID/filesystem and fresh-process isolation gate; missing container/kernel prerequisites fail.
-	$(CONTAINER_TOOL) run --rm $(HARNESS_ISOLATION_IMG)
+harness-isolation-test: harness-isolation-image ## Freshly format real ext4+XFS filesystems and require the production setpriv/UID/TLS-key/fresh-process isolation gate; missing privileged Linux prerequisites fail.
+	$(CONTAINER_TOOL) run --rm --privileged -e HARNESS_ISOLATION_FILESYSTEM=ext4 $(HARNESS_ISOLATION_IMG)
+	$(CONTAINER_TOOL) run --rm --privileged -e HARNESS_ISOLATION_FILESYSTEM=xfs $(HARNESS_ISOLATION_IMG)
 
-harness-isolation-negative-test: harness-isolation-image ## Prove an intentional cross-session access break fails the real isolation gate.
-	@if $(CONTAINER_TOOL) run --rm -e HARNESS_ISOLATION_BREAK=cross-session-read $(HARNESS_ISOLATION_IMG); then \
+harness-isolation-negative-test: harness-isolation-image ## Prove an intentional cross-session access break fails the real ext4 isolation gate.
+	@if $(CONTAINER_TOOL) run --rm --privileged -e HARNESS_ISOLATION_FILESYSTEM=ext4 -e HARNESS_ISOLATION_BREAK=cross-session-read $(HARNESS_ISOLATION_IMG); then \
 		echo "intentional cross-session access break unexpectedly passed"; \
 		exit 1; \
 	else \
@@ -345,7 +348,7 @@ KUBECTL ?= kubectl
 KUSTOMIZE ?= $(LOCALBIN)/kustomize
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 ENVTEST ?= $(LOCALBIN)/setup-envtest
-GOLANGCI_LINT = $(LOCALBIN)/golangci-lint
+GOLANGCI_LINT ?= $(LOCALBIN)/golangci-lint
 
 ## Tool Versions
 KUSTOMIZE_VERSION ?= v5.8.1
@@ -354,22 +357,20 @@ CONTROLLER_TOOLS_VERSION ?= v0.21.0
 # setup-envtest is its own module; keep CI/local generation reproducible.
 ENVTEST_VERSION ?= v0.24.1
 
-# ENVTEST_K8S_VERSION is derived from k8s.io/api in go.mod (e.g. 1.36).
-ENVTEST_K8S_VERSION ?= $(shell v='$(call gomodver,k8s.io/api)'; \
-  [ -n "$$v" ] || { echo "Set ENVTEST_K8S_VERSION manually" >&2; exit 1; }; \
-  printf '%s\n' "$$v" | sed -E 's/^v?[0-9]+\.([0-9]+).*/1.\1/')
+# Exact envtest runtime archive version governed by remote-content.json.
+ENVTEST_K8S_VERSION ?= 1.36.2
 
 GOLANGCI_LINT_VERSION ?= v2.12.2
 
 .PHONY: kustomize
 kustomize: $(KUSTOMIZE) ## Download kustomize locally if necessary.
 $(KUSTOMIZE): $(LOCALBIN)
-	$(call go-install-tool,$(KUSTOMIZE),sigs.k8s.io/kustomize/kustomize/v5,$(KUSTOMIZE_VERSION))
+	$(call go-install-tool,$(KUSTOMIZE),sigs.k8s.io/kustomize/kustomize/v5,$(KUSTOMIZE_VERSION),../.github/tools/control-plane)
 
 .PHONY: controller-gen
 controller-gen: $(CONTROLLER_GEN) ## Download controller-gen locally if necessary.
 $(CONTROLLER_GEN): $(LOCALBIN)
-	$(call go-install-tool,$(CONTROLLER_GEN),sigs.k8s.io/controller-tools/cmd/controller-gen,$(CONTROLLER_TOOLS_VERSION))
+	$(call go-install-tool,$(CONTROLLER_GEN),sigs.k8s.io/controller-tools/cmd/controller-gen,$(CONTROLLER_TOOLS_VERSION),../.github/tools/control-plane)
 
 .PHONY: setup-envtest
 setup-envtest: envtest ## Download envtest binaries for the configured Kubernetes version.
@@ -382,29 +383,31 @@ setup-envtest: envtest ## Download envtest binaries for the configured Kubernete
 .PHONY: envtest
 envtest: $(ENVTEST) ## Download setup-envtest locally if necessary.
 $(ENVTEST): $(LOCALBIN)
-	$(call go-install-tool,$(ENVTEST),sigs.k8s.io/controller-runtime/tools/setup-envtest,$(ENVTEST_VERSION))
+	$(call go-install-tool,$(ENVTEST),sigs.k8s.io/controller-runtime/tools/setup-envtest,$(ENVTEST_VERSION),../.github/tools/control-plane)
 
 .PHONY: golangci-lint
 golangci-lint: $(GOLANGCI_LINT) ## Download golangci-lint locally if necessary.
 $(GOLANGCI_LINT): $(LOCALBIN)
-	$(call go-install-tool,$(GOLANGCI_LINT),github.com/golangci/golangci-lint/v2/cmd/golangci-lint,$(GOLANGCI_LINT_VERSION))
+	$(call go-install-tool,$(GOLANGCI_LINT),github.com/golangci/golangci-lint/v2/cmd/golangci-lint,$(GOLANGCI_LINT_VERSION),../.github/tools)
 
 # go-install-tool will 'go install' any package with custom target and name of binary, if it doesn't exist
 # $1 - target path with name of binary
 # $2 - package url which can be installed
-# $3 - specific version of package
+# $3 - exact version recorded in the repository tool module
+# $4 - repository tool module directory
 define go-install-tool
-@[ -f "$(1)-$(3)" ] && [ "$$(readlink -- "$(1)" 2>/dev/null)" = "$(1)-$(3)" ] || { \
-set -e; \
-package=$(2)@$(3) ;\
-echo "Downloading $${package}" ;\
-rm -f "$(1)" ;\
-GOBIN="$(LOCALBIN)" go install $${package} ;\
-mv "$(LOCALBIN)/$$(basename "$(1)")" "$(1)-$(3)" ;\
-} ;\
-ln -sf "$$(realpath "$(1)-$(3)")" "$(1)"
-endef
-
-define gomodver
-$(shell go list -m -f '{{if .Replace}}{{.Replace.Version}}{{else}}{{.Version}}{{end}}' $(1) 2>/dev/null)
+@if [ "$(ITERABASE_CI_EXACT_TOOLS)" = true ]; then \
+	test -x "$(1)"; \
+else \
+	lock_hash="$$(cat "$(4)/go.mod" "$(4)/go.sum" | sha256sum | awk '{print $$1}')"; \
+	[ -f "$(1)-$(3)" ] && [ "$$(cat "$(1)-$(3).lock" 2>/dev/null)" = "$$lock_hash" ] || { \
+		set -e; \
+		echo "Installing repository-locked $(2) $(3)"; \
+		rm -f "$(1)" "$(1)-$(3)" "$(1)-$(3).lock"; \
+		(cd "$(4)" && GOWORK=off go mod verify && GOWORK=off GOBIN="$(abspath $(LOCALBIN))" go install -mod=readonly "$(2)"); \
+		mv "$(LOCALBIN)/$$(basename "$(1)")" "$(1)-$(3)"; \
+		printf '%s\n' "$$lock_hash" > "$(1)-$(3).lock"; \
+	}; \
+	ln -sf "$$(realpath "$(1)-$(3)")" "$(1)"; \
+fi
 endef

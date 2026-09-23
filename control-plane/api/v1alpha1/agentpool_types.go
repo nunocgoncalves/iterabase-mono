@@ -10,8 +10,8 @@ import (
 // isolated warm-worker pods that execute Platform-v1 turns with the approved
 // supervisor/child model, fixed local-workspace boundary, and maximum gateway
 // permissions — without proxy sidecars or customer credentials in the sandbox
-// (ARCH-003/009/010/016/018). The operator provisions the RWX sandbox PVC,
-// per-pod SPIFFE certs (via the cert-manager CSI driver), the rendered harness
+// (ARCH-003/009/010/016/018). The operator provisions the dedicated-class RWO
+// sandbox PVC, per-pod SPIFFE certs (via the cert-manager CSI driver), the rendered harness
 // boot config, and a deny-by-default NetworkPolicy. HOR-249 owns dispatch and
 // the warm-pool scaling/credit protocol; HOR-245 only maintains a static
 // `replicas` warm set.
@@ -56,14 +56,19 @@ type AgentPoolSpec struct {
 	// URI SAN spiffe://<trustDomain>/pools/<pool-uid>/workers/<pod-name>; the
 	// operator never holds the CA key (cert-manager owns the CA). Servers
 	// (gateway/inference/future Work server) trust caSecretRef's cert as
-	// ClientCAs. The child UID cannot read the key (fsGroup + dropped groups).
+	// ClientCAs. No fsGroup grants access: the trusted root supervisor validates
+	// the cert-manager CSI AtomicWriter chain and reads the exact root:root 0440
+	// resolved key, while the disposable child has cleared groups/capabilities
+	// and receives EACCES.
 	// +kubebuilder:validation:Required
 	Identity PoolIdentitySpec `json:"identity"`
 
-	// sandbox configures the shared RWX PVC that backs per-session sandboxes.
-	// Each session gets a 0700 subdir owned by its stable session UID/GID
-	// (provisioning/ownership enforced by the supervisor, HOR-381); the pool
-	// PVC request is the per-pool storage quota.
+	// sandbox configures the pool's shared same-node OpenEBS LVM XFS RWO PVC. Every trusted root
+	// supervisor in this pool may access the whole claim; separate AgentPools
+	// receive separate claims/mounts. Each disposable child gets a stable distinct
+	// UID=GID and session-owned 0700 tree beneath the root-owned 0711 PVC root.
+	// The requested size is desired grow-only thick-LV/filesystem capacity.
+	// Increases patch the same claim; shrink and identity replacement are refused.
 	// +kubebuilder:validation:Required
 	Sandbox SandboxSpec `json:"sandbox"`
 
@@ -147,32 +152,33 @@ type PoolIdentitySpec struct {
 	CASecretRef LocalKeyRef `json:"caSecretRef"`
 
 	// certMountPath is where the CSI driver materialises tls.crt/tls.key/ca.crt
-	// in the supervisor. Defaults to "/etc/harness/tls". Mounted readOnly; the
-	// key is child-inaccessible via fsGroup + dropped supplementary groups.
+	// in the supervisor. Defaults to "/etc/harness/tls". Mounted readOnly; no
+	// fsGroup is set. Supervisor startup/readiness accepts only the exact contained
+	// cert-manager AtomicWriter chain beneath non-child-writable ancestors and a
+	// root-owned regular exact-0440 resolved key (the narrow upstream exception).
+	// The nonzero-UID/GID child has cleared groups/capabilities and gets EACCES.
 	// +optional
 	CertMountPath string `json:"certMountPath,omitempty"`
 }
 
-// SandboxSpec configures the shared sandbox PVC.
+// SandboxSpec configures the shared same-node OpenEBS LVM XFS sandbox PVC.
 // +kubebuilder:object:generate=true
 type SandboxSpec struct {
-	// storageClassName is the StorageClass backing the sandbox PVC. The
-	// operator validates it exists and supports the selected access mode.
+	// storageClassName is fixed to iterabase-agentpool-lvm-xfs. Alternate or
+	// default classes are rejected before the claim or workers are mutated.
+	// +kubebuilder:validation:Enum=iterabase-agentpool-lvm-xfs
 	// +kubebuilder:validation:Required
 	StorageClassName string `json:"storageClassName"`
 
-	// accessMode selects the sandbox PVC access mode (HOR-427). ReadWriteMany
-	// is required for multi-worker pools (the warm pool shares one PVC and
-	// per-turn children of different sessions run concurrently across pods).
-	// ReadWriteOnce is permitted only as a single-worker deployment mode
-	// (at most one replica, spec.replicas <= 1; replicas == 0 pauses the
-	// pool without the storage-mode change) on an ordinary RWO StorageClass,
-	// and is not the production multi-worker storage backend.
-	// +kubebuilder:validation:Enum=ReadWriteOnce;ReadWriteMany
+	// accessMode is fixed to ReadWriteOnce. RWO constrains the claim to one node,
+	// not one pod, so two or more workers may mount it on the supported single
+	// K3s node.
+	// +kubebuilder:validation:Enum=ReadWriteOnce
 	// +kubebuilder:validation:Required
 	AccessMode corev1.PersistentVolumeAccessMode `json:"accessMode"`
 
-	// size is the PVC request (the per-pool storage quota).
+	// size is the desired grow-only thick XFS capacity requested from
+	// iterabase-data. Only an increase is reconciled after provisioning.
 	// +kubebuilder:validation:Required
 	Size resource.Quantity `json:"size"`
 
@@ -386,14 +392,15 @@ type PoolProbeSpec struct {
 // +kubebuilder:object:generate=true
 type AgentPoolStatus struct {
 	// conditions expose stable storage/readiness reason families. StorageReady
-	// is fail-closed for RWX pools and identifies the exact class/PVC/PV/backend
-	// predicate or operator action without exposing session bytes.
+	// identifies the exact fixed class/PVC/PV/path predicate, while
+	// WorkspaceCapacityHealthy projects the durable actual-filesystem
+	// warning/gate state and operator action without exposing session bytes.
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
 	// ready is true once the warm-worker pods + PVC + NetworkPolicy are
-	// reconciled, the RWX class/conformance/PVC/backend contract is healthy, and
-	// at least one pod is Ready (envtest has no kubelet, so this stays false).
+	// reconciled, the exact OpenEBS LVM/XFS/VG/topology contract is healthy, and at least one
+	// pod is Ready (envtest has no kubelet, so this stays false).
 	// +optional
 	Ready bool `json:"ready,omitempty"`
 

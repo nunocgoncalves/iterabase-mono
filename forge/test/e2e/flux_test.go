@@ -11,18 +11,20 @@ import (
 )
 
 // runFluxStage exercises the Flux GitOps phase on the composed CPU fixture:
-// droplet: forge reconciles Flux, its GitRepository, and Kustomization against
-// the PUBLIC exact-artifact E2E overlay fixture (tokenless),
+// Forge reconciles Flux, its GitRepository, and Kustomization against the
+// public exact-artifact E2E overlay fixture using only the workflow's
+// ephemeral read credential,
 // and Flux source-controller materializes the fork in-cluster + kustomize-controller
 // reconciles crds/client. Validates the MECHANICS (install → sync resources →
 // Flux reconciles) rather than a writable push-to-git loop (that's Flux upstream
 // behavior, validated end-to-end by HOR-299's real OPO1 client fork).
 //
-// FORGE_OVERLAY_TOKEN is intentionally unset (public repo, CI non-interactive);
-// the token→Secret path is covered by unit + fake-SSH tests.
-func runFluxStage(t *testing.T, state *digitalOceanCPUState) {
+// No explicit FORGE_OVERLAY_TOKEN is accepted. The E2E process maps the
+// workflow's ephemeral GITHUB_TOKEN into each Forge subprocess; tokenless and
+// prompt behavior remains covered by unit + fake-SSH tests.
+func runFluxStage(t *testing.T, state *permanentCPUFixtureState) {
 	if _, ok := os.LookupEnv("FORGE_OVERLAY_TOKEN"); ok {
-		t.Fatal("FORGE_OVERLAY_TOKEN must be unset for this test (public repo, tokenless)")
+		t.Fatal("FORGE_OVERLAY_TOKEN must be unset; E2E supplies only the ephemeral workflow token")
 	}
 
 	cfgPath := writeFluxForgeConfig(t, state.runID, state.ip, state.privKeyPath, state.chartVersion)
@@ -52,6 +54,21 @@ func runFluxStage(t *testing.T, state *digitalOceanCPUState) {
 		}
 		if !strings.Contains(line, "Running") && !strings.Contains(line, "Completed") {
 			t.Fatalf("flux-system pod not Running:\n%s", line)
+		}
+	}
+
+	// Root-flux scoping contract (HOR-576): a second, tenant-owned Flux
+	// instance shares the cluster, so the root instance must be namespace-scoped
+	// — otherwise each source-controller overwrites the other instance's
+	// artifact URLs, and Flux's generated NetworkPolicies refuse the
+	// cross-namespace fetch.
+	for _, controller := range []string{"source-controller", "kustomize-controller", "helm-controller", "notification-controller"} {
+		args, err := sshOutput(sc, fmt.Sprintf("sudo k3s kubectl get deployment -n flux-system %s -o jsonpath='{.spec.template.spec.containers[*].args}'", controller))
+		if err != nil {
+			t.Fatalf("get %s args: %v\n%s", controller, err, args)
+		}
+		if !strings.Contains(args, "--watch-all-namespaces=false") {
+			t.Fatalf("%s is not namespace-scoped (args: %s)", controller, args)
 		}
 	}
 

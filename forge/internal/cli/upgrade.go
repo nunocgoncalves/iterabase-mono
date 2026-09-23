@@ -35,7 +35,7 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 
 	to, _ := cmd.Flags().GetString("to")
 	log.Info("upgrading", "install", cfg.Metadata.Name, "to", to)
-	res, err := lifecycle.Upgrade(context.Background(), cfg, p, to, lifecycle.ApplyOpts{})
+	res, err := lifecycle.Upgrade(context.Background(), cfg, p, p, to, lifecycle.ApplyOpts{})
 	if err != nil {
 		return err
 	}
@@ -43,5 +43,8 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 	fmt.Fprintln(out, "upgrade complete")
 	fmt.Fprintf(out, "  kubeconfig: %s\n", res.KubeconfigPath)
 	fmt.Fprintf(out, "  node ready: %v\n", res.NodeReady)
+	if res.HostInotify != nil {
+		fmt.Fprintf(out, "  inotify:    %s\n", hostInotifySummary(res.HostInotify))
+	}
 	return nil
 }

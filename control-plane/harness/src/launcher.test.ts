@@ -34,15 +34,19 @@ describe("buildSetprivArgv", () => {
       "-all",
       "--ambient-caps",
       "-all",
+      "/bin/sh",
+      "-c",
+      'umask 0077; exec "$@"',
+      "harness-child",
       process.execPath,
       "/app/dist/child.js",
     ]);
   });
 
-  it("stringifies uid/gid", () => {
-    const argv = buildSetprivArgv({ ...VALID, uid: 2000, gid: 3000 });
+  it("stringifies the stable equal session uid/gid", () => {
+    const argv = buildSetprivArgv({ ...VALID, uid: 2000, gid: 2000 });
     expect(argv[1]).toBe("2000");
-    expect(argv[3]).toBe("3000");
+    expect(argv[3]).toBe("2000");
   });
 });
 
@@ -61,6 +65,10 @@ describe("validateLaunchOptions", () => {
     expect(() => validateLaunchOptions({ ...VALID, uid: -1 })).toThrow(LauncherError);
     expect(() => validateLaunchOptions({ ...VALID, uid: 1.5 })).toThrow(LauncherError);
     expect(() => validateLaunchOptions({ ...VALID, gid: 0 })).toThrow(LauncherError);
+  });
+
+  it("rejects a session gid that differs from its stable uid", () => {
+    expect(() => validateLaunchOptions({ ...VALID, uid: 2000, gid: 3000 })).toThrow(/must be equal/);
   });
 
   it("rejects a relative or missing script path", () => {

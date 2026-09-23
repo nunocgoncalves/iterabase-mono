@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -29,7 +30,8 @@ func testConfig() *config.Cluster {
 		Kind:       config.Kind,
 		Metadata:   config.Metadata{Name: "opo1"},
 		Spec: config.Spec{
-			Mode: config.ModeSingleNode,
+			Mode:        config.ModeSingleNode,
+			DataStorage: config.DataStorage{Devices: []string{"/dev/disk/by-id/scsi-data-a", "/dev/disk/by-id/scsi-data-b"}},
 			Hosts: []config.Host{{
 				Address: "10.20.0.10", SSHUser: "forge", SSHKeyPath: "/dev/null",
 				Role: config.RoleControlPlaneWorker,
@@ -54,27 +56,46 @@ type installCall struct {
 
 // fakeProv is a controllable provisioner.Provisioner for lifecycle tests.
 type fakeProv struct {
-	pf                     provisioner.PreflightResult
-	state                  provisioner.HostState
-	ready                  bool
-	readyAfterInstall      bool
-	kubeconfig             []byte
-	installErr             error
-	installs               []installCall
-	ensureDepsErr          error
-	ensureDepsCalls        int
-	ensureStorageErr       error
-	ensureStorageDepsCalls int
-	gpuReady               bool
-	gpuTerminal            bool
-	gpuReadinessReason     string
-	gpuDriverRequests      []string
+	pf                      provisioner.PreflightResult
+	state                   provisioner.HostState
+	ready                   bool
+	readyAfterInstall       bool
+	kubeconfig              []byte
+	installErr              error
+	installs                []installCall
+	ensureDepsErr           error
+	ensureDepsCalls         int
+	hostSwapErr             error
+	hostSwapCalls           int
+	hostInotify             *provisioner.HostInotifyState
+	hostInotifyErr          error
+	hostInotifyCalls        int
+	hostInotifyInspectErr   error
+	hostInotifyInspectCalls int
+	mutationOrder           []string
+	workspaceInspectErr     error
+	workspaceInspectState   *provisioner.DataStorageState
+	workspaceReconcileErr   error
+	workspaceInspectCalls   int
+	workspaceToolsErr       error
+	workspaceToolsCalls     int
+	workspaceApplyCalls     int
+	lvmReadinessErr         error
+	lvmReadinessCalls       int
+	gpuReady                bool
+	gpuTerminal             bool
+	gpuReadinessReason      string
+	gpuDriverRequests       []string
+	destroyCalls            []string
+	purgeErr                error
+	rebootErr               error
 }
 
 func (f *fakeProv) Preflight(_ context.Context) (*provisioner.PreflightResult, error) {
 	return &f.pf, nil
 }
 func (f *fakeProv) Install(_ context.Context, version string, args []string) error {
+	f.mutationOrder = append(f.mutationOrder, "k3s-install")
 	f.installs = append(f.installs, installCall{version, args})
 	if f.installErr != nil {
 		return f.installErr
@@ -89,8 +110,17 @@ func (f *fakeProv) Upgrade(ctx context.Context, v string, a []string) error {
 	return f.Install(ctx, v, a)
 }
 func (f *fakeProv) Uninstall(_ context.Context) error {
+	f.destroyCalls = append(f.destroyCalls, "uninstall")
 	f.state.Installed = false
 	return nil
+}
+func (f *fakeProv) PurgeDataStorage(_ context.Context, spec provisioner.DataStorageSpec) error {
+	f.destroyCalls = append(f.destroyCalls, "purge:"+spec.InstallName+":"+strings.Join(spec.Devices, ","))
+	return f.purgeErr
+}
+func (f *fakeProv) Reboot(_ context.Context) error {
+	f.destroyCalls = append(f.destroyCalls, "reboot")
+	return f.rebootErr
 }
 func (f *fakeProv) FetchKubeconfig(_ context.Context) ([]byte, error) { return f.kubeconfig, nil }
 func (f *fakeProv) ReadState(_ context.Context) (*provisioner.HostState, error) {
@@ -102,9 +132,86 @@ func (f *fakeProv) EnsureDriverBuildDeps(_ context.Context) error {
 	f.ensureDepsCalls++
 	return f.ensureDepsErr
 }
-func (f *fakeProv) EnsureRWXStoragePrerequisites(_ context.Context) error {
-	f.ensureStorageDepsCalls++
-	return f.ensureStorageErr
+func (f *fakeProv) EnsureHostSwapDisabled(_ context.Context) error {
+	f.hostSwapCalls++
+	f.mutationOrder = append(f.mutationOrder, "host-swap")
+	return f.hostSwapErr
+}
+
+// hostInotifyState returns the configured observation or a canonical ready
+// host so most lifecycle tests stay focused on their own concern.
+func (f *fakeProv) hostInotifyState() *provisioner.HostInotifyState {
+	if f.hostInotify != nil {
+		state := *f.hostInotify
+		return &state
+	}
+	return &provisioner.HostInotifyState{
+		Effective:       provisioner.InotifyMaxUserInstancesRequired,
+		Persisted:       provisioner.InotifyMaxUserInstancesRequired,
+		DropInPresent:   true,
+		DropInRegular:   true,
+		DropInOwner:     "0:0",
+		DropInMode:      "644",
+		DropInCanonical: true,
+	}
+}
+func (f *fakeProv) InspectHostInotify(_ context.Context) (*provisioner.HostInotifyState, error) {
+	f.hostInotifyInspectCalls++
+	if f.hostInotifyInspectErr != nil {
+		return nil, f.hostInotifyInspectErr
+	}
+	return f.hostInotifyState(), nil
+}
+func (f *fakeProv) ReconcileHostInotify(_ context.Context) (*provisioner.HostInotifyState, error) {
+	f.hostInotifyCalls++
+	f.mutationOrder = append(f.mutationOrder, "host-inotify")
+	if f.hostInotifyErr != nil {
+		return nil, f.hostInotifyErr
+	}
+	return f.hostInotifyState(), nil
+}
+func (f *fakeProv) ListDataStorageDevices(_ context.Context) ([]provisioner.DataStorageDevice, error) {
+	return nil, nil
+}
+func (f *fakeProv) InspectDataStorage(_ context.Context, spec provisioner.DataStorageSpec) (*provisioner.DataStorageState, error) {
+	f.workspaceInspectCalls++
+	if f.workspaceInspectErr != nil {
+		return nil, f.workspaceInspectErr
+	}
+	if f.workspaceInspectState != nil {
+		state := *f.workspaceInspectState
+		state.Devices = append([]provisioner.DataStorageDevice(nil), f.workspaceInspectState.Devices...)
+		return &state, nil
+	}
+	devices := make([]provisioner.DataStorageDevice, len(spec.Devices))
+	for i, device := range spec.Devices {
+		devices[i] = provisioner.DataStorageDevice{Path: device, Transport: "scsi", SizeBytes: 100}
+	}
+	return &provisioner.DataStorageState{Devices: devices, VGName: provisioner.DataVolumeGroupName, State: "blank-candidate"}, nil
+}
+func (f *fakeProv) EnsureDataStorageTools(_ context.Context) error {
+	f.workspaceToolsCalls++
+	f.mutationOrder = append(f.mutationOrder, "data-storage-tools")
+	return f.workspaceToolsErr
+}
+func (f *fakeProv) ReconcileDataStorage(_ context.Context, spec provisioner.DataStorageSpec) (*provisioner.DataStorageState, error) {
+	f.workspaceApplyCalls++
+	f.mutationOrder = append(f.mutationOrder, "data-storage-reconcile")
+	if f.workspaceReconcileErr != nil {
+		return nil, f.workspaceReconcileErr
+	}
+	devices := make([]provisioner.DataStorageDevice, len(spec.Devices))
+	for i, device := range spec.Devices {
+		devices[i] = provisioner.DataStorageDevice{Path: device, Transport: "scsi", SizeBytes: 100, PVUUID: fmt.Sprintf("pv-%d", i)}
+	}
+	return &provisioner.DataStorageState{Devices: devices, VGName: provisioner.DataVolumeGroupName, VGUUID: "vg-uuid", SizeBytes: 200, FreeBytes: 200, State: "complete"}, nil
+}
+func (f *fakeProv) WaitForLVMStorageReady(_ context.Context, _ string, storage *provisioner.DataStorageState) (*provisioner.LVMStorageReadiness, error) {
+	f.lvmReadinessCalls++
+	if f.lvmReadinessErr != nil {
+		return nil, f.lvmReadinessErr
+	}
+	return &provisioner.LVMStorageReadiness{Ready: true, NodeName: "node", VGName: storage.VGName, VGUUID: storage.VGUUID, SizeBytes: storage.SizeBytes, FreeBytes: storage.FreeBytes, PVCount: len(storage.Devices)}, nil
 }
 func (f *fakeProv) ReadGPUReadiness(_ context.Context, requestedDriverVersion string) (*provisioner.GPUReadiness, error) {
 	f.gpuDriverRequests = append(f.gpuDriverRequests, requestedDriverVersion)
@@ -122,11 +229,12 @@ func readyPf() provisioner.PreflightResult {
 
 func inSyncState() provisioner.HostState {
 	return provisioner.HostState{
-		Installed:   true,
-		Version:     "v1.31.5+k3s1",
-		ClusterCIDR: "10.42.0.0/16,fd42::/48",
-		ServiceCIDR: "10.43.0.0/16,fd43::/112",
-		DualStack:   true,
+		Installed:            true,
+		Version:              "v1.31.5+k3s1",
+		ClusterCIDR:          "10.42.0.0/16,fd42::/48",
+		ServiceCIDR:          "10.43.0.0/16,fd43::/112",
+		DualStack:            true,
+		LocalStorageDisabled: true,
 	}
 }
 
@@ -262,9 +370,10 @@ func TestApply_KubeconfigOut(t *testing.T) {
 
 func TestUpgrade(t *testing.T) {
 	useTempHome(t)
-	p := &fakeProv{pf: readyPf(), state: inSyncState(), kubeconfig: []byte(minKubeconfig), ready: true}
+	p := &fakeProv{pf: readyPf(), state: inSyncState(), kubeconfig: []byte(minKubeconfig), ready: true,
+		workspaceInspectState: &provisioner.DataStorageState{State: "complete", VGName: provisioner.DataVolumeGroupName, VGUUID: "vg-uuid"}}
 	p.pf.Installed = true
-	res, err := Upgrade(context.Background(), testConfig(), p, "v1.32.0+k3s1", ApplyOpts{
+	res, err := Upgrade(context.Background(), testConfig(), p, &fakeDeployer{}, "v1.32.0+k3s1", ApplyOpts{
 		ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
 	})
 	require.NoError(t, err)
@@ -276,13 +385,53 @@ func TestUpgrade(t *testing.T) {
 func TestUpgrade_NotInstalled(t *testing.T) {
 	useTempHome(t)
 	p := &fakeProv{pf: readyPf()} // not installed
-	_, err := Upgrade(context.Background(), testConfig(), p, "v1.32.0", ApplyOpts{})
+	_, err := Upgrade(context.Background(), testConfig(), p, &fakeDeployer{}, "v1.32.0", ApplyOpts{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not installed")
 }
 
+func TestUpgradeRefusesIncompatibleOrUnknownPreLVMStateWithoutMutation(t *testing.T) {
+	complete := &provisioner.DataStorageState{State: "complete", VGName: provisioner.DataVolumeGroupName, VGUUID: "vg-uuid"}
+	for _, tt := range []struct {
+		name      string
+		mutate    func(*config.Cluster, *fakeProv, *fakeDeployer)
+		wantError string
+	}{
+		{name: "local-storage-enabled", wantError: "k3s.disable[local-storage]", mutate: func(_ *config.Cluster, p *fakeProv, _ *fakeDeployer) {
+			p.workspaceInspectState = complete
+			p.state.LocalStorageDisabled = false
+		}},
+		{name: "storage-observation-failed", wantError: "inspect data storage", mutate: func(_ *config.Cluster, p *fakeProv, _ *fakeDeployer) {
+			p.workspaceInspectErr = errors.New("receipt unavailable")
+		}},
+		{name: "receipt-not-complete", wantError: "clean install", mutate: func(_ *config.Cluster, _ *fakeProv, _ *fakeDeployer) {}},
+		{name: "pre-lvm-platform", wantError: "predates the OpenEBS LVM", mutate: func(cfg *config.Cluster, p *fakeProv, d *fakeDeployer) {
+			p.workspaceInspectState = complete
+			cfg.Spec.Chart = config.Chart{Release: "opo1", Namespace: "iterabase-system", Version: "0.4.0"}
+			d.statusStates["opo1"] = deployer.ChartState{Installed: true, Version: "0.3.23"}
+		}},
+		{name: "platform-observation-failed", wantError: "read installed platform", mutate: func(cfg *config.Cluster, p *fakeProv, d *fakeDeployer) {
+			p.workspaceInspectState = complete
+			cfg.Spec.Chart = config.Chart{Release: "opo1", Namespace: "iterabase-system", Version: "0.4.0"}
+			d.statusErr = errors.New("helm transport unavailable")
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			useTempHome(t)
+			cfg := testConfig()
+			p := &fakeProv{pf: readyPf(), state: inSyncState()}
+			d := &fakeDeployer{statusStates: map[string]deployer.ChartState{}}
+			tt.mutate(cfg, p, d)
+			_, err := Upgrade(context.Background(), cfg, p, d, "v1.34.10+k3s1", ApplyOpts{})
+			require.ErrorContains(t, err, tt.wantError)
+			assert.Empty(t, p.installs, "upgrade/install provisioner mutation must not run on refusal")
+		})
+	}
+}
+
 type applyCall struct {
 	release, repository, version, namespace string
+	checksum                                string
 	values, valueFiles                      []string
 	noWait                                  bool
 	timeout                                 string
@@ -309,6 +458,7 @@ type fakeDeployer struct {
 	restarts                        []restartCall
 	order                           []string // ordered op log for phase-ordering assertions
 	statusStates                    map[string]deployer.ChartState
+	statusErr                       error
 	crdsOwnedByTarget               bool
 	crdsMigrationComplete           bool
 	applyErr                        error
@@ -322,7 +472,7 @@ type fakeDeployer struct {
 func (f *fakeDeployer) Apply(_ context.Context, opts deployer.ApplyOpts) error {
 	f.applyCalls = append(f.applyCalls, applyCall{
 		release: opts.Release, repository: opts.Repository,
-		version: opts.Version, namespace: opts.Namespace,
+		version: opts.Version, namespace: opts.Namespace, checksum: opts.Checksum,
 		values: opts.Values, valueFiles: opts.ValueFiles, noWait: opts.NoWait, timeout: opts.Timeout,
 	})
 	f.order = append(f.order, "apply")
@@ -356,6 +506,9 @@ func (f *fakeDeployer) EnsureRepo(_ context.Context, name, url string) error {
 	return nil
 }
 func (f *fakeDeployer) Status(_ context.Context, release, _ string) (*deployer.ChartState, error) {
+	if f.statusErr != nil {
+		return nil, f.statusErr
+	}
 	s := f.statusStates[release]
 	return &s, nil
 }
@@ -457,6 +610,17 @@ func testConfigWithChart() *config.Cluster {
 	return c
 }
 
+func testConfigWithLVMChart() *config.Cluster {
+	c := testConfig()
+	c.Spec.Chart = config.Chart{
+		Version:    "0.4.0",
+		Repository: "oci://ghcr.io/nunocgoncalves/iterabase-charts/iterabase-platform",
+		Release:    "opo1",
+		Namespace:  "iterabase-system",
+	}
+	return c
+}
+
 func TestCertificateSubstrateRepository(t *testing.T) {
 	required, err := certificateSubstrateRequired("0.2.2")
 	require.NoError(t, err)
@@ -500,6 +664,41 @@ func TestApply_Chart(t *testing.T) {
 	assert.Equal(t, "0.3.0", platform.version)
 	assert.Equal(t, "opo1", platform.release)
 	assert.Equal(t, "iterabase-system", platform.namespace)
+}
+
+func TestApplyRefusesPreLVMPlatformBeforeHostOrDiskMutation(t *testing.T) {
+	p := &fakeProv{pf: readyPf(), state: inSyncState(), ready: true, kubeconfig: []byte(minKubeconfig)}
+	p.pf.Installed = true
+	d := &fakeDeployer{statusStates: map[string]deployer.ChartState{"opo1": {Installed: true, Status: "deployed", Version: "0.3.23"}}}
+	_, err := Apply(context.Background(), testConfigWithLVMChart(), p, d, nil, nil, ApplyOpts{})
+	require.ErrorContains(t, err, "supports only a clean destroy and fresh install")
+	assert.Zero(t, p.workspaceToolsCalls)
+	assert.Zero(t, p.workspaceApplyCalls)
+	assert.Empty(t, d.applyCalls)
+}
+
+func TestApplyChartOrdersBothSubstratesBeforePlatform(t *testing.T) {
+	useTempHome(t)
+	p := &fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig), readyAfterInstall: true}
+	d := &fakeDeployer{}
+	res, err := Apply(context.Background(), testConfigWithLVMChart(), p, d, nil, &fakeFluxer{}, ApplyOpts{
+		ReadyTimeout: time.Second, ReadyInterval: 10 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	assert.True(t, res.CertificateSubstrateApplied)
+	assert.True(t, res.LVMStorageSubstrateApplied)
+	require.NotNil(t, res.LVMStorageReady)
+	assert.True(t, res.LVMStorageReady.Ready)
+	assert.True(t, res.ChartApplied)
+	require.Len(t, d.applyCalls, 3)
+	assert.Equal(t, "opo1-cert-manager", d.applyCalls[0].release)
+	assert.Equal(t, "opo1-lvm-storage", d.applyCalls[1].release)
+	assert.Equal(t, "oci://ghcr.io/nunocgoncalves/iterabase-charts/lvm-storage-substrate", d.applyCalls[1].repository)
+	// DES-HOR-545-01: the substrate install carries the exact manager SA identity
+	// so admission fails closed unless the request is the control-plane manager.
+	assert.Equal(t, []string{"agentpool.authorizedManagerIdentity=system:serviceaccount:iterabase-system:opo1-control-plane-manager"}, d.applyCalls[1].values)
+	assert.Equal(t, "opo1", d.applyCalls[2].release)
+	assert.Equal(t, 1, p.lvmReadinessCalls)
 }
 
 func TestApply_Chart_MigratesPreSubstrateOwnershipBeforeCompanion(t *testing.T) {
@@ -643,6 +842,18 @@ func TestDestroy_Chart(t *testing.T) {
 	assert.False(t, p.state.Installed) // k3s uninstalled too
 }
 
+func TestDestroyCurrentChartRemovesPlatformThenLVMThenCertificateWithoutPurgingVG(t *testing.T) {
+	p := &fakeProv{pf: readyPf(), state: inSyncState()}
+	p.pf.Installed = true
+	d := &fakeDeployer{}
+	require.NoError(t, Destroy(context.Background(), testConfigWithLVMChart(), p, d, nil, nil))
+	require.Len(t, d.uninstallCalls, 3)
+	assert.Equal(t, "opo1", d.uninstallCalls[0].release)
+	assert.Equal(t, "opo1-lvm-storage", d.uninstallCalls[1].release)
+	assert.Equal(t, "opo1-cert-manager", d.uninstallCalls[2].release)
+	assert.Equal(t, []string{"uninstall"}, p.destroyCalls)
+}
+
 func TestDestroy_NoChart(t *testing.T) {
 	p := &fakeProv{pf: readyPf(), state: inSyncState()}
 	p.pf.Installed = true
@@ -650,17 +861,50 @@ func TestDestroy_NoChart(t *testing.T) {
 	require.NoError(t, Destroy(context.Background(), testConfig(), p, d, nil, nil))
 	assert.Empty(t, d.uninstallCalls) // no chart configured
 	assert.False(t, p.state.Installed)
+	assert.Equal(t, []string{"uninstall"}, p.destroyCalls, "ordinary destroy must preserve the workspace and must not reboot")
 }
+
+func TestDestroyWithOptions_PurgeThenReboot(t *testing.T) {
+	p := &fakeProv{pf: readyPf(), state: inSyncState()}
+	require.NoError(t, DestroyWithOptions(context.Background(), testConfig(), p, nil, nil, nil, DestroyOpts{
+		PurgeDataStorage: true,
+		Reboot:           true,
+	}))
+	assert.Equal(t, []string{
+		"uninstall",
+		"purge:opo1:/dev/disk/by-id/scsi-data-a,/dev/disk/by-id/scsi-data-b",
+		"reboot",
+	}, p.destroyCalls)
+}
+
+func TestDestroyWithOptions_StopsBeforeRebootOnPurgeFailure(t *testing.T) {
+	p := &fakeProv{pf: readyPf(), state: inSyncState(), purgeErr: errors.New("identity drift")}
+	err := DestroyWithOptions(context.Background(), testConfig(), p, nil, nil, nil, DestroyOpts{
+		PurgeDataStorage: true,
+		Reboot:           true,
+	})
+	require.ErrorContains(t, err, "identity drift")
+	assert.Equal(t, []string{
+		"uninstall",
+		"purge:opo1:/dev/disk/by-id/scsi-data-a,/dev/disk/by-id/scsi-data-b",
+	}, p.destroyCalls)
+}
+
+const defaultGPUOperatorChecksumForTest = "59abb5852a24b3ae0ef757bfea3051f419acbf559ee5efd72f0672d28af56a68"
 
 func testConfigWithGPU() *config.Cluster {
 	c := testConfigWithChart()
-	c.Spec.GPU = config.GPU{Enabled: true}
+	c.Spec.GPU = config.GPU{
+		Enabled: true,
+		Driver:  config.GPUDriver{Version: "580.126.20", SHA256: strings.Repeat("b", 64)},
+	}
 	c.Spec.GPU.Operator = config.GPUOperator{
 		Version:    "v26.3.3",
 		Repository: "https://helm.ngc.nvidia.com/nvidia",
 		Chart:      "gpu-operator",
 		Release:    "opo1-gpu-operator",
 		Namespace:  "gpu-operator",
+		SHA256:     defaultGPUOperatorChecksumForTest,
 	}
 	return c
 }
@@ -679,6 +923,7 @@ func TestPlan_GPUEnabled(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, plan.GPUEnabled)
 	assert.Equal(t, "v26.3.3", plan.GPUOperatorVersion)
+	assert.Equal(t, "580.126.20", plan.GPUDriverVersion)
 	assert.Equal(t, ActionInstall, plan.Action)
 }
 
@@ -720,6 +965,7 @@ func TestApply_GPU(t *testing.T) {
 	assert.Equal(t, "opo1-gpu-operator", op.release)
 	assert.Equal(t, "nvidia/gpu-operator", op.repository)
 	assert.Equal(t, "v26.3.3", op.version)
+	assert.Equal(t, defaultGPUOperatorChecksumForTest, op.checksum)
 	assert.Equal(t, "gpu-operator", op.namespace)
 	assert.Equal(t, []string{
 		"cdi.enabled=true",
@@ -727,6 +973,17 @@ func TestApply_GPU(t *testing.T) {
 		"toolkit.enabled=true",
 		"devicePlugin.enabled=true",
 		"gfd.enabled=true",
+		"operator.version=v26.3.3@sha256:6584c36f153d18cfce284f7e5bc477887ce3c1ac566dc795bd80c9af6c6488f7",
+		"validator.version=v26.3.3@sha256:6584c36f153d18cfce284f7e5bc477887ce3c1ac566dc795bd80c9af6c6488f7",
+		"driver.manager.version=v0.11.0@sha256:8aec215a8b159b0162b55e688065efd58ebfa848ebc999c1797221686ff1243d",
+		"toolkit.version=v1.19.1@sha256:c927adbc9b7755c5cb90022fdcc5c1295f5fe5fe1f38200a2dc65e85632b029c",
+		"devicePlugin.version=v0.19.3@sha256:25cc340fe6fd53c101e16fc452f503e7a92c219c64a80ed5381784b522dbbf77",
+		"dcgmExporter.version=4.5.3-4.8.2-distroless@sha256:60d3b00ac80b4ae77f94dae2f943685605585ad9e92fdccda3154d009ae317cc",
+		"gfd.version=v0.19.3@sha256:25cc340fe6fd53c101e16fc452f503e7a92c219c64a80ed5381784b522dbbf77",
+		"migManager.version=v0.14.2@sha256:313586bfa5c07601a83f310dd700db0007d489df2ad42bb52c611802cbb7a278",
+		"node-feature-discovery.image.repository=registry.k8s.io/nfd/node-feature-discovery",
+		"node-feature-discovery.image.tag=v0.19.0@sha256:2fa1c99ad09bdf2c8ad97706a4ad2fd548c84d5ecd70ba32a6152c667b96c4d2",
+		"node-feature-discovery.master.resyncPeriod=30s",
 		"toolkit.env[0].name=CONTAINERD_CONFIG",
 		"toolkit.env[0].value=/var/lib/rancher/k3s/agent/etc/containerd/config.toml",
 		"toolkit.env[1].name=CONTAINERD_SOCKET",
@@ -735,7 +992,9 @@ func TestApply_GPU(t *testing.T) {
 		"toolkit.env[2].value=nvidia",
 		"driver.upgradePolicy.gpuPodDeletion.deleteEmptyDir=true",
 		"driver.upgradePolicy.drain.enable=false",
+		"driver.version=580.126.20@sha256:" + strings.Repeat("b", 64),
 	}, op.values)
+	assert.Equal(t, "580.126.20", res.GPUDriverVersion)
 	assert.Equal(t, "opo1", chart.release)
 	assert.Equal(t, "0.3.0", chart.version)
 	assert.Equal(t, 1, p.ensureDepsCalls) // build deps ensured once
@@ -747,39 +1006,9 @@ func TestApply_GPU(t *testing.T) {
 	assert.True(t, res.ChartApplied)
 }
 
-func TestApply_GPU_EmptyDriverOmitsSet(t *testing.T) {
-	// Empty driver version => no driver.version Helm --set emitted (chart default).
-	// Mirrors the existing TestApply_GPU values assertion but asserts the plan/result
-	// fields are empty too.
-	p := &fakeProv{pf: gpuReadyPf()}
-	plan, err := Plan(context.Background(), testConfigWithGPU(), p)
-	require.NoError(t, err)
-	assert.Empty(t, plan.GPUDriverVersion)
-
-	useTempHome(t)
-	p = &fakeProv{
-		pf:                gpuReadyPf(),
-		kubeconfig:        []byte(minKubeconfig),
-		readyAfterInstall: true,
-		gpuReady:          true,
-	}
-	d := &fakeDeployer{}
-	res, err := Apply(context.Background(), testConfigWithGPU(), p, d, nil, &fakeFluxer{}, ApplyOpts{
-		ReadyTimeout: 1 * time.Second, ReadyInterval: 10 * time.Millisecond,
-		GPUReadyTimeout: 1 * time.Second, GPUReadyInterval: 10 * time.Millisecond,
-	})
-	require.NoError(t, err)
-	require.Len(t, d.applyCalls, 3)
-	op := d.applyCalls[0]
-	for _, v := range op.values {
-		assert.NotContains(t, v, "driver.version")
-	}
-	assert.Empty(t, res.GPUDriverVersion)
-}
-
 func TestApply_GPU_PinnedDriverEmitsSet(t *testing.T) {
 	cfg := testConfigWithGPU()
-	cfg.Spec.GPU.Driver = config.GPUDriver{Version: "570.186"}
+	cfg.Spec.GPU.Driver = config.GPUDriver{Version: "570.186", SHA256: strings.Repeat("a", 64)}
 
 	p := &fakeProv{pf: gpuReadyPf()}
 	plan, err := Plan(context.Background(), cfg, p)
@@ -801,7 +1030,7 @@ func TestApply_GPU_PinnedDriverEmitsSet(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, d.applyCalls, 3)
 	op := d.applyCalls[0]
-	assert.Contains(t, op.values, "driver.version=570.186")
+	assert.Contains(t, op.values, "driver.version=570.186@sha256:"+strings.Repeat("a", 64))
 	// ordering / other values unchanged — driver.version appended after the base set.
 	assert.Equal(t, []string{
 		"cdi.enabled=true",
@@ -809,6 +1038,17 @@ func TestApply_GPU_PinnedDriverEmitsSet(t *testing.T) {
 		"toolkit.enabled=true",
 		"devicePlugin.enabled=true",
 		"gfd.enabled=true",
+		"operator.version=v26.3.3@sha256:6584c36f153d18cfce284f7e5bc477887ce3c1ac566dc795bd80c9af6c6488f7",
+		"validator.version=v26.3.3@sha256:6584c36f153d18cfce284f7e5bc477887ce3c1ac566dc795bd80c9af6c6488f7",
+		"driver.manager.version=v0.11.0@sha256:8aec215a8b159b0162b55e688065efd58ebfa848ebc999c1797221686ff1243d",
+		"toolkit.version=v1.19.1@sha256:c927adbc9b7755c5cb90022fdcc5c1295f5fe5fe1f38200a2dc65e85632b029c",
+		"devicePlugin.version=v0.19.3@sha256:25cc340fe6fd53c101e16fc452f503e7a92c219c64a80ed5381784b522dbbf77",
+		"dcgmExporter.version=4.5.3-4.8.2-distroless@sha256:60d3b00ac80b4ae77f94dae2f943685605585ad9e92fdccda3154d009ae317cc",
+		"gfd.version=v0.19.3@sha256:25cc340fe6fd53c101e16fc452f503e7a92c219c64a80ed5381784b522dbbf77",
+		"migManager.version=v0.14.2@sha256:313586bfa5c07601a83f310dd700db0007d489df2ad42bb52c611802cbb7a278",
+		"node-feature-discovery.image.repository=registry.k8s.io/nfd/node-feature-discovery",
+		"node-feature-discovery.image.tag=v0.19.0@sha256:2fa1c99ad09bdf2c8ad97706a4ad2fd548c84d5ecd70ba32a6152c667b96c4d2",
+		"node-feature-discovery.master.resyncPeriod=30s",
 		"toolkit.env[0].name=CONTAINERD_CONFIG",
 		"toolkit.env[0].value=/var/lib/rancher/k3s/agent/etc/containerd/config.toml",
 		"toolkit.env[1].name=CONTAINERD_SOCKET",
@@ -817,7 +1057,7 @@ func TestApply_GPU_PinnedDriverEmitsSet(t *testing.T) {
 		"toolkit.env[2].value=nvidia",
 		"driver.upgradePolicy.gpuPodDeletion.deleteEmptyDir=true",
 		"driver.upgradePolicy.drain.enable=false",
-		"driver.version=570.186",
+		"driver.version=570.186@sha256:" + strings.Repeat("a", 64),
 	}, op.values)
 	assert.Equal(t, "570.186", res.GPUDriverVersion)
 	require.NotEmpty(t, p.gpuDriverRequests)
@@ -874,8 +1114,8 @@ func TestApply_SkipGPU(t *testing.T) {
 	// Skipped phase does not claim the operator ran.
 	assert.False(t, res.GPUOperatorApplied)
 	assert.False(t, res.GPUReady)
-	// No pin configured => result stays empty (apply report shows chart default).
-	assert.Empty(t, res.GPUDriverVersion)
+	// Skipping reconciliation still reports the configured immutable driver identity.
+	assert.Equal(t, "580.126.20", res.GPUDriverVersion)
 }
 
 func TestApply_SkipGPU_SurfacesConfiguredPin(t *testing.T) {
@@ -885,7 +1125,7 @@ func TestApply_SkipGPU_SurfacesConfiguredPin(t *testing.T) {
 	// reconciliation ran.
 	useTempHome(t)
 	cfg := testConfigWithGPU()
-	cfg.Spec.GPU.Driver = config.GPUDriver{Version: "570.186"}
+	cfg.Spec.GPU.Driver = config.GPUDriver{Version: "570.186", SHA256: strings.Repeat("a", 64)}
 	p := &fakeProv{
 		pf:                gpuReadyPf(),
 		kubeconfig:        []byte(minKubeconfig),
@@ -1120,11 +1360,9 @@ func TestApply_Secrets(t *testing.T) {
 		}
 	}
 
-	// secrets plus the two semantic chart value files were read from the cloned overlay.
-	require.Len(t, o.readFileCalls, 3)
+	// Only the non-secret declaration is read; storage is fixed substrate config.
+	require.Len(t, o.readFileCalls, 1)
 	assert.Equal(t, "secrets.yaml", o.readFileCalls[0].relPath)
-	assert.Equal(t, "values.yaml", o.readFileCalls[1].relPath)
-	assert.Equal(t, "values.client.yaml", o.readFileCalls[2].relPath)
 
 	// secrets are applied AFTER the overlay clone + BEFORE the chart so
 	// cert-manager finds them on first reconcile.
@@ -1169,17 +1407,14 @@ func TestApply_SkipSecrets(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, res.SecretsApplied)
 	assert.Empty(t, d.applyManifestCalls, "SkipSecrets skips materialization")
-	assert.Equal(t, []readFileCall{
-		{dest: overlayDestPath(testConfigWithOverlay()), relPath: "values.yaml"},
-		{dest: overlayDestPath(testConfigWithOverlay()), relPath: "values.client.yaml"},
-	}, o.readFileCalls, "SkipSecrets still resolves the independent storage selection but does not read secrets.yaml")
+	assert.Empty(t, o.readFileCalls, "SkipSecrets does not read secret declarations; storage is not overlay-selectable")
 }
 
 func TestApply_Secrets_NoSecretsFile(t *testing.T) {
 	useTempHome(t)
 	p := &fakeProv{pf: readyPf(), kubeconfig: []byte(minKubeconfig), readyAfterInstall: true}
 	d := &fakeDeployer{}
-	// overlay cloned but has no secrets.yaml; semantic values remain readable.
+	// Overlay cloned but has no secrets.yaml.
 	o := &fakeOverlayer{cloneCommit: "deadbeef", readFileErrors: map[string]error{
 		"secrets.yaml": errors.New("overlay read secrets.yaml: No such file or directory"),
 	}}

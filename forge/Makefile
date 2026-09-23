@@ -1,6 +1,6 @@
-.PHONY: build test test-unit test-e2e test-e2e-rwx-tls test-e2e-rwx-three-node test-e2e-overlay test-e2e-secrets test-e2e-flux test-e2e-gpu test-e2e-gpu-broken-policy test-e2e-inference-gpu test-e2e-unit lint fmt fmt-check install-hooks clean
+.PHONY: build test test-unit test-e2e test-e2e-workspace test-e2e-gpu test-e2e-unit lint fmt fmt-check install-hooks clean
 
-# Load .env if present (e.g. DIGITALOCEAN_TOKEN for e2e). .env is gitignored.
+# Load an optional gitignored local environment file.
 -include .env
 export
 
@@ -8,14 +8,14 @@ BINARY := bin/forge
 GO := go
 GOBUILDFLAGS := -trimpath
 
-# Every suite execution records an explicit fixture mode. CI may override these
-# with candidate-plan or pinned-published inputs; there is no floating latest.
+# Every suite execution records an explicit fixture mode. Required CI supplies
+# one verified runtime bundle; the explicit published file remains local-only.
 ITERABASE_E2E_FIXTURE_MODE ?= source
 ITERABASE_E2E_SOURCE_SHA ?= $(shell git rev-parse HEAD)
 ITERABASE_E2E_SOURCE_DIRTY ?= $(if $(shell git status --porcelain),true,false)
 ITERABASE_E2E_PUBLISHED_FIXTURE ?= $(CURDIR)/test/e2e/published-fixture.json
 ITERABASE_E2E_SOURCE_INPUTS ?= $(ITERABASE_E2E_PUBLISHED_FIXTURE)
-export ITERABASE_E2E_FIXTURE_MODE ITERABASE_E2E_SOURCE_SHA ITERABASE_E2E_SOURCE_DIRTY ITERABASE_E2E_PUBLISHED_FIXTURE ITERABASE_E2E_CANDIDATE_PLAN
+export ITERABASE_E2E_FIXTURE_MODE ITERABASE_E2E_SOURCE_SHA ITERABASE_E2E_SOURCE_DIRTY ITERABASE_E2E_PUBLISHED_FIXTURE
 
 VERSION := $(shell version="$$(git describe --tags --match 'forge-v*' --always --dirty 2>/dev/null)" && printf '%s\n' "$$version" | sed 's/^forge-//' || echo dev)
 COMMIT  := $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
@@ -35,41 +35,14 @@ test-unit:
 # The E2E module has one top-level TestE2E runner. -run selects an isolated
 # scenario; -v is required so capacity skips and named stages remain visible.
 test-e2e:
-	cd test/e2e && ITERABASE_E2E_SOURCE_INPUTS="$(ITERABASE_E2E_SOURCE_INPUTS)" go test -v -race -count=1 -timeout 95m -run '^TestE2E$$/^digitalocean-cpu$$' .
+	cd test/e2e && ITERABASE_E2E_SOURCE_INPUTS="$(ITERABASE_E2E_SOURCE_INPUTS)" go test -v -race -count=1 -timeout 95m -run '^TestE2E$$/^permanent-fixture-cpu$$' .
 
-test-e2e-rwx-tls:
-	cd test/e2e && FORGE_E2E_REQUIRE_MANAGED_TLS=true FORGE_E2E_STORAGE_TLS_ONLY=true \
-		ITERABASE_E2E_SOURCE_INPUTS="$(ITERABASE_E2E_SOURCE_INPUTS)" \
-		go test -v -race -count=1 -timeout 70m -run '^TestE2E$$/^digitalocean-rwx-tls$$' .
-
-test-e2e-rwx-three-node:
-	cd test/e2e && ITERABASE_E2E_SOURCE_INPUTS="$(ITERABASE_E2E_SOURCE_INPUTS)" go test -v -race -count=1 -timeout 155m -run '^TestE2E$$/^digitalocean-rwx-three-node$$' .
-
-# Compatibility aliases: overlay, secret-sync, and Flux now compose on the one
-# CPU fixture instead of provisioning three additional droplets.
-test-e2e-overlay test-e2e-secrets test-e2e-flux: test-e2e
+test-e2e-workspace:
+	cd test/e2e && ITERABASE_E2E_SOURCE_INPUTS="$(ITERABASE_E2E_SOURCE_INPUTS)" \
+		go test -v -race -count=1 -timeout 95m -run '^TestE2E$$/^permanent-fixture-cpu-workspace$$' .
 
 test-e2e-gpu:
-	cd test/e2e && ITERABASE_E2E_SOURCE_INPUTS="$(ITERABASE_E2E_SOURCE_INPUTS)" go test -v -race -count=1 -timeout 100m -run '^TestE2E$$/^digitalocean-gpu$$' .
-
-# Intentional HOR-411 red proof. Build the same source with only the Forge
-# deleteEmptyDir value mutated to false, require real capacity, and prove the
-# normal green fixture catches the operator's local-storage deletion failure.
-test-e2e-gpu-broken-policy:
-	@output=$$(mktemp); trap 'rm -f "$$output"' EXIT; \
-	set +e; (cd test/e2e && FORGE_E2E_BREAK_DELETE_EMPTYDIR=true FORGE_E2E_REQUIRE_CAPACITY=true \
-		ITERABASE_E2E_SOURCE_INPUTS="$(ITERABASE_E2E_SOURCE_INPUTS)" \
-		go test -v -race -count=1 -timeout 100m -run '^TestE2E$$/^digitalocean-gpu$$' .) >"$$output" 2>&1; status=$$?; set -e; \
-	cat "$$output"; \
-	if [ "$$status" -eq 0 ]; then echo "broken deleteEmptyDir policy unexpectedly passed" >&2; exit 1; fi; \
-	grep -Fq 'building intentional HOR-411 mutation with deleteEmptyDir=false' "$$output"; \
-	grep -Fq 'baseline GPU workload ready:' "$$output"; \
-	grep -Fq 'deleteEmptyDir: false' "$$output"; \
-	grep -Fq 'pod-deletion-required' "$$output"; \
-	grep -Fq 'upgrade-failed' "$$output"
-
-# Compatibility alias: real inference now follows GPU smoke on the same VM.
-test-e2e-inference-gpu: test-e2e-gpu
+	cd test/e2e && ITERABASE_E2E_SOURCE_INPUTS="$(ITERABASE_E2E_SOURCE_INPUTS)" go test -v -race -count=1 -timeout 100m -run '^TestE2E$$/^permanent-fixture-gpu$$' .
 
 # Run the hermetic shared-runner scenario and Forge-specific fixture,
 # diagnostics, GPU-transition, and candidate-composition tests. Direct chart

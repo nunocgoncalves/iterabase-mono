@@ -6,8 +6,8 @@
 # file is opt-in); the prod overlay carries the same flips plus Alertmanager
 # email routing (HOR-408).
 #
-# Pair with values-kind.yaml for a kind install (the stack needs a StorageClass;
-# kind ships local-path by default).
+# Pair with values-kind.yaml only after the pinned lvm-storage-substrate has
+# discovered the test iterabase-data VG and created the managed classes.
 
 # --- The stack (Prometheus / Grafana / Loki / Alertmanager + operator CRDs) ---
 observability:

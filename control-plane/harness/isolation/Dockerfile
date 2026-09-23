@@ -1,22 +1,26 @@
-# syntax=docker/dockerfile:1
+# syntax=docker/dockerfile:1@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
 # The HOR-381 sandbox isolation test image. Builds the harness (for the real
 # launcher at dist/launcher.js), then runs the probe + runner as ROOT — the
-# runner needs CAP_SETUID/CAP_SETGID to setpriv-spawn children as per-session
-# UIDs and to chown the sandboxes. Production grants those caps via the K8s
-# security context (HOR-245), not by running the supervisor as root.
+# runner needs root plus the container runtime's default capabilities to format
+# and mount fresh ext4/XFS images, chown the sandboxes, and setpriv-spawn
+# per-session children. Production likewise renders the trusted supervisor as
+# root, retaining runtime-default capabilities plus explicit SETUID/SETGID.
 #
-# This is the HOR-381 isolation gate (bullets 1-5). Bullets 6-7 (RWX-CSI
+# This is the HOR-381 isolation gate (bullets 1-5). Bullets 6-7 (same-node OpenEBS LVM RWO
 # cross-pod ownership + Pod Security admission) are HOR-245's gate.
 # Run: make harness-isolation-test
 
-FROM node:24-bookworm-slim AS builder
+FROM node:24-bookworm-slim@sha256:ba849c60be29959425b8734d57b8b4b7d56f98edd9504c9af091d5281095a71e AS builder
 WORKDIR /src
 COPY package.json package-lock.json tsconfig.json ./
 RUN npm ci
 COPY src ./src
 RUN npm run build
 
-FROM node:24-bookworm-slim
+FROM node:24-bookworm-slim@sha256:ba849c60be29959425b8734d57b8b4b7d56f98edd9504c9af091d5281095a71e
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends e2fsprogs xfsprogs util-linux \
+    && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=builder /src/dist ./dist
 COPY isolation/probe.mjs isolation/probe-state.mjs isolation/run.mjs ./

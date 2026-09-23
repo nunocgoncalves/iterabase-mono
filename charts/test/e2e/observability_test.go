@@ -22,6 +22,7 @@ import (
 const (
 	observabilityToolSourceName      = "observability-e2e"
 	observabilityToolServerNamespace = "flux-system"
+	observabilityHarnessStorageClass = "iterabase-agentpool-lvm-xfs"
 	gpuOperatorFixtureNamespace      = "gpu-operator"
 )
 
@@ -30,16 +31,18 @@ func observabilityScenario() sharede2e.Definition {
 	return sharede2e.Define(sharede2e.Scenario[*chartState]{
 		Metadata: chartScenarioMetadata(
 			"observability",
-			"Installs only the chart-owned observability composition and proves stack readiness, monitor discovery, disjoint endpoints, client paths, and unambiguous Prometheus/Loki persistence.",
+			"Installs the pinned LVM substrate and chart-owned observability composition, then proves exact thick XFS persistence, per-pool and aggregate VG monitor discovery, stack readiness, disjoint endpoints, and client paths.",
 			"test-e2e-observability", 40,
-			[]string{"HOR-408", "HOR-414", "HOR-418", "HOR-416", "HOR-505"},
+			[]string{"HOR-408", "HOR-414", "HOR-418", "HOR-416", "HOR-505", "HOR-545", "DES-HOR-545-01"},
 			[]string{"control-plane-chart", "inference-gateway-chart", "iterabase-platform-chart"},
 		),
 		NewState: newChartState,
 		Stages: []sharede2e.Stage[*chartState]{
 			{Name: "create-kind", Run: createKindStage},
-			{Name: "install-certificate-substrate", DependsOn: []string{"create-kind"}, Run: installCertificateSubstrateStage},
-			{Name: "install-tool-source", DependsOn: []string{"install-certificate-substrate"}, Run: installObservabilityToolSourceStage},
+			{Name: "import-runtime-images", DependsOn: []string{"create-kind"}, Run: importRuntimeImagesStage},
+			{Name: "install-certificate-substrate", DependsOn: []string{"import-runtime-images"}, Run: installCertificateSubstrateStage},
+			{Name: "install-lvm-storage-substrate", DependsOn: []string{"install-certificate-substrate"}, Run: installLVMStorageStage},
+			{Name: "install-tool-source", DependsOn: []string{"install-lvm-storage-substrate"}, Run: installObservabilityToolSourceStage},
 			{Name: "install-dcgm-exporter-fixture", DependsOn: []string{"install-tool-source"}, Run: installDCGMExporterFixtureStage},
 			{Name: "install-observability", DependsOn: []string{"install-dcgm-exporter-fixture"}, Run: installObservabilityStage},
 			{Name: "install-harness-worker", DependsOn: []string{"install-observability"}, Run: installObservabilityHarnessStage},
@@ -104,7 +107,7 @@ spec:
       automountServiceAccountToken: false
       containers:
         - name: exporter
-          image: busybox:1.37.0
+          image: busybox:1.37.0@sha256:9db7b59979c38555a39def84a31fb98b5296952f9e3afd4f6f11f05b07adfab0
           command: ["sh", "-c"]
           args:
             - |
@@ -176,7 +179,7 @@ func observabilityPlatformValues(t *testing.T) map[string]any {
 	if repository, tag := os.Getenv("TOOL_RUNNER_IMAGE_REPO"), os.Getenv("TOOL_RUNNER_IMAGE_TAG"); repository != "" && tag != "" {
 		controlPlane["toolRunner"] = map[string]any{
 			"enabled": true,
-			"image":   map[string]any{"repository": repository, "tag": tag},
+			"image":   map[string]any{"repository": repository, "tag": tag, "pullPolicy": "Never"},
 			"flux":    map[string]any{"namespace": testNamespace, "sourceName": observabilityToolSourceName},
 		}
 	}
@@ -195,7 +198,10 @@ func installObservabilityHarnessStage(t *testing.T, state *chartState) {
 	t.Helper()
 	repository, tag := os.Getenv("HARNESS_IMAGE_REPO"), os.Getenv("HARNESS_IMAGE_TAG")
 	if repository == "" || tag == "" {
-		t.Log("HARNESS_IMAGE_REPO/TAG absent; candidate harness target is not part of this local fixture")
+		if os.Getenv(sharede2e.RequiredEnv) == "true" {
+			t.Fatal("required observability runtime is missing the composed harness image")
+		}
+		t.Log("HARNESS_IMAGE_REPO/TAG absent in the optional local fixture")
 		return
 	}
 	manifest := fmt.Sprintf(`apiVersion: platform.iterabase.com/v1alpha1
@@ -212,7 +218,7 @@ spec:
     caSecretRef: {name: %s-control-plane-gateway-ca}
     certMountPath: /etc/harness/tls
   sandbox:
-    storageClassName: standard
+    storageClassName: %s
     accessMode: ReadWriteOnce
     size: 1Gi
     mountPath: /data/sandboxes
@@ -234,7 +240,7 @@ spec:
   piDirs: [/pi/product, /pi/client]
   walDir: /var/harness/wal
   probe: {port: 8081}
-`, testNamespace, repository, tag, testRelease, testRelease, testRelease, testNamespace,
+`, testNamespace, repository, tag, testRelease, observabilityHarnessStorageClass, testRelease, testRelease, testNamespace,
 		testRelease, testRelease, testNamespace, testRelease, testRelease, testNamespace)
 	state.kubectl(t, 30*time.Second, "apply", "-f", state.writeManifest(t, "observability-agentpool.yaml", manifest))
 	state.waitForPods(t, "app.kubernetes.io/name=control-plane,app.kubernetes.io/component=harness", 7*time.Minute)
@@ -380,12 +386,12 @@ func assertGrafanaDataStoragePanels(t *testing.T, client *http.Client, baseURL, 
 		t.Fatal(err)
 	}
 	want := map[string]string{
-		"Longhorn managers available":         "longhorn-manager-.*",
-		"Longhorn unhealthy volumes":          "longhorn_volume_robustness",
-		"Longhorn minimum node/disk headroom": "longhorn_disk_capacity_bytes",
-		"Longhorn CSI unavailable nodes":      "longhorn-csi-plugin",
-		"Longhorn share-managers unavailable": "share-manager-.*",
-		"Longhorn replicas rebuilding":        "longhorn_replica_state",
+		"AgentPool PVC free bytes":    "control_plane_dispatch_workspace_free_bytes",
+		"AgentPool PVC free ratio":    "control_plane_dispatch_workspace_free_ratio",
+		"AgentPool capacity warnings": "control_plane_dispatch_workspace_capacity_warning",
+		"AgentPool credit gates":      "control_plane_dispatch_workspace_credit_gated",
+		"iterabase-data free bytes":   "lvm_vg_free_size_bytes",
+		"iterabase-data free ratio":   "lvm_vg_total_size_bytes",
 	}
 	for _, panel := range payload.Dashboard.Panels {
 		fragment, ok := want[panel.Title]
@@ -395,7 +401,7 @@ func assertGrafanaDataStoragePanels(t *testing.T, client *http.Client, baseURL, 
 		delete(want, panel.Title)
 	}
 	if len(want) != 0 {
-		t.Fatalf("Grafana data/storage dashboard missing Longhorn orientation panels: %v", want)
+		t.Fatalf("Grafana data/storage dashboard missing dedicated workspace capacity panels: %v", want)
 	}
 }
 
@@ -500,6 +506,8 @@ func assertMonitorDiscoveryStage(t *testing.T, state *chartState) {
 		{`count(up{namespace="gpu-operator",service="nvidia-dcgm-exporter",endpoint="gpu-metrics"} == 1)`, "1"},
 		{`DCGM_FI_DEV_GPU_UTIL{namespace="gpu-operator",UUID="GPU-e2e",device="nvidia0",modelName="NVIDIA E2E GPU"}`, "42"},
 		{`DCGM_FI_DEV_FB_FREE{namespace="gpu-operator",UUID="GPU-e2e",device="nvidia0",modelName="NVIDIA E2E GPU"}`, "81920"},
+		{`count(lvm_vg_total_size_bytes{namespace="iterabase-system",name="iterabase-data"} > 0)`, "1"},
+		{`count(lvm_vg_free_size_bytes{namespace="iterabase-system",name="iterabase-data"} > 0)`, "1"},
 	} {
 		if err := waitPrometheusValue(state.ctx, client, forward.URL, metric.query, metric.want, 5*time.Minute); err != nil {
 			t.Fatalf("representative DCGM metric %s did not become %s: %v", metric.query, metric.want, err)
@@ -535,7 +543,7 @@ func assertMonitorDiscoveryStage(t *testing.T, state *chartState) {
 		t.Fatal(err)
 	}
 	rules := string(requireHTTP(t, client, http.MethodGet, forward.URL+"/api/v1/rules", nil, http.StatusOK))
-	for _, alert := range []string{"IterabasePlatformTargetDown", "IterabaseGatewayOutcomeUnknown", "IterabaseDispatchWithoutWorkers", "IterabaseInferenceGatewayHighErrorRate"} {
+	for _, alert := range []string{"IterabasePlatformTargetDown", "IterabaseGatewayOutcomeUnknown", "IterabaseDispatchWithoutWorkers", "IterabaseInferenceGatewayHighErrorRate", "IterabaseDataVGCapacityWarning", "IterabaseLVMClaimPending"} {
 		if !strings.Contains(rules, alert) {
 			t.Fatalf("Prometheus did not load shipped alert %s", alert)
 		}
@@ -649,6 +657,12 @@ func platformMetricQueries(includeHarness, includeToolRunner bool) []string {
 		)
 	}
 	return queries
+}
+
+func TestUnitObservabilityHarnessUsesDedicatedAgentPoolStorageClass(t *testing.T) {
+	if observabilityHarnessStorageClass != "iterabase-agentpool-lvm-xfs" {
+		t.Fatalf("observability harness storage class=%q", observabilityHarnessStorageClass)
+	}
 }
 
 func TestUnitFeatureRuntimeAssertionsMatchDisabledComponents(t *testing.T) {

@@ -3,285 +3,455 @@ package controller
 import (
 	"context"
 	"fmt"
-	"strings"
+	"math"
+	"reflect"
+	"strconv"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/nunocgoncalves/iterabase-mono/control-plane/api/v1alpha1"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/gateway"
 )
 
 const (
-	storageContractVersion           = "HOR-469/v1"
-	storageContractLabel             = "platform.iterabase.com/storage-contract"
-	storageConformanceLabel          = "platform.iterabase.com/storage-conformance"
-	storageModeManagedLonghorn       = "managed-longhorn"
-	storageModeExternal              = "external"
-	managedLonghornStorageClass      = "iterabase-rwx"
-	managedLonghornProvisioner       = "driver.longhorn.io"
-	managedLonghornNamespace         = "longhorn-system"
-	longhornShareManagerComponent    = "share-manager"
-	longhornShareManagerComponentKey = "longhorn.io/component"
+	agentPoolWorkspaceStorageClass = "iterabase-agentpool-lvm-xfs"
+	agentPoolWorkspaceProvisioner  = "local.csi.openebs.io"
+	agentPoolWorkspaceVolumeGroup  = managedOpenEBSVolumeGroup
+	storageModeOpenEBSLVMRWO       = "openebs-lvm-xfs-rwo"
 )
 
 const (
-	storageReasonClassMissing       = "StorageClassMissing"
-	storageReasonClassMismatch      = "StorageClassMismatch"
-	storageReasonConformancePending = "StorageConformancePending"
-	storageReasonConformanceFailed  = "StorageConformanceFailed"
-	storageReasonPVCProvisioning    = "PVCProvisioning"
-	storageReasonPVCExpansionFailed = "PVCExpansionFailed"
-	storageReasonPVCUnavailable     = "PVCUnavailable"
-	storageReasonMountRootUnsafe    = "MountRootUnsafe"
-	storageReasonBackendDegraded    = "BackendDegraded"
-	storageReasonShareManagerDown   = "ShareManagerUnavailable"
-	storageReasonCapacity           = "CapacityInsufficient"
-	storageReasonRecoveryPending    = "StorageRecoveryPending"
-	storageReasonReady              = "StorageReady"
+	storageReasonClassMissing                   = "StorageClassMissing"
+	storageReasonClassMismatch                  = "StorageClassMismatch"
+	storageReasonPVCProvisioning                = "PVCProvisioning"
+	storageReasonPVCExpansionPending            = "PVCExpansionPending"
+	storageReasonPVCExpansionFailed             = "PVCExpansionFailed"
+	storageReasonPVCShrinkRefused               = "PVCShrinkRefused"
+	storageReasonPVCUnavailable                 = "PVCUnavailable"
+	storageReasonMountRootUnsafe                = "MountRootUnsafe"
+	storageReasonCapacity                       = "CapacityInsufficient"
+	storageReasonRecoveryPending                = "StorageRecoveryPending"
+	storageReasonFreshWorkersReady              = "FreshWorkersReady"
+	storageReasonReady                          = "StorageReady"
+	storageReasonOperationalReadinessReached    = "ReadyWorkersObserved"
+	storageReasonWorkspaceCapacityHealthy       = "WorkspaceCapacityHealthy"
+	storageReasonWorkspaceCapacityWarning       = "WorkspaceCapacityWarning"
+	storageReasonWorkspaceCapacityGated         = "WorkspaceCapacityGateActive"
+	storageReasonWorkspaceCapacityUnknown       = "WorkspaceCapacityUnknown"
+	storageConditionReady                       = "StorageReady"
+	storageConditionOperationalReadinessReached = "OperationalReadinessReached"
+	storageConditionWorkerReplacementPending    = "StorageWorkerReplacementPending"
+	storageConditionWorkspaceCapacityHealthy    = "WorkspaceCapacityHealthy"
 )
+
+const workspaceCapacityObservationFreshness = time.Minute
 
 type agentPoolStorageAssessment struct {
-	Ready        bool
-	CanMount     bool
-	Reason       string
-	Message      string
-	Mode         string
-	ClassName    string
-	PVName       string
-	VolumeHandle string
+	Ready               bool
+	CanMount            bool
+	ConfirmedUnsafe     bool
+	ObservationUnknown  bool
+	ObservationErr      error
+	Reason              string
+	Message             string
+	Mode                string
+	ClassName           string
+	PVName              string
+	VolumeHandle        string
+	ReplacementPending  bool
+	SafeResize          bool
+	ResizeStartedAt     *time.Time
+	ResizeBaselineBytes uint64
 }
 
-// assessAgentPoolStorage intentionally keeps the ordered fail-closed predicate
-// chain visible so each stable condition reason maps to one observed resource.
-//
-//nolint:gocyclo
-func (r *AgentPoolReconciler) assessAgentPoolStorage(ctx context.Context, pool *v1alpha1.AgentPool) agentPoolStorageAssessment {
-	if pool.Spec.Sandbox.AccessMode != corev1.ReadWriteMany {
-		return agentPoolStorageAssessment{Ready: true, CanMount: true, Reason: storageReasonReady, Message: "single-worker RWO storage uses the legacy bounded deployment contract"}
-	}
+func storageQuiescenceRequired(assessment agentPoolStorageAssessment) bool {
+	return assessment.ConfirmedUnsafe && !assessment.ObservationUnknown
+}
 
-	assessment := agentPoolStorageAssessment{ClassName: pool.Spec.Sandbox.StorageClassName}
-	contract, failure := r.storageContract(ctx, pool)
-	if failure != nil {
-		return *failure
+// assessAgentPoolStorage validates the fixed chart-owned OpenEBS LVM contract.
+// A Pending WaitForFirstConsumer claim remains mount-capable so the first worker
+// can schedule and trigger binding; every bound identity/path check is fail
+// closed before an established worker set is retained.
+//
+//nolint:gocyclo // ordered fail-closed predicates intentionally map to stable condition reasons.
+func (r *AgentPoolReconciler) assessAgentPoolStorage(ctx context.Context, pool *v1alpha1.AgentPool) agentPoolStorageAssessment {
+	assessment := agentPoolStorageAssessment{
+		Mode: storageModeOpenEBSLVMRWO, ClassName: pool.Spec.Sandbox.StorageClassName,
 	}
-	assessment.Mode = contract["mode"]
-	if contract["storageClassName"] != assessment.ClassName {
+	if assessment.ClassName != agentPoolWorkspaceStorageClass || pool.Spec.Sandbox.AccessMode != corev1.ReadWriteOnce {
+		assessment.ConfirmedUnsafe = true
 		assessment.Reason = storageReasonClassMismatch
-		assessment.Message = fmt.Sprintf("AgentPool declares StorageClass %q but the installation storage contract requires %q; update the overlay without mutating or recreating the existing claim", assessment.ClassName, contract["storageClassName"])
+		assessment.Message = fmt.Sprintf("AgentPool storage must remain class=%s access=ReadWriteOnce (observed class=%s access=%s); alternate/default/RWX storage has no V2 fallback", agentPoolWorkspaceStorageClass, assessment.ClassName, pool.Spec.Sandbox.AccessMode)
 		return assessment
 	}
 
 	var class storagev1.StorageClass
 	if err := r.Get(ctx, types.NamespacedName{Name: assessment.ClassName}, &class); err != nil {
 		assessment.Reason = storageReasonClassMissing
-		assessment.Message = fmt.Sprintf("StorageClass %q is unavailable; install the managed RWX companion or restore the exact conforming external class", assessment.ClassName)
-		if !errors.IsNotFound(err) {
+		if errors.IsNotFound(err) {
+			assessment.ConfirmedUnsafe = true
+			assessment.Message = fmt.Sprintf("StorageClass %q is unavailable; reapply the pinned LVM storage substrate before reconciling AgentPools", assessment.ClassName)
+		} else {
+			assessment.ObservationUnknown = true
+			assessment.ObservationErr = err
 			assessment.Message = fmt.Sprintf("read StorageClass %q: %v", assessment.ClassName, err)
 		}
 		return assessment
 	}
-	if class.ReclaimPolicy == nil || *class.ReclaimPolicy != corev1.PersistentVolumeReclaimRetain || class.AllowVolumeExpansion == nil || !*class.AllowVolumeExpansion {
+	if failure := validateAgentPoolStorageClass(&class); failure != "" {
+		assessment.ConfirmedUnsafe = true
 		assessment.Reason = storageReasonClassMismatch
-		assessment.Message = fmt.Sprintf("StorageClass %q must use reclaimPolicy=Retain and allowVolumeExpansion=true (observed reclaim=%v expansion=%v)", assessment.ClassName, pointerValue(class.ReclaimPolicy), pointerValue(class.AllowVolumeExpansion))
+		assessment.Message = failure
 		return assessment
 	}
-	if class.Provisioner == "" {
-		assessment.Reason = storageReasonClassMismatch
-		assessment.Message = fmt.Sprintf("StorageClass %q has no provisioner", assessment.ClassName)
-		return assessment
-	}
-	if assessment.Mode == storageModeManagedLonghorn && (assessment.ClassName != managedLonghornStorageClass || class.Provisioner != managedLonghornProvisioner) {
-		assessment.Reason = storageReasonClassMismatch
-		assessment.Message = fmt.Sprintf("managed storage requires %s with provisioner %s (observed class=%s provisioner=%s)", managedLonghornStorageClass, managedLonghornProvisioner, assessment.ClassName, class.Provisioner)
-		return assessment
-	}
-
-	conformance, failure := r.storageConformance(ctx, &class)
-	if failure != nil {
-		failure.Mode = assessment.Mode
-		failure.ClassName = assessment.ClassName
-		return *failure
-	}
-	_ = conformance
 	assessment.CanMount = true
 
 	var pvc corev1.PersistentVolumeClaim
 	pvcName := sandboxPVCName(pool)
 	if err := r.Get(ctx, types.NamespacedName{Namespace: pool.Namespace, Name: pvcName}, &pvc); err != nil {
 		assessment.Reason = storageReasonPVCProvisioning
-		assessment.Message = fmt.Sprintf("PVC %s/%s has not been created yet", pool.Namespace, pvcName)
+		if errors.IsNotFound(err) {
+			assessment.Message = fmt.Sprintf("PVC %s/%s has not been created yet", pool.Namespace, pvcName)
+		} else {
+			assessment.CanMount = false
+			assessment.ObservationUnknown = true
+			assessment.ObservationErr = err
+			assessment.Message = fmt.Sprintf("read PVC %s/%s: %v", pool.Namespace, pvcName, err)
+		}
 		return assessment
 	}
-	if pvc.Spec.StorageClassName == nil || *pvc.Spec.StorageClassName != assessment.ClassName || len(pvc.Spec.AccessModes) != 1 || pvc.Spec.AccessModes[0] != corev1.ReadWriteMany {
+	owner := metav1.GetControllerOf(&pvc)
+	if owner == nil || owner.APIVersion != v1alpha1.GroupVersion.String() || owner.Kind != "AgentPool" || owner.Name != pool.Name || owner.UID != pool.UID {
 		assessment.CanMount = false
+		assessment.ConfirmedUnsafe = true
+		assessment.Reason = storageReasonPVCUnavailable
+		assessment.Message = fmt.Sprintf("PVC %s/%s must remain controller-owned by AgentPool %s uid=%s; refusing adoption or ownership mutation", pool.Namespace, pvcName, pool.Name, pool.UID)
+		return assessment
+	}
+	pvcVolumeMode := corev1.PersistentVolumeFilesystem
+	if pvc.Spec.VolumeMode != nil {
+		pvcVolumeMode = *pvc.Spec.VolumeMode
+	}
+	if pvc.Spec.StorageClassName == nil || *pvc.Spec.StorageClassName != assessment.ClassName || len(pvc.Spec.AccessModes) != 1 || pvc.Spec.AccessModes[0] != corev1.ReadWriteOnce || pvc.Spec.VolumeMode == nil || pvcVolumeMode != corev1.PersistentVolumeFilesystem {
+		assessment.CanMount = false
+		assessment.ConfirmedUnsafe = true
 		assessment.Reason = storageReasonClassMismatch
-		assessment.Message = fmt.Sprintf("PVC %s/%s does not retain the declared class/access mode (required class=%s access=ReadWriteMany)", pool.Namespace, pvcName, assessment.ClassName)
+		assessment.Message = fmt.Sprintf("PVC %s/%s must retain class=%s access=ReadWriteOnce volumeMode=Filesystem; bound identity changes require explicit settlement and recreation", pool.Namespace, pvcName, assessment.ClassName)
+		return assessment
+	}
+	requested := pvc.Spec.Resources.Requests[corev1.ResourceStorage]
+	desired := pool.Spec.Sandbox.Size
+	if requested.Cmp(desired) < 0 {
+		assessment.SafeResize = true
+		assessment.Reason = storageReasonPVCExpansionPending
+		assessment.Message = fmt.Sprintf("PVC %s/%s request %s is growing in place to %s; retain mounted workers and withhold fresh credits until OpenEBS/XFS/statfs convergence", pool.Namespace, pvcName, requested.String(), desired.String())
+		return assessment
+	}
+	if requested.Cmp(desired) > 0 {
+		assessment.Reason = storageReasonPVCShrinkRefused
+		assessment.Message = fmt.Sprintf("PVC %s/%s shrink is unsupported (current request %s desired %s); preserve the claim, workers, and bytes", pool.Namespace, pvcName, requested.String(), desired.String())
+		return assessment
+	}
+	if resizeStarted := pvc.Annotations[agentPoolResizeStartedAnnotation]; resizeStarted != "" {
+		started, err := time.Parse(time.RFC3339Nano, resizeStarted)
+		if err != nil {
+			assessment.ConfirmedUnsafe = true
+			assessment.CanMount = false
+			assessment.Reason = storageReasonPVCExpansionFailed
+			assessment.Message = fmt.Sprintf("PVC %s/%s has malformed controller resize evidence; preserve the claim and inspect annotation %s", pool.Namespace, pvcName, agentPoolResizeStartedAnnotation)
+			return assessment
+		}
+		baselineText := pvc.Annotations[agentPoolResizeBaselineCapacityAnnotation]
+		baseline, err := strconv.ParseUint(baselineText, 10, 64)
+		if err != nil || baseline == 0 {
+			assessment.ConfirmedUnsafe = true
+			assessment.CanMount = false
+			assessment.Reason = storageReasonPVCExpansionFailed
+			assessment.Message = fmt.Sprintf("PVC %s/%s has malformed controller filesystem-capacity baseline evidence; preserve the claim and inspect annotation %s", pool.Namespace, pvcName, agentPoolResizeBaselineCapacityAnnotation)
+			return assessment
+		}
+		assessment.ResizeStartedAt = &started
+		assessment.ResizeBaselineBytes = baseline
+		assessment.SafeResize = true
+	}
+	if (pvc.Status.Phase == corev1.ClaimPending || pvc.Status.Phase == "") && pvc.Spec.VolumeName == "" {
+		if pool.Spec.Replicas == 0 {
+			assessment.Ready = true
+			assessment.Reason = storageReasonReady
+			assessment.Message = fmt.Sprintf("StorageReady: scaled-to-zero PVC %s/%s is intentionally unbound under WaitForFirstConsumer", pool.Namespace, pvcName)
+			return assessment
+		}
+		assessment.Reason = storageReasonPVCProvisioning
+		assessment.Message = fmt.Sprintf("PVC %s/%s is waiting for its first consumer on the dedicated class; create workers to trigger WaitForFirstConsumer binding", pool.Namespace, pvcName)
 		return assessment
 	}
 	if pvc.Status.Phase != corev1.ClaimBound || pvc.Spec.VolumeName == "" {
 		assessment.Reason = storageReasonPVCProvisioning
-		assessment.Message = fmt.Sprintf("PVC %s/%s phase=%s; inspect PVC, StorageClass, CSI, node, and provisioning events", pool.Namespace, pvcName, pvc.Status.Phase)
+		assessment.Message = fmt.Sprintf("PVC %s/%s phase=%s; inspect OpenEBS LVM controller/node, iterabase-data capacity, topology, and claim events", pool.Namespace, pvcName, pvc.Status.Phase)
 		return assessment
 	}
 	assessment.PVName = pvc.Spec.VolumeName
-	requested := pvc.Spec.Resources.Requests[corev1.ResourceStorage]
 	capacity := pvc.Status.Capacity[corev1.ResourceStorage]
 	if capacity.IsZero() || capacity.Cmp(requested) < 0 {
-		assessment.Reason = storageReasonPVCExpansionFailed
-		assessment.Message = fmt.Sprintf("PVC %s/%s requested %s but reports usable capacity %s; wait for controller and filesystem expansion or inspect expansion events", pool.Namespace, pvcName, requested.String(), capacity.String())
+		if assessment.SafeResize {
+			assessment.Reason = storageReasonPVCExpansionPending
+			assessment.Message = fmt.Sprintf("PVC %s/%s request is %s but reported capacity is %s; retain mounted workers for online XFS growth", pool.Namespace, pvcName, requested.String(), capacity.String())
+			return assessment
+		}
+		assessment.Reason = storageReasonCapacity
+		assessment.Message = fmt.Sprintf("PVC %s/%s requested thick XFS capacity %s but reports %s; inspect OpenEBS provisioning and iterabase-data free capacity", pool.Namespace, pvcName, requested.String(), capacity.String())
 		return assessment
 	}
 	for _, condition := range pvc.Status.Conditions {
 		if condition.Status == corev1.ConditionTrue {
 			assessment.Reason = storageReasonPVCProvisioning
-			assessment.Message = fmt.Sprintf("PVC %s/%s still reports condition %s=%s; do not schedule workers until expansion/provisioning settles", pool.Namespace, pvcName, condition.Type, condition.Status)
+			assessment.Message = fmt.Sprintf("PVC %s/%s reports condition %s=%s; keep fresh credits closed until the claim settles", pool.Namespace, pvcName, condition.Type, condition.Status)
 			return assessment
 		}
 	}
 
 	var pv corev1.PersistentVolume
 	if err := r.Get(ctx, types.NamespacedName{Name: assessment.PVName}, &pv); err != nil {
+		assessment.CanMount = false
 		assessment.Reason = storageReasonPVCUnavailable
 		assessment.Message = fmt.Sprintf("bound PVC %s/%s references unavailable PV %q: %v", pool.Namespace, pvcName, assessment.PVName, err)
+		if errors.IsNotFound(err) {
+			assessment.ConfirmedUnsafe = true
+		} else {
+			assessment.ObservationUnknown = true
+			assessment.ObservationErr = err
+		}
 		return assessment
 	}
-	if pv.Status.Phase != corev1.VolumeBound || pv.Spec.StorageClassName != assessment.ClassName || pv.Spec.PersistentVolumeReclaimPolicy != corev1.PersistentVolumeReclaimRetain || !containsAccessMode(pv.Spec.AccessModes, corev1.ReadWriteMany) || pv.Spec.CSI == nil {
+	if failure := validateAgentPoolPV(&pv, assessment.ClassName); failure != "" {
+		assessment.CanMount = false
+		assessment.ConfirmedUnsafe = true
 		assessment.Reason = storageReasonPVCUnavailable
-		assessment.Message = fmt.Sprintf("PV %s must remain Bound, class=%s, RWX Filesystem CSI, and Retain (observed phase=%s class=%s reclaim=%s)", pv.Name, assessment.ClassName, pv.Status.Phase, pv.Spec.StorageClassName, pv.Spec.PersistentVolumeReclaimPolicy)
+		assessment.Message = failure
+		return assessment
+	}
+	if failure, resizePending, unknown, err := r.validateAgentPoolLVMVolume(ctx, pool.Namespace, &pv, desired); failure != "" {
+		if resizePending && assessment.SafeResize {
+			assessment.Reason = storageReasonPVCExpansionPending
+			assessment.Message = failure
+			return assessment
+		}
+		assessment.CanMount = false
+		assessment.ConfirmedUnsafe = !unknown
+		assessment.ObservationUnknown = unknown
+		assessment.ObservationErr = err
+		assessment.Reason = storageReasonPVCUnavailable
+		assessment.Message = failure
 		return assessment
 	}
 	pvCapacity := pv.Spec.Capacity[corev1.ResourceStorage]
 	if pvCapacity.Cmp(requested) < 0 {
+		if assessment.SafeResize {
+			assessment.Reason = storageReasonPVCExpansionPending
+			assessment.Message = fmt.Sprintf("PV %s capacity %s is growing in place to PVC request %s; retain mounted workers", pv.Name, pvCapacity.String(), requested.String())
+			return assessment
+		}
+		assessment.CanMount = false
+		assessment.ConfirmedUnsafe = true
 		assessment.Reason = storageReasonCapacity
-		assessment.Message = fmt.Sprintf("PV %s capacity %s is below PVC request %s; prove physical headroom and complete expansion", pv.Name, pvCapacity.String(), requested.String())
+		assessment.Message = fmt.Sprintf("PV %s planning capacity %s is below PVC request %s", pv.Name, pvCapacity.String(), requested.String())
 		return assessment
 	}
 	assessment.VolumeHandle = pv.Spec.CSI.VolumeHandle
-	if assessment.Mode == storageModeManagedLonghorn {
-		if pv.Spec.CSI.Driver != managedLonghornProvisioner || assessment.VolumeHandle == "" {
-			assessment.Reason = storageReasonClassMismatch
-			assessment.Message = fmt.Sprintf("managed PV %s must use CSI driver %s and a non-empty volume handle", pv.Name, managedLonghornProvisioner)
+	if assessment.ResizeStartedAt != nil {
+		assessment.SafeResize = true
+		if r.CapacityReader == nil {
+			assessment.Reason = storageReasonPVCExpansionPending
+			assessment.Message = fmt.Sprintf("PVC %s/%s infrastructure resize converged; waiting for a fresh mounted-filesystem statfs observation after %s", pool.Namespace, pvcName, assessment.ResizeStartedAt.Format(time.RFC3339Nano))
 			return assessment
 		}
-		if failure := r.managedLonghornVolumeHealth(ctx, assessment.VolumeHandle, false); failure != nil {
-			failure.CanMount = false
-			failure.Mode = assessment.Mode
-			failure.ClassName = assessment.ClassName
-			failure.PVName = assessment.PVName
-			failure.VolumeHandle = assessment.VolumeHandle
-			return *failure
+		status, err := r.CapacityReader.WorkspaceCapacityStatus(ctx, pool.Namespace+"/"+pool.Name)
+		if err != nil {
+			assessment.ObservationUnknown = true
+			assessment.ObservationErr = err
+			assessment.Reason = storageReasonPVCExpansionPending
+			assessment.Message = fmt.Sprintf("PVC %s/%s infrastructure resize converged but the required post-resize statfs observation is unavailable: %v", pool.Namespace, pvcName, err)
+			return assessment
 		}
+		if !workspaceCapacityStatusValid(status) || status.ObservedAt == nil || !status.ObservedAt.After(*assessment.ResizeStartedAt) || time.Since(*status.ObservedAt) > workspaceCapacityObservationFreshness || status.CapacityBytes <= assessment.ResizeBaselineBytes {
+			assessment.Reason = storageReasonPVCExpansionPending
+			assessment.Message = fmt.Sprintf("PVC %s/%s infrastructure resize converged; waiting for a fresh valid mounted-filesystem statfs capacity greater than the pre-resize %d bytes after %s", pool.Namespace, pvcName, assessment.ResizeBaselineBytes, assessment.ResizeStartedAt.Format(time.RFC3339Nano))
+			return assessment
+		}
+		if err := r.completeAgentPoolResize(ctx, &pvc); err != nil {
+			assessment.ObservationUnknown = true
+			assessment.ObservationErr = err
+			assessment.Reason = storageReasonPVCExpansionPending
+			assessment.Message = fmt.Sprintf("PVC %s/%s resize converged but completion evidence could not be persisted; retaining mounted workers and fresh-credit closure: %v", pool.Namespace, pvcName, err)
+			return assessment
+		}
+		assessment.ResizeStartedAt = nil
+		assessment.ResizeBaselineBytes = 0
 	}
 	assessment.Ready = true
+	assessment.SafeResize = false
 	assessment.Reason = storageReasonReady
-	assessment.Message = fmt.Sprintf("StorageReady: class=%s pvc=%s/%s pv=%s mode=%s conformance=%s", assessment.ClassName, pool.Namespace, pvcName, assessment.PVName, assessment.Mode, conformance["validatedAt"])
+	assessment.Message = fmt.Sprintf("StorageReady: class=%s provisioner=%s pvc=%s/%s pv=%s volume=%s vg=%s fs=xfs shared=yes access=ReadWriteOnce reclaim=Delete expansion=true", assessment.ClassName, agentPoolWorkspaceProvisioner, pool.Namespace, pvcName, assessment.PVName, assessment.VolumeHandle, agentPoolWorkspaceVolumeGroup)
 	return assessment
 }
 
-func (r *AgentPoolReconciler) storageContract(ctx context.Context, pool *v1alpha1.AgentPool) (map[string]string, *agentPoolStorageAssessment) {
-	var contracts corev1.ConfigMapList
-	if err := r.List(ctx, &contracts, client.InNamespace(pool.Namespace), client.MatchingLabels{storageContractLabel: "true"}); err != nil {
-		return nil, &agentPoolStorageAssessment{Reason: storageReasonConformanceFailed, Message: fmt.Sprintf("read installation RWX storage contract in namespace %s: %v", pool.Namespace, err)}
-	}
-	if len(contracts.Items) == 0 {
-		return nil, &agentPoolStorageAssessment{Reason: storageReasonConformancePending, Message: fmt.Sprintf("no chart-owned RWX storage contract exists in namespace %s; reconcile the platform chart before AgentPools", pool.Namespace)}
-	}
-	if len(contracts.Items) != 1 {
-		return nil, &agentPoolStorageAssessment{Reason: storageReasonConformanceFailed, Message: fmt.Sprintf("namespace %s has %d RWX storage contracts; retain exactly one platform release authority", pool.Namespace, len(contracts.Items))}
-	}
-	data := contracts.Items[0].Data
-	if data["contractVersion"] != storageContractVersion {
-		return nil, &agentPoolStorageAssessment{Reason: storageReasonConformanceFailed, Message: fmt.Sprintf("RWX storage contract %s/%s has unsupported version %q; require %s", pool.Namespace, contracts.Items[0].Name, data["contractVersion"], storageContractVersion)}
-	}
-	if data["mode"] != storageModeManagedLonghorn && data["mode"] != storageModeExternal {
-		return nil, &agentPoolStorageAssessment{Reason: storageReasonConformanceFailed, Message: fmt.Sprintf("RWX storage contract %s/%s has invalid mode %q", pool.Namespace, contracts.Items[0].Name, data["mode"])}
-	}
-	return data, nil
+func (r *AgentPoolReconciler) completeAgentPoolResize(ctx context.Context, pvc *corev1.PersistentVolumeClaim) error {
+	base := pvc.DeepCopy()
+	delete(pvc.Annotations, agentPoolResizeStartedAnnotation)
+	delete(pvc.Annotations, agentPoolResizeBaselineCapacityAnnotation)
+	return r.Patch(ctx, pvc, client.MergeFrom(base))
 }
 
-func (r *AgentPoolReconciler) storageConformance(ctx context.Context, class *storagev1.StorageClass) (map[string]string, *agentPoolStorageAssessment) {
-	var attestations corev1.ConfigMapList
-	if err := r.List(ctx, &attestations, client.MatchingLabels{storageConformanceLabel: "true"}); err != nil {
-		return nil, &agentPoolStorageAssessment{Reason: storageReasonConformanceFailed, Message: fmt.Sprintf("read RWX conformance attestations for StorageClass %q: %v", class.Name, err)}
+func validateAgentPoolStorageClass(class *storagev1.StorageClass) string {
+	binding := storagev1.VolumeBindingImmediate
+	if class.VolumeBindingMode != nil {
+		binding = *class.VolumeBindingMode
 	}
-	var stale []string
-	for i := range attestations.Items {
-		attestation := &attestations.Items[i]
-		if attestation.Data["storageClassName"] != class.Name {
-			continue
-		}
-		if attestation.Data["contractVersion"] == storageContractVersion &&
-			attestation.Data["storageClassUID"] == string(class.UID) &&
-			attestation.Data["provisioner"] == class.Provisioner &&
-			attestation.Data["result"] == "pass" {
-			return attestation.Data, nil
-		}
-		stale = append(stale, attestation.Namespace+"/"+attestation.Name)
+	reclaim := corev1.PersistentVolumeReclaimDelete
+	if class.ReclaimPolicy != nil {
+		reclaim = *class.ReclaimPolicy
 	}
-	if len(stale) > 0 {
-		return nil, &agentPoolStorageAssessment{Reason: storageReasonConformanceFailed, Message: fmt.Sprintf("StorageClass %q has stale/mismatched conformance evidence %s; rerun the same-release disposable gate against class UID %s", class.Name, strings.Join(stale, ","), class.UID)}
+	expectedParameters := map[string]string{
+		"storage":       "lvm",
+		"vgpattern":     "^iterabase-data$",
+		"fsType":        "xfs",
+		"thinProvision": "no",
+		"shared":        "yes",
 	}
-	return nil, &agentPoolStorageAssessment{Reason: storageReasonConformancePending, Message: fmt.Sprintf("StorageClass %q has no %s live conformance attestation bound to class UID %s; run docs/architecture/validation/hor-424-rwx-conformance.sh", class.Name, storageContractVersion, class.UID)}
+	if class.Name != agentPoolWorkspaceStorageClass || class.Provisioner != agentPoolWorkspaceProvisioner || binding != storagev1.VolumeBindingWaitForFirstConsumer || reclaim != corev1.PersistentVolumeReclaimDelete || class.AllowVolumeExpansion == nil || !*class.AllowVolumeExpansion || !reflect.DeepEqual(class.Parameters, expectedParameters) || storageClassIsDefault(class) {
+		return fmt.Sprintf("StorageClass %q must be non-default provisioner=%s binding=WaitForFirstConsumer reclaim=Delete expansion=true parameters=%v (observed provisioner=%s binding=%s reclaim=%s expansion=%v default=%v parameters=%v)", class.Name, agentPoolWorkspaceProvisioner, expectedParameters, class.Provisioner, binding, reclaim, pointerValue(class.AllowVolumeExpansion), storageClassIsDefault(class), class.Parameters)
+	}
+	return ""
 }
 
-func (r *AgentPoolReconciler) managedLonghornVolumeHealth(ctx context.Context, volumeHandle string, requireAttached bool) *agentPoolStorageAssessment {
-	volume := &unstructured.Unstructured{}
-	volume.SetAPIVersion("longhorn.io/v1beta2")
-	volume.SetKind("Volume")
-	if err := r.Get(ctx, types.NamespacedName{Namespace: managedLonghornNamespace, Name: volumeHandle}, volume); err != nil {
-		return &agentPoolStorageAssessment{Reason: storageReasonBackendDegraded, Message: fmt.Sprintf("Longhorn volume %s/%s is unavailable: %v; inspect Longhorn volume, engine, replica, node/disk, and CSI events", managedLonghornNamespace, volumeHandle, err)}
-	}
-	robustness, _, _ := unstructured.NestedString(volume.Object, "status", "robustness")
-	state, _, _ := unstructured.NestedString(volume.Object, "status", "state")
-	if robustness != "healthy" {
-		return &agentPoolStorageAssessment{Reason: storageReasonBackendDegraded, Message: fmt.Sprintf("Longhorn volume %s/%s robustness=%q state=%q; restore replica/node/disk capacity before replacing workers", managedLonghornNamespace, volumeHandle, robustness, state)}
-	}
-	if requireAttached && state != "attached" {
-		return &agentPoolStorageAssessment{Reason: storageReasonRecoveryPending, Message: fmt.Sprintf("Longhorn volume %s/%s is healthy but state=%q; wait for a fresh worker attachment before scheduling", managedLonghornNamespace, volumeHandle, state)}
-	}
-	if requireAttached && state == "attached" && !r.shareManagerReady(ctx, volumeHandle) {
-		return &agentPoolStorageAssessment{Reason: storageReasonShareManagerDown, Message: fmt.Sprintf("Longhorn share-manager for volume %s is unavailable; restore backend/share-manager health, then use fresh workers without replay", volumeHandle)}
-	}
-	return nil
+func storageClassIsDefault(class *storagev1.StorageClass) bool {
+	return class.Annotations["storageclass.kubernetes.io/is-default-class"] == "true" || class.Annotations["storageclass.beta.kubernetes.io/is-default-class"] == "true"
 }
 
-func (r *AgentPoolReconciler) shareManagerReady(ctx context.Context, volumeHandle string) bool {
-	var pods corev1.PodList
-	selector := labels.SelectorFromSet(labels.Set{longhornShareManagerComponentKey: longhornShareManagerComponent})
-	if err := r.List(ctx, &pods, client.InNamespace(managedLonghornNamespace), client.MatchingLabelsSelector{Selector: selector}); err != nil {
+//nolint:gocyclo // each exact PV identity predicate has a distinct actionable refusal.
+func validateAgentPoolPV(pv *corev1.PersistentVolume, className string) string {
+	volumeMode := corev1.PersistentVolumeFilesystem
+	if pv.Spec.VolumeMode != nil {
+		volumeMode = *pv.Spec.VolumeMode
+	}
+	if pv.Status.Phase != corev1.VolumeBound || pv.Spec.StorageClassName != className || pv.Spec.PersistentVolumeReclaimPolicy != corev1.PersistentVolumeReclaimDelete || len(pv.Spec.AccessModes) != 1 || pv.Spec.AccessModes[0] != corev1.ReadWriteOnce || pv.Spec.VolumeMode == nil || volumeMode != corev1.PersistentVolumeFilesystem || pv.Spec.CSI == nil {
+		return fmt.Sprintf("PV %s must remain Bound, class=%s, ReadWriteOnce Filesystem OpenEBS CSI, and Delete (observed phase=%s class=%s access=%v reclaim=%s)", pv.Name, className, pv.Status.Phase, pv.Spec.StorageClassName, pv.Spec.AccessModes, pv.Spec.PersistentVolumeReclaimPolicy)
+	}
+	if pv.Spec.CSI.Driver != agentPoolWorkspaceProvisioner || pv.Spec.CSI.FSType != "xfs" || pv.Spec.CSI.VolumeHandle == "" || pv.Spec.CSI.VolumeAttributes["openebs.io/volgroup"] != agentPoolWorkspaceVolumeGroup {
+		return fmt.Sprintf("PV %s must use driver=%s fsType=xfs volumeHandle=<OpenEBS volume> openebs.io/volgroup=%s (observed driver=%s fsType=%s handle=%s attributes=%v)", pv.Name, agentPoolWorkspaceProvisioner, agentPoolWorkspaceVolumeGroup, pv.Spec.CSI.Driver, pv.Spec.CSI.FSType, pv.Spec.CSI.VolumeHandle, pv.Spec.CSI.VolumeAttributes)
+	}
+	if pv.Spec.NodeAffinity == nil || pv.Spec.NodeAffinity.Required == nil || len(pv.Spec.NodeAffinity.Required.NodeSelectorTerms) != 1 {
+		return fmt.Sprintf("PV %s lacks one exact local node-affinity term required by one-node RWO", pv.Name)
+	}
+	return ""
+}
+
+func (r *AgentPoolReconciler) validateAgentPoolLVMVolume(ctx context.Context, namespace string, pv *corev1.PersistentVolume, desired resource.Quantity) (failure string, resizePending bool, observationUnknown bool, observationErr error) {
+	observation, issue := observeManagedOpenEBSVolume(ctx, r.Client, namespace, pv)
+	if issue != nil {
+		return issue.Message, false, issue.Unknown, issue.Err
+	}
+	if observation.Shared != "yes" {
+		return fmt.Sprintf("LVMVolume %s/%s must retain shared=yes for same-node AgentPool workers (observed shared=%s)", observation.Namespace, observation.Name, observation.Shared), false, false, nil
+	}
+	if observation.State != "Ready" {
+		return fmt.Sprintf("LVMVolume %s/%s resize state is %s; retain mounted workers only while a controller-recorded resize remains outstanding", observation.Namespace, observation.Name, observation.State), true, false, nil
+	}
+	if observation.Capacity.Cmp(desired) < 0 {
+		return fmt.Sprintf("LVMVolume %s/%s capacity %s is growing in place to %s; retain mounted workers", observation.Namespace, observation.Name, observation.Capacity.String(), desired.String()), true, false, nil
+	}
+	return "", false, false, nil
+}
+
+// setWorkspaceCapacityCondition projects one durable pool-PVC gate into the
+// matching AgentPool's actionable condition. Ready/StorageReady continue
+// to describe pod/PVC mount health; this independent condition explains why
+// fresh dispatch credit is open, warning, gated, or unavailable.
+func workspaceCapacityStatusValid(status gateway.WorkspaceCapacityStatus) bool {
+	if !status.Observed || status.CapacityBytes == 0 || status.FreeBytes > status.CapacityBytes || math.IsNaN(status.FreeRatio) || math.IsInf(status.FreeRatio, 0) {
 		return false
 	}
-	for i := range pods.Items {
-		pod := &pods.Items[i]
-		if pod.Name != "share-manager-"+volumeHandle && pod.Labels["longhorn.io/share-manager"] != volumeHandle {
-			continue
-		}
-		if podIsReady(pod) {
-			return true
-		}
-	}
-	return false
+	computed := float64(status.FreeBytes) / float64(status.CapacityBytes)
+	return math.Abs(computed-status.FreeRatio) <= 0.000001
 }
 
-func containsAccessMode(modes []corev1.PersistentVolumeAccessMode, wanted corev1.PersistentVolumeAccessMode) bool {
-	for _, mode := range modes {
-		if mode == wanted {
-			return true
-		}
+func (r *AgentPoolReconciler) setWorkspaceCapacityCondition(ctx context.Context, pool *v1alpha1.AgentPool) string {
+	if r.CapacityReader == nil {
+		return ""
 	}
-	return false
+	condition := metav1.Condition{
+		Type:               storageConditionWorkspaceCapacityHealthy,
+		Status:             metav1.ConditionUnknown,
+		Reason:             storageReasonWorkspaceCapacityUnknown,
+		ObservedGeneration: pool.Generation,
+	}
+	status, err := r.CapacityReader.WorkspaceCapacityStatus(ctx, pool.Namespace+"/"+pool.Name)
+	if err != nil {
+		condition.Message = fmt.Sprintf("workspace capacity observation is unavailable; dispatch fails closed until this pool PVC is observed: %v", err)
+		meta.SetStatusCondition(&pool.Status.Conditions, condition)
+		return condition.Message
+	}
+	if !status.Observed || status.ObservedAt == nil || time.Since(*status.ObservedAt) > workspaceCapacityObservationFreshness {
+		condition.Message = "workspace capacity observation is missing or stale; inspect harness/dispatch health before expecting fresh credits"
+		meta.SetStatusCondition(&pool.Status.Conditions, condition)
+		return condition.Message
+	}
+	if !workspaceCapacityStatusValid(status) {
+		condition.Message = "workspace capacity observation is invalid; dispatch fails closed until a valid actual-filesystem measurement arrives"
+		meta.SetStatusCondition(&pool.Status.Conditions, condition)
+		return condition.Message
+	}
+	observation := fmt.Sprintf("AgentPool PVC is %.1f%% free (%d of %d bytes)", status.FreeRatio*100, status.FreeBytes, status.CapacityBytes)
+	switch {
+	case status.CreditGated:
+		condition.Status = metav1.ConditionFalse
+		condition.Reason = storageReasonWorkspaceCapacityGated
+		condition.Message = observation + "; all fresh dispatch credits for this pool are withheld until its PVC reaches at least 25% free"
+	case status.Warning:
+		condition.Status = metav1.ConditionFalse
+		condition.Reason = storageReasonWorkspaceCapacityWarning
+		condition.Message = observation + "; below the 25% warning threshold but this pool's fresh credits remain open until the 20% floor"
+	default:
+		condition.Status = metav1.ConditionTrue
+		condition.Reason = storageReasonWorkspaceCapacityHealthy
+		condition.Message = observation + "; fresh dispatch credits are capacity-eligible"
+	}
+	meta.SetStatusCondition(&pool.Status.Conditions, condition)
+	if condition.Status != metav1.ConditionTrue {
+		return condition.Message
+	}
+	return ""
 }
 
-func storageWasReady(pool *v1alpha1.AgentPool) bool {
+func storageWasOperationallyReady(pool *v1alpha1.AgentPool) bool {
 	for _, condition := range pool.Status.Conditions {
-		if condition.Type == "StorageReady" {
-			return condition.Status == "True"
+		if condition.Type == storageConditionOperationalReadinessReached && condition.Status == metav1.ConditionTrue {
+			return true
+		}
+	}
+	if !pool.Status.Ready || pool.Status.ReadyReplicas == 0 {
+		return false
+	}
+	for _, condition := range pool.Status.Conditions {
+		if condition.Type == storageConditionReady {
+			return condition.Status == metav1.ConditionTrue
+		}
+	}
+	return false
+}
+
+func storageWorkerReplacementPending(pool *v1alpha1.AgentPool) bool {
+	for _, condition := range pool.Status.Conditions {
+		if condition.Type == storageConditionWorkerReplacementPending {
+			return condition.Status == metav1.ConditionTrue
 		}
 	}
 	return false
@@ -312,12 +482,12 @@ func workerStorageFailure(ctx context.Context, c client.Client, pool *v1alpha1.A
 		statuses = append(statuses, pod.Status.ContainerStatuses...)
 		for _, status := range statuses {
 			if status.State.Terminated != nil && status.State.Terminated.ExitCode != 0 {
-				return fmt.Sprintf("worker %s/%s container %s exited during mount-root validation (reason=%s message=%s); inspect pod mount events and refuse root-squashed/foreign-owner/unsafe-mode storage", pod.Namespace, pod.Name, status.Name, status.State.Terminated.Reason, status.State.Terminated.Message)
+				return fmt.Sprintf("worker %s/%s container %s exited during workspace mount/I/O validation (reason=%s message=%s); inspect the AgentPool XFS PVC, OpenEBS LVMVolume/PV topology, ownership, and per-pool capacity", pod.Namespace, pod.Name, status.Name, status.State.Terminated.Reason, status.State.Terminated.Message)
 			}
 			if status.State.Waiting != nil {
 				reason := status.State.Waiting.Reason
 				if reason == "CreateContainerError" || reason == "CrashLoopBackOff" || reason == "RunContainerError" {
-					return fmt.Sprintf("worker %s/%s container %s cannot validate/mount storage (reason=%s message=%s); inspect PVC, CSI mount, root ownership/mode, and node events", pod.Namespace, pod.Name, status.Name, reason, status.State.Waiting.Message)
+					return fmt.Sprintf("worker %s/%s container %s cannot validate/mount dedicated storage (reason=%s message=%s); inspect PVC/PV path, mount identity, ownership, free space, and node events", pod.Namespace, pod.Name, status.Name, reason, status.State.Waiting.Message)
 				}
 			}
 		}

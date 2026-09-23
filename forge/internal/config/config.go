@@ -25,7 +25,11 @@ const (
 	RoleWorker             = "worker"
 )
 
-var nameRe = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
+var (
+	nameRe                 = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
+	dataStoragePartitionRe = regexp.MustCompile(`-part[0-9]+$`)
+	contentSHA256Re        = regexp.MustCompile(`^[0-9a-f]{64}$`)
+)
 
 // Cluster is the top-level forge.yaml document.
 type Cluster struct {
@@ -42,13 +46,44 @@ type Metadata struct {
 
 // Spec is the cluster substrate specification.
 type Spec struct {
-	Mode    string  `yaml:"mode"`
-	Hosts   []Host  `yaml:"hosts"`
-	K3s     K3s     `yaml:"k3s"`
-	Flux    Flux    `yaml:"flux"`
-	Overlay Overlay `yaml:"overlay"`
-	Chart   Chart   `yaml:"chart"`
-	GPU     GPU     `yaml:"gpu"`
+	Mode        string      `yaml:"mode"`
+	Hosts       []Host      `yaml:"hosts"`
+	K3s         K3s         `yaml:"k3s"`
+	Flux        Flux        `yaml:"flux"`
+	Overlay     Overlay     `yaml:"overlay"`
+	Chart       Chart       `yaml:"chart"`
+	GPU         GPU         `yaml:"gpu"`
+	DataStorage DataStorage `yaml:"dataStorage"`
+}
+
+// DataStorage selects the immutable set of blank whole disks Forge prepares as
+// the fixed iterabase-data volume group. The canonical by-id list is the sole
+// first-write authorization; forge apply never discovers or substitutes media.
+type DataStorage struct {
+	Devices []string `yaml:"devices"`
+}
+
+func (s DataStorage) validate() error {
+	if len(s.Devices) == 0 {
+		return fmt.Errorf("dataStorage.devices must contain at least one stable whole-disk identity")
+	}
+	seen := make(map[string]struct{}, len(s.Devices))
+	for i, device := range s.Devices {
+		if !strings.HasPrefix(device, "/dev/disk/by-id/") || strings.Contains(strings.TrimPrefix(device, "/dev/disk/by-id/"), "/") {
+			return fmt.Errorf("dataStorage.devices[%d] %q must be one stable /dev/disk/by-id/<identity> whole-disk path", i, device)
+		}
+		if strings.ContainsAny(device, " \t\r\n") || dataStoragePartitionRe.MatchString(device) {
+			return fmt.Errorf("dataStorage.devices[%d] %q must identify a whole disk, not a partition or volatile path", i, device)
+		}
+		if _, ok := seen[device]; ok {
+			return fmt.Errorf("dataStorage.devices contains duplicate identity %q", device)
+		}
+		seen[device] = struct{}{}
+		if i > 0 && s.Devices[i-1] > device {
+			return fmt.Errorf("dataStorage.devices must use canonical lexical order; order-only drift is refused")
+		}
+	}
+	return nil
 }
 
 // Host describes a single target VM/host.
@@ -56,6 +91,7 @@ type Host struct {
 	Address    string            `yaml:"address"`
 	SSHUser    string            `yaml:"sshUser"`
 	SSHKeyPath string            `yaml:"sshKeyPath"`
+	SSHHostKey string            `yaml:"sshHostKey,omitempty"` // optional OpenSSH public host key; permanent automation pins it
 	Role       string            `yaml:"role"`
 	Labels     map[string]string `yaml:"labels"`
 	Taints     []Taint           `yaml:"taints"`
@@ -120,6 +156,9 @@ func (f Flux) validate(overlay Overlay) error {
 	if !strings.HasPrefix(overlay.Repo, "https://") {
 		return fmt.Errorf("flux.enabled requires an https:// overlay.repo (Flux source-controller cannot watch %q; file:// is a forge-apply-only dev path)", overlay.Repo)
 	}
+	if f.Version != defaultFluxVersion {
+		return fmt.Errorf("flux.version %q has no repository-reviewed executable/runtime identity", f.Version)
+	}
 	return nil
 }
 
@@ -167,7 +206,7 @@ func (o Overlay) validate() error {
 // Chart is the platform umbrella chart pull pointer. An empty Version means
 // the chart phase is skipped (k3s-only). Defaults are applied in Validate.
 type Chart struct {
-	Repository string `yaml:"repository"` // OCI URL ending /iterabase-platform; Forge installs the same-version /cert-manager-substrate companion first
+	Repository string `yaml:"repository"` // OCI URL ending /iterabase-platform; Forge installs same-version certificate and LVM-storage companions first
 	Version    string `yaml:"version"`    // chart version (semver) to install; empty => skip chart
 	Release    string `yaml:"release"`    // helm release name (default: metadata.name)
 	Namespace  string `yaml:"namespace"`  // target namespace (default: iterabase-system)
@@ -210,13 +249,14 @@ type GPU struct {
 
 // GPUDriver is the NVIDIA driver the gpu-operator installs and loads as a host
 // kernel module. It is a node-readiness / substrate concern, on the same
-// footing as the operator chart pointer — NOT an overlay chart value. An empty
-// Version means the operator chart's own default driver is used (no
-// driver.version Helm --set emitted); setting it pins the driver version for
-// reproducibility across chart bumps and intentional driver moves. v1: the
-// operator compiles and loads the driver on the host; forge just sets the value.
+// footing as the operator chart pointer — NOT an overlay chart value. Version
+// and SHA256 are both required when GPU is enabled so the operator receives an
+// immutable tag-plus-digest image identity rather than resolving a mutable tag.
+// v1: the operator compiles and loads the driver on the host; forge sets the
+// reviewed content identity.
 type GPUDriver struct {
-	Version string `yaml:"version"` // NVIDIA driver version (e.g. 570.186); empty => chart default
+	Version string `yaml:"version"` // NVIDIA driver version reported by the loaded module (e.g. 580.126.20)
+	SHA256  string `yaml:"sha256"`  // exact resolved driver-container image digest
 }
 
 // GPUOperator is the NVIDIA GPU Operator Helm release pointer. Defaults are
@@ -228,6 +268,7 @@ type GPUOperator struct {
 	Chart      string `yaml:"chart"`      // chart name in the repo; default gpu-operator
 	Release    string `yaml:"release"`    // helm release name (default: <metadata.name>-gpu-operator)
 	Namespace  string `yaml:"namespace"`  // target namespace (default: gpu-operator)
+	SHA256     string `yaml:"sha256"`     // exact chart archive content identity
 }
 
 const (
@@ -235,6 +276,7 @@ const (
 	defaultGPUOperatorRepository = "https://helm.ngc.nvidia.com/nvidia"
 	defaultGPUOperatorChart      = "gpu-operator"
 	defaultGPUOperatorNamespace  = "gpu-operator"
+	defaultGPUOperatorSHA256     = "59abb5852a24b3ae0ef757bfea3051f419acbf559ee5efd72f0672d28af56a68"
 )
 
 // applyDefaults fills the GPU operator release pointer defaults when GPU is
@@ -258,24 +300,38 @@ func (g *GPU) applyDefaults(install string) {
 	if g.Operator.Namespace == "" {
 		g.Operator.Namespace = defaultGPUOperatorNamespace
 	}
+	if g.Operator.SHA256 == "" && g.Operator.Version == defaultGPUOperatorVersion &&
+		g.Operator.Repository == defaultGPUOperatorRepository && g.Operator.Chart == defaultGPUOperatorChart {
+		g.Operator.SHA256 = defaultGPUOperatorSHA256
+	}
 }
 
 // validate enforces v1 constraints on the GPU configuration. GPU readiness
 // supports single-node only in v1 (HA is already refused by mode validation;
 // this guard makes the intent explicit and keeps GPU enablement honest).
 //
-// A non-empty driver version with gpu.enabled: false is rejected: the pin is
+// A non-empty driver identity with gpu.enabled: false is rejected: the pin is
 // inert when GPU is disabled (no operator runs to materialize it), so keeping
-// it would be silently ignored config. Clear gpu.driver.version or enable gpu.
+// it would be silently ignored config. GPU enablement requires both the
+// operator chart archive checksum and the driver container digest.
 func (g GPU) validate(mode string) error {
 	if !g.Enabled {
-		if g.Driver.Version != "" {
-			return fmt.Errorf("gpu.driver.version %q is set but gpu.enabled is false — clear gpu.driver.version or enable gpu", g.Driver.Version)
+		if g.Driver.Version != "" || g.Driver.SHA256 != "" {
+			return fmt.Errorf("gpu.driver identity is set but gpu.enabled is false — clear gpu.driver or enable gpu")
 		}
 		return nil
 	}
 	if mode != ModeSingleNode {
 		return fmt.Errorf("gpu.enabled requires mode %q in v1, got %q", ModeSingleNode, mode)
+	}
+	if !contentSHA256Re.MatchString(g.Operator.SHA256) {
+		return fmt.Errorf("gpu.operator.sha256 must be the exact lowercase chart archive SHA-256")
+	}
+	if strings.TrimSpace(g.Driver.Version) == "" {
+		return fmt.Errorf("gpu.driver.version is required for immutable driver identity")
+	}
+	if !contentSHA256Re.MatchString(g.Driver.SHA256) {
+		return fmt.Errorf("gpu.driver.sha256 must be the exact lowercase driver image SHA-256")
 	}
 	return nil
 }
@@ -341,6 +397,9 @@ func (s *Spec) validate() error {
 	if err := s.GPU.validate(s.Mode); err != nil {
 		return err
 	}
+	if err := s.DataStorage.validate(); err != nil {
+		return err
+	}
 	if err := s.Overlay.validate(); err != nil {
 		return err
 	}
@@ -359,6 +418,9 @@ func (h *Host) validate() error {
 	}
 	if h.SSHKeyPath == "" {
 		return fmt.Errorf("sshKeyPath is required")
+	}
+	if strings.ContainsAny(h.SSHHostKey, "\r\n") {
+		return fmt.Errorf("sshHostKey must be one OpenSSH public host key line")
 	}
 	if h.Role != RoleControlPlaneWorker {
 		return fmt.Errorf("role must be %q for v1, got %q", RoleControlPlaneWorker, h.Role)
@@ -384,8 +446,16 @@ func (t Taint) validate() error {
 }
 
 func (k K3s) validate() error {
+	if err := validateK3sExtraArgs(k.ExtraArgs); err != nil {
+		return err
+	}
 	if k.Version == "" {
 		return fmt.Errorf("k3s.version is required")
+	}
+	switch k.Version {
+	case "v1.31.5", "v1.31.5+k3s1", "v1.34.10", "v1.34.10+k3s1":
+	default:
+		return fmt.Errorf("k3s.version %q has no repository-reviewed executable/runtime identity", k.Version)
 	}
 	if err := validateCIDR(k.ClusterCIDR, false, "clusterCIDR"); err != nil {
 		return err
@@ -400,6 +470,38 @@ func (k K3s) validate() error {
 		if err := validateCIDR(k.ServiceCIDRv6, true, "serviceCIDRv6"); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+//nolint:gocyclo // ordered token-stream validation keeps split/joined security cases explicit.
+func validateK3sExtraArgs(args []string) error {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--disable" || strings.HasPrefix(arg, "--disable=") {
+			return fmt.Errorf("k3s.extraArgs must not override component disablement; use k3s.disable (local-storage is always disabled)")
+		}
+		if arg == "--data-dir" || strings.HasPrefix(arg, "--data-dir=") {
+			return fmt.Errorf("k3s.extraArgs must not change the fixed K3s data/kubelet directory required by the LVM storage substrate")
+		}
+		if strings.HasPrefix(arg, "--kubelet-arg=") {
+			value := strings.TrimPrefix(arg, "--kubelet-arg=")
+			if value == "" || value == "root-dir" || strings.HasPrefix(value, "root-dir=") {
+				return fmt.Errorf("k3s.extraArgs must not change the fixed K3s data/kubelet directory required by the LVM storage substrate")
+			}
+			continue
+		}
+		if arg != "--kubelet-arg" {
+			continue
+		}
+		if i+1 >= len(args) || args[i+1] == "" || strings.HasPrefix(args[i+1], "--") {
+			return fmt.Errorf("k3s.extraArgs --kubelet-arg requires one following kubelet argument token")
+		}
+		value := args[i+1]
+		if value == "root-dir" || strings.HasPrefix(value, "root-dir=") {
+			return fmt.Errorf("k3s.extraArgs must not change the fixed K3s data/kubelet directory required by the LVM storage substrate")
+		}
+		i++
 	}
 	return nil
 }

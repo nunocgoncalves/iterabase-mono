@@ -13,12 +13,11 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Install Go ${{ inputs.go-version }}
-      uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+    - name: Install checksummed Go ${{ inputs.go-version }}
+      uses: ./.github/actions/setup-ci-tool
       with:
-        go-version: ${{ inputs.go-version }}
-        cache: false
-        check-latest: false
+        name: go
+        version: ${{ inputs.go-version }}
     - name: Compute content-addressed Go cache key
       id: cache-key
       shell: bash

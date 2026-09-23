@@ -65,6 +65,35 @@ describe("createGatewayClient", () => {
     });
   });
 
+  it("maps a metadata-bearing descriptor to artifact capability the child can forward (HOR-546)", async () => {
+    const transport = createRouterTransport((router) => {
+      router.service(GatewayService, {
+        discoverEffectiveTools: async () => ({
+          descriptors: [
+            {
+              name: "graph.read_mail",
+              version: "1.0.0",
+              digest: "sha256:abc",
+              description: "read mail",
+              inputSchema: new TextEncoder().encode(JSON.stringify({ type: "object" })),
+              effectClass: EffectClass.READ_ONLY,
+              credentialSlots: [],
+              artifactCapabilities: { readsArtifacts: true, writesArtifacts: false, acceptedMimeTypes: ["text/plain"] },
+              timeout: { seconds: 30n, nanos: 0 },
+              idempotencyProof: undefined,
+            },
+          ],
+        }),
+        invokeTool: async () => ({ invocationId: "inv-1", state: InvokeState.SUCCEEDED, resultJson: new TextEncoder().encode('{"ok":true}'), artifactOutputRefs: [], error: undefined, existingInvocationId: "" }),
+        cancelInvocation: async () => ({ state: InvokeState.FAILED }),
+      });
+    });
+    const client = createGatewayClient(cfg(), () => transport as Transport);
+    const descriptors = await client.discover({ turnId: "turn-1", runId: "run-1" });
+    expect(descriptors[0].readsArtifacts).toBe(true);
+    expect(descriptors[0].acceptedArtifactMimeTypes).toEqual(["text/plain"]);
+  });
+
   it("invokeTool stamps attempt_id=runId + caller_scope_id=turnId and decodes the result", async () => {
     let seen: { attemptId: string; callerScope: number; callerScopeId: string; toolCallId: string; artifactIds: string[] } | undefined;
     const transport = createRouterTransport((router) => {

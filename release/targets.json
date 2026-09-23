@@ -1,62 +1,151 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
+  "artifact_recipes": {
+    "control-plane-image": {
+      "kind": "image",
+      "target": "control-plane",
+      "name": "control-plane",
+      "repository": "ghcr.io/nunocgoncalves/control-plane",
+      "context": "control-plane",
+      "dockerfile": "control-plane/Dockerfile",
+      "paths": ["control-plane/**"],
+      "build_args": ["VERSION={version}", "COMMIT={source_sha}"],
+      "labels": ["org.opencontainers.image.version={version}", "org.opencontainers.image.revision={source_sha}", "org.opencontainers.image.source=https://github.com/{repository}"]
+    },
+    "harness-image": {
+      "kind": "image",
+      "target": "control-plane",
+      "name": "control-plane-harness",
+      "repository": "ghcr.io/nunocgoncalves/control-plane-harness",
+      "context": "control-plane/harness",
+      "dockerfile": "control-plane/harness/Dockerfile",
+      "paths": ["control-plane/harness/**", "control-plane/proto/**"],
+      "build_args": ["VERSION={version}", "COMMIT={source_sha}"],
+      "labels": ["org.opencontainers.image.version={version}", "org.opencontainers.image.revision={source_sha}", "org.opencontainers.image.source=https://github.com/{repository}"]
+    },
+    "tool-runner-image": {
+      "kind": "image",
+      "target": "control-plane",
+      "name": "control-plane-tool-runner",
+      "repository": "ghcr.io/nunocgoncalves/control-plane-tool-runner",
+      "context": "control-plane/tool-runner",
+      "dockerfile": "control-plane/tool-runner/Dockerfile",
+      "paths": ["control-plane/tool-runner/**", "control-plane/proto/**"],
+      "build_args": ["VERSION={version}", "COMMIT={source_sha}"],
+      "labels": ["org.opencontainers.image.version={version}", "org.opencontainers.image.revision={source_sha}", "org.opencontainers.image.source=https://github.com/{repository}"]
+    },
+    "inference-gateway-image": {
+      "kind": "image",
+      "target": "inference-gateway",
+      "name": "inference-gateway",
+      "repository": "ghcr.io/nunocgoncalves/inference-gateway",
+      "context": "inference-gateway",
+      "dockerfile": "inference-gateway/Dockerfile",
+      "paths": ["inference-gateway/**"],
+      "build_args": ["VERSION={version}", "COMMIT={source_sha}"],
+      "labels": ["org.opencontainers.image.version={version}", "org.opencontainers.image.revision={source_sha}", "org.opencontainers.image.source=https://github.com/{repository}"]
+    },
+    "runtime-fixture-image": {
+      "kind": "image",
+      "temporary_only": true,
+      "name": "control-plane-runtime-fixture",
+      "repository": "iterabase-e2e/control-plane-runtime-fixture",
+      "context": "control-plane/test/e2e/fixtures/runtime",
+      "dockerfile": "control-plane/test/e2e/fixtures/runtime/Dockerfile",
+      "paths": ["control-plane/test/e2e/fixtures/runtime/**"],
+      "build_args": ["COMMIT={source_sha}"],
+      "labels": ["org.opencontainers.image.revision={source_sha}", "org.opencontainers.image.source=https://github.com/{repository}"]
+    },
+    "control-plane-chart": {
+      "kind": "chart",
+      "target": "control-plane-chart",
+      "chart": "control-plane",
+      "dependency_builds": ["control-plane", "observability", "cert-manager-substrate", "lvm-storage-substrate", "iterabase-platform"],
+      "paths": ["charts/charts/control-plane/**"]
+    },
+    "inference-gateway-chart": {
+      "kind": "chart",
+      "target": "inference-gateway-chart",
+      "chart": "inference-gateway",
+      "dependency_builds": ["control-plane", "observability", "cert-manager-substrate", "lvm-storage-substrate", "iterabase-platform"],
+      "paths": ["charts/charts/inference-gateway/**"]
+    },
+    "iterabase-platform-chart": {
+      "kind": "chart",
+      "target": "iterabase-platform-chart",
+      "chart": "iterabase-platform",
+      "companions": ["cert-manager-substrate", "lvm-storage-substrate"],
+      "dependency_builds": ["control-plane", "observability", "cert-manager-substrate", "lvm-storage-substrate", "iterabase-platform"],
+      "paths": ["charts/**"]
+    },
+    "cert-manager-substrate-chart": {
+      "kind": "chart-companion",
+      "target": "iterabase-platform-chart",
+      "chart": "cert-manager-substrate",
+      "dependency_builds": ["control-plane", "observability", "cert-manager-substrate", "lvm-storage-substrate", "iterabase-platform"],
+      "paths": ["charts/charts/cert-manager-substrate/**"]
+    },
+    "lvm-storage-substrate-chart": {
+      "kind": "chart-companion",
+      "target": "iterabase-platform-chart",
+      "chart": "lvm-storage-substrate",
+      "dependency_builds": ["control-plane", "observability", "cert-manager-substrate", "lvm-storage-substrate", "iterabase-platform"],
+      "paths": ["charts/charts/lvm-storage-substrate/**", ".github/inputs/remote-content.json"]
+    },
+    "forge-binary": {
+      "kind": "forge",
+      "target": "forge",
+      "paths": ["forge/**"],
+      "goreleaser_config": "forge/.goreleaser.yaml",
+      "goreleaser_version": "v2.12.7",
+      "platforms": ["linux_amd64", "linux_arm64", "darwin_amd64", "darwin_arm64"]
+    },
+    "certificate-migration-chart": {
+      "kind": "published-chart"
+    },
+    "supported-platform-predecessor": {
+      "kind": "published-chart"
+    },
+    "supported-substrate-predecessor": {
+      "kind": "published-chart"
+    },
+    "metallb-platform-predecessor": {
+      "kind": "published-chart"
+    },
+    "metallb-substrate-predecessor": {
+      "kind": "published-chart"
+    }
+  },
   "targets": {
     "control-plane": {
       "version_file": "control-plane/VERSION",
       "tag_prefix": "control-plane-v",
-      "images": [
-        {
-          "name": "control-plane",
-          "repository": "ghcr.io/nunocgoncalves/control-plane",
-          "context": "control-plane",
-          "dockerfile": "control-plane/Dockerfile"
-        },
-        {
-          "name": "control-plane-harness",
-          "repository": "ghcr.io/nunocgoncalves/control-plane-harness",
-          "context": "control-plane/harness",
-          "dockerfile": "control-plane/harness/Dockerfile"
-        },
-        {
-          "name": "control-plane-tool-runner",
-          "repository": "ghcr.io/nunocgoncalves/control-plane-tool-runner",
-          "context": "control-plane/tool-runner",
-          "dockerfile": "control-plane/tool-runner/Dockerfile"
-        }
-      ]
+      "artifacts": ["control-plane-image", "harness-image", "tool-runner-image"]
     },
     "inference-gateway": {
       "version_file": "inference-gateway/VERSION",
       "tag_prefix": "inference-gateway-v",
-      "images": [
-        {
-          "name": "inference-gateway",
-          "repository": "ghcr.io/nunocgoncalves/inference-gateway",
-          "context": "inference-gateway",
-          "dockerfile": "inference-gateway/Dockerfile"
-        }
-      ]
+      "artifacts": ["inference-gateway-image"]
     },
     "forge": {
       "version_file": "forge/VERSION",
       "tag_prefix": "forge-v",
-      "images": []
+      "artifacts": ["forge-binary"]
     },
     "control-plane-chart": {
       "chart": "control-plane",
       "tag_prefix": "control-plane-",
-      "images": []
+      "artifacts": ["control-plane-chart"]
     },
     "inference-gateway-chart": {
       "chart": "inference-gateway",
       "tag_prefix": "inference-gateway-",
-      "images": []
+      "artifacts": ["inference-gateway-chart"]
     },
     "iterabase-platform-chart": {
       "chart": "iterabase-platform",
       "tag_prefix": "iterabase-platform-",
-      "images": [],
-      "companions": ["cert-manager-substrate", "rwx-storage-substrate"]
+      "artifacts": ["iterabase-platform-chart", "cert-manager-substrate-chart", "lvm-storage-substrate-chart"]
     }
   }
 }

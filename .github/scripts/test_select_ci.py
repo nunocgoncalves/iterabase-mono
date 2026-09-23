@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+from __future__ import annotations
+
 import json
 from pathlib import Path
 import subprocess
@@ -7,34 +9,92 @@ import tempfile
 import unittest
 
 from collect_changed_paths import collect_changed_paths
-from select_ci import OUTPUTS, selection
-
+from select_ci import OUTPUTS, selection, validate_needs
 
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = ROOT / ".github/ci/path-selection-fixtures.json"
 
 
-class PathSelectionFixtures(unittest.TestCase):
+class StaticCIPathSelectionTests(unittest.TestCase):
     def test_fixture_matrix(self) -> None:
-        fixtures = json.loads(FIXTURES.read_text())
+        fixtures = json.loads(FIXTURES.read_text(encoding="utf-8"))
         for fixture in fixtures:
-            with self.subTest(fixture["name"]):
+            with self.subTest(fixture=fixture["name"]):
                 result = selection(fixture["paths"])
-                actual_true = {name for name in OUTPUTS if result[name]}
-                self.assertEqual(set(fixture["true"]), actual_true)
+                self.assertEqual(
+                    set(fixture["true"]),
+                    {name for name in OUTPUTS if result[name]},
+                )
                 self.assertEqual(
                     fixture["images"],
                     [image["name"] for image in result["image_matrix"]],
                 )
                 self.assertEqual(bool(fixture["true"]), result["any"])
 
-    def test_select_all_is_explicit_and_complete(self) -> None:
-        result = selection([], select_all=True)
-        self.assertTrue(all(result[name] for name in OUTPUTS))
-        self.assertEqual(5, len(result["image_matrix"]))
+    def test_unified_e2e_contract_changes_fan_out_static_owners(self) -> None:
+        for path in (
+            ".github/scripts/e2e.py",
+            ".github/scripts/test_e2e.py",
+            ".github/workflows/e2e.yml",
+            "testkit/e2e/suite.go",
+            "release/targets.json",
+        ):
+            with self.subTest(path=path):
+                result = selection([path])
+                if path == "release/targets.json":
+                    # Release target authority remains covered by focused release
+                    # checks; execution recipes are validated by test_e2e.py.
+                    self.assertFalse(result["any"])
+                else:
+                    self.assertTrue(all(result[name] for name in OUTPUTS))
+
+    def test_only_explicit_nonempty_docs_input_can_be_zero_work(self) -> None:
+        self.assertEqual("docs-only", selection(["docs/ci.md"])["classification"])
+        self.assertEqual("release-only", selection(["release/targets.json"])["classification"])
+        for paths in ([], ["unknown/runtime.input"], ["../outside"], ["./docs/ci.md"]):
+            with self.subTest(paths=paths), self.assertRaises(ValueError):
+                selection(paths)
+
+    def test_required_gate_rejects_missing_outputs_malformed_matrix_and_status_drift(self) -> None:
+        selected = selection(["control-plane/internal/api/server.go"])
+        outputs = {
+            name: str(bool(selected[name])).lower() for name in OUTPUTS
+        }
+        outputs.update(
+            {
+                "image_matrix": json.dumps(selected["image_matrix"], separators=(",", ":")),
+                "classification": selected["classification"],
+                "selection": json.dumps(selected, sort_keys=True, separators=(",", ":")),
+            }
+        )
+        jobs = {
+            "control-plane": True,
+            "ui": False,
+            "harness": False,
+            "tool-runner": False,
+            "proto": False,
+            "inference-gateway": False,
+            "forge": False,
+            "forge-fault-matrix": False,
+            "charts": False,
+            "images": True,
+        }
+        needs = {"changes": {"result": "success", "outputs": outputs}}
+        needs.update({name: {"result": "success" if value else "skipped"} for name, value in jobs.items()})
+        validate_needs(selected, needs)
+        for mutation in ("missing", "matrix", "status"):
+            broken = json.loads(json.dumps(needs))
+            if mutation == "missing":
+                del broken["changes"]["outputs"]["forge_real_e2e"]
+            elif mutation == "matrix":
+                broken["changes"]["outputs"]["image_matrix"] = "not-json"
+            else:
+                broken["ui"]["result"] = "success"
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                validate_needs(selected, broken)
 
 
-class ChangedPathCollectionFixtures(unittest.TestCase):
+class ChangedPathCollectionTests(unittest.TestCase):
     def git(self, repo: Path, *args: str) -> str:
         completed = subprocess.run(
             ["git", "-C", str(repo), *args],
@@ -52,23 +112,38 @@ class ChangedPathCollectionFixtures(unittest.TestCase):
         self.git(repo, "config", "user.name", "CI Fixture")
         source = repo / "control-plane/internal/api/moved.go"
         source.parent.mkdir(parents=True)
-        source.write_text("package api\n")
+        source.write_text("package api\n", encoding="utf-8")
         self.git(repo, "add", "-A")
         self.git(repo, "commit", "--quiet", "-m", "base")
         return repo, self.git(repo, "rev-parse", "HEAD")
+
+    def test_invalid_event_sha_and_ambiguous_empty_diff_fail(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repo, head = self.create_repo(directory)
+            for event, base, source in (
+                ("unknown", head, head),
+                ("pull_request", "short", head),
+                ("pull_request", head, "short"),
+            ):
+                with self.subTest(event=event, base=base, source=source), self.assertRaises((ValueError, subprocess.CalledProcessError)):
+                    collect_changed_paths(repo, event, base, source)
+            # Equal commits produce a typed empty diff; the selector, not the
+            # collector, rejects that ambiguity rather than calling it docs-only.
+            select_all, paths = collect_changed_paths(repo, "push", head, head)
+            self.assertFalse(select_all)
+            self.assertEqual([], paths)
+            with self.assertRaises(ValueError):
+                selection(paths)
 
     def test_deletion_only_change_retains_source_owner(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             repo, base_sha = self.create_repo(directory)
             (repo / "control-plane/internal/api/moved.go").unlink()
             self.git(repo, "add", "-A")
-            self.git(repo, "commit", "--quiet", "-m", "delete source")
-            head_sha = self.git(repo, "rev-parse", "HEAD")
-
+            self.git(repo, "commit", "--quiet", "-m", "delete")
             select_all, paths = collect_changed_paths(
-                repo, "push", base_sha, head_sha
+                repo, "push", base_sha, self.git(repo, "rev-parse", "HEAD")
             )
-
             self.assertFalse(select_all)
             self.assertEqual(["control-plane/internal/api/moved.go"], paths)
             self.assertTrue(selection(paths)["control_plane"])
@@ -76,119 +151,107 @@ class ChangedPathCollectionFixtures(unittest.TestCase):
     def test_cross_owner_move_reports_source_and_destination(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             repo, base_sha = self.create_repo(directory)
-            (repo / "docs").mkdir()
+            destination = repo / "forge/internal/moved.go"
+            destination.parent.mkdir(parents=True)
             self.git(
                 repo,
                 "mv",
                 "control-plane/internal/api/moved.go",
-                "docs/moved.md",
+                "forge/internal/moved.go",
             )
-            self.git(repo, "commit", "--quiet", "-m", "move source to docs")
-            head_sha = self.git(repo, "rev-parse", "HEAD")
-
+            self.git(repo, "commit", "--quiet", "-m", "move")
             select_all, paths = collect_changed_paths(
-                repo, "pull_request", base_sha, head_sha
+                repo,
+                "pull_request",
+                base_sha,
+                self.git(repo, "rev-parse", "HEAD"),
             )
-
             self.assertFalse(select_all)
             self.assertEqual(
-                {"control-plane/internal/api/moved.go", "docs/moved.md"},
+                {
+                    "control-plane/internal/api/moved.go",
+                    "forge/internal/moved.go",
+                },
                 set(paths),
             )
-            self.assertTrue(selection(paths)["control_plane"])
+            result = selection(paths)
+            self.assertTrue(result["control_plane"])
+            self.assertTrue(result["forge"])
 
-    def test_workflows_share_collector_and_publish_exact_required_names(self) -> None:
+
+class WorkflowContractTests(unittest.TestCase):
+    def test_ci_and_e2e_share_changed_path_collector_and_stable_contexts(self) -> None:
         workflows = {
             "CI": (ROOT / ".github/workflows/ci.yml").read_text(),
             "E2E": (ROOT / ".github/workflows/e2e.yml").read_text(),
         }
-        for workflow_name, workflow in workflows.items():
-            with self.subTest(workflow=workflow_name):
+        for name, workflow in workflows.items():
+            with self.subTest(workflow=name):
                 self.assertIn(
                     "python3 .github/scripts/collect_changed_paths.py", workflow
                 )
                 self.assertNotIn("git diff --name-only", workflow)
-                self.assertIn(f"name: {workflow_name} / required", workflow)
+                self.assertIn(f"name: {name} / required", workflow)
 
-    def test_pr_has_required_exact_head_managed_storage_internal_tls_job(self) -> None:
+    def test_e2e_uses_exact_head_compiled_matrices_and_result_reconciliation(self) -> None:
         workflow = (ROOT / ".github/workflows/e2e.yml").read_text()
-        job = workflow.split("  digitalocean-rwx-tls:\n", 1)[1].split(
-            "\n  digitalocean-rwx-three-node:\n", 1
-        )[0]
-        for contract in (
-            "needs.changes.outputs.charts == 'true' ||",
-            "needs.changes.outputs.forge_real_e2e == 'true') &&",
+        for value in (
             "ref: ${{ github.event.pull_request.head.sha || github.sha }}",
-            "timeout-minutes: 70",
-            "group: e2e-digitalocean-rwx-tls",
-            ".github/scripts/prepare_pr_managed_runtime.sh",
-            "run: make test-e2e-rwx-tls",
-            'FORGE_E2E_REQUIRE_CAPACITY: "true"',
-            "ITERABASE_E2E_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}",
+            "test \"$(git rev-parse HEAD)\" = \"$SOURCE_SHA\"",
+            "fromJSON(needs.plan.outputs.kind_matrix)",
+            "fromJSON(needs.plan.outputs.real_machine_matrix)",
+            "python3 .github/scripts/e2e.py compose",
+            "python3 .github/scripts/e2e.py validate-results",
+            "export FORGE_E2E_REQUIRE_CAPACITY=true",
+            "uses: ./.github/actions/setup-permanent-fixture",
+            "group: iterabase-permanent-fixture-${{ matrix.capacity }}",
         ):
-            self.assertIn(contract, job)
-        for path in (
-            "forge/test/e2e/overlay_test.go",
-            "forge/internal/lifecycle/storage.go",
+            self.assertIn(value, workflow)
+        self.assertNotIn("DIGITALOCEAN_TOKEN", workflow)
+        for stale in (
+            "schedule:",
+            "workflow_dispatch:",
+            "complete_catalogue",
+            "gpu_policy_red_proof",
+            "fixture_cleanup_red_proof",
+            "gpu-red-proof:",
+            "cleanup-red-proof:",
+            "nightly",
+            "Exact source",
+            "Exact bundle",
+            "control-plane-kind:",
+            "control-plane-execution-kind:",
+            "charts-runtime:",
+            "nightly-kind:",
+            "nightly-real-machine:",
+            "prepare_pr_workspace_runtime.sh",
         ):
-            with self.subTest(managed_tls_path=path):
-                result = selection([path])
-                self.assertTrue(result["forge_real_e2e"])
-                self.assertFalse(result["charts"])
-        required = workflow.split("  required:\n", 1)[1]
-        self.assertIn("- digitalocean-rwx-tls", required)
-        helper = (
-            ROOT / ".github/scripts/prepare_pr_managed_runtime.sh"
-        ).read_text()
-        for chart in (
-            "iterabase-platform",
-            "cert-manager-substrate",
-            "rwx-storage-substrate",
-        ):
-            self.assertIn(chart, helper)
-        for variable in (
-            "FORGE_E2E_PLATFORM_CHART_ARCHIVE",
-            "FORGE_E2E_SUBSTRATE_CHART_ARCHIVE",
-            "FORGE_E2E_RWX_STORAGE_CHART_ARCHIVE",
-        ):
-            self.assertIn(variable, helper)
+            self.assertNotIn(stale, workflow)
 
-    def test_control_plane_deployed_scenarios_are_required_when_selected(self) -> None:
-        workflow = (ROOT / ".github/workflows/e2e.yml").read_text()
-        job = workflow.split("  control-plane-kind:\n", 1)[1].split(
-            "\n  published-compatibility:\n", 1
-        )[0]
-        for target in (
-            "test-e2e-identity",
-            "test-e2e-work",
-            "test-e2e-artifact",
-            "test-e2e-browser",
-        ):
-            self.assertIn(f"target: {target}", job)
-        self.assertIn("playwright/package-lock.json", job)
-        self.assertIn("--with-deps chromium", job)
-        execution_job = workflow.split("  control-plane-execution-kind:\n", 1)[1].split(
-            "\n  published-compatibility:\n", 1
-        )[0]
-        self.assertIn("run: make test-e2e-execution", execution_job)
-        required = workflow.split("  required:\n", 1)[1]
-        self.assertIn("- control-plane-kind", required)
-        self.assertIn("- control-plane-execution-kind", required)
+    def test_removed_nightly_fixture_is_absent_from_repository(self) -> None:
+        self.assertFalse(
+            (ROOT / ".github/ci/nightly-selection-fixture.json").exists()
+        )
 
-    def test_control_plane_gates_are_fresh_and_isolation_is_required(self) -> None:
-        component_makefile = (ROOT / "control-plane/Makefile").read_text()
+    def test_helm_inputs_use_exact_archive_authority_without_repository_indexes(self) -> None:
+        helper = (ROOT / ".github/scripts/add_helm_repositories.sh").read_text()
+        builder = (ROOT / "charts/scripts/build-chart-dependency.sh").read_text()
+        manifest = json.loads((ROOT / ".github/inputs/remote-content.json").read_text())
+        self.assertNotIn("helm repo add", helper)
+        self.assertIn("remote_content.py", helper)
+        self.assertIn("remote_content.py", builder)
+        self.assertGreaterEqual(len(manifest["helm_charts"]), 9)
+        self.assertTrue(all(len(item["sha256"]) == 64 for item in manifest["helm_charts"]))
+
+    def test_harness_isolation_static_gate_remains_required(self) -> None:
         root_makefile = (ROOT / "Makefile").read_text()
         workflow = (ROOT / ".github/workflows/ci.yml").read_text()
-        harness_job = workflow.split("  harness:\n", 1)[1].split(
+        harness = workflow.split("  harness:\n", 1)[1].split(
             "\n  tool-runner:\n", 1
         )[0]
-
-        self.assertIn(
-            "go test -count=1 -coverprofile cover.out ./...", component_makefile
-        )
         self.assertIn("harness-isolation-test", root_makefile)
-        self.assertIn("run: make harness-isolation-test", harness_job)
-        self.assertNotIn("continue-on-error", harness_job)
+        self.assertIn("run: make harness-isolation-test", harness)
+        self.assertNotIn("continue-on-error", harness)
 
 
 if __name__ == "__main__":

@@ -53,7 +53,7 @@ spec:
     trustDomain: iterabase.local
     caSecretRef: {name: late-platform-ca}
   sandbox:
-    storageClassName: standard
+    storageClassName: iterabase-agentpool-lvm-xfs
     accessMode: ReadWriteOnce
     size: 1Gi
   gateways:
@@ -212,14 +212,14 @@ apiVersion: platform.iterabase.com/v1alpha1
 kind: AgentPool
 metadata: {name: execution-pool, namespace: iterabase-system}
 spec:
-  replicas: 1
+  replicas: 2
   workerImage: %s
   podSecurity: baseline
   identity:
     trustDomain: iterabase.local
     caSecretRef: {name: iterabase-control-plane-gateway-ca}
   sandbox:
-    storageClassName: standard
+    storageClassName: iterabase-agentpool-lvm-xfs
     accessMode: ReadWriteOnce
     size: 1Gi
   gateways:
@@ -239,6 +239,7 @@ spec:
   workspaceTools: true
   gatewayGrants:
     - {tool: platform.fixture_read, maxEffectClass: read_only}
+    - {tool: platform.fixture_barrier, maxEffectClass: read_only}
     - {tool: platform.fixture_upsert, maxEffectClass: idempotent_write}
     - {tool: platform.fixture_write, maxEffectClass: non_idempotent_write}
   credentialBindings:
@@ -267,12 +268,21 @@ func waitForAgentPoolReady(t *testing.T, state *deployedState, name string, time
 	var last string
 	err := poll.Until(state.ctx, timeout, time.Second, func(_ context.Context) (bool, string, error) {
 		out, err := state.client.Kubectl(state.ctx, 30*time.Second, "get", "agentpool/"+name, "-n", controlPlaneNamespace,
-			"-o", `jsonpath={.status.ready}|{.status.readyReplicas}|{.status.observedGeneration}|{.status.message}`)
+			"-o", `jsonpath={.spec.replicas}|{.status.ready}|{.status.readyReplicas}|{.status.observedGeneration}|{.status.message}`)
 		last = strings.TrimSpace(out)
 		if err != nil {
 			return false, last, err
 		}
-		return strings.HasPrefix(last, "true|"), last, nil
+		parts := strings.SplitN(last, "|", 5)
+		if len(parts) != 5 {
+			return false, last, nil
+		}
+		desired, desiredErr := strconv.Atoi(parts[0])
+		readyReplicas, readyErr := strconv.Atoi(parts[2])
+		if desiredErr != nil || readyErr != nil || desired < 1 {
+			return false, last, nil
+		}
+		return parts[1] == "true" && readyReplicas == desired, last, nil
 	})
 	if err == nil {
 		return
@@ -394,7 +404,17 @@ func exerciseWorkerLossCancellationStage(t *testing.T, state *deployedState) {
 	if err != nil {
 		t.Fatalf("slow model request did not start: %v", err)
 	}
-	pod := state.firstPod(t, "platform.iterabase.com/agentpool=execution-pool")
+	// With multiple Ready same-pool workers, kill the worker durably assigned to
+	// this exact turn rather than whichever pod happens to sort first.
+	pod := state.databaseQuery(t, fmt.Sprintf(`SELECT worker_id FROM runtime.turn_assignments WHERE attempt_id='%s' AND state='active'`, item.CurrentAttemptID))
+	if pod == "" {
+		t.Fatal("slow model turn has no active assigned worker")
+	}
+	poolLabel := state.kubectl(t, 30*time.Second, "get", "pod", pod, "-n", controlPlaneNamespace,
+		"-o", "jsonpath={.metadata.labels.platform\\.iterabase\\.com/agentpool}")
+	if poolLabel != "execution-pool" {
+		t.Fatalf("assigned worker %q has AgentPool label %q", pod, poolLabel)
+	}
 	oldUID := state.kubectl(t, 30*time.Second, "get", "pod", pod, "-n", controlPlaneNamespace, "-o", "jsonpath={.metadata.uid}")
 	state.kubectl(t, time.Minute, "delete", "pod", pod, "-n", controlPlaneNamespace, "--wait=true")
 	item = waitForWorkState(t, state, item.ID, "failed", 2*time.Minute)
@@ -422,6 +442,27 @@ func exerciseWorkerLossCancellationStage(t *testing.T, state *deployedState) {
 	})
 	if err != nil {
 		t.Fatalf("AgentPool did not replace the lost worker with a Ready process: %v (last %q)", err, replacement)
+	}
+}
+
+func exerciseConcurrentSamePoolWorkStage(t *testing.T, state *deployedState) {
+	t.Helper()
+	state.applyYAML(t, "same-pool-barrier.yaml", workflowYAML("same-pool-barrier", "e2e/same-pool-barrier", "1", "E2E_MODE:barrier", false,
+		[]string{"platform.fixture_barrier"}, "", ""))
+	waitForWorkflowReady(t, state, "same-pool-barrier", 30*time.Second)
+
+	first := startWorkflow(t, state, "e2e/same-pool-barrier", "Concurrent same-pool work A")
+	second := startWorkflow(t, state, "e2e/same-pool-barrier", "Concurrent same-pool work B")
+	first = waitForWorkState(t, state, first.ID, "done", 4*time.Minute)
+	second = waitForWorkState(t, state, second.ID, "done", 4*time.Minute)
+
+	assignmentEvidence := state.databaseQuery(t, fmt.Sprintf(`SELECT count(DISTINCT worker_id)::text || '|' || count(*)::text FROM runtime.turn_assignments WHERE attempt_id IN ('%s','%s')`, first.CurrentAttemptID, second.CurrentAttemptID))
+	if assignmentEvidence != "2|2" {
+		t.Fatalf("same-pool barrier did not consume two simultaneous worker credits: %q", assignmentEvidence)
+	}
+	invocations := state.databaseQuery(t, fmt.Sprintf(`SELECT count(*) FROM toolgateway.invocations WHERE attempt_id IN ('%s','%s') AND tool_name='platform.fixture_barrier' AND state='succeeded'`, first.CurrentAttemptID, second.CurrentAttemptID))
+	if invocations != "2" {
+		t.Fatalf("concurrency barrier did not settle both authenticated work items: %q", invocations)
 	}
 }
 

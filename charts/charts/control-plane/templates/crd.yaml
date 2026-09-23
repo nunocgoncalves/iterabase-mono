@@ -122,7 +122,6 @@ spec:
     subresources:
       status: {}
 ---
----
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
@@ -468,6 +467,54 @@ spec:
                   defaults to {nvidia.com/gpu.present: "true"} (applied by the GPU
                   Operator's GFD).
                 type: object
+              persistentVolumes:
+                description: |-
+                  persistentVolumes declares controller-owned serving PVCs. Each stable name
+                  maps to one deterministic ReadWriteOnce/Filesystem claim and absolute mount
+                  path. The managed class is explicit and fixed to iterabase-lvm-xfs in this
+                  single-node release. After any claim is provisioned, the claim set, names,
+                  mount paths, class, access mode, and volume mode are immutable; only a larger
+                  size is supported. The controller never adopts, replaces, copies, or cuts
+                  over an unrelated claim. Ignored for external backends, where declarations
+                  are rejected.
+                items:
+                  description: ModelBackendPersistentVolumeSpec declares one controller-owned
+                    serving PVC.
+                  properties:
+                    mountPath:
+                      description: |-
+                        mountPath is a unique absolute serving-container path. /dev/shm and paths
+                        used by explicit volumeMounts are reserved. /data/hf-cache is supported and
+                        backs the controller-managed HF_HOME default.
+                      pattern: ^/.*
+                      type: string
+                    name:
+                      description: name is the stable declaration and claim identity
+                        within this ModelBackend.
+                      maxLength: 63
+                      pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                      type: string
+                    size:
+                      anyOf:
+                      - type: integer
+                      - type: string
+                      description: size is the positive desired capacity. It may only
+                        grow after provisioning.
+                      pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                      x-kubernetes-int-or-string: true
+                    storageClassName:
+                      description: storageClassName explicitly selects the managed
+                        general OpenEBS LVM class.
+                      enum:
+                      - iterabase-lvm-xfs
+                      type: string
+                  required:
+                  - mountPath
+                  - name
+                  - size
+                  - storageClassName
+                  type: object
+                type: array
               replicas:
                 description: |-
                   replicas is the desired pod count. v1 runs a single replica; multi-replica
@@ -779,9 +826,10 @@ spec:
               volumeMounts:
                 description: |-
                   volumeMounts are extra container volume mounts, appended after the
-                  controller-managed hf-cache and dshm mounts. Reserved mount names
-                  `hf-cache` and `dshm` may not be reused. Pair with volumes to overlay
-                  file artifacts onto the serving image. Ignored for external.
+                  controller-managed persistent/ephemeral HF cache and dshm mounts. Reserved
+                  mount names `hf-cache` and `dshm` may not be reused. Pair with volumes to
+                  overlay file artifacts onto the serving image. Their mount paths may not
+                  collide with persistentVolumes. Ignored for external.
                 items:
                   description: VolumeMount describes a mounting of a Volume within
                     a container.
@@ -847,8 +895,8 @@ spec:
               volumes:
                 description: |-
                   volumes are extra pod volumes, appended after the controller-managed
-                  hf-cache (hostPath /data/hf-cache) and dshm (memory emptyDir /dev/shm)
-                  volumes. The reserved names `hf-cache` and `dshm` may not be reused —
+                  persistent/ephemeral hf-cache and dshm (memory emptyDir /dev/shm) volumes.
+                  The reserved names `hf-cache` and `dshm` may not be reused —
                   the reconciler rejects a CR that declares either. Use this for custom
                   vLLM builds that need file-artifact overlays (e.g. a ConfigMap of patch
                   .py files subPath-mounted over venv paths) or a PV. Ignored for external.
@@ -2770,7 +2818,10 @@ spec:
                   to HOR-307).
                 type: boolean
               lastReconciled:
-                description: lastReconciled is the time of the last successful reconciliation.
+                description: |-
+                  lastReconciled is the time the observed status last changed. It is
+                  refreshed only when another status field changes, not as a per-reconcile
+                  heartbeat.
                 format: date-time
                 type: string
               message:
@@ -2792,7 +2843,6 @@ spec:
     storage: true
     subresources:
       status: {}
----
 ---
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
@@ -2938,7 +2988,9 @@ spec:
                 description: healthy mirrors the referenced ModelBackend's health.
                 type: boolean
               lastChecked:
-                description: lastChecked is the time health was last evaluated.
+                description: |-
+                  lastChecked is the time the observed status last changed. It is refreshed
+                  only when another status field changes, not as a per-reconcile heartbeat.
                 format: date-time
                 type: string
               message:

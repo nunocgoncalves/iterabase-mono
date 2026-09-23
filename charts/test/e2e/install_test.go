@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -17,17 +18,21 @@ func freshInstallScenario() sharede2e.Definition {
 	return sharede2e.Define(sharede2e.Scenario[*chartState]{
 		Metadata: chartScenarioMetadata(
 			"fresh-install",
-			"Installs the ordered certificate substrate plus class-isolated public/private ingress planes, then proves manager, issuer, workload identity, fixed private allocation, route isolation, and verified gateway readiness.",
-			"test-e2e-install", 30,
-			[]string{"HOR-408", "HOR-414", "HOR-416", "HOR-475"},
+			"Installs ordered certificate and pinned OpenEBS LVM volume-only substrates plus class-isolated public/private ingress planes, then proves exact classes, claims, the inert LVMSnapshot deletion-safety boundary, CSI/user snapshot absence, manager, issuer, workload identity, fixed private allocation, route isolation, and verified gateway readiness.",
+			"test-e2e-install", 45,
+			[]string{"HOR-408", "HOR-414", "HOR-416", "HOR-475", "HOR-545", "HOR-557", "DES-HOR-545-01", "DES-HOR-545-05", "DES-HOR-545-07"},
 			[]string{"control-plane-chart", "inference-gateway-chart", "iterabase-platform-chart"},
 		),
 		NewState: newChartState,
 		Stages: []sharede2e.Stage[*chartState]{
 			{Name: "create-kind", Run: createKindStage},
-			{Name: "install-certificate-substrate", DependsOn: []string{"create-kind"}, Run: installCertificateSubstrateStage},
-			{Name: "install-minimal-platform-edge", DependsOn: []string{"install-certificate-substrate"}, Run: installMinimalPlatformEdgeStage},
-			{Name: "assert-manager-contract", DependsOn: []string{"install-minimal-platform-edge"}, Run: assertManagerContractStage},
+			{Name: "import-runtime-images", DependsOn: []string{"create-kind"}, Run: importRuntimeImagesStage},
+			{Name: "install-certificate-substrate", DependsOn: []string{"import-runtime-images"}, Run: installCertificateSubstrateStage},
+			{Name: "install-lvm-storage-substrate", DependsOn: []string{"install-certificate-substrate"}, Run: installLVMStorageStage},
+			{Name: "install-minimal-platform-edge", DependsOn: []string{"install-lvm-storage-substrate"}, Run: installMinimalPlatformEdgeStage},
+			{Name: "assert-openebs-lvm-claims", DependsOn: []string{"install-minimal-platform-edge"}, Run: assertOpenEBSLVMClaimsStage},
+			{Name: "assert-storage-snapshot-boundary", DependsOn: []string{"assert-openebs-lvm-claims"}, Run: assertStorageSnapshotBoundaryStage},
+			{Name: "assert-manager-contract", DependsOn: []string{"assert-openebs-lvm-claims"}, Run: assertManagerContractStage},
 			{Name: "assert-certificate-issuer", DependsOn: []string{"install-minimal-platform-edge"}, Run: assertCertificateIssuerStage},
 			{Name: "assert-workload-identity", DependsOn: []string{"assert-certificate-issuer"}, Run: assertWorkloadIdentityStage},
 			{Name: "assert-verified-edge", DependsOn: []string{"install-minimal-platform-edge", "assert-certificate-issuer"}, Run: assertVerifiedEdgeStage},
@@ -40,6 +45,62 @@ func freshInstallScenario() sharede2e.Definition {
 
 func installCertificateSubstrateStage(t *testing.T, state *chartState) {
 	state.installSubstrate(t)
+}
+
+func assertStorageSnapshotBoundaryStage(t *testing.T, state *chartState) {
+	t.Helper()
+	if got := strings.TrimSpace(state.kubectl(t, 30*time.Second, "get", "crd/lvmsnapshots.local.openebs.io", "-o", "name")); got != "customresourcedefinition.apiextensions.k8s.io/lvmsnapshots.local.openebs.io" {
+		t.Fatalf("inert LVMSnapshot CRD identity = %q", got)
+	}
+	if got := strings.TrimSpace(state.kubectl(t, 30*time.Second, "get", "lvmsnapshots.local.openebs.io", "-A", "-o", "name")); got != "" {
+		t.Fatalf("inert LVMSnapshot API contains forbidden instances: %s", got)
+	}
+	for _, name := range []string{
+		"volumesnapshotclasses.snapshot.storage.k8s.io",
+		"volumesnapshotcontents.snapshot.storage.k8s.io",
+		"volumesnapshots.snapshot.storage.k8s.io",
+	} {
+		if got := strings.TrimSpace(state.kubectl(t, 30*time.Second, "get", "crd/"+name, "--ignore-not-found=true", "-o", "name")); got != "" {
+			t.Fatalf("volume-only runtime exposes forbidden CSI snapshot CRD: %s", got)
+		}
+	}
+	for _, resource := range []string{"clusterrole/openebs-lvm-snapshotter-role", "clusterrolebinding/openebs-lvm-snapshotter-binding"} {
+		if got := strings.TrimSpace(state.kubectl(t, 30*time.Second, "get", resource, "--ignore-not-found=true", "-o", "name")); got != "" {
+			t.Fatalf("volume-only runtime exposes forbidden broad snapshot RBAC: %s", got)
+		}
+	}
+	policy := state.kubectl(t, 30*time.Second, "get", "validatingadmissionpolicy/iterabase-lvmsnapshot-create-deny", "-o", `jsonpath={.spec.failurePolicy}|{.spec.matchConstraints.resourceRules[0].apiGroups[0]}|{.spec.matchConstraints.resourceRules[0].apiVersions[0]}|{.spec.matchConstraints.resourceRules[0].operations[0]}|{.spec.matchConstraints.resourceRules[0].resources[0]}|{.spec.validations[0].expression}`)
+	if policy != "Fail|local.openebs.io|v1alpha1|CREATE|lvmsnapshots|false" {
+		t.Fatalf("LVMSnapshot deny policy contract = %q", policy)
+	}
+	binding := state.kubectl(t, 30*time.Second, "get", "validatingadmissionpolicybinding/iterabase-lvmsnapshot-create-deny", "-o", `jsonpath={.spec.policyName}|{.spec.validationActions[0]}`)
+	if binding != "iterabase-lvmsnapshot-create-deny|Deny" {
+		t.Fatalf("LVMSnapshot deny binding contract = %q", binding)
+	}
+	blocked := `apiVersion: local.openebs.io/v1alpha1
+kind: LVMSnapshot
+metadata:
+  name: forbidden-lvmsnapshot
+  namespace: ` + testNamespace + `
+spec:
+  ownerNodeID: forbidden
+  volGroup: iterabase-data
+status: {}
+`
+	blockedPath := state.writeManifest(t, "forbidden-lvmsnapshot.yaml", blocked)
+	out, err := state.kubectlResult(30*time.Second, "create", "-f", blockedPath)
+	if err == nil || !strings.Contains(out, "LVMSnapshot creation is disabled by DES-HOR-545-05") {
+		t.Fatalf("LVMSnapshot CREATE was not denied by the exact admission policy: err=%v output=%s", err, out)
+	}
+	if got := strings.TrimSpace(state.kubectl(t, 30*time.Second, "get", "lvmsnapshots.local.openebs.io", "-A", "-o", "name")); got != "" {
+		t.Fatalf("denied LVMSnapshot CREATE left instances: %s", got)
+	}
+	containers := strings.ToLower(state.kubectl(t, 30*time.Second, "get", "deployment", "-n", testNamespace, "-l", "app=openebs-lvm-controller", "-o", `jsonpath={range .items[*].spec.template.spec.containers[*]}{.name}{" "}{.image}{"\n"}{end}`))
+	if strings.Contains(containers, "snapshot") {
+		t.Fatalf("volume-only runtime exposes forbidden CSI snapshot container: %s", containers)
+	}
+	node := strings.TrimSpace(state.process(t, 30*time.Second, "kind", "get", "nodes", "--name", state.cluster.Name))
+	state.process(t, 30*time.Second, "docker", "exec", node, "bash", "-ceu", `if grep -q '^dm_snapshot ' /proc/modules; then exit 42; fi`)
 }
 
 func installMinimalPlatformEdgeStage(t *testing.T, state *chartState) {
@@ -80,6 +141,189 @@ func installMinimalPlatformEdgeStage(t *testing.T, state *chartState) {
 	assertCandidateImages(t, state)
 }
 
+func assertOpenEBSLVMClaimsStage(t *testing.T, state *chartState) {
+	t.Helper()
+	classes := strings.Fields(state.kubectl(t, 30*time.Second, "get", "storageclass", "-o", `jsonpath={range .items[*]}{.metadata.name}{"\n"}{end}`))
+	if len(classes) != 2 || !slices.Contains(classes, PlatformDataStorageClass) || !slices.Contains(classes, AgentPoolWorkspaceStorageClass) {
+		t.Fatalf("managed StorageClass set=%v", classes)
+	}
+	for _, class := range classes {
+		if expansion := state.kubectl(t, 30*time.Second, "get", "storageclass/"+class, "-o", "jsonpath={.allowVolumeExpansion}"); expansion != "true" {
+			t.Fatalf("managed StorageClass %s allowVolumeExpansion=%q want=true", class, expansion)
+		}
+	}
+	claims := strings.Fields(state.kubectl(t, 30*time.Second, "get", "pvc", "-A", "-o", `jsonpath={range .items[*]}{.metadata.namespace}/{.metadata.name}|{.spec.storageClassName}|{.status.phase}|{.spec.volumeName}{"\n"}{end}`))
+	if len(claims) == 0 {
+		t.Fatal("fresh platform rendered no data claims")
+	}
+	for _, claim := range claims {
+		parts := strings.Split(claim, "|")
+		if len(parts) != 4 || parts[1] != PlatformDataStorageClass || parts[2] != "Bound" || parts[3] == "" {
+			t.Fatalf("chart data claim is not explicitly Bound through the general LVM class: %s", claim)
+		}
+		pv := state.kubectl(t, 30*time.Second, "get", "pv/"+parts[3], "-o", `jsonpath={.spec.csi.driver}|{.spec.csi.fsType}|{.spec.csi.volumeAttributes.openebs\.io/volgroup}|{.spec.hostPath.path}`)
+		if pv != "local.csi.openebs.io|xfs|iterabase-data|" {
+			t.Fatalf("chart data PV %s has wrong CSI/XFS/VG/no-hostPath identity: %s", parts[3], pv)
+		}
+	}
+
+	// DES-HOR-545-01 claims authority: the AgentPool workspace class is authorized
+	// ONLY for the manager-created, AgentPool-owned PVC shape. A generic unrelated
+	// claim selecting it under a non-manager identity must be denied by the
+	// iterabase-agentpool-claim-authority ValidatingAdmissionPolicy (the chart
+	// installs it with the manager ServiceAccount as authorizedManagerIdentity).
+	blocked := `apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: unrelated-agentpool-claim, namespace: ` + testNamespace + `}
+spec:
+  accessModes: [ReadWriteOnce]
+  volumeMode: Filesystem
+  storageClassName: ` + AgentPoolWorkspaceStorageClass + `
+  resources: {requests: {storage: 512Mi}}
+`
+	blockedPath := state.writeManifest(t, "unrelated-agentpool-claim.yaml", blocked)
+	if _, err := state.kubectlResult(30*time.Second, "apply", "-f", blockedPath); err == nil {
+		t.Fatalf("an unrelated PVC selecting the AgentPool class was admitted; DES-HOR-545-01 requires the manager-owned AgentPool claim shape only")
+	}
+
+	// The claim-authority binding is cluster-wide (REQ-035: no unrelated claim may
+	// use the AgentPool class in ANY namespace, because the StorageClass and the
+	// manager watch are cluster-scoped). Prove the out-of-namespace bypass is
+	// closed: a generic PVC in a namespace other than the release namespace must
+	// be denied too, not just a same-namespace one.
+	crossNS := `apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: unrelated-agentpool-claim-cn, namespace: kube-system}
+spec:
+  accessModes: [ReadWriteOnce]
+  volumeMode: Filesystem
+  storageClassName: ` + AgentPoolWorkspaceStorageClass + `
+  resources: {requests: {storage: 512Mi}}
+`
+	crossNSPath := state.writeManifest(t, "unrelated-agentpool-claim-cn.yaml", crossNS)
+	if _, err := state.kubectlResult(30*time.Second, "apply", "-f", crossNSPath); err == nil {
+		t.Fatalf("a cross-namespace PVC selecting the AgentPool class was admitted; REQ-035 requires cluster-wide claim authority")
+	}
+
+	// UPDATE owner-replacement bypass: an existing AgentPool claim whose matching
+	// controller ownerReference is replaced with a different AgentPool {name,uid}
+	// at the same count must be denied. Keep a real (intentionally dependency-
+	// unready) AgentPool owner present so garbage collection cannot remove the
+	// admission test claim before its WFFC consumer binds it.
+	managerIdentity := "system:serviceaccount:" + testNamespace + ":" + testRelease + "-control-plane-manager"
+	agentOwner := `apiVersion: platform.iterabase.com/v1alpha1
+kind: AgentPool
+metadata: {name: ap-manager, namespace: ` + testNamespace + `}
+spec:
+  replicas: 0
+  workerImage: unavailable.invalid/harness:test
+  podSecurity: baseline
+  identity: {caSecretRef: {name: intentionally-missing-ca}}
+  sandbox: {storageClassName: iterabase-agentpool-lvm-xfs, accessMode: ReadWriteOnce, size: 512Mi}
+  gateways:
+    controlPlane: {url: https://control-plane.invalid:8443, serverName: control-plane, selector: {podSelector: {matchLabels: {app: control-plane}}}}
+    toolGateway: {url: https://tool-gateway.invalid:8443, serverName: tool-gateway, selector: {podSelector: {matchLabels: {app: tool-gateway}}}}
+    inferenceGateway: {url: https://inference-gateway.invalid:8443, serverName: inference-gateway, selector: {podSelector: {matchLabels: {app: inference-gateway}}}}
+`
+	agentOwnerPath := state.writeManifest(t, "manager-agentpool-owner.yaml", agentOwner)
+	state.kubectl(t, 30*time.Second, "apply", "-f", agentOwnerPath)
+	agentOwnerUID := state.kubectl(t, 30*time.Second, "get", "agentpool/ap-manager", "-n", testNamespace, "-o", "jsonpath={.metadata.uid}")
+	agentClaim := `apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: manager-agentpool-claim
+  namespace: ` + testNamespace + `
+  ownerReferences:
+    - apiVersion: platform.iterabase.com/v1alpha1
+      kind: AgentPool
+      name: ap-manager
+      uid: ` + agentOwnerUID + `
+      controller: true
+spec:
+  accessModes: [ReadWriteOnce]
+  volumeMode: Filesystem
+  storageClassName: ` + AgentPoolWorkspaceStorageClass + `
+  resources: {requests: {storage: 512Mi}}
+`
+	agentClaimPath := state.writeManifest(t, "manager-agentpool-claim.yaml", agentClaim)
+	if _, err := state.kubectlResult(30*time.Second, "create", "-f", agentClaimPath, "--as", managerIdentity); err != nil {
+		t.Fatalf("manager-identity + AgentPool-owned PVC selecting the class was denied on CREATE: %v", err)
+	}
+	if _, err := state.kubectlResult(30*time.Second, "patch", "pvc/manager-agentpool-claim", "-n", testNamespace, "--type=merge", "-p", `{"metadata":{"ownerReferences":[{"apiVersion":"platform.iterabase.com/v1alpha1","kind":"AgentPool","name":"ap-other","uid":"22222222-2222-2222-2222-222222222222","controller":true}]}}`); err == nil {
+		t.Fatalf("an AgentPool PVC UPDATE swapping its controller ownerReference to a different AgentPool was admitted; ownership must be immutable")
+	}
+	consumer := `apiVersion: v1
+kind: Pod
+metadata: {name: manager-agentpool-claim-consumer, namespace: ` + testNamespace + `}
+spec:
+  containers:
+    - name: hold
+      image: busybox:1.37.0@sha256:9db7b59979c38555a39def84a31fb98b5296952f9e3afd4f6f11f05b07adfab0
+      command: [sh, -ceu]
+      args: ['printf manager-growth > /data/marker; sync; sleep 600']
+      volumeMounts: [{name: data, mountPath: /data}]
+  volumes: [{name: data, persistentVolumeClaim: {claimName: manager-agentpool-claim}}]
+`
+	consumerPath := state.writeManifest(t, "manager-agentpool-claim-consumer.yaml", consumer)
+	state.kubectl(t, 30*time.Second, "apply", "-f", consumerPath)
+	state.kubectl(t, 5*time.Minute, "wait", "pod/manager-agentpool-claim-consumer", "-n", testNamespace, "--for=condition=Ready", "--timeout=4m")
+	if _, err := state.kubectlResult(30*time.Second, "patch", "pvc/manager-agentpool-claim", "-n", testNamespace, "--type=merge", "-p", `{"spec":{"resources":{"requests":{"storage":"768Mi"}}}}`); err == nil {
+		t.Fatalf("a non-manager identity raised an AgentPool PVC request")
+	}
+	if _, err := state.kubectlResult(30*time.Second, "patch", "pvc/manager-agentpool-claim", "-n", testNamespace, "--type=merge", "-p", `{"spec":{"resources":{"requests":{"storage":"768Mi"}}}}`, "--as", managerIdentity); err != nil {
+		t.Fatalf("the exact manager identity could not raise an AgentPool PVC request: %v", err)
+	}
+	if _, err := state.kubectlResult(30*time.Second, "patch", "pvc/manager-agentpool-claim", "-n", testNamespace, "--type=merge", "-p", `{"spec":{"resources":{"requests":{"storage":"512Mi"}}}}`, "--as", managerIdentity); err == nil {
+		t.Fatalf("the manager identity was allowed to shrink an AgentPool PVC request")
+	}
+	if got := state.kubectl(t, 30*time.Second, "get", "pvc/manager-agentpool-claim", "-n", testNamespace, "-o", "jsonpath={.spec.resources.requests.storage}"); got != "768Mi" {
+		t.Fatalf("grow-only admission changed the same request to %q, want 768Mi", got)
+	}
+	state.kubectl(t, 3*time.Minute, "delete", "pod/manager-agentpool-claim-consumer", "pvc/manager-agentpool-claim", "agentpool/ap-manager", "-n", testNamespace, "--ignore-not-found=true", "--wait=true", "--timeout=2m")
+
+	// Ubuntu 24.04 XFS refuses filesystems at or below 300 MB; keep this real
+	// lifecycle claim above that supported minimum rather than bypassing format.
+	manifest := `apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: lvm-lifecycle, namespace: iterabase-system}
+spec:
+  accessModes: [ReadWriteOnce]
+  volumeMode: Filesystem
+  storageClassName: iterabase-lvm-xfs
+  resources: {requests: {storage: 512Mi}}
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: lvm-lifecycle, namespace: iterabase-system}
+spec:
+  restartPolicy: Never
+  containers:
+    - name: write
+      image: busybox:1.37.0@sha256:9db7b59979c38555a39def84a31fb98b5296952f9e3afd4f6f11f05b07adfab0
+      command: [sh, -ceu]
+      args: ['printf lvm-lifecycle=pass > /data/marker; sync; test "$(cat /data/marker)" = lvm-lifecycle=pass']
+      volumeMounts: [{name: data, mountPath: /data}]
+  volumes: [{name: data, persistentVolumeClaim: {claimName: lvm-lifecycle}}]
+`
+	path := state.writeManifest(t, "lvm-lifecycle.yaml", manifest)
+	state.kubectl(t, 30*time.Second, "apply", "-f", path)
+	state.kubectl(t, 5*time.Minute, "wait", "pod/lvm-lifecycle", "-n", testNamespace, "--for=jsonpath={.status.phase}=Succeeded", "--timeout=4m")
+	pv := state.kubectl(t, 30*time.Second, "get", "pvc/lvm-lifecycle", "-n", testNamespace, "-o", `jsonpath={.spec.volumeName}`)
+	handle := state.kubectl(t, 30*time.Second, "get", "pv/"+pv, "-o", `jsonpath={.spec.csi.volumeHandle}`)
+	state.kubectl(t, 30*time.Second, "delete", "pod/lvm-lifecycle", "-n", testNamespace, "--wait=true", "--timeout=2m")
+	state.kubectl(t, 30*time.Second, "delete", "pvc/lvm-lifecycle", "-n", testNamespace, "--wait=true", "--timeout=2m")
+	deadline := time.Now().Add(3 * time.Minute)
+	for time.Now().Before(deadline) {
+		pvMissing := state.kubectl(t, 30*time.Second, "get", "pv/"+pv, "--ignore-not-found=true", "-o", "name") == ""
+		volumeMissing := state.kubectl(t, 30*time.Second, "get", "lvmvolume.local.openebs.io/"+handle, "-n", testNamespace, "--ignore-not-found=true", "-o", "name") == ""
+		if pvMissing && volumeMissing {
+			return
+		}
+		time.Sleep(2 * time.Second)
+	}
+	t.Fatalf("Delete reclaim left PV %s or LVMVolume %s", pv, handle)
+}
+
 func assertManagerContractStage(t *testing.T, state *chartState) {
 	t.Helper()
 	deployment := testRelease + "-control-plane-manager"
@@ -88,7 +332,7 @@ func assertManagerContractStage(t *testing.T, state *chartState) {
 	state.kubectl(t, 30*time.Second, "get", "crd", "agentpools.platform.iterabase.com", "workflows.platform.iterabase.com")
 	for _, resource := range []string{
 		"pods", "configmaps", "persistentvolumeclaims", "networkpolicies.networking.k8s.io",
-		"agentpools.platform.iterabase.com", "workflows.platform.iterabase.com",
+		"agentpools.platform.iterabase.com", "workflows.platform.iterabase.com", "lvmnodes.local.openebs.io", "lvmvolumes.local.openebs.io",
 	} {
 		if got := state.kubectl(t, 30*time.Second, "auth", "can-i", "list", resource, "--all-namespaces", "--as", subject); got != "yes" {
 			t.Fatalf("%s cannot list %s", subject, resource)
@@ -131,7 +375,7 @@ spec:
   restartPolicy: Never
   containers:
     - name: verify
-      image: busybox:1.37.0
+      image: busybox:1.37.0@sha256:9db7b59979c38555a39def84a31fb98b5296952f9e3afd4f6f11f05b07adfab0
       command: ["/bin/sh", "-c"]
       args: ["test -s /tls/tls.crt && test -s /tls/tls.key && test -s /tls/ca.crt"]
       volumeMounts:

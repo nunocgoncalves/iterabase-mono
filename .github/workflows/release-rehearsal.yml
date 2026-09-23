@@ -1,99 +1,73 @@
-name: Release system rehearsal
+name: Release immutability gate
 
 on:
   workflow_dispatch:
 
 concurrency:
-  group: release-system-rehearsal
+  group: release-immutability-gate
   cancel-in-progress: false
 
 permissions:
   contents: read
 
 jobs:
-  rehearse:
-    name: Founder-approved disposable release rehearsal
+  verify:
+    name: Founder-approved retained release gate
     runs-on: ubuntu-latest
     environment: release
     permissions:
+      actions: read
       contents: write
-      packages: write
+      deployments: read
     steps:
-      - name: Require rehearsal workflow from master
-        run: test '${{ github.ref }}' = refs/heads/master
+      - name: Require immutable control from master
+        env:
+          CONTROL_SHA: ${{ github.sha }}
+        run: |
+          test '${{ github.ref }}' = refs/heads/master
+          test "$CONTROL_SHA" = '${{ github.workflow_sha }}'
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: master
+          ref: ${{ github.sha }}
           fetch-depth: 0
-      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
-      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Configure protected-tag credential
+      - name: Configure the reviewed protected-tag deploy key
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG_SSH_KEY: ${{ secrets.RELEASE_TAG_SSH_KEY }}
         run: |
           test -n "$RELEASE_TAG_SSH_KEY"
           install -m 700 -d ~/.ssh
-          printf '%s\n' "$RELEASE_TAG_SSH_KEY" > ~/.ssh/release-tag
-          chmod 600 ~/.ssh/release-tag
+          printf '%s\n' "$RELEASE_TAG_SSH_KEY" > "$RUNNER_TEMP/release-tag"
+          chmod 600 "$RUNNER_TEMP/release-tag"
           gh api meta --jq '.ssh_keys[] | "github.com " + .' > ~/.ssh/known_hosts
           git remote set-url origin 'git@github.com:${{ github.repository }}.git'
-          git config core.sshCommand 'ssh -i ~/.ssh/release-tag -o IdentitiesOnly=yes'
+          git config core.sshCommand "ssh -i $RUNNER_TEMP/release-tag -o IdentitiesOnly=yes"
           git config user.name iterabase-release
           git config user.email release@iterabase.com
-      - name: Exercise package, protected tag, and prerelease APIs
+      - name: Reverify live release and deploy-key authority after founder approval
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REHEARSAL_TAG: dry-run/rehearsal-${{ github.run_id }}
-          IMAGE_TAG: rehearsal-${{ github.run_id }}
+          AUDIT_REPOSITORY_SECRETS: "false"
+          AUDIT_ADMIN_ENDPOINTS: "false"
+          RELEASE_TAG_KEY_FILE: ${{ runner.temp }}/release-tag
         run: |
-          cleanup() {
-            status=$?
-            set +e
-            gh release delete "$REHEARSAL_TAG" --yes
-            git push origin ":refs/tags/$REHEARSAL_TAG"
-            version_id="$(gh api --paginate /user/packages/container/control-plane/versions \
-              --jq '.[] | select(.metadata.container.tags[]? == env.IMAGE_TAG) | .id' | head -1)"
-            if [ -n "$version_id" ]; then
-              gh api --method DELETE "/user/packages/container/control-plane/versions/$version_id"
-            fi
-            exit "$status"
-          }
-          trap cleanup EXIT
-
-          context="$(mktemp -d)"
-          printf 'release rehearsal %s\n' '${{ github.run_id }}' > "$context/probe"
-          cat > "$context/Dockerfile" <<'EOF'
-          FROM scratch
-          COPY probe /probe
-          EOF
-          docker buildx build --push \
-            --tag "ghcr.io/${{ github.repository_owner }}/control-plane:$IMAGE_TAG" \
-            "$context"
-          docker buildx imagetools inspect "ghcr.io/${{ github.repository_owner }}/control-plane:$IMAGE_TAG"
-
-          git -c tag.gpgSign=false tag -a "$REHEARSAL_TAG" '${{ github.sha }}' -m "Disposable release rehearsal"
-          git push origin "refs/tags/$REHEARSAL_TAG"
-          printf 'release rehearsal %s\n' '${{ github.run_id }}' > rehearsal.txt
-          gh release create "$REHEARSAL_TAG" rehearsal.txt --verify-tag --prerelease \
-            --title "$REHEARSAL_TAG" --notes 'Disposable protected release-system rehearsal.'
-          gh release download "$REHEARSAL_TAG" --pattern rehearsal.txt --dir verified
-          cmp rehearsal.txt verified/rehearsal.txt
-      - name: Verify rehearsal cleanup
-        if: always()
+          test "$(git rev-parse HEAD)" = '${{ github.sha }}'
+          .github/scripts/audit_release_security.sh '${{ github.repository }}'
+      - name: Verify and safely probe the exact retained release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REHEARSAL_TAG: dry-run/rehearsal-${{ github.run_id }}
-          IMAGE_TAG: rehearsal-${{ github.run_id }}
         run: |
-          test -z "$(git ls-remote --tags origin "refs/tags/$REHEARSAL_TAG")"
-          if gh release view "$REHEARSAL_TAG"; then
-            echo "rehearsal release still exists" >&2
-            exit 1
-          fi
-          test -z "$(gh api --paginate /user/packages/container/control-plane/versions \
-            --jq '.[] | select(.metadata.container.tags[]? == env.IMAGE_TAG) | .id')"
+          .github/scripts/run_retained_release_gate.sh \
+            '${{ github.repository }}' '${{ github.sha }}' '${{ github.run_id }}'
+      - name: Reverify live authority after retained release probes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          AUDIT_REPOSITORY_SECRETS: "false"
+          AUDIT_ADMIN_ENDPOINTS: "false"
+          RELEASE_TAG_KEY_FILE: ${{ runner.temp }}/release-tag
+        run: .github/scripts/audit_release_security.sh '${{ github.repository }}'
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: immutable-release-gate-evidence
+          path: immutable-release-gate-evidence.json
+          retention-days: 90

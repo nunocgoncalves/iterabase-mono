@@ -1,6 +1,0 @@
-# BYO example. Replace the placeholder with the exact customer-operated class
-# that has passed docs/architecture/validation/hor-424-rwx-conformance.sh.
-storage:
-  rwx:
-    mode: external
-    storageClassName: customer-production-rwx

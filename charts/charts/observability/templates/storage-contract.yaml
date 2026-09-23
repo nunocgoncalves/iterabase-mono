@@ -1,0 +1,12 @@
+{{- if .Values.enabled }}
+{{- $class := "iterabase-lvm-xfs" }}
+{{- $alertmanager := index .Values "kube-prometheus-stack" "alertmanager" "alertmanagerSpec" "storage" "volumeClaimTemplate" "spec" "storageClassName" }}
+{{- $grafana := index .Values "kube-prometheus-stack" "grafana" "persistence" "storageClassName" }}
+{{- $prometheus := index .Values "kube-prometheus-stack" "prometheus" "prometheusSpec" "storageSpec" "volumeClaimTemplate" "spec" "storageClassName" }}
+{{- $loki := index .Values "loki" "singleBinary" "persistence" "storageClass" }}
+{{- range $component, $observed := dict "Alertmanager" $alertmanager "Grafana" $grafana "Prometheus" $prometheus "Loki" $loki }}
+{{- if ne $observed $class }}
+{{- fail (printf "%s storageClass must remain %s; default, alternate, and BYO classes are unsupported (observed %v)" $component $class $observed) }}
+{{- end }}
+{{- end }}
+{{- end }}

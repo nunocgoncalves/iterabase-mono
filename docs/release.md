@@ -1,33 +1,36 @@
 # Build-once affected-target bundles and protected promotion
 
-HOR-473 makes `master` an integration branch, not a publication trigger. The repository has three manual workflows:
+`master` is an integration branch, not a publication trigger. Publication uses
+four manual workflows:
 
-- **Release candidate** (`release-candidate.yml`) builds and validates an explicit affected-target bundle from one exact master SHA.
-- **Promote release** (`release-promote.yml`) verifies a successful candidate bundle and publishes its exact members after one founder approval in the protected `release` environment.
-- **Release system rehearsal** (`release-rehearsal.yml`) exercises and cleans up disposable package, protected-tag, and prerelease operations after release-system or permission changes.
+- **Release candidate** resolves one complete published baseline, then builds and
+  validates an explicit affected-target bundle from one exact SHA contained in
+  `master` (or from an exact branch head in rehearsal mode).
+- **Promote release** verifies a successful candidate run, publishes its unchanged
+  members non-Latest, and performs one final complete-cohort Latest handoff after
+  founder approval in the protected `release` environment.
+- **Roll back complete release baseline** verifies and selects one exact whole-snapshot
+  ancestor without editing any immutable Release, tag, manifest, or artifact.
+- **Release immutability gate** verifies the retained, non-semantic draft-first
+  publication against its exact tag, assets, and release attestation.
 
-No push to `master` or tag push publishes an artifact or GitHub Release.
+No push to `master`, tag push, merge, acceptance step, or rehearsal implicitly
+publishes a semantic artifact.
 
 ## Ticket acceptance and release intent
 
-Engineering acceptance and semantic publication are separate decisions. Every
-ticket's production-impact evidence must classify publication as one of:
+Every ticket classifies semantic publication as:
 
-- **Required for ticket acceptance:** the acceptance contract names the affected
-  release targets and requires published artifacts. After merge, run a candidate
-  from the exact current master SHA, promote that successful run through the
-  founder-approved environment, and record the run, release, tag, digest, and
-  checksum evidence before marking the ticket Done.
-- **Deferred to the product release gate:** the merged implementation can be
-  accepted as engineering delivery without publishing it. The containing
-  outcome's `product-release-review` decides when the coherent product release
-  is ready.
-- **None:** documentation, tests, source-control operations, or other work does
-  not alter a semantic artifact.
+- **Required for ticket acceptance:** after merge, the founder explicitly
+  selects release targets for the exact current master SHA; successful candidate,
+  promotion, and any named-environment deployment evidence block Done.
+- **Deferred to product release review:** engineering can be accepted without
+  publication; the product release gate later authorizes the target set.
+- **None:** no semantic artifact is required.
 
-Acceptance must never dispatch a release merely because a PR merged. When
-publication is required, target selection is explicit founder-reviewed release
-intent; path selection may inform the proposal but cannot choose it.
+Path selection may inform a proposal but never chooses semantic release intent.
+HOR-540 itself is **none**: its all-target candidate is a non-promoted validation
+rehearsal.
 
 ## Independently versioned targets
 
@@ -35,95 +38,286 @@ intent; path selection may inform the proposal but cannot choose it.
 | --- | --- | --- |
 | `control-plane` | `control-plane/VERSION` | control-plane, harness, and tool-runner images |
 | `inference-gateway` | `inference-gateway/VERSION` | inference-gateway image |
-| `forge` | `forge/VERSION` | Linux/macOS × amd64/arm64 archives in one GitHub Release |
+| `forge` | `forge/VERSION` | Linux/macOS × amd64/arm64 archives |
 | `control-plane-chart` | chart `Chart.yaml` | control-plane OCI chart |
 | `inference-gateway-chart` | chart `Chart.yaml` | inference-gateway OCI chart |
-| `iterabase-platform-chart` | chart `Chart.yaml` | platform chart plus same-version certificate and managed-RWX substrate companions |
+| `iterabase-platform-chart` | chart `Chart.yaml` | platform chart plus same-version certificate and LVM-storage substrate companions |
 
-The protected Git tags remain `control-plane-v<version>`, `inference-gateway-v<version>`, `forge-v<version>`, and `<chart>-<version>`. Targets keep independent versions and namespaced releases, but one product change may release any coherent subset together. Forge's platform matrix is one target, not four releases.
+Tags remain namespaced (`control-plane-v<version>`,
+`inference-gateway-v<version>`, `forge-v<version>`, and `<chart>-<version>`).
+Targets keep independent versions even when validated and promoted together.
+
+## Latest-anchored complete baseline authority
+
+Per `DES-HOR-554-01`, the repository-wide GitHub Latest full Release is the sole
+active published-baseline selection authority. Latest is only a mutable,
+founder-controlled pointer: a consumer resolves it once, then pins the exact
+Release ID/tag/source, canonical snapshot hash, target Release IDs/manifests,
+asset retrieval identities/digests, annotated tag objects, and attestations. Release listings,
+registry listings, semver maxima, mutable aliases, filenames, source versions,
+and `release/targets.json` cannot infer a baseline.
+
+`baseline-snapshot.json` schema v1 contains exactly all six target cohorts in
+repository order: four product images; control-plane, inference-gateway, platform,
+certificate, and LVM charts; all four Forge OS/architecture archives; and all
+named migration/predecessor fixtures. A target cohort has one version/source/run
+and cannot mix manifests or provenance. Every image is digest-qualified; every
+chart carries exact OCI digest plus archive filename/size/SHA-256; Forge carries
+all four exact protected-Release URLs and byte identities. Validation is complete,
+not scenario-filtered.
+
+The hard-bounded bootstrap accepts only immutable Latest Release ID `386705918`
+and exact sibling Releases `386705747`, `386705816`, and `386705691`, all from
+candidate `34541902001` and source
+`b4b32b14d6ab89a85db24fc198879fdfe9621d2a`. It verifies the exact v2 manifests,
+all bytes and attestations, inherited inference identities, and historical
+fixtures in memory. Any other legacy Latest fails. Bootstrap creates or mutates
+nothing; the first later promotion establishes schema-v3 snapshot-bearing
+Releases.
+
+See [`architecture/release-baseline-snapshots.md`](architecture/release-baseline-snapshots.md)
+for schema, verification, failure, retry, and trust-boundary details.
+
+## Single artifact and E2E authority
+
+`release/targets.json` owns target/version identity and every reviewed production
+recipe: Docker context/file/arguments/labels, Helm dependency/package steps,
+companion membership, and Forge GoReleaser config/version. The same recipe hashes
+are consumed by temporary PR builders and candidate builders.
+
+The candidate's execution plan is produced by `.github/scripts/e2e.py`, the same
+planner used by PR E2E. Explicit requested targets
+select a conservative union from compiled owner registrations. Each selected
+scenario retains the same ID, owner Make target, timeout/capacity metadata, and
+stage DAG used in source mode. There is no chart-only matrix, pre-catalogue
+fallback, or duplicate candidate planner.
 
 ## Candidate bundle flow
 
 Dispatch **Release candidate** from `master` with:
 
-- a comma-separated target set such as `control-plane,control-plane-chart,forge`; and
-- one full commit SHA contained in `master`.
+- a non-empty comma-separated target set;
+- one full SHA contained in `master`; and
+- `baseline_anchor_release_id`, the exact numeric GitHub Latest Release ID the
+  candidate must use as its parent.
 
-The workflow trims and validates the explicit target set, rejects empty, unknown, or duplicate members, and canonicalizes it in repository target order. CI may suggest affected targets, but it does not silently choose release intent. Every selected version is inferred from source; callers cannot supply conflicting versions.
+The workflow trims, validates, deduplicates, and canonicalizes targets in
+repository order. Versions are read from source authority; callers cannot supply
+conflicting versions.
 
-1. Preflight validates the repository release contract, exact source membership, target set, version authorities, production-tag uniqueness, and absence of every planned semantic image/chart identity. Existing semantic artifacts or an unavailable registry fail before builds and validation begin.
-2. Every selected target is built exactly once. Image targets push canonical digests plus immutable full-SHA aliases in existing GHCR packages. Chart and Forge archives remain Actions artifacts; candidate runs create no persistent run-specific package namespace.
-3. Validation consumes all selected candidates together. For example, a selected control-plane chart installs the selected control-plane image digest, and selected Forge validation runs with both. Shared owner, chart, Kind, and real-machine suites are deduplicated into one union.
-4. Any unselected dependency used by validation resolves to an explicit, reviewed, already-published baseline. Candidate evidence distinguishes selected candidate identities from baseline dependencies; it never treats a bumped but unpublished repository version as an available baseline.
-5. A generated bundle bill of materials records source SHA, selected target/version pairs, exact artifact identities, published baselines, native chart dependencies, fixture inputs, and validation result. There is no hand-maintained global compatibility manifest.
-6. The final `release-candidate` Actions artifact contains the canonical plan, evidence, exact chart/Forge files, checksums, SBOMs, and image digest metadata. It is retained for 90 days pending promotion or expiry.
+For an explicit pre-merge validation rehearsal, dispatch the same workflow from
+the ticket branch with `rehearsal: true` and the exact dispatch-head SHA. That
+mode skips only existing semantic destination availability checks; it still
+builds, composes, executes, reconciles, and retains the complete candidate
+bundle. A rehearsal is structurally non-promotable: promotion accepts only a
+successful candidate workflow whose recorded head branch is `master` and whose
+source is contained in `master`. Rehearsal does not publish or promote semantic
+artifacts.
+
+1. **Preflight** resolves `GET /releases/latest` exactly once and requires its
+   exact ID to equal `baseline_anchor_release_id`. It then verifies the complete
+   snapshot, exact checkout/membership, recipes, version authorities, candidate
+   alias uniqueness, semantic destination availability, and compiled candidate
+   routing before emitting any build matrix. No downstream job re-resolves Latest.
+2. **Build once.** Selected product images are pushed by digest and receive one
+   immutable run-scoped alias `<source-sha>-<run-id>-<run-attempt>`. Selected
+   chart/companion and Forge outputs remain retained Actions artifacts. Every
+   external Helm archive is downloaded directly through
+   `.github/inputs/remote-content.json`, and its reviewed SHA-256 is verified
+   before packaging; mutable repository indexes are not authority. A bounded
+   retry recovers transport only and never accepts changed bytes. Candidate
+   product chart scenarios do not reacquire those inputs. Required validation-only
+   artifacts are exact-source temporary Actions artifacts and can never be
+   promoted.
+3. **Compose once per scenario.** The shared composer verifies every selected or
+   baseline digest/checksum/source/recipe identity, composes selected nested
+   charts into the exact platform archive, and supplies the same runtime-bundle
+   schema used by PR execution.
+4. **Execute the compiled union.** F2 and mandatory F3 jobs invoke the same owner
+   scenario and stage graph. Each CPU/GPU path shares its literal
+   `iterabase-permanent-fixture-<capacity>` non-canceling lock across PR, master,
+   and candidate workflows. Independent CPU and GPU hosts may run concurrently.
+5. **Reconcile actual evidence.** Candidate validation requires exactly one
+   machine-readable result per planned scenario and one passed terminal result
+   per declared stage. The aggregate reads the retained plan and a compact,
+   explicit job-result map from files rather than expanding the full plan and
+   dependency graph into the process environment. Missing/extra/skipped/blocked/
+   canceled results or identity mismatches fail even when a matrix job itself
+   appears successful.
+6. **Retain promotion trust.** The 90-day `release-candidate` artifact contains
+   the normalized plan, complete per-scenario/stage/runtime identity records,
+   selected candidate files and metadata, checksums, SBOMs, and the generated
+   candidate evidence record. Plan and evidence bind the repository, workflow
+   path, manual event, workflow-control SHA, run ID, and run attempt in addition
+   to the independently selected source SHA.
+
+Selected targets may never resolve to baselines. Every unselected release-capable
+artifact comes from the one pinned complete snapshot, including all images,
+charts/companions, all four Forge variants, and named transition fixtures. A
+missing row fails planning; it never creates `selected-temporary`, `version:
+"source"`, a source filename, registry lookup, or per-artifact Latest inference.
+`selected-temporary` remains valid only for an intentionally affected PR artifact
+or a recipe explicitly marked `temporary_only`.
+
+Temporary and candidate artifact custody differs; recipes and assertions do not.
+The retained candidate contains complete candidate and planned-final snapshots;
+unselected target cohorts and fixtures are inherited byte-for-byte from the
+pinned parent.
+Temporary artifacts expire and have no semantic names. Candidate identities are
+immutable and retained for no-rebuild promotion.
 
 ## Promotion flow
 
-Dispatch **Promote release** from `master` with the successful candidate workflow run ID.
+Dispatch **Promote release** from `master` with the successful candidate run ID.
+Both jobs check out and assert the immutable workflow-dispatch control SHA;
+`master` is never resolved again as executable promotion code. The candidate
+source remains independently allowed to be any explicit full SHA contained in
+`master`. Before approval the workflow verifies:
 
-Before approval, the workflow verifies:
+- repository and head-repository identity, exact workflow path, manual event,
+  workflow-control SHA, run ID/attempt, master branch, and successful run;
+- source SHA containment in `master`;
+- normalized plan and all retained asset checksums;
+- exact selected target/version/alias identities; and
+- the complete reconciled scenario/stage/runtime result set.
 
-- the run belongs to this repository's `Release candidate` workflow;
-- it was manually dispatched from `master` and concluded successfully;
-- its source SHA remains contained in `master`;
-- every selected target is known and source-versioned;
-- its plan and every artifact checksum match the candidate evidence.
+The publication job then waits once for founder approval in the protected
+`release` environment. After approval it reasserts the control checkout and
+workflow SHA; re-queries candidate workflow/run/source authority; re-verifies
+candidate bytes, source containment, environment, collaborator, and common
+protected-tag authority; and preflights every semantic image, chart, tag, and
+GitHub Release destination—including governed published metadata, complete bytes,
+and immutable state—before the first mutation. It then:
 
-The publication job then waits once for founder approval in the protected `release` environment. After approval it re-verifies the bundle and preflights **every** semantic image, chart, protected tag, and GitHub Release destination before the first mutation. It then:
+- rechecks that the candidate's exact parent Release ID is still Latest;
+- adds semantic image tags to the exact tested digests;
+- pushes unchanged chart/companion archives;
+- creates or verifies protected namespaced tags at the exact source SHA;
+- creates all selected Release drafts explicitly non-Latest, captures their exact
+  database IDs, derives the final complete snapshot, and uploads each target's
+  exact files, identical `baseline-snapshot.json`, and schema-v3 manifest;
+- verifies and publishes every complete draft with REST `make_latest: "false"`;
+- rechecks the parent immediately before visibility changes; and
+- performs one REST `make_latest: "true"` update on the highest selected target
+  in repository target order, then re-resolves and fully verifies the exact new
+  anchor and cohort.
 
-- adds semantic image tags to the tested digests;
-- pushes unchanged chart archives;
-- creates or verifies each protected namespaced Git tag at the exact source SHA; and
-- creates one GitHub Release per selected target, attaching that target's exact candidate files plus the shared bundle plan and evidence.
+Nothing is rebuilt. An unpublished draft may be replaced in full on retry. An
+existing published Release is verification-only: its governed metadata,
+immutable state, complete member set, sizes, and bytes must already match, and
+promotion never uploads a late member or changes a published asset. Other identical completed image/chart/tag members are verified
+and skipped; conflicts fail closed.
 
-Nothing is rebuilt. GitHub and GHCR do not provide a cross-package transaction, so promotion is resumable rather than falsely atomic: an identical already-published member is verified and skipped, a missing member continues, and any conflicting digest, archive, tag, or Release asset fails closed.
+## Permanent fixtures and incomplete candidates
 
-## Generated compatibility evidence
+Every selected F3 scenario is mandatory. Candidate execution uses the same fixed
+CPU/GPU addresses, pinned SSH identities, data-storage devices, explicit
+pre/post-test purge/reboot lifecycle, and GPU model-cache authority as source
+execution. The active scenario IDs are `forge/permanent-fixture-cpu`,
+`forge/permanent-fixture-cpu-workspace`, and
+`forge/permanent-fixture-gpu`; grouped result/diagnostic artifacts use
+`candidate-result-permanent-fixture-<capacity>` and
+`candidate-diagnostics-permanent-fixture-<capacity>`. Results retain those
+fixture identities alongside exact artifact and stage evidence.
 
-Compatibility evidence answers “what exact combination did this bundle prove?” It is generated from actual inputs:
+A missing fixture-scoped key, unreachable host, host-key/device drift, corrupt
+model cache, or failed cleanup/reboot produces a failing classification and
+retained redacted diagnostics. It never becomes a skip, retry, or pass-on-retry.
+Actions has no provider credential and cannot power-cycle, rescue, reimage,
+replace, or delete a fixture. Founder-operated quarantine/recovery must restore
+the runbook baseline before a new candidate dispatch.
 
-- selected component `VERSION` files and chart metadata;
-- selected chart dependencies;
-- explicit published baseline identities for unselected dependencies;
-- E2E fixture constants;
-- image digests and archive checksums;
-- source SHA and deduplicated selected scenarios.
+## Post-merge immutable-release gate
 
-The scenario set is compiled from each owner `TestE2E` entrypoint via `make e2e-catalogue`. Scenario metadata—not `release/targets.json` or changed-file narrowing—associates release targets with Kind/real-machine Make targets, bounds, and mandatory CPU/GPU capacity. A coordinated request takes the conservative union. The release target file retains artifact/version authority only.
+After the controlling change merges, the founder approves **Release immutability
+gate**. Its least-privilege protected `GITHUB_TOKEN` never calls the admin-only
+repository immutable-release setting endpoint. The workflow instead audits every
+accessible invariant, including the protected environment, environment deploy-key
+identity, common tag-ruleset shape, founder-only writer set, fixture callers,
+provider-authority absence, and immutable control checkout.
 
-Targets retain independent versions. A bundle records a tested combination without imposing a synthetic lockstep platform version.
+The gate resolves only retained Release database ID `382723775` and tag
+`dry-run/immutable-release-gate-v1`; it has no Release-create, Release-delete,
+or replacement path. Before any presentation repair, it fails closed unless the
+Release reports immutable and matches the retained source commit, annotated
+tag object, exact two asset IDs/names/sizes/digests/downloaded bytes, governed
+body/prerelease state,
+and GitHub-generated release attestation. `gh release verify` must bind the exact
+tag object and complete asset digest set, and `gh release verify-asset` must
+validate each downloaded member. The title may be restored from only the known
+failed-probe value `forbidden` to its governed tag value after those checks; an
+already-restored title is accepted.
 
-## Release-system rehearsal
+GitHub immutable Releases cryptographically lock the associated tag and assets
+and attest that set. Presentation metadata such as title, notes, prerelease/latest
+state remains governed expected state but is mutable, and Release existence is
+not an immutability guarantee. The live gate therefore probes only late asset
+upload, retained-asset deletion, remote tag force-update, and remote tag deletion.
 
-The rehearsal is manual and is not part of normal candidate or promotion execution. It runs through the real protected `release` environment and environment-scoped credentials, creates a unique temporary image manifest in the existing control-plane package, creates a protected `dry-run/rehearsal-<run-id>` tag and prerelease, verifies them, and removes all three before completing.
+Each asset command is bound to its exact retained upload or asset-ID endpoint,
+must fail, and must expose exactly one HTTP 422 protocol status. Each tag command
+uses the exact update or deletion refspec with `git push --porcelain`, must fail,
+and must expose exactly one `!` record for that refspec classified as
+`[remote rejected]`. Response bodies and Git rejection reasons are not parsed or
+retained as authority. Success, authentication/authorization, wrong resource or
+ref, rate limiting, transport failure, local rejection, malformed or multiple
+records, and every non-422 HTTP result fail closed.
 
-Run it only when commissioning or changing release workflow code, environment permissions, package permissions, deploy keys, or tag rulesets. Workflow logs provide the durable audit; it leaves no release catalogue or candidate-package namespace.
+After each probe, before the next mutation is attempted, the gate freshly
+re-fetches and compares the complete baseline: release identity and immutable
+response, governed presentation, annotated tag object/target, complete asset
+identities and downloaded bytes, the release attestation, and both per-asset
+attestations. A mismatch reports only bounded operation, process, protocol, and
+state fields. Redacted evidence retains all four protocol results and immediate
+state comparisons for 90 days without claiming that presentation or Release
+deletion is cryptographically locked.
+
+After the behavioral gate succeeds, an authenticated administrator runs
+`make release-security-audit` from the resulting `master` authority. That audit
+is the sole direct proof that the repository immutable-release setting is exactly
+enabled and retains the admin-only deploy-key, bypass-actor, workflow-permission,
+secret, and variable checks.
 
 ## Protection and operator audit
 
-The `release` environment must require founder review, permit only `master`, and hold `RELEASE_TAG_SSH_KEY`. The active tag ruleset protects production namespaces plus `dry-run/**`. Because GitHub grants deploy-key bypass by actor class, the release key must remain the repository's only write deploy key.
-
-Before release and after repository-key or ruleset changes:
+The `release` environment must require founder review, permit only `master`, and
+hold `RELEASE_TAG_SSH_KEY`. The active ruleset protects production namespaces
+and `dry-run/**`. The release deploy key must remain the repository's only write
+deploy key. The complete push/maintain/admin collaborator set must remain exactly
+`nunocgoncalves`; repository secrets must remain exactly the CPU/GPU fixture keys;
+and immutable releases must remain enabled. Protected workflow invocations set
+`AUDIT_ADMIN_ENDPOINTS=false`; they preserve accessible checks but neither call
+nor claim direct evidence from the immutable-release setting or other admin-only
+endpoints. The authenticated admin invocation is fail-closed when the setting is
+disabled, malformed, or unavailable.
 
 ```bash
+make release-check
 make release-security-audit
 
 test "$(gh api repos/nunocgoncalves/iterabase-mono/keys \
   --jq '[.[] | select(.read_only == false)] | length')" -eq 1
 ```
 
-The sole write key must be `iterabase protected release tags (validated)`. Repository default workflow permissions remain read-only; only candidate image jobs receive package write, and only the approved promotion/rehearsal job receives publication permissions.
+Repository default workflow permissions remain read-only. Only candidate image
+jobs receive package write. Publication and Latest mutation permissions remain
+scoped to founder-approved promotion, protected whole-snapshot rollback, and the
+retained immutability rehearsal boundary.
 
-## Local validation
+## Complete-snapshot rollback
 
-```bash
-make release-check
-python3 .github/scripts/test_select_ci.py
-```
+Normal promotion and rollback share the literal, non-canceling
+`release-promotion` concurrency group. Dispatch **Roll back complete release
+baseline** from `master` with exact current and destination anchor Release IDs, a
+Linear identifier, and a reason. After founder approval, it verifies both
+complete immutable snapshots and follows exact parent links without a Release
+listing. The destination must be a whole-snapshot ancestor; partial target
+rollback is denied and requires a new candidate.
 
-Release-only implementation changes are handled by these focused contract checks. Changes to affected-target selection or shared CI/test infrastructure deliberately fan out broadly because they can invalidate every selection decision.
-
-## Rollback
-
-No overlay deploys automatically. Consumers continue pinning immutable versions. Disable or revert the manual workflows to stop publication. Never overwrite or delete an immutable production release to roll back behavior; publish a corrected version and update consumers deliberately. If publication stops between bundle members, resume the exact verified candidate rather than rebuilding it.
+Rollback changes only the GitHub Latest selection pointer with one
+`make_latest: "true"` update and a complete post-update re-verification. It never
+edits, deletes, retags, overwrites, or rebuilds Releases, tags, manifests, assets,
+or historical evidence. No overlay deploys automatically. If publication stops
+between members, retry the same exact candidate: completed immutable members are
+verification-only, drafts are replaced in full, and no build or E2E execution is
+repeated during promotion.

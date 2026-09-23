@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"sync/atomic"
 	"time"
@@ -78,14 +79,15 @@ func (c Config) defaults() Config {
 // bidi stream, worker fencing, one-credit dispatch, durable TurnEvent ACK/dedup,
 // cancellation and worker-loss semantics, and the dispatch reconciler.
 type Service struct {
-	store       *Store
-	work        *workstore.Store
-	cfg         Config
-	pool        *workerPool
-	gen         atomic.Uint64 // global monotonic fencing-generation counter
-	log         *slog.Logger
-	reconcileCh chan struct{}
-	metrics     *cpmetrics.Metrics
+	store             *Store
+	work              *workstore.Store
+	cfg               Config
+	pool              *workerPool
+	gen               atomic.Uint64 // global monotonic fencing-generation counter
+	log               *slog.Logger
+	reconcileCh       chan struct{}
+	metrics           *cpmetrics.Metrics
+	nextCapacitySweep time.Time
 }
 
 // NewService builds a dispatch Service. cfg is defaulted.
@@ -100,21 +102,30 @@ func NewService(store *Store, cfg Config, log *slog.Logger) *Service {
 // isolated dispatch tests do not need a Prometheus registry.
 func (s *Service) SetMetrics(metrics *cpmetrics.Metrics) { s.metrics = metrics }
 
-// SeedGeneration initializes the in-memory fencing-generation counter from the
-// durable high-water mark in runtime.turn_assignments so a restarted control
-// plane never reuses a prior generation value. The first connection after a
-// restart advertises max+1, strictly greater than any durable prior
-// assignment's gen; combined with the unconditional reconnect fence this
-// guarantees a fenced/terminal prior assignment can never be confused with
-// the new active one (HOR-249 reconnect fencing). Must be called once before
-// serving traffic; idempotent for tests.
+// SeedGeneration initializes the in-memory fencing-generation counter and the
+// per-pool workspace gates from durable Postgres state before serving traffic.
+// The turn high-water mark prevents generation reuse; each pool's capacity row
+// prevents a restart from reopening its credit inside the 20-25% band.
+// Must be called once before serving traffic; idempotent for tests.
 func (s *Service) SeedGeneration(ctx context.Context) error {
 	max, err := s.store.MaxFencingGeneration(ctx)
 	if err != nil {
 		return fmt.Errorf("seed fencing generation: %w", err)
 	}
+	capacities, err := s.store.LoadWorkspaceCapacityStates(ctx)
+	if err != nil {
+		return fmt.Errorf("seed workspace capacity gates: %w", err)
+	}
 	s.gen.Store(max)
-	s.log.Info("seeded fencing generation counter", "from_durable_max", max)
+	for _, poolID := range s.pool.syncWorkspaceCapacity(capacities) {
+		s.deleteWorkspaceMetrics(poolID)
+	}
+	s.nextCapacitySweep = time.Now().Add(30 * time.Second)
+	for _, capacity := range capacities {
+		s.observeWorkspaceMetrics(capacity)
+	}
+	s.log.Info("seeded fencing generation and per-pool workspace capacity gates", "from_durable_max", max,
+		"workspace_pool_states", len(capacities))
 	return nil
 }
 
@@ -146,7 +157,7 @@ func identityFromContext(ctx context.Context) (spiffe.Identity, bool) {
 // --- Harness.Work bidi handler ---
 
 // Work is the one long-lived bidi stream per warm worker. Worker->CP: Hello,
-// Ready, Heartbeat, TurnEvent, TokenDelta. CP->worker: Welcome, AssignTurn,
+// Ready, WorkspaceStatus, Heartbeat, TurnEvent, TokenDelta. CP->worker: Welcome, AssignTurn,
 // AbortTurn, EventAck, SessionEnd.
 //
 //nolint:gocyclo // the bidi receive loop is naturally branchy; kept flat.
@@ -275,15 +286,31 @@ func (s *Service) Work(ctx context.Context, st *connect.BidiStream[v1.WorkerMess
 
 			switch m := msg.Kind.(type) {
 			case *v1.WorkerMessage_Ready:
-				// One credit. Legal only when no turn is active; a Ready while busy
-				// is a protocol violation (stream closed fail-closed). The busy
-				// check + credit grant are one locked worker operation so the
-				// reconciler cannot race an assignment between them.
-				if !w.grantCreditIfIdle() {
+				granted, valid := w.grantCreditIfIdle()
+				if !valid {
 					return connect.NewError(connect.CodeFailedPrecondition,
-						errors.New("ready while a turn is active is a protocol violation (one-credit dispatch)"))
+						errors.New("ready without a current workspace status or while a turn is active is a protocol violation"))
 				}
-				s.kickReconciler()
+				if granted {
+					s.kickReconciler()
+				}
+			case *v1.WorkerMessage_WorkspaceStatus:
+				if err := validateWorkspaceStatus(m.WorkspaceStatus); err != nil {
+					return connect.NewError(connect.CodeInvalidArgument, err)
+				}
+				ws := m.WorkspaceStatus
+				capacity, err := s.store.ObserveWorkspaceCapacity(ctx, w.poolID, ws.GetFreeBytes(), ws.GetCapacityBytes(), ws.GetFreeRatio())
+				if err != nil {
+					return connect.NewError(connect.CodeUnavailable, fmt.Errorf("persist AgentPool workspace capacity gate: %w", err))
+				}
+				freshCreditGated := capacity.freshCreditGated()
+				if s.pool.applyWorkspaceStatus(w, capacity.FreeBytes, capacity.CapacityBytes, capacity.FreeRatio, capacity.Warning, freshCreditGated) {
+					s.kickReconciler()
+				}
+				s.observeWorkspaceMetrics(capacity)
+				if freshCreditGated {
+					s.log.Warn("workspace or storage-identity gate is withholding fresh credit", "pool", w.poolID, "worker", w.workerID, "free_bytes", capacity.FreeBytes, "free_ratio", capacity.FreeRatio, "capacity_gated", capacity.CreditGated, "storage_authorized", capacity.StorageAuthorized)
+				}
 			case *v1.WorkerMessage_Heartbeat:
 				// Any message renews the lease; nothing else to do.
 			case *v1.WorkerMessage_TurnEvent:
@@ -296,6 +323,79 @@ func (s *Service) Work(ctx context.Context, st *connect.BidiStream[v1.WorkerMess
 			}
 		}
 	}
+}
+
+func (s *Service) syncWorkspaceCapacityState(ctx context.Context) error {
+	capacities, err := s.store.LoadWorkspaceCapacityStates(ctx)
+	if err != nil {
+		return fmt.Errorf("sync active workspace capacity states: %w", err)
+	}
+	for _, poolID := range s.pool.syncWorkspaceCapacity(capacities) {
+		s.deleteWorkspaceMetrics(poolID)
+	}
+	return nil
+}
+
+func (s *Service) syncWorkspaceCapacityStateIfDue(ctx context.Context, now time.Time) {
+	if !s.nextCapacitySweep.IsZero() && now.Before(s.nextCapacitySweep) {
+		return
+	}
+	if err := s.syncWorkspaceCapacityState(ctx); err != nil {
+		s.log.Warn("sync workspace capacity state", "error", err)
+		return
+	}
+	s.nextCapacitySweep = now.Add(30 * time.Second)
+}
+
+func (s *Service) deleteWorkspaceMetrics(poolID string) {
+	if s.metrics == nil {
+		return
+	}
+	s.metrics.DispatchWorkspaceFreeBytes.DeleteLabelValues(poolID)
+	s.metrics.DispatchWorkspaceCapacity.DeleteLabelValues(poolID)
+	s.metrics.DispatchWorkspaceFreeRatio.DeleteLabelValues(poolID)
+	s.metrics.DispatchWorkspaceWarning.DeleteLabelValues(poolID)
+	s.metrics.DispatchWorkspaceGated.DeleteLabelValues(poolID)
+}
+
+func (s *Service) observeWorkspaceMetrics(state WorkspaceCapacityState) {
+	if s.metrics == nil {
+		return
+	}
+	s.metrics.DispatchWorkspaceFreeBytes.WithLabelValues(state.PoolID).Set(float64(state.FreeBytes))
+	s.metrics.DispatchWorkspaceCapacity.WithLabelValues(state.PoolID).Set(float64(state.CapacityBytes))
+	s.metrics.DispatchWorkspaceFreeRatio.WithLabelValues(state.PoolID).Set(state.FreeRatio)
+	if state.Warning {
+		s.metrics.DispatchWorkspaceWarning.WithLabelValues(state.PoolID).Set(1)
+	} else {
+		s.metrics.DispatchWorkspaceWarning.WithLabelValues(state.PoolID).Set(0)
+	}
+	if state.CreditGated {
+		s.metrics.DispatchWorkspaceGated.WithLabelValues(state.PoolID).Set(1)
+	} else {
+		s.metrics.DispatchWorkspaceGated.WithLabelValues(state.PoolID).Set(0)
+	}
+}
+
+func validateWorkspaceStatus(status *v1.WorkspaceStatus) error {
+	if status == nil || status.GetCapacityBytes() == 0 || status.GetFreeBytes() > status.GetCapacityBytes() {
+		return errors.New("workspace status has invalid byte capacity")
+	}
+	ratio := status.GetFreeRatio()
+	computed := float64(status.GetFreeBytes()) / float64(status.GetCapacityBytes())
+	if math.IsNaN(ratio) || math.IsInf(ratio, 0) || ratio < 0 || ratio > 1 || math.Abs(ratio-computed) > 0.000001 {
+		return errors.New("workspace status free ratio does not match available blocks")
+	}
+	if status.GetWarning() != (ratio < 0.25) {
+		return errors.New("workspace status warning does not match the 25 percent threshold")
+	}
+	if ratio <= 0.20 && !status.GetCreditGated() {
+		return errors.New("workspace status must gate credit at or below 20 percent free")
+	}
+	if ratio >= 0.25 && status.GetCreditGated() {
+		return errors.New("workspace status must reopen credit at or above 25 percent free")
+	}
+	return nil
 }
 
 // welcome builds the Welcome control message for a fencing generation.
@@ -828,6 +928,7 @@ func (s *Service) expireLeases(ctx context.Context) {
 func (s *Service) reconcileOnce(ctx context.Context) {
 	started := time.Now()
 	result := "success"
+	s.syncWorkspaceCapacityStateIfDue(ctx, started)
 	if s.metrics != nil {
 		s.metrics.DispatchPendingWork.WithLabelValues().Set(0)
 	}
@@ -922,7 +1023,11 @@ func (s *Service) dispatchGraphRun(ctx context.Context, run runtime.Run) {
 	}
 	poolID, err := s.store.PoolForRun(ctx, run.ID)
 	if err != nil {
-		s.log.Warn("graph run has no pool assignment", "run", run.ID, "error", err)
+		if errors.Is(err, ErrPoolStorageUnauthorized) {
+			s.log.Warn("graph run fresh credit withheld until AgentPool storage is authoritatively observed", "run", run.ID)
+		} else {
+			s.log.Warn("graph run has no pool assignment", "run", run.ID, "error", err)
+		}
 		return
 	}
 	w := s.pool.pickIdle(poolID, turn.ID)
@@ -932,20 +1037,25 @@ func (s *Service) dispatchGraphRun(ctx context.Context, run runtime.Run) {
 		}
 		return
 	}
-	assignErr := s.assignGraph(ctx, turn, run, node, poolID, w)
+	deliveryAttempted, assignErr := s.assignGraph(ctx, turn, run, node, poolID, w)
 	s.observeAssignment(assignErr)
 	if assignErr != nil {
 		s.log.Warn("assign graph turn", "turn", turn.ID, "error", assignErr)
-		w.releaseTurn()
+		w.releaseAssignmentFailure(turn.ID, deliveryAttempted)
 		s.kickReconciler()
 	}
 }
 
+// assignGraph reports whether AssignTurn entered the stream send. Before that
+// boundary an error is proven undelivered, so the caller restores the same
+// Ready intent; once send starts, delivery is ambiguous and the credit remains
+// consumed while the existing fence/loss path settles the assignment.
+//
 //nolint:gocyclo // Assignment validates and stamps the complete immutable graph execution envelope.
-func (s *Service) assignGraph(ctx context.Context, turn runtime.Turn, run runtime.Run, node workstore.NodeExecution, poolID string, w *workerConn) error {
+func (s *Service) assignGraph(ctx context.Context, turn runtime.Turn, run runtime.Run, node workstore.NodeExecution, poolID string, w *workerConn) (bool, error) {
 	assignment, err := s.work.GetAssignmentContext(ctx, node.ID)
 	if err != nil {
-		return err
+		return false, err
 	}
 	var model struct {
 		ID              string `json:"id"`
@@ -955,11 +1065,11 @@ func (s *Service) assignGraph(ctx context.Context, turn runtime.Turn, run runtim
 		ThinkingLevel   string `json:"thinkingLevel"`
 	}
 	if err := json.Unmarshal(node.ModelSnapshot, &model); err != nil || model.ID == "" {
-		return fmt.Errorf("invalid graph model snapshot: %w", err)
+		return false, fmt.Errorf("invalid graph model snapshot: %w", err)
 	}
 	uid, err := s.store.AllocateSessionUID(ctx, run.SessionID, s.cfg.SessionUIDBase, s.cfg.SessionUIDRange, s.cfg.SessionUIDGrace)
 	if err != nil {
-		return fmt.Errorf("allocate session uid: %w", err)
+		return false, fmt.Errorf("allocate session uid: %w", err)
 	}
 	prompt := ""
 	if node.Prompt != nil {
@@ -990,12 +1100,12 @@ func (s *Service) assignGraph(ctx context.Context, turn runtime.Turn, run runtim
 	in := AssignmentInput{
 		TurnID: turn.ID, RunID: run.ID, PoolID: poolID, WorkerID: w.workerID,
 		FencingGeneration: w.gen, AttemptID: run.ID, ScopeIdentityID: run.ScopeIdentityID,
-		AgentPoolKey: assignment.AgentPoolKey, ModelPermission: node.ModelSnapshot,
-		CapabilityRequest: node.CapabilitiesSnapshot, ToolVersionSnapshot: assignment.ToolPins,
+		AgentPoolKey: assignment.AgentPoolKey, SessionID: run.SessionID, SandboxUID: uid, SandboxGID: uid,
+		ModelPermission: node.ModelSnapshot, CapabilityRequest: node.CapabilitiesSnapshot, ToolVersionSnapshot: assignment.ToolPins,
 		WorkItemID: assignment.WorkItemID, NodeExecutionID: node.ID,
 	}
 	if _, err := s.store.CreateAssignment(ctx, in); err != nil {
-		return err
+		return false, err
 	}
 	if err := w.send(msg); err != nil {
 		if a, ferr := s.store.FenceWorkerGenerationIf(ctx, poolID, w.workerID, w.gen); ferr == nil {
@@ -1003,7 +1113,7 @@ func (s *Service) assignGraph(ctx context.Context, turn runtime.Turn, run runtim
 				s.log.Warn("graph assign send failed: terminalize turn", "turn", a.TurnID, "error", tErr)
 			}
 		}
-		return err
+		return true, err
 	}
 	s.log.Info("assigned graph turn", "turn", turn.ID, "run", run.ID, "node", node.NodeKey, "visit", node.Visit, "worker", w.workerID)
 	if node.TimeoutMS != nil {
@@ -1023,7 +1133,7 @@ func (s *Service) assignGraph(ctx context.Context, turn runtime.Turn, run runtim
 			}
 		}(ctx)
 	}
-	return nil
+	return true, nil
 }
 
 // dispatchRun ensures a running run has an active, assigned turn. If the run has
@@ -1086,7 +1196,11 @@ func (s *Service) dispatchRun(ctx context.Context, run runtime.Run) {
 	// Assign to an idle worker in the run's pool.
 	poolID, err := s.store.PoolForRun(ctx, run.ID)
 	if err != nil {
-		s.log.Warn("run has no pool assignment", "run", run.ID, "error", err)
+		if errors.Is(err, ErrPoolStorageUnauthorized) {
+			s.log.Warn("run fresh credit withheld until AgentPool storage is authoritatively observed", "run", run.ID)
+		} else {
+			s.log.Warn("run has no pool assignment", "run", run.ID, "error", err)
+		}
 		return
 	}
 	w := s.pool.pickIdle(poolID, turn.ID)
@@ -1096,11 +1210,11 @@ func (s *Service) dispatchRun(ctx context.Context, run runtime.Run) {
 		}
 		return // no idle worker; retry on next tick / Ready.
 	}
-	assignErr := s.assign(ctx, turn, run, poolID, w)
+	deliveryAttempted, assignErr := s.assign(ctx, turn, run, poolID, w)
 	s.observeAssignment(assignErr)
 	if assignErr != nil {
 		s.log.Warn("assign turn", "turn", turn.ID, "error", assignErr)
-		w.releaseTurn()
+		w.releaseAssignmentFailure(turn.ID, deliveryAttempted)
 		s.kickReconciler()
 	}
 }
@@ -1130,19 +1244,19 @@ func (s *Service) runningStepID(ctx context.Context, runID string) (string, erro
 	return "", runtime.ErrNotFound
 }
 
-// assign records the active assignment and sends AssignTurn to the worker. The
-// worker's credit is already consumed by pickIdle; on failure the caller must
-// release it.
-func (s *Service) assign(ctx context.Context, turn runtime.Turn, run runtime.Run, poolID string, w *workerConn) error {
+// assign records the active assignment and sends AssignTurn to the worker. It
+// reports whether AssignTurn entered the stream send, matching assignGraph's
+// proven-undelivered credit-restoration boundary.
+func (s *Service) assign(ctx context.Context, turn runtime.Turn, run runtime.Run, poolID string, w *workerConn) (bool, error) {
 	model := s.cfg.DefaultModel
 	if model == nil || model.Id == "" {
 		// Dispatch must not emit an empty model permission (HOR-249). The
 		// reconciler gates on this before starting a turn; guard again here.
-		return errors.New("no default model configured; cannot assign turn")
+		return false, errors.New("no default model configured; cannot assign turn")
 	}
 	uid, err := s.store.AllocateSessionUID(ctx, run.SessionID, s.cfg.SessionUIDBase, s.cfg.SessionUIDRange, s.cfg.SessionUIDGrace)
 	if err != nil {
-		return fmt.Errorf("allocate session uid: %w", err)
+		return false, fmt.Errorf("allocate session uid: %w", err)
 	}
 	gid := uid
 	msg := &v1.ControlMessage{Kind: &v1.ControlMessage_AssignTurn{AssignTurn: &v1.AssignTurn{
@@ -1164,16 +1278,19 @@ func (s *Service) assign(ctx context.Context, turn runtime.Turn, run runtime.Run
 		AttemptID:           run.ID, // v1: attempt identity = run id (HOR-254 may add a first-class attempts table)
 		ScopeIdentityID:     run.ScopeIdentityID,
 		AgentPoolKey:        poolID, // pool UID; the CR "<ns>/<name>" is resolved by HOR-252
+		SessionID:           run.SessionID,
+		SandboxUID:          uid,
+		SandboxGID:          gid,
 		ModelPermission:     mustJSON(model),
 		CapabilityRequest:   []byte("[]"),
 		ToolVersionSnapshot: []byte("[]"),
 	}
 	if _, err := s.store.CreateAssignment(ctx, in); err != nil {
-		return err
+		return false, err
 	}
 	if err := w.send(msg); err != nil {
-		// Send failed: the assignment is recorded active but the worker never
-		// received it. Fence (generation-qualified CAS) + terminalize as worker
+		// Send failed after crossing the delivery-attempt boundary, so receipt is
+		// ambiguous. Fence (generation-qualified CAS) + terminalize as worker
 		// loss using the assignment returned by the fence (the row is no longer
 		// active after fencing, so ResolveActiveAssignment would miss it).
 		if a, ferr := s.store.FenceWorkerGenerationIf(ctx, poolID, w.workerID, w.gen); ferr == nil {
@@ -1181,10 +1298,10 @@ func (s *Service) assign(ctx context.Context, turn runtime.Turn, run runtime.Run
 				s.log.Warn("assign send failed: terminalize turn", "turn", a.TurnID, "error", tErr)
 			}
 		}
-		return err
+		return true, err
 	}
 	s.log.Info("assigned turn", "turn", turn.ID, "run", run.ID, "pool", poolID, "worker", w.workerID, "gen", w.gen)
-	return nil
+	return true, nil
 }
 
 func mustJSON(v any) []byte {

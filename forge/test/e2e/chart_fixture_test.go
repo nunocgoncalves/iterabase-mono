@@ -13,8 +13,8 @@ const (
 	pinnedPlatformChartVersion     = "0.3.11"
 	pinnedControlPlaneChartVersion = "0.4.9" // release fixture authority; Forge no longer installs this chart directly
 
-	// The CPU cloud scenario starts here only to prove the real ownership handoff
-	// into pinnedPlatformChartVersion. It is not the scenario's desired version.
+	// Release-fixture authority for the chart owner's preserved certificate
+	// ownership history. Current Forge scenarios do not install this baseline.
 	certificateMigrationSourceVersion = "0.2.2"
 )
 

@@ -89,7 +89,12 @@ charts-check:
 	$(MAKE) -C charts check
 
 release-check:
+	python3 .github/scripts/test_e2e.py
+	python3 .github/scripts/test_release_baseline.py
 	python3 .github/scripts/test_release.py
+	python3 .github/scripts/test_remote_content.py
+	python3 .github/scripts/remote_content.py validate
+	python3 .github/scripts/e2e.py validate-contract
 	python3 .github/scripts/release.py validate
 
 release-security-audit:

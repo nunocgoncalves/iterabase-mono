@@ -8,9 +8,6 @@ import (
 	"github.com/nunocgoncalves/iterabase-mono/forge/internal/config"
 )
 
-// InstallScriptURL is the official k3s install script.
-const InstallScriptURL = "https://get.k3s.io"
-
 // ServerArgs builds the k3s `server` flags from a cluster config. Output is
 // deterministic (labels sorted by key) so installs are reproducible.
 func ServerArgs(cfg *config.Cluster) []string {
@@ -23,8 +20,16 @@ func ServerArgs(cfg *config.Cluster) []string {
 	args = append(args, "--flannel-backend=vxlan")
 	args = append(args, "--tls-san", host.Address) // so the off-host kubeconfig verifies
 
+	disabled := make(map[string]struct{}, len(k.Disable)+1)
 	for _, d := range k.Disable {
+		if _, duplicate := disabled[d]; duplicate {
+			continue
+		}
+		disabled[d] = struct{}{}
 		args = append(args, "--disable", d)
+	}
+	if _, configured := disabled["local-storage"]; !configured {
+		args = append(args, "--disable", "local-storage")
 	}
 
 	for _, key := range sortedKeys(host.Labels) {

@@ -109,8 +109,8 @@ type ModelBackendSpec struct {
 	Env []corev1.EnvVar `json:"env,omitempty"`
 
 	// volumes are extra pod volumes, appended after the controller-managed
-	// hf-cache (hostPath /data/hf-cache) and dshm (memory emptyDir /dev/shm)
-	// volumes. The reserved names `hf-cache` and `dshm` may not be reused —
+	// persistent/ephemeral hf-cache and dshm (memory emptyDir /dev/shm) volumes.
+	// The reserved names `hf-cache` and `dshm` may not be reused —
 	// the reconciler rejects a CR that declares either. Use this for custom
 	// vLLM builds that need file-artifact overlays (e.g. a ConfigMap of patch
 	// .py files subPath-mounted over venv paths) or a PV. Ignored for external.
@@ -118,11 +118,23 @@ type ModelBackendSpec struct {
 	Volumes []corev1.Volume `json:"volumes,omitempty"`
 
 	// volumeMounts are extra container volume mounts, appended after the
-	// controller-managed hf-cache and dshm mounts. Reserved mount names
-	// `hf-cache` and `dshm` may not be reused. Pair with volumes to overlay
-	// file artifacts onto the serving image. Ignored for external.
+	// controller-managed persistent/ephemeral HF cache and dshm mounts. Reserved
+	// mount names `hf-cache` and `dshm` may not be reused. Pair with volumes to
+	// overlay file artifacts onto the serving image. Their mount paths may not
+	// collide with persistentVolumes. Ignored for external.
 	// +optional
 	VolumeMounts []corev1.VolumeMount `json:"volumeMounts,omitempty"`
+
+	// persistentVolumes declares controller-owned serving PVCs. Each stable name
+	// maps to one deterministic ReadWriteOnce/Filesystem claim and absolute mount
+	// path. The managed class is explicit and fixed to iterabase-lvm-xfs in this
+	// single-node release. After any claim is provisioned, the claim set, names,
+	// mount paths, class, access mode, and volume mode are immutable; only a larger
+	// size is supported. The controller never adopts, replaces, copies, or cuts
+	// over an unrelated claim. Ignored for external backends, where declarations
+	// are rejected.
+	// +optional
+	PersistentVolumes []ModelBackendPersistentVolumeSpec `json:"persistentVolumes,omitempty"`
 
 	// hostIPC sets pod-level hostIPC. Default false. vLLM tensor-parallel on a
 	// single multi-GPU pod normally only needs the sized /dev/shm tmpfs
@@ -147,6 +159,28 @@ type ModelBackendSpec struct {
 	// kind is external.
 	// +optional
 	External *ExternalBackendSpec `json:"external,omitempty"`
+}
+
+// ModelBackendPersistentVolumeSpec declares one controller-owned serving PVC.
+// +kubebuilder:object:generate=true
+type ModelBackendPersistentVolumeSpec struct {
+	// name is the stable declaration and claim identity within this ModelBackend.
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	// +kubebuilder:validation:MaxLength=63
+	Name string `json:"name"`
+
+	// mountPath is a unique absolute serving-container path. /dev/shm and paths
+	// used by explicit volumeMounts are reserved. /data/hf-cache is supported and
+	// backs the controller-managed HF_HOME default.
+	// +kubebuilder:validation:Pattern=`^/.*`
+	MountPath string `json:"mountPath"`
+
+	// storageClassName explicitly selects the managed general OpenEBS LVM class.
+	// +kubebuilder:validation:Enum=iterabase-lvm-xfs
+	StorageClassName string `json:"storageClassName"`
+
+	// size is the positive desired capacity. It may only grow after provisioning.
+	Size resource.Quantity `json:"size"`
 }
 
 // HealthProbeSpec configures the backend health probe.
@@ -203,7 +237,9 @@ type ModelBackendStatus struct {
 	// +optional
 	ServiceURL string `json:"serviceURL,omitempty"`
 
-	// lastReconciled is the time of the last successful reconciliation.
+	// lastReconciled is the time the observed status last changed. It is
+	// refreshed only when another status field changes, not as a per-reconcile
+	// heartbeat.
 	// +optional
 	LastReconciled *metav1.Time `json:"lastReconciled,omitempty"`
 

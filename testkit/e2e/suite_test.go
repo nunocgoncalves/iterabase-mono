@@ -1,6 +1,9 @@
 package e2e
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -56,6 +59,74 @@ func TestStageFailureKeepsIndependentWorkAndLifecycleHooks(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(directory, "dependent")); !os.IsNotExist(err) {
 		t.Fatalf("dependent stage ran despite failed prerequisite: %v", err)
+	}
+}
+
+func TestRequiredSkipIsIncompleteAndStillRunsIndependentWorkAndCleanup(t *testing.T) {
+	if os.Getenv("ITERABASE_E2E_SKIP_HELPER") == "1" {
+		suite := helperSuite([]Stage[*helperState]{
+			{Name: "skips", Run: func(t *testing.T, _ *helperState) { t.Skip("forced skip") }},
+			{Name: "blocked", DependsOn: []string{"skips"}, Run: func(t *testing.T, state *helperState) { writeMarker(t, state.directory, "blocked") }},
+			{Name: "independent", Run: func(t *testing.T, state *helperState) { writeMarker(t, state.directory, "skip-independent") }},
+		}, []Hook[*helperState]{{Name: "record", Run: func(t *testing.T, state *helperState) { writeMarker(t, state.directory, "skip-cleanup") }}}, nil)
+		suite.Run(t)
+		return
+	}
+	directory := t.TempDir()
+	plan := filepath.Join(directory, "plan.json")
+	if err := os.WriteFile(plan, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	planData, err := os.ReadFile(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	planDigest := sha256.Sum256(planData)
+	bundle := RuntimeBundle{
+		SchemaVersion: 1, Intent: IntentPR, SourceSHA: strings.Repeat("a", 40),
+		PlanSHA256: hex.EncodeToString(planDigest[:]), CatalogueSHA256: strings.Repeat("b", 64),
+	}
+	bundleData, err := json.Marshal(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundlePath := filepath.Join(directory, "bundle.json")
+	if err := os.WriteFile(bundlePath, append(bundleData, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	resultPath := filepath.Join(directory, "result.json")
+	command := exec.Command(os.Args[0], "-test.run=^TestRequiredSkipIsIncompleteAndStillRunsIndependentWorkAndCleanup$")
+	command.Env = append(os.Environ(),
+		"ITERABASE_E2E_SKIP_HELPER=1",
+		"ITERABASE_E2E_HELPER_DIR="+directory,
+		RequiredEnv+"=true",
+		RuntimeBundleEnv+"="+bundlePath,
+		ExecutionPlanEnv+"="+plan,
+		ScenarioIDEnv+"=helper/lifecycle",
+		ResultOutputEnv+"="+resultPath,
+	)
+	output, err := command.CombinedOutput()
+	if err == nil {
+		t.Fatalf("required forced skip unexpectedly passed:\n%s", output)
+	}
+	for _, name := range []string{"skip-independent", "skip-cleanup"} {
+		if _, err := os.Stat(filepath.Join(directory, name)); err != nil {
+			t.Fatalf("%s did not run: %v\n%s", name, err, output)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(directory, "blocked")); !os.IsNotExist(err) {
+		t.Fatalf("blocked stage ran: %v", err)
+	}
+	var result ScenarioResult
+	data, err := os.ReadFile(resultPath)
+	if err != nil {
+		t.Fatalf("required result missing: %v\n%s", err, output)
+	}
+	if err := json.Unmarshal(data, &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "incomplete" || len(result.Stages) != 3 || result.Stages[0].Status != string(stageSkipped) || result.Stages[1].Status != string(stageBlocked) || result.Stages[2].Status != string(stagePassed) {
+		t.Fatalf("required skip result = %+v", result)
 	}
 }
 

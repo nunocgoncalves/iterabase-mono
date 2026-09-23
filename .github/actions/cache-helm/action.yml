@@ -15,7 +15,7 @@ runs:
         cd "$GITHUB_WORKSPACE"
         mapfile -t metadata < <(find charts/charts -type f \( -name Chart.lock -o -name Chart.yaml \) -print | sort)
         [ "${#metadata[@]}" -gt 0 ] || { echo "no Helm metadata found" >&2; exit 1; }
-        digest=$(python3 .github/scripts/content_digest.py .github/tools/checksums.txt "${metadata[@]}")
+        digest=$(python3 .github/scripts/content_digest.py .github/inputs/remote-content.json "${metadata[@]}")
         key="${{ runner.os }}-${{ runner.arch }}-helm-downloads-$(helm version --template '{{.Version}}')-${{ inputs.cache-scope }}-${digest}"
         echo "key=$key" >> "$GITHUB_OUTPUT"
         echo "Helm cache key: $key"

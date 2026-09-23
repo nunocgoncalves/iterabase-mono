@@ -57,10 +57,15 @@ func WithSSHConfig(c *ssh.ClientConfig) Option {
 // SSH agent as fallback). Encrypted keys must be agent-loaded (no passphrase
 // prompt).
 func New(host config.Host, opts ...Option) (*SSHProvisioner, error) {
+	hostKeyCallback, hostKeyAlgorithms, err := configuredHostKey(host.SSHHostKey)
+	if err != nil {
+		return nil, err
+	}
 	cfg := &ssh.ClientConfig{
-		User:            host.SSHUser,
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(), //nolint:gosec // TODO: known_hosts pinning
-		Timeout:         10 * time.Second,
+		User:              host.SSHUser,
+		HostKeyCallback:   hostKeyCallback,
+		HostKeyAlgorithms: hostKeyAlgorithms,
+		Timeout:           10 * time.Second,
 	}
 	p := &SSHProvisioner{host: host, cfg: cfg, dial: defaultDial}
 	for _, opt := range opts {
@@ -74,6 +79,21 @@ func New(host config.Host, opts ...Option) (*SSHProvisioner, error) {
 		}
 	}
 	return p, nil
+}
+
+func configuredHostKey(value string) (ssh.HostKeyCallback, []string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ssh.InsecureIgnoreHostKey(), nil, nil //nolint:gosec // backward-compatible interactive config
+	}
+	publicKey, _, _, rest, err := ssh.ParseAuthorizedKey([]byte(value + "\n"))
+	if err != nil {
+		return nil, nil, fmt.Errorf("parse pinned SSH host key: %w", err)
+	}
+	if len(bytes.TrimSpace(rest)) != 0 {
+		return nil, nil, fmt.Errorf("parse pinned SSH host key: unexpected trailing data")
+	}
+	return ssh.FixedHostKey(publicKey), []string{publicKey.Type()}, nil
 }
 
 // Close releases the underlying SSH connection.
@@ -178,8 +198,13 @@ func (p *SSHProvisioner) run(ctx context.Context, cmd string) (string, error) {
 // Preflight implements provisioner.Provisioner.
 func (p *SSHProvisioner) Preflight(ctx context.Context) (*provisioner.PreflightResult, error) {
 	r := &provisioner.PreflightResult{}
-	if out, err := p.run(ctx, "cat /etc/os-release"); err == nil {
-		r.OS = parseOS(out)
+	out, err := p.run(ctx, "cat /etc/os-release")
+	if err != nil {
+		return nil, fmt.Errorf("inspect operating system: %w", err)
+	}
+	r.OS = parseOS(out)
+	if r.OS == "" {
+		return nil, fmt.Errorf("inspect operating system: /etc/os-release has no PRETTY_NAME")
 	}
 	if _, err := p.run(ctx, "sudo -n true"); err == nil {
 		r.HasSudo = true
@@ -198,32 +223,53 @@ func (p *SSHProvisioner) Preflight(ctx context.Context) (*provisioner.PreflightR
 	}
 	// GPU preflight checks (read-only; only meaningful when GPU is enabled).
 	// NVIDIA GPU on the PCI bus via the vendor ID (0x10de) — no driver or
-	// pciutils needed. Kernel-headers presence via the /usr/src dir the driver
-	// container mounts.
+	// pciutils needed. Driver-build dependency checks use the exact paths and
+	// executables consumed by the GPU Operator driver container.
 	if _, err := p.run(ctx, "grep -qi 0x10de /sys/bus/pci/devices/*/vendor"); err == nil {
 		r.HasNVIDIAGPU = true
 	}
-	if _, err := p.run(ctx, "test -d /usr/src/linux-headers-$(uname -r)"); err == nil {
+	if _, err := p.run(ctx, "test -f /lib/modules/$(uname -r)/build/Makefile"); err == nil {
 		r.KernelHeadersInstalled = true
 	}
-	if _, err := p.run(ctx, "command -v iscsiadm >/dev/null && systemctl is-active --quiet iscsid"); err == nil {
-		r.HasISCSI = true
+	if _, err := p.run(ctx, "command -v dkms"); err == nil {
+		r.HasDKMS = true
 	}
-	if _, err := p.run(ctx, "command -v mount.nfs >/dev/null"); err == nil {
-		r.HasNFSv4 = true
+	if _, err := p.run(ctx, "command -v gcc"); err == nil {
+		r.HasGCC = true
 	}
-	if _, err := p.run(ctx, "findmnt -n -o PROPAGATION / | grep -Eq '(^|,)r?shared(,|$)'"); err == nil {
-		r.HasMountPropagation = true
+	if _, err := p.run(ctx, "command -v make"); err == nil {
+		r.HasMake = true
 	}
 	return r, nil
 }
 
 // Install implements provisioner.Provisioner.
 func (p *SSHProvisioner) Install(ctx context.Context, version string, serverArgs []string) error {
-	cmd := fmt.Sprintf("curl -sfL %s | sudo env INSTALL_K3S_VERSION=%s sh -s - %s",
-		k3s.InstallScriptURL, shellQuote(k3s.ResolveVersion(version)), joinArgs(serverArgs))
-	_, err := p.run(ctx, cmd)
-	return err
+	resolvedVersion := k3s.ResolveVersion(version)
+	if _, err := p.installReviewedRemoteTool(ctx, "k3s", resolvedVersion); err != nil {
+		return fmt.Errorf("install reviewed k3s executable: %w", err)
+	}
+	if _, err := p.installReviewedRemoteTool(ctx, "k3s-images", resolvedVersion); err != nil {
+		return fmt.Errorf("install reviewed k3s runtime images: %w", err)
+	}
+	installer, err := p.downloadVerifiedRemoteContent(ctx, "k3s-installer", k3sInstallScriptURL, k3sInstallScriptSHA256)
+	if err != nil {
+		return err
+	}
+	defer p.removeRemoteContent(ctx, installer)
+	cmd := fmt.Sprintf("sudo env INSTALL_K3S_VERSION=%s INSTALL_K3S_SKIP_DOWNLOAD=true sh %s %s",
+		shellQuote(resolvedVersion), shellQuote(installer), joinArgs(serverArgs))
+	if _, err = p.run(ctx, cmd); err != nil {
+		return err
+	}
+	tool, installed, err := p.installedReviewedTool(ctx, "k3s", "/usr/local/bin/k3s")
+	if err != nil {
+		return fmt.Errorf("verify installed k3s content identity: %w", err)
+	}
+	if !installed || tool.version != resolvedVersion {
+		return fmt.Errorf("installed k3s does not match reviewed version %s", resolvedVersion)
+	}
+	return nil
 }
 
 // Upgrade implements provisioner.Provisioner. k3s supports in-place upgrade by
@@ -234,7 +280,14 @@ func (p *SSHProvisioner) Upgrade(ctx context.Context, version string, serverArgs
 
 // Uninstall implements provisioner.Provisioner.
 func (p *SSHProvisioner) Uninstall(ctx context.Context) error {
-	_, err := p.run(ctx, "sudo /usr/local/bin/k3s-uninstall.sh")
+	_, err := p.run(ctx, "if test -x /usr/local/bin/k3s-uninstall.sh; then sudo /usr/local/bin/k3s-uninstall.sh; fi")
+	return err
+}
+
+// Reboot implements provisioner.Rebooter. --no-block lets systemd acknowledge
+// the request before the pinned SSH connection is intentionally severed.
+func (p *SSHProvisioner) Reboot(ctx context.Context) error {
+	_, err := p.run(ctx, "sudo systemctl reboot --no-block")
 	return err
 }
 
@@ -250,15 +303,25 @@ func (p *SSHProvisioner) FetchKubeconfig(ctx context.Context) ([]byte, error) {
 // ReadState implements provisioner.Provisioner.
 func (p *SSHProvisioner) ReadState(ctx context.Context) (*provisioner.HostState, error) {
 	st := &provisioner.HostState{}
-	if _, err := p.run(ctx, "command -v k3s"); err != nil {
-		return st, nil // not installed
+	tool, installed, err := p.installedReviewedTool(ctx, "k3s", "/usr/local/bin/k3s")
+	if err != nil {
+		return nil, err
+	}
+	if !installed {
+		return st, nil
 	}
 	st.Installed = true
-	if out, err := p.run(ctx, "sudo k3s --version"); err == nil {
-		st.Version = parseK3sVersion(out)
+	out, err := p.run(ctx, "sudo /usr/local/bin/k3s --version")
+	if err != nil {
+		return nil, fmt.Errorf("read reviewed k3s version: %w", err)
+	}
+	st.Version = parseK3sVersion(out)
+	if st.Version != tool.version {
+		return nil, fmt.Errorf("reviewed k3s bytes report version %q, expected %q", st.Version, tool.version)
 	}
 	if out, err := p.run(ctx, "sudo cat /etc/systemd/system/k3s.service"); err == nil {
 		st.ClusterCIDR, st.ServiceCIDR, st.DualStack = parseSystemdUnit(out)
+		st.LocalStorageDisabled = systemdUnitDisables(out, "local-storage")
 	}
 	return st, nil
 }
@@ -278,20 +341,21 @@ func (p *SSHProvisioner) NodeReady(ctx context.Context) (bool, error) {
 var aptLockRetryInterval = 15 * time.Second
 
 // EnsureDriverBuildDeps implements provisioner.Provisioner. It installs the
-// kernel headers matching the running kernel so the GPU operator's driver
-// container can compile the NVIDIA module. Ubuntu/apt in v1; idempotent. It
-// retries on apt/dpkg lock contention (cloud-init/unattended-upgrades holding
-// the lock on first boot) rather than failing fast.
+// kernel headers matching the running kernel plus the compiler, make, and DKMS
+// required by the GPU Operator driver container. Ubuntu/apt in v1; idempotent.
+// It retries on apt/dpkg lock contention (cloud-init/unattended-upgrades holding
+// the lock on first boot) rather than failing fast, then verifies the exact
+// build surface before allowing GPU Operator reconciliation to continue.
 func (p *SSHProvisioner) EnsureDriverBuildDeps(ctx context.Context) error {
-	cmd := "sudo apt-get update && sudo apt-get install -y linux-headers-$(uname -r)"
+	cmd := "sudo apt-get update && sudo apt-get install -y linux-headers-$(uname -r) build-essential dkms"
 	for attempt := 0; ; attempt++ {
 		out, err := p.run(ctx, cmd)
 		if err == nil {
-			return nil
+			break
 		}
 		lockHeld := isAptLockHeld(err.Error()) || isAptLockHeld(out)
 		if !lockHeld || attempt >= 20 {
-			return fmt.Errorf("install kernel headers: %w", err)
+			return fmt.Errorf("install GPU driver build dependencies: %w", err)
 		}
 		select {
 		case <-ctx.Done():
@@ -299,53 +363,16 @@ func (p *SSHProvisioner) EnsureDriverBuildDeps(ctx context.Context) error {
 		case <-time.After(aptLockRetryInterval):
 		}
 	}
-}
-
-// EnsureRWXStoragePrerequisites installs and verifies the exact host capability
-// boundary required by DES-HOR-424-01/02. It does not select a provider; the
-// lifecycle calls it only after resolving managed-longhorn from chart values.
-func (p *SSHProvisioner) EnsureRWXStoragePrerequisites(ctx context.Context) error {
-	cmd := `sudo bash -ceu '
-. /etc/os-release
-case "$ID" in
-  ubuntu|debian)
-    apt-get update
-    DEBIAN_FRONTEND=noninteractive apt-get install -y open-iscsi nfs-common
-    ;;
-  fedora|rhel|centos|rocky|almalinux)
-    dnf install -y iscsi-initiator-utils nfs-utils
-    ;;
-  *)
-    echo "unsupported managed Longhorn host OS: $ID" >&2
-    exit 1
-    ;;
-esac
-systemctl enable --now iscsid
-modprobe iscsi_tcp
-install -d -m 0750 /var/lib/longhorn
-for tool in bash curl findmnt grep awk blkid lsblk iscsiadm mount.nfs; do
-  command -v "$tool" >/dev/null || { echo "missing managed RWX prerequisite: $tool" >&2; exit 1; }
-done
-systemctl is-active --quiet iscsid
-findmnt -n -o PROPAGATION / | grep -Eq "(^|,)r?shared(,|$)"
-findmnt -n -o FSTYPE --target /var/lib/longhorn | grep -Eq "^(ext4|xfs)$"
-k3s kubectl label nodes --all --overwrite node.longhorn.io/create-default-disk=true >/dev/null
-'`
-	for attempt := 0; ; attempt++ {
-		out, err := p.run(ctx, cmd)
-		if err == nil {
-			return nil
-		}
-		lockHeld := isAptLockHeld(err.Error()) || isAptLockHeld(out)
-		if !lockHeld || attempt >= 20 {
-			return fmt.Errorf("install/verify iSCSI, NFSv4, mount propagation, and Longhorn data path: %w", err)
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(aptLockRetryInterval):
-		}
+	// The driver container resolves and downloads this exact package from the
+	// Ubuntu archives independently of the host. An installed-but-retired HWE
+	// kernel package is therefore unusable even when its local build tree remains.
+	if _, err := p.run(ctx, "apt-cache show linux-headers-$(uname -r) >/dev/null 2>&1"); err != nil {
+		return fmt.Errorf("verify GPU driver build dependencies: running kernel headers are not available from configured apt repositories: %w", err)
 	}
+	if _, err := p.run(ctx, "test -f /lib/modules/$(uname -r)/build/Makefile && command -v dkms >/dev/null && command -v gcc >/dev/null && command -v make >/dev/null"); err != nil {
+		return fmt.Errorf("verify GPU driver build dependencies: %w", err)
+	}
+	return nil
 }
 
 // isAptLockHeld reports whether an apt/dpkg error is lock contention
@@ -414,7 +441,7 @@ func parseGPUReadiness(out, requestedDriverVersion string) (*provisioner.GPURead
 			}
 			readiness.PolicyName = item.Metadata.Name
 			readiness.PolicyState = item.Status.State
-			readiness.PolicyDriverVersion = item.Spec.Driver.Version
+			readiness.PolicyDriverVersion = driverVersionWithoutDigest(item.Spec.Driver.Version)
 			for _, condition := range item.Status.Conditions {
 				switch condition.Type {
 				case "Ready":
@@ -442,6 +469,11 @@ func parseGPUReadiness(out, requestedDriverVersion string) (*provisioner.GPURead
 	}
 	evaluateGPUReadiness(readiness)
 	return readiness, nil
+}
+
+func driverVersionWithoutDigest(version string) string {
+	version, _, _ = strings.Cut(version, "@sha256:")
+	return version
 }
 
 func evaluateGPUReadiness(readiness *provisioner.GPUReadiness) {
@@ -557,6 +589,22 @@ func parseSystemdUnit(out string) (clusterCIDR, serviceCIDR string, dualStack bo
 // Tokens that are not single-quoted are returned unchanged. It assumes arg
 // values contain no whitespace (true for all forge k3s flags: CIDRs, addresses,
 // labels, taints), so strings.Fields never splits a quoted value across tokens.
+func systemdUnitDisables(out, component string) bool {
+	out = strings.ReplaceAll(out, "\\\r\n", " ")
+	out = strings.ReplaceAll(out, "\\\n", " ")
+	tokens := strings.Fields(out)
+	for i, raw := range tokens {
+		tok := unquoteShellToken(raw)
+		if tok == "--disable" && i+1 < len(tokens) && unquoteShellToken(tokens[i+1]) == component {
+			return true
+		}
+		if strings.HasPrefix(tok, "--disable=") && strings.TrimPrefix(tok, "--disable=") == component {
+			return true
+		}
+	}
+	return false
+}
+
 func unquoteShellToken(tok string) string {
 	if len(tok) < 2 || tok[0] != '\'' || tok[len(tok)-1] != '\'' {
 		return tok
@@ -592,9 +640,7 @@ func joinArgs(args []string) string {
 }
 
 const (
-	helmInstallScript      = "https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-4"
-	helmInstallerTempCmd   = "mktemp /tmp/forge-helm-installer.XXXXXX"
-	helmVerifyCommand      = "sudo helm version --short"
+	helmVerifyCommand      = "case $(uname -m) in x86_64|amd64) expected=aeb4645b9e6658948efa290e28dd23ae75a16fb73f137942f2294fd5c7fcb573 ;; aarch64|arm64) expected=01bdd0c90f371968326162daaa427cdd14da2641ded094131afc44fb7a538b62 ;; *) exit 1 ;; esac; actual=$(sudo sha256sum /usr/local/bin/helm 2>/dev/null | awk '{print $1}') && test \"$actual\" = \"$expected\""
 	k3sKubeconfigPath      = "/etc/rancher/k3s/k3s.yaml"
 	helmRegistryConfigPath = "/etc/forge/helm-registry.json"
 )
@@ -607,41 +653,18 @@ func helmCmd(args ...string) string {
 	return joinArgs(append(base, args...))
 }
 
-// ensureHelm installs Helm on the host when it is not usable through the same
-// privileged PATH used by all subsequent chart operations. The installer is
-// downloaded and validated before execution so curl, empty-input, and installer
-// failures cannot be hidden by a successful shell at the end of a pipeline.
+// ensureHelm installs the repository-reviewed Helm archive after verifying its
+// exact bytes. Existing host binaries are never executed as installation
+// authority; each reconciliation replaces them before the first Helm command.
 func (p *SSHProvisioner) ensureHelm(ctx context.Context) error {
 	if _, err := p.run(ctx, helmVerifyCommand); err == nil {
 		return nil
 	}
-
-	installerPath, err := p.run(ctx, helmInstallerTempCmd)
-	if err != nil {
-		return fmt.Errorf("prepare helm installer download: %w", err)
-	}
-	installerPath = strings.TrimSpace(installerPath)
-	if installerPath == "" {
-		return errors.New("prepare helm installer download: mktemp returned an empty path")
-	}
-	defer func() {
-		_, _ = p.run(ctx, "rm -f "+shellQuote(installerPath))
-	}()
-
-	if _, err := p.run(ctx, fmt.Sprintf("curl -fsSL -o %s %s", shellQuote(installerPath), shellQuote(helmInstallScript))); err != nil {
-		return fmt.Errorf("download helm installer: %w", err)
-	}
-	if _, err := p.run(ctx, "test -s "+shellQuote(installerPath)); err != nil {
-		return fmt.Errorf("download helm installer: downloaded installer is empty: %w", err)
-	}
-	if out, err := p.run(ctx, "sudo bash "+shellQuote(installerPath)); err != nil {
-		if out = strings.TrimSpace(out); out != "" {
-			return fmt.Errorf("execute helm installer: %w; stdout: %s", err, out)
-		}
-		return fmt.Errorf("execute helm installer: %w", err)
+	if _, err := p.installReviewedRemoteTool(ctx, "helm", helmInstallVersion); err != nil {
+		return fmt.Errorf("install reviewed Helm executable: %w", err)
 	}
 	if _, err := p.run(ctx, helmVerifyCommand); err != nil {
-		return fmt.Errorf("verify helm installation through privileged PATH: %w", err)
+		return fmt.Errorf("verify reviewed Helm installation: %w", err)
 	}
 	return nil
 }
@@ -857,7 +880,11 @@ func selectMetalLBCRDs(raw string) (string, error) {
 // intentionally remain on uninstall to protect custom-resource data, matching
 // Helm's CRD lifecycle semantics.
 func (p *SSHProvisioner) applyChartCRDs(ctx context.Context, opts deployer.ApplyOpts) (bool, error) {
-	raw, err := p.run(ctx, helmCmd("show", "crds", opts.Repository, "--version", opts.Version))
+	showArgs := []string{"show", "crds", opts.Repository}
+	if opts.Version != "" {
+		showArgs = append(showArgs, "--version", opts.Version)
+	}
+	raw, err := p.run(ctx, helmCmd(showArgs...))
 	if err != nil {
 		return false, fmt.Errorf("discover chart CRDs: %w", err)
 	}
@@ -914,7 +941,11 @@ func (p *SSHProvisioner) renderChartCRDs(ctx context.Context, opts deployer.Appl
 	// (e.g. the bgppeers conversion webhook's clientConfig.service.namespace)
 	// resolve identically to the subsequent `helm install`, avoiding an SSA
 	// conflict when Helm adopts the pre-applied CRD.
-	args := []string{"template", opts.Repository, "--version", opts.Version, "-n", opts.Namespace}
+	args := []string{"template", opts.Repository}
+	if opts.Version != "" {
+		args = append(args, "--version", opts.Version)
+	}
+	args = append(args, "-n", opts.Namespace)
 	for _, f := range opts.ValueFiles {
 		args = append(args, "-f", f)
 	}
@@ -1055,6 +1086,11 @@ func (p *SSHProvisioner) Apply(ctx context.Context, opts deployer.ApplyOpts) err
 	if err := p.ensureHelm(ctx); err != nil {
 		return err
 	}
+	opts, cleanup, err := p.verifiedApplyOpts(ctx, opts)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
 	metallbEnabled, err := p.applyChartCRDs(ctx, opts)
 	if err != nil {
 		return err
@@ -1103,6 +1139,19 @@ func (p *SSHProvisioner) Apply(ctx context.Context, opts deployer.ApplyOpts) err
 	return nil
 }
 
+func (p *SSHProvisioner) verifiedApplyOpts(ctx context.Context, opts deployer.ApplyOpts) (deployer.ApplyOpts, func(), error) {
+	if opts.Checksum == "" {
+		return opts, func() {}, nil
+	}
+	archive, cleanup, err := p.downloadVerifiedHelmChart(ctx, opts.Repository, opts.Version, opts.Checksum)
+	if err != nil {
+		return deployer.ApplyOpts{}, nil, err
+	}
+	opts.Repository = archive
+	opts.Version = ""
+	return opts, cleanup, nil
+}
+
 // releaseInstalled reports whether a helm release already exists for the target.
 func (p *SSHProvisioner) releaseInstalled(ctx context.Context, opts deployer.ApplyOpts) (bool, error) {
 	state, err := p.Status(ctx, opts.Release, opts.Namespace)
@@ -1145,12 +1194,15 @@ func applyArgs(opts deployer.ApplyOpts, override string) []string {
 	if timeout == "" {
 		timeout = "10m"
 	}
-	args := []string{"upgrade", "--install", opts.Release, opts.Repository,
-		"--version", opts.Version,
+	args := []string{"upgrade", "--install", opts.Release, opts.Repository}
+	if opts.Version != "" {
+		args = append(args, "--version", opts.Version)
+	}
+	args = append(args,
 		"-n", opts.Namespace,
 		"--create-namespace",
 		"--timeout", timeout,
-	}
+	)
 	if !opts.NoWait {
 		args = append(args, "--wait")
 	}
@@ -1174,7 +1226,13 @@ func (p *SSHProvisioner) Status(ctx context.Context, release, namespace string) 
 	}
 	out, err := p.run(ctx, helmCmd("status", release, "-n", namespace, "-o", "json"))
 	if err != nil {
-		return &deployer.ChartState{Installed: false}, nil // release not found
+		// Only Helm's exact release-absence result is authoritative absence.
+		// Transport, API, RBAC, timeout, and all other observation errors must
+		// remain errors so clean-install guards cannot mutate under uncertainty.
+		if strings.TrimSpace(out) == "Error: release: not found" || strings.HasSuffix(strings.TrimSpace(err.Error()), "stderr: Error: release: not found") {
+			return &deployer.ChartState{Installed: false}, nil
+		}
+		return nil, fmt.Errorf("helm status %s/%s: %w", namespace, release, err)
 	}
 	state, err := parseHelmStatus(out)
 	if err != nil || state.Version != "" {

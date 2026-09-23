@@ -154,6 +154,7 @@ postgresql:
   image:
     repository: pgvector/pgvector
     tag: "pg16"
+    digest: sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b
   auth:
     username: controlplane
     database: controlplane

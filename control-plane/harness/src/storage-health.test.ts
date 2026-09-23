@@ -2,7 +2,7 @@ import { chmodSync, existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { checkSandboxStorageHealth } from "./storage-health.js";
+import { checkSandboxStorageHealth, WorkspaceCapacityGate } from "./storage-health.js";
 
 let base: string;
 
@@ -30,5 +30,38 @@ describe("checkSandboxStorageHealth", () => {
   it("sanitizes a worker identity before using it as a temporary filename", () => {
     checkSandboxStorageHealth(base, "pool/worker:0");
     expect(readdirSync(join(base, ".iterabase-storage-health"))).toEqual([]);
+  });
+});
+
+describe("WorkspaceCapacityGate", () => {
+  it("warns below 25%, gates at 20%, and reopens only at 25%", () => {
+    const gate = new WorkspaceCapacityGate();
+    expect(gate.observe(26, 100)).toMatchObject({ warning: false, creditGated: false });
+    expect(gate.observe(24, 100)).toMatchObject({ warning: true, creditGated: false });
+    expect(gate.observe(20, 100)).toMatchObject({ warning: true, creditGated: true });
+    expect(gate.observe(24, 100)).toMatchObject({ warning: true, creditGated: true });
+    expect(gate.observe(25, 100)).toMatchObject({ warning: false, creditGated: false });
+  });
+
+  it("retains a triggered gate across worker replacement in the hysteresis band", () => {
+    const firstWorker = new WorkspaceCapacityGate(base);
+    expect(firstWorker.observe(30, 100)).toMatchObject({ creditGated: false });
+    expect(firstWorker.observe(20, 100)).toMatchObject({ creditGated: true });
+
+    const replacementWorker = new WorkspaceCapacityGate(base);
+    expect(replacementWorker.observe(24, 100)).toMatchObject({ warning: true, creditGated: true });
+    expect(replacementWorker.observe(25, 100)).toMatchObject({ warning: false, creditGated: false });
+  });
+
+  it("starts fail-closed when durable history is missing inside the hysteresis band", () => {
+    const replacementWorker = new WorkspaceCapacityGate(base);
+    expect(replacementWorker.observe(22, 100)).toMatchObject({ warning: true, creditGated: true });
+  });
+
+  it("rejects uncertain capacity observations", () => {
+    const gate = new WorkspaceCapacityGate();
+    expect(() => gate.observe(-1, 100)).toThrow();
+    expect(() => gate.observe(101, 100)).toThrow();
+    expect(() => gate.observe(1, 0)).toThrow();
   });
 });

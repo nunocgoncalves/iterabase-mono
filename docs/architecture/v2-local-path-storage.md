@@ -1,0 +1,82 @@
+# Platform V2 dedicated local-path RWO storage
+
+> **Superseded historical record (2026-09-07).** `DES-HOR-545-01` and
+> [`v2-openebs-lvm-storage.md`](v2-openebs-lvm-storage.md) replace this storage
+> substrate. The HOR-538 implementation, corrective evidence, candidate,
+> protected promotion, published artifacts, and preserved AgentPool
+> isolation/workload-key semantics remain immutable history. No configuration,
+> command, StorageClass, or fallback below is supported by the current source.
+
+## Supported topology
+
+Platform V2 supports exactly one schedulable K3s `v1.34.10+k3s1` server node and one customer-selected stable non-removable whole disk for AgentPool workspaces. Multi-node, Longhorn, RWX, BYO/alternate classes, managed storage selection, HA, existing-filesystem adoption, disk replacement/migration, and root-disk fallback are unsupported.
+
+Every AgentPool owns one `ReadWriteOnce` claim on fixed non-default `iterabase-agentpool-local-path`. RWO limits the claim to one node, not one pod: multiple workers in the pool may mount it concurrently on the single node. Every trusted root supervisor in a pool may access that whole pool PVC; separate AgentPools receive separate claims/mounts. Model-directed children use stable distinct session UID=GID, cleared supplementary groups, all capabilities dropped, `no_new_privs`, umask `0077`, and session-owned `0700` root/home/tmp/session/workspace beneath the root-owned `0711` PVC root.
+
+## Forge device authorization and refusal boundary
+
+`spec.agentPoolWorkspace.device` in `forge.yaml` is required and must be one `/dev/disk/by-id/...` whole-disk identity. `forge init` obtains the same value through interactive selection, `--agentpool-workspace-device`, or `FORGE_AGENTPOOL_WORKSPACE_DEVICE`; conflicting explicit sources fail. Hand-authored config uses the same field. Apply never discovers or substitutes a device.
+
+`spec.agentPoolWorkspace.filesystem` supports `auto|ext4|xfs` and defaults to `auto`. Init also accepts `--agentpool-workspace-filesystem` and `FORGE_AGENTPOOL_WORKSPACE_FILESYSTEM`; conflicting explicit sources fail. Auto resolves to XFS only when `lsblk` reliably reports the selected whole disk's transport as NVMe. SATA, unknown/empty, and virtual transports resolve to ext4. Interactive init displays detected transport, the auto recommendation/resolution, and explicit ext4/XFS overrides. Forge installs and verifies `xfsprogs` before an XFS reconciliation and verifies the ext4 formatter for ext4.
+
+The persisted stable-device selection is the sole authorization for Forge's first format. Interactive selection shows stable path, model, serial, transport, size, fixed purpose, resolved filesystem, and the format consequence. Filesystem selection is configuration, not a second destructive confirmation. There is no post-selection exact confirmation, force/wipe/adopt switch, or other destructive input.
+
+Before any K3s/chart mutation, and again immediately before first format, Forge uses bounded required probes to reject:
+
+- missing, volatile, partition, removable, mapper, loop, RAID, or non-whole devices;
+- a partition table, child device, holder, mount, swap use, or process-held raw-device/other active consumer (through a bounded `/proc` descriptor probe that fails closed on uncertainty);
+- any device backing root, boot/EFI, K3s, kubelet, or system data;
+- a recognized filesystem, partition, RAID, LVM, or crypt signature;
+- probe read errors, ambiguity, or stable-identity/model/serial/WWN/size drift.
+
+`wipefs -n` and `blkid -p` inspect known signature locations. Forge does not perform a block-wide read or require arbitrary bytes to be zero. Arbitrary non-signature bytes are accepted after every required predicate passes. Forge does not securely erase media.
+
+## Crash-resumable filesystem transaction
+
+Before format, Forge fsyncs a root-owned `0600` receipt at `/var/lib/iterabase/agentpool-workspace.receipt`. It binds contract version, install name, selected by-id value, model/serial/WWN, normalized detected transport, exact size, configured and resolved filesystem, planned UUID, exact `iterabase-ws` label, fixed mount, and transaction status.
+
+Forge formats the whole device directly as the resolved ext4 or XFS type with the planned UUID and exact label. A retry resumes only from a still-blank candidate matching the receipt or the exact receipt-created filesystem identity. Any other signature, type, or identity mismatch fails closed. The filesystem choice never authorizes a different device or bypasses the repeated first-format probes.
+
+Reconciliation owns:
+
+- root-owned `/var/lib/iterabase/agentpool-workspaces` at mode `0711`;
+- exactly one UUID-based `/etc/fstab` entry using the exact resolved type and `nodev,nosuid` without `nofail` (`0 2` for ext4, `0 0` for XFS);
+- active source, type, options, ownership, duplicate-UUID, and unexpected-consumer checks;
+- a root-owned `0600` `.iterabase-workspace-identity` marker binding transport, configured/resolved type, UUID, and label;
+- fsynced receipt transitions through planned, formatted, fstab, mounted, and complete.
+
+A complete transaction refuses marker, device, transport, filesystem selection/resolution, size, UUID, label, type, conflicting fstab/mount, or consumer drift. Safe same-device repair is limited to recreating the mount directory, restoring a missing exact fstab line, and remounting the exact UUID. `forge destroy` never wipes or removes the filesystem identity.
+
+## Bundled local-path isolation
+
+After K3s readiness, Forge reconciles `kube-system/local-path-config` with exact per-class maps:
+
+- default `local-path` -> `/var/lib/rancher/k3s/storage`;
+- `iterabase-agentpool-local-path` -> `/var/lib/iterabase/agentpool-workspaces`.
+
+The AgentPool class uses `rancher.io/local-path`, `WaitForFirstConsumer`, `Delete`, `allowVolumeExpansion: false`, and an explicit non-default annotation. The control-plane accepts initial unbound `WaitForFirstConsumer` state so workers can trigger binding, then requires the bound PV to be RWO Filesystem `hostPath`, `Delete`, node-affine, and strictly beneath the dedicated mount. PostgreSQL, MinIO, and unrelated default claims remain on the normal K3s path.
+
+## AgentPool permission and workload-TLS boundary
+
+The supervisor is a trusted root process. Its rendered container retains the container runtime's default capability set and explicitly adds `SETUID` and `SETGID`; it is not non-root and does not have only those two capabilities. No pod `fsGroup` grants PVC or credential access.
+
+At startup and every bounded readiness-health observation, the supervisor accepts only the exact cert-manager CSI AtomicWriter chain `tls.key -> ..data/tls.key`, with `..data` selecting one contained hidden timestamp directory beneath the expected pod-scoped mount. The mount and relevant root-owned ancestors must not be child-writable. The supervisor opens the manually resolved target with `O_NOFOLLOW`, requires a root-owned regular exact-`0440` inode, and rechecks the chain/inode so an in-progress rotation is retried safely within a bounded attempt count. Exact `0440` is the narrow exception for cert-manager CSI v0.15.0's csi-lib v0.10.0 fixed projected-file mode, not a general key-mode relaxation. It never uses a mirror or `subPath`, and never chmods, chowns, replaces, or repairs projected key material. Drift withdraws readiness/health, drains/fences the worker, and exits fail-closed. The valid current key establishes the supervisor's workload mTLS connections.
+
+For each assignment, the production `setpriv` launcher requires equal stable session UID/GID, clears supplementary groups, sets `no_new_privs`, clears bounding/inheritable/ambient capabilities before the UID transition clears permitted/effective capabilities, pins umask `0077`, and executes the disposable child. A real child must receive `EACCES` opening a known sibling path and `/etc/harness/tls/tls.key`. Freshly formatted ext4 and XFS Linux CI runs the same production launcher/probe; the DigitalOcean exact-candidate scenario runs the deployed real-child sibling/key negative proof and trusted-supervisor whole-pool/mTLS proof.
+
+## Capacity and failure semantics
+
+Each harness performs a real write/fsync/rename/unlink transaction and `statfs` measurement on the mounted workspace filesystem. The pool-shared PVC stores the gate transition so a replacement supervisor cannot reopen inside the hysteresis band; dispatch serializes the installation-wide gate through Postgres because all AgentPool paths share the one dedicated filesystem. Dispatch metrics and each AgentPool's actionable `WorkspaceCapacityHealthy` condition expose available bytes, capacity bytes, free ratio, warning/gate state, freshness, and customer action; per-worker metrics retain supporting health evidence.
+
+- warn below 25% free;
+- withhold/revoke unspent fresh dispatch credit at or below 20%;
+- once gated, reopen only at or above 25%, including across worker, pool, and dispatch-process replacement;
+- do not abort an active turn solely because capacity crossed the threshold;
+- after the active turn's normal terminal/ACK boundary, withhold its next credit;
+- treat zero blocks and real I/O/fsync/mount/ownership failure as worker loss, using existing fencing and no automatic replay.
+
+Requested PVC size is planning metadata, not a quota. There is no online expansion. Customers own capacity response, infrastructure/hardware encryption, node/disk protection, and infrastructure backup. Node/disk loss may lose non-authoritative session bytes; PostgreSQL, invocation-ledger, artifact, attempt, and checkpoint records remain recovery authority.
+
+## Validation
+
+Required validation includes Forge config/CLI/fake-SSH command-shape and refusal tests; receipt/mount/class reapply tests; AgentPool fixed-class/RWO/PV-path, one-PVC-per-pool, separate-pool mount, and multi-replica tests; freshly formatted real ext4/XFS production-`setpriv` probes; fail-closed CSI-key type/owner/mode tests; deployed real-child sibling/key `EACCES`, trusted-supervisor whole-pool access, and mTLS behavior; harness threshold/credit/fencing tests; alert/dashboard/runbook checks; release-target/catalogue checks; exact-candidate real-machine install/reapply/worker-replacement behavior; and proof that no Longhorn namespace, CRD, release, image, companion target, iSCSI/NFS bootstrap, RWX/BYO value, or root fallback remains. Tests observe production behavior and do not perform permission repair that production does not perform.

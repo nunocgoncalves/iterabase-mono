@@ -5,7 +5,6 @@ go 1.26.0
 replace github.com/nunocgoncalves/iterabase-mono/testkit/e2e => ../../../testkit/e2e
 
 require (
-	github.com/digitalocean/godo v1.197.0
 	github.com/nunocgoncalves/iterabase-mono/testkit/e2e v0.0.0
 	github.com/stretchr/testify v1.11.1
 	golang.org/x/crypto v0.53.0
@@ -23,10 +22,7 @@ require (
 	github.com/go-openapi/jsonreference v0.20.2 // indirect
 	github.com/go-openapi/swag v0.23.0 // indirect
 	github.com/google/gnostic-models v0.7.0 // indirect
-	github.com/google/go-querystring v1.1.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
-	github.com/hashicorp/go-cleanhttp v0.5.2 // indirect
-	github.com/hashicorp/go-retryablehttp v0.7.7 // indirect
 	github.com/josharian/intern v1.0.0 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/mailru/easyjson v0.7.7 // indirect

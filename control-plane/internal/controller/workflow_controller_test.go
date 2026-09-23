@@ -59,7 +59,7 @@ func poolWithGrants(name, ns string, grants ...v1alpha1.GatewayGrant) *v1alpha1.
 			PodSecurity:    "baseline",
 			WorkspaceTools: false,
 			Identity:       v1alpha1.PoolIdentitySpec{TrustDomain: "iterabase.local", CASecretRef: v1alpha1.LocalKeyRef{Name: "platform-ca"}},
-			Sandbox:        v1alpha1.SandboxSpec{StorageClassName: "rwx", AccessMode: corev1.ReadWriteMany, Size: resource.MustParse("1Gi")},
+			Sandbox:        v1alpha1.SandboxSpec{StorageClassName: agentPoolWorkspaceStorageClass, AccessMode: corev1.ReadWriteOnce, Size: resource.MustParse("1Gi")},
 			Gateways: v1alpha1.PoolGatewaysSpec{
 				ControlPlane:     v1alpha1.GatewayEndpoint{URL: "https://cp:8443", ServerName: "cp", Selector: gwSelector("cp")},
 				ToolGateway:      v1alpha1.GatewayEndpoint{URL: "https://gw:8443", ServerName: "gw", Selector: gwSelector("gw")},

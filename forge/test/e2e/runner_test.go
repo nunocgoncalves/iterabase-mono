@@ -16,93 +16,85 @@ func TestE2E(t *testing.T) {
 	}, sharede2e.FixtureFromEnv)
 	suite.Add(
 		hermeticExampleScenario(),
-		sharede2e.Define(sharede2e.Scenario[*digitalOceanCPUState]{
+		sharede2e.Define(sharede2e.Scenario[*permanentCPUFixtureState]{
 			Metadata: forgeScenarioMetadata(
-				"digitalocean-cpu",
-				"Provisions a fresh CPU host and proves Forge bootstrap, exact-source managed Longhorn RWX prerequisites/conformance/persistence, internal-CA gRPC mTLS with negative rejection probes, migration, exact source/Flux handoff, secret transport, idempotent reconciliation, diagnostics, and cleanup.",
+				permanentCPUScenarioName,
+				"Resets the permanent CPU fixture and proves receipt-bound thick LVM preparation, exact expandable OpenEBS/source/Flux handoff, durable host inotify instance capacity, two-worker same-node RWO readiness, persistence, worker replacement, reapply, diagnostics, and cleanup.",
 				sharede2e.TierF3,
-				[]string{"HOR-406", "HOR-469", "DES-HOR-424-01", "DES-HOR-469-01", "DES-HOR-469-02"},
-				[]string{"forge", "iterabase-platform-chart"},
-				"test-e2e", 90, "cpu",
+				[]string{"HOR-406", "HOR-545", "HOR-557", "HOR-569", "DES-HOR-545-01", "DES-HOR-545-02", "DES-HOR-545-03", "DES-HOR-545-07", "DES-HOR-538-03"},
+				[]string{"forge", "control-plane", "control-plane-chart", "iterabase-platform-chart"},
+				"test-e2e", 100, "cpu",
 			),
-			NewState: newDigitalOceanCPUState,
-			Stages: []sharede2e.Stage[*digitalOceanCPUState]{
-				{Name: "provision-host", Run: cpuDiagnosticStage(failureDomainProvisioning, provisionCPUStage)},
-				{Name: "reject-gpu-on-cpu-host", DependsOn: []string{"provision-host"}, Run: cpuDiagnosticStage(failureDomainSubstrate, rejectGPUOnCPUStage)},
-				{Name: "install-migration-source", DependsOn: []string{"reject-gpu-on-cpu-host"}, Run: cpuDiagnosticStage(failureDomainForgeReconcile, applyBaselineStage)},
-				{Name: "assert-migration-source-edge", DependsOn: []string{"install-migration-source"}, Run: cpuDiagnosticStage(failureDomainForgeReconcile, assertBaselineStage)},
-				{Name: "upgrade-current-with-exact-flux", DependsOn: []string{"assert-migration-source-edge"}, Run: cpuDiagnosticStage(failureDomainForgeHandoff, runOverlayStage)},
-				{Name: "assert-dependent-health-smoke", DependsOn: []string{"upgrade-current-with-exact-flux"}, Run: cpuDiagnosticStage(failureDomainDependentSmoke, assertCurrentPlatformStage)},
-				{Name: "setup-managed-agentpool", DependsOn: []string{"assert-dependent-health-smoke"}, Run: cpuDiagnosticStage(failureDomainDependentSmoke, setupManagedAgentPoolStage)},
-				{Name: "force-share-manager-loss", DependsOn: []string{"setup-managed-agentpool"}, Run: cpuDiagnosticStage(failureDomainSubstrate, exerciseManagedShareManagerFailureStage)},
-				{Name: "assert-fresh-worker-storage-recovery", DependsOn: []string{"force-share-manager-loss"}, Run: cpuDiagnosticStage(failureDomainDependentSmoke, assertManagedStorageRecoveryStage)},
-				{Name: "seed-managed-rwx-claim", DependsOn: []string{"assert-fresh-worker-storage-recovery"}, Run: cpuDiagnosticStage(failureDomainSubstrate, seedManagedRWXReapplyStage)},
-				{Name: "reapply-current-idempotently", DependsOn: []string{"seed-managed-rwx-claim"}, Run: cpuDiagnosticStage(failureDomainForgeReconcile, reapplyCurrentPlatformStage)},
-				{Name: "assert-managed-rwx-reapply", DependsOn: []string{"reapply-current-idempotently"}, Run: cpuDiagnosticStage(failureDomainSubstrate, assertManagedRWXReapplyStage)},
-				{Name: "sync-secrets", DependsOn: []string{"assert-managed-rwx-reapply"}, Run: cpuDiagnosticStage(failureDomainForgeHandoff, runSecretsStage)},
+			NewState: newPermanentCPUFixtureState,
+			Stages: []sharede2e.Stage[*permanentCPUFixtureState]{
+				{Name: "reset-permanent-cpu-fixture", Run: cpuDiagnosticStage(failureDomainFixtureReset, resetPermanentCPUFixtureStage)},
+				{Name: "reject-gpu-on-cpu-host", DependsOn: []string{"reset-permanent-cpu-fixture"}, Run: cpuDiagnosticStage(failureDomainSubstrate, rejectGPUOnCPUStage)},
+				{Name: "fresh-current-with-exact-flux", DependsOn: []string{"reject-gpu-on-cpu-host"}, Run: cpuDiagnosticStage(failureDomainForgeHandoff, runOverlayStage)},
+				{Name: "assert-openebs-lvm-foundation", DependsOn: []string{"fresh-current-with-exact-flux"}, Run: cpuDiagnosticStage(failureDomainDependentSmoke, assertCurrentPlatformStage)},
+				{Name: "assert-inotify-capacity", DependsOn: []string{"assert-openebs-lvm-foundation"}, Run: cpuDiagnosticStage(failureDomainForgeReconcile, assertHostInotifyCapacityStage)},
+				{Name: "setup-two-worker-rwo-agentpool", DependsOn: []string{"assert-openebs-lvm-foundation"}, Run: cpuDiagnosticStage(failureDomainDependentSmoke, setupLVMSharedAgentPoolStage)},
+				{Name: "replace-one-workspace-worker", DependsOn: []string{"setup-two-worker-rwo-agentpool"}, Run: cpuDiagnosticStage(failureDomainDependentSmoke, replaceWorkspaceWorkerStage)},
+				{Name: "seed-dedicated-rwo-claim", DependsOn: []string{"replace-one-workspace-worker"}, Run: cpuDiagnosticStage(failureDomainSubstrate, seedLVMReapplyStage)},
+				{Name: "reapply-current-idempotently", DependsOn: []string{"seed-dedicated-rwo-claim"}, Run: cpuDiagnosticStage(failureDomainForgeReconcile, reapplyCurrentPlatformStage)},
+				{Name: "assert-inotify-reapply-idempotent", DependsOn: []string{"reapply-current-idempotently"}, Run: cpuDiagnosticStage(failureDomainForgeReconcile, assertHostInotifyReapplyStage)},
+				{Name: "assert-lvm-reapply", DependsOn: []string{"reapply-current-idempotently"}, Run: cpuDiagnosticStage(failureDomainSubstrate, assertLVMReapplyStage)},
+				{Name: "sync-secrets", DependsOn: []string{"assert-lvm-reapply"}, Run: cpuDiagnosticStage(failureDomainForgeHandoff, runSecretsStage)},
 				{Name: "reconcile-flux", DependsOn: []string{"sync-secrets"}, Run: cpuDiagnosticStage(failureDomainForgeHandoff, runFluxStage)},
 			},
 			Diagnostics: cpuScenarioDiagnostics(), Cleanup: cpuScenarioCleanup(),
 		}),
-		sharede2e.Define(sharede2e.Scenario[*digitalOceanCPUState]{
+		sharede2e.Define(sharede2e.Scenario[*permanentCPUFixtureState]{
 			Metadata: forgeScenarioMetadata(
-				"digitalocean-rwx-tls",
-				"Provisions a fresh single-node host, packages the exact platform/certificate/RWX companions, establishes the platform internal CA before Longhorn, and proves every current instance-manager gRPC service accepts mTLS while rejecting unauthenticated TLS and plaintext.",
+				permanentCPUWorkspaceScenarioName,
+				"Fresh exact-head real-machine install proving process-open refusal, receipt-bound PV/VG identity, mounted general and AgentPool grow-only XFS/LVM expansion, insufficient-capacity refusal, active-turn continuity, authenticated same-pool isolation, durable 20/25 gating, reboot/reapply convergence, persisted bytes, safe claim release, and non-purging ordinary destroy.",
 				sharede2e.TierF3,
-				[]string{"HOR-469", "DES-HOR-424-01", "DES-HOR-469-01", "DES-HOR-469-02"},
-				[]string{"iterabase-platform-chart"},
-				"test-e2e-rwx-tls", 70, "cpu",
+				[]string{"HOR-545", "HOR-557", "REQ-018", "REQ-035", "SCN-018", "DES-HOR-545-01", "DES-HOR-545-02", "DES-HOR-545-03", "DES-HOR-545-07", "DES-HOR-538-03"},
+				[]string{"forge", "control-plane", "control-plane-chart", "iterabase-platform-chart"},
+				"test-e2e-workspace", 120, "cpu",
 			),
-			NewState: newDigitalOceanRWXTLSState,
-			Stages: []sharede2e.Stage[*digitalOceanCPUState]{
-				{Name: "provision-single-node", Run: cpuDiagnosticStage(failureDomainProvisioning, provisionCPUStage)},
-				{Name: "install-and-prove-managed-internal-tls", DependsOn: []string{"provision-single-node"}, Run: cpuDiagnosticStage(failureDomainForgeHandoff, runOverlayStage)},
+			NewState: newPermanentCPUWorkspaceFixtureState,
+			Stages: []sharede2e.Stage[*permanentCPUFixtureState]{
+				{Name: "reset-permanent-cpu-fixture", Run: cpuDiagnosticStage(failureDomainFixtureReset, resetPermanentCPUFixtureStage)},
+				{Name: "refuse-process-held-raw-disk", DependsOn: []string{"reset-permanent-cpu-fixture"}, Run: cpuDiagnosticStage(failureDomainSubstrate, refuseProcessHeldDataStorageDiskStage)},
+				{Name: "fresh-exact-head-install", DependsOn: []string{"refuse-process-held-raw-disk"}, Run: cpuDiagnosticStage(failureDomainForgeHandoff, runOverlayStage)},
+				{Name: "assert-pvs-vg-substrate-and-classes", DependsOn: []string{"fresh-exact-head-install"}, Run: cpuDiagnosticStage(failureDomainSubstrate, assertCurrentPlatformStage)},
+				{Name: "setup-two-worker-rwo-agentpool", DependsOn: []string{"assert-pvs-vg-substrate-and-classes"}, Run: cpuDiagnosticStage(failureDomainDependentSmoke, setupLVMSharedAgentPoolStage)},
+				{Name: "install-real-workspace-execution-fixture", DependsOn: []string{"setup-two-worker-rwo-agentpool"}, Run: cpuDiagnosticStage(failureDomainDependentSmoke, setupWorkspaceExecutionFixtureStage)},
+				{Name: "run-authenticated-concurrent-isolated-work", DependsOn: []string{"install-real-workspace-execution-fixture"}, Run: cpuDiagnosticStage(failureDomainDependentSmoke, exerciseConcurrentWorkspaceWorkStage)},
+				{Name: "cross-capacity-floor-during-active-turn", DependsOn: []string{"run-authenticated-concurrent-isolated-work"}, Run: cpuDiagnosticStage(failureDomainDependentSmoke, exerciseActiveWorkspaceCapacityStage)},
+				{Name: "prove-aggregate-vg-pressure-and-new-claim-exhaustion", DependsOn: []string{"cross-capacity-floor-during-active-turn"}, Run: cpuDiagnosticStage(failureDomainSubstrate, exerciseAggregateVGCapacityStage)},
+				{Name: "resume-human-gated-session-after-worker-replacement", DependsOn: []string{"prove-aggregate-vg-pressure-and-new-claim-exhaustion"}, Run: cpuDiagnosticStage(failureDomainDependentSmoke, exerciseHumanGateWorkspaceReplacementStage)},
+				{Name: "seed-committed-workspace-bytes", DependsOn: []string{"resume-human-gated-session-after-worker-replacement"}, Run: cpuDiagnosticStage(failureDomainSubstrate, seedLVMReapplyStage)},
+				{Name: "grow-mounted-general-xfs-in-place", DependsOn: []string{"seed-committed-workspace-bytes"}, Run: cpuDiagnosticStage(failureDomainSubstrate, growGeneralLVMClaimStage)},
+				{Name: "reboot-with-unchanged-storage-identities", DependsOn: []string{"grow-mounted-general-xfs-in-place"}, Run: cpuDiagnosticStage(failureDomainSubstrate, rebootPreservesLVMStorageStage)},
+				{Name: "reapply-with-unchanged-identities", DependsOn: []string{"reboot-with-unchanged-storage-identities"}, Run: cpuDiagnosticStage(failureDomainForgeReconcile, reapplyCurrentPlatformStage)},
+				{Name: "assert-persisted-bytes", DependsOn: []string{"reapply-with-unchanged-identities"}, Run: cpuDiagnosticStage(failureDomainSubstrate, assertLVMReapplyStage)},
+				{Name: "delete-general-claim-without-leaked-lv", DependsOn: []string{"assert-persisted-bytes"}, Run: cpuDiagnosticStage(failureDomainSubstrate, deleteLVMClaimStage)},
+				{Name: "ordinary-destroy-preserves-data-vg", DependsOn: []string{"delete-general-claim-without-leaked-lv"}, Run: cpuDiagnosticStage(failureDomainForgeReconcile, destroyPreservesDataStorageStage)},
 			},
+
 			Diagnostics: cpuScenarioDiagnostics(), Cleanup: cpuScenarioCleanup(),
 		}),
-		sharede2e.Define(sharede2e.Scenario[*rwxThreeNodeState]{
+		sharede2e.Define(sharede2e.Scenario[*permanentGPUFixtureState]{
 			Metadata: forgeScenarioMetadata(
-				"digitalocean-rwx-three-node",
-				"Provisions three K3s storage nodes, installs the exact managed Longhorn companion, proves three replicas and generic conformance, replaces one lost node, preserves committed bytes across rebuild/reapply, and exercises deletion-confirmed uninstall.",
+				permanentGPUScenarioName,
+				"Resets the permanent GPU fixture and proves Forge GPU readiness, an emptyDir-safe driver transition, exact artifact handoff, managed-PVC cache seeding, mounted HF/generic-cache growth, pod-replacement byte identity, diagnostics, cleanup, and one real-serving smoke request.",
 				sharede2e.TierF3,
-				[]string{"HOR-469", "DES-HOR-424-01", "DES-HOR-424-03", "DES-HOR-424-05", "DES-HOR-424-06", "DES-HOR-469-01"},
-				[]string{"iterabase-platform-chart"},
-				"test-e2e-rwx-three-node", 150, "cpu",
+				[]string{"HOR-411", "HOR-406", "HOR-481", "HOR-485", "HOR-494", "HOR-557", "DES-HOR-545-02", "DES-HOR-545-07"},
+				[]string{"forge", "control-plane", "control-plane-chart", "iterabase-platform-chart"},
+				"test-e2e-gpu", 130, "gpu",
 			),
-			NewState: newRWXThreeNodeState,
-			Stages: []sharede2e.Stage[*rwxThreeNodeState]{
-				{Name: "provision-three-nodes-with-dedicated-ssds", Run: provisionRWXThreeNodesStage},
-				{Name: "bootstrap-k3s-baseline", DependsOn: []string{"provision-three-nodes-with-dedicated-ssds"}, Run: bootstrapRWXThreeNodeK3sStage},
-				{Name: "install-longhorn-1-11-predecessor", DependsOn: []string{"bootstrap-k3s-baseline"}, Run: installThreeNodeRWXPredecessorStage},
-				{Name: "validate-external-byo-agentpool", DependsOn: []string{"install-longhorn-1-11-predecessor"}, Run: validateExternalRWXAgentPoolStage},
-				{Name: "seed-pre-upgrade-three-replica-volume", DependsOn: []string{"validate-external-byo-agentpool"}, Run: seedThreeNodeRWXVolumeStage},
-				{Name: "upgrade-longhorn-1-11-to-1-12", DependsOn: []string{"seed-pre-upgrade-three-replica-volume"}, Run: upgradeThreeNodeRWXCompanionStage},
-				{Name: "replace-lost-storage-node", DependsOn: []string{"upgrade-longhorn-1-11-to-1-12"}, Run: replaceLostRWXNodeStage},
-				{Name: "assert-persistence-reapply-uninstall", DependsOn: []string{"replace-lost-storage-node"}, Run: assertThreeNodePersistenceReapplyAndUninstallStage},
-			},
-			Diagnostics: []sharede2e.Hook[*rwxThreeNodeState]{{Name: "three-node-storage-evidence", Run: func(t *testing.T, state *rwxThreeNodeState) { state.diagnostics(t) }}},
-			Cleanup:     []sharede2e.Hook[*rwxThreeNodeState]{{Name: "delete-three-node-capacity", Run: func(t *testing.T, state *rwxThreeNodeState) { state.cleanup(t) }}},
-		}),
-		sharede2e.Define(sharede2e.Scenario[*digitalOceanGPUState]{
-			Metadata: forgeScenarioMetadata(
-				"digitalocean-gpu",
-				"Provisions a fresh GPU host and proves Forge GPU readiness, an emptyDir-safe driver transition, exact artifact handoff, diagnostics, cleanup, and one non-authoritative real-serving smoke request.",
-				sharede2e.TierF3,
-				[]string{"HOR-411", "HOR-406", "HOR-481", "HOR-485", "HOR-494"},
-				[]string{"forge", "iterabase-platform-chart"},
-				"test-e2e-gpu", 110, "gpu",
-			),
-			NewState: newDigitalOceanGPUState,
-			Stages: []sharede2e.Stage[*digitalOceanGPUState]{
+			NewState: newPermanentGPUFixtureState,
+			Stages: []sharede2e.Stage[*permanentGPUFixtureState]{
 				{Name: "record-driver-inputs", Run: gpuDiagnosticStage(failureDomainSubstrate, recordGPUUpgradeInputsStage)},
-				{Name: "provision-host", DependsOn: []string{"record-driver-inputs"}, Run: gpuDiagnosticStage(failureDomainProvisioning, provisionGPUStage)},
-				{Name: "apply-gpu-substrate", DependsOn: []string{"provision-host"}, Run: gpuDiagnosticStage(failureDomainSubstrate, applyGPUSubstrateStage)},
+				{Name: "reset-permanent-gpu-fixture", DependsOn: []string{"record-driver-inputs"}, Run: gpuDiagnosticStage(failureDomainFixtureReset, resetPermanentGPUFixtureStage)},
+				{Name: "apply-gpu-substrate", DependsOn: []string{"reset-permanent-gpu-fixture"}, Run: gpuDiagnosticStage(failureDomainSubstrate, applyGPUSubstrateStage)},
 				{Name: "assert-gpu-smoke", DependsOn: []string{"apply-gpu-substrate"}, Run: gpuDiagnosticStage(failureDomainSubstrate, assertGPUSmokeStage)},
-				{Name: "start-emptydir-workload", DependsOn: []string{"assert-gpu-smoke"}, Run: gpuDiagnosticStage(failureDomainSubstrate, startGPUUpgradeWorkloadStage)},
+				{Name: "apply-dependent-platform-smoke", DependsOn: []string{"assert-gpu-smoke"}, Run: gpuDiagnosticStage(failureDomainForgeHandoff, applyInferencePlatformStage)},
+				{Name: "start-emptydir-workload", DependsOn: []string{"apply-dependent-platform-smoke"}, Run: gpuDiagnosticStage(failureDomainSubstrate, startGPUUpgradeWorkloadStage)},
 				{Name: "apply-driver-upgrade", DependsOn: []string{"start-emptydir-workload"}, Run: gpuDiagnosticStage(failureDomainSubstrate, applyGPUDriverUpgradeStage)},
 				{Name: "assert-driver-upgrade", DependsOn: []string{"apply-driver-upgrade"}, Run: gpuDiagnosticStage(failureDomainSubstrate, assertGPUDriverUpgradeStage)},
-				{Name: "apply-dependent-platform-smoke", DependsOn: []string{"assert-driver-upgrade"}, Run: gpuDiagnosticStage(failureDomainForgeHandoff, applyInferencePlatformStage)},
-				{Name: "run-real-serving-smoke", DependsOn: []string{"apply-dependent-platform-smoke"}, Run: gpuDiagnosticStage(failureDomainDependentSmoke, runInferenceGPUStage)},
+				{Name: "run-real-serving-smoke", DependsOn: []string{"assert-driver-upgrade"}, Run: gpuDiagnosticStage(failureDomainDependentSmoke, runInferenceGPUStage)},
 			},
 			Diagnostics: gpuScenarioDiagnostics(), Cleanup: gpuScenarioCleanup(),
 		}),
@@ -111,11 +103,28 @@ func TestE2E(t *testing.T) {
 }
 
 func forgeScenarioMetadata(name, description string, tier sharede2e.Tier, references, targets []string, makeTarget string, timeout int, capacity string) sharede2e.ScenarioMetadata {
+	artifacts := []string{"forge-binary", "control-plane-chart", "iterabase-platform-chart", "cert-manager-substrate-chart", "lvm-storage-substrate-chart", "control-plane-image", "tool-runner-image", "inference-gateway-image"}
+	if name == permanentCPUScenarioName || name == permanentCPUWorkspaceScenarioName {
+		artifacts = append(artifacts, "harness-image")
+	}
+	if name == permanentCPUWorkspaceScenarioName {
+		artifacts = append(artifacts, "runtime-fixture-image")
+	}
 	return sharede2e.ScenarioMetadata{
 		Name: name, Description: description, Tier: tier,
-		References: references, ReleaseTargets: targets,
+		References: references, ReleaseTargets: targets, RequiredArtifacts: artifacts,
+		Intents:      []sharede2e.ExecutionIntent{sharede2e.IntentPR, sharede2e.IntentCandidate},
 		FixtureModes: []sharede2e.FixtureMode{sharede2e.FixtureSource, sharede2e.FixtureCandidate},
 		MakeTarget:   makeTarget, TimeoutMinutes: timeout, Capacity: capacity, Mandatory: capacity != "",
+	}
+}
+
+func TestGPUScenarioSelectsEveryChartRuntimeImage(t *testing.T) {
+	metadata := forgeScenarioMetadata(permanentGPUScenarioName, "gpu", sharede2e.TierF3, nil, nil, "test-e2e-gpu", 110, "gpu")
+	for _, artifact := range []string{"control-plane-image", "inference-gateway-image", "tool-runner-image"} {
+		if !slices.Contains(metadata.RequiredArtifacts, artifact) {
+			t.Fatalf("GPU scenario does not select chart runtime artifact %q: %v", artifact, metadata.RequiredArtifacts)
+		}
 	}
 }
 

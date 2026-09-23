@@ -9,7 +9,7 @@ Read the root [`AGENTS.md`](../AGENTS.md) first. Its context, Git, ticket, valid
 ```bash
 make build          # -> bin/forge
 make test           # unit + fake-SSH integration tests
-make test-e2e       # DigitalOcean cloud-VM E2E; needs DIGITALOCEAN_TOKEN
+make test-e2e       # permanent CPU fixture E2E; needs the pinned fixture environment
 make test-e2e-unit  # compile/test the nested E2E module without infrastructure
 make lint
 make fmt-check

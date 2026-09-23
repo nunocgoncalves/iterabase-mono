@@ -1,0 +1,78 @@
+# DES-HOR-545-01 / DES-HOR-545-05: own the OpenEBS controller
+# ServiceAccount and exact volume lifecycle role in this wrapper. The reviewed
+# upstream chart combines volume and unsupported snapshot authority, so its
+# controller RBAC is disabled. The sole snapshot-adjacent permission retained
+# below is list/watch for the inert LVMSnapshot deletion-safety dependency.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: openebs-lvm-controller-sa
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/part-of: openebs-lvm-localpv
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: openebs-lvm-provisioner-role
+  labels:
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["persistentvolumes", "services"]
+    verbs: ["get", "list", "watch", "create", "delete", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "update"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims/status"]
+    verbs: ["update", "patch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses", "csinodes", "volumeattributesclasses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["csistoragecapacities"]
+    verbs: ["get", "list", "watch", "create", "delete", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["list", "watch", "create", "update", "patch"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "delete", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: ["local.openebs.io"]
+    resources: ["lvmvolumes", "lvmnodes"]
+    verbs: ["get", "list", "watch", "create", "delete", "update", "patch"]
+  # The pinned driver's DeleteVolume path checks that no LVMSnapshot references
+  # the volume. It may observe that inert resource but cannot read one by name or
+  # create, mutate, patch, or delete one.
+  - apiGroups: ["local.openebs.io"]
+    resources: ["lvmsnapshots"]
+    verbs: ["list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: openebs-lvm-provisioner-binding
+  labels:
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+subjects:
+  - kind: ServiceAccount
+    name: openebs-lvm-controller-sa
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: ClusterRole
+  name: openebs-lvm-provisioner-role
+  apiGroup: rbac.authorization.k8s.io

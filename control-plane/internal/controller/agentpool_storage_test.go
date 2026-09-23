@@ -2,398 +2,547 @@ package controller
 
 import (
 	"context"
-	stderrors "errors"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	storagev1 "k8s.io/api/storage/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
-	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/nunocgoncalves/iterabase-mono/control-plane/api/v1alpha1"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/gateway"
 )
 
-func storageTestObjects(pool *v1alpha1.AgentPool, mode, className, provisioner string) []client.Object {
-	reclaim := corev1.PersistentVolumeReclaimRetain
+func storagePool() *v1alpha1.AgentPool {
+	return &v1alpha1.AgentPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "pool", Namespace: "iterabase-system"},
+		Spec: v1alpha1.AgentPoolSpec{
+			Replicas: 3,
+			Sandbox: v1alpha1.SandboxSpec{
+				StorageClassName: agentPoolWorkspaceStorageClass,
+				AccessMode:       corev1.ReadWriteOnce,
+				Size:             resource.MustParse("10Gi"),
+			},
+		},
+	}
+}
+
+func lvmAgentPoolClass() *storagev1.StorageClass {
+	reclaim := corev1.PersistentVolumeReclaimDelete
+	binding := storagev1.VolumeBindingWaitForFirstConsumer
 	expand := true
-	classUID := types.UID("class-uid")
-	class := &storagev1.StorageClass{
-		ObjectMeta:  metav1.ObjectMeta{Name: className, UID: classUID},
-		Provisioner: provisioner, ReclaimPolicy: &reclaim, AllowVolumeExpansion: &expand,
-	}
-	contract := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{Name: "platform-rwx-storage-contract", Namespace: pool.Namespace, Labels: map[string]string{storageContractLabel: "true"}},
-		Data:       map[string]string{"contractVersion": storageContractVersion, "mode": mode, "storageClassName": className},
-	}
-	attestation := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{Name: "iterabase-rwx-conformance", Namespace: pool.Namespace, Labels: map[string]string{storageConformanceLabel: "true"}},
-		Data: map[string]string{
-			"contractVersion": storageContractVersion, "storageClassName": className,
-			"storageClassUID": string(classUID), "provisioner": provisioner,
-			"result": "pass", "validatedAt": "2026-08-25T00:00:00Z",
+	return &storagev1.StorageClass{
+		ObjectMeta:  metav1.ObjectMeta{Name: agentPoolWorkspaceStorageClass, Annotations: map[string]string{"storageclass.kubernetes.io/is-default-class": "false"}},
+		Provisioner: agentPoolWorkspaceProvisioner, ReclaimPolicy: &reclaim,
+		VolumeBindingMode: &binding, AllowVolumeExpansion: &expand,
+		Parameters: map[string]string{
+			"storage": "lvm", "vgpattern": "^iterabase-data$", "fsType": "xfs", "thinProvision": "no", "shared": "yes",
 		},
 	}
-	classCopy := className
-	pvc := &corev1.PersistentVolumeClaim{
-		ObjectMeta: metav1.ObjectMeta{Name: sandboxPVCName(pool), Namespace: pool.Namespace},
+}
+
+func pendingWorkspacePVC(pool *v1alpha1.AgentPool) *corev1.PersistentVolumeClaim {
+	class := agentPoolWorkspaceStorageClass
+	filesystem := corev1.PersistentVolumeFilesystem
+	controller := true
+	return &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: sandboxPVCName(pool), Namespace: pool.Namespace,
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: v1alpha1.GroupVersion.String(), Kind: "AgentPool", Name: pool.Name, UID: pool.UID, Controller: &controller,
+			}},
+		},
 		Spec: corev1.PersistentVolumeClaimSpec{
-			AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany},
-			StorageClassName: &classCopy,
-			VolumeName:       "pool-pv",
-			Resources:        corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("10Gi")}},
+			StorageClassName: &class, AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}, VolumeMode: &filesystem,
+			Resources: corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("10Gi")}},
 		},
-		Status: corev1.PersistentVolumeClaimStatus{
-			Phase:    corev1.ClaimBound,
-			Capacity: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("10Gi")},
-		},
+		Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimPending},
 	}
+}
+
+func boundWorkspaceObjects(pool *v1alpha1.AgentPool) []client.Object {
+	pvc := pendingWorkspacePVC(pool)
+	pvc.Spec.VolumeName = "pool-pv"
+	pvc.Status.Phase = corev1.ClaimBound
+	pvc.Status.Capacity = corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("10Gi")}
+	filesystem := corev1.PersistentVolumeFilesystem
 	pv := &corev1.PersistentVolume{
 		ObjectMeta: metav1.ObjectMeta{Name: "pool-pv"},
 		Spec: corev1.PersistentVolumeSpec{
-			StorageClassName: className, PersistentVolumeReclaimPolicy: corev1.PersistentVolumeReclaimRetain,
-			AccessModes:            []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany},
-			Capacity:               corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("10Gi")},
-			PersistentVolumeSource: corev1.PersistentVolumeSource{CSI: &corev1.CSIPersistentVolumeSource{Driver: provisioner, VolumeHandle: "pool-volume"}},
+			StorageClassName:              agentPoolWorkspaceStorageClass,
+			PersistentVolumeReclaimPolicy: corev1.PersistentVolumeReclaimDelete,
+			AccessModes:                   []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			VolumeMode:                    &filesystem,
+			Capacity:                      corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("10Gi")},
+			PersistentVolumeSource: corev1.PersistentVolumeSource{CSI: &corev1.CSIPersistentVolumeSource{
+				Driver: agentPoolWorkspaceProvisioner, FSType: "xfs", VolumeHandle: "pvc-volume-1",
+				VolumeAttributes: map[string]string{"openebs.io/volgroup": agentPoolWorkspaceVolumeGroup},
+			}},
+			NodeAffinity: &corev1.VolumeNodeAffinity{Required: &corev1.NodeSelector{NodeSelectorTerms: []corev1.NodeSelectorTerm{{MatchExpressions: []corev1.NodeSelectorRequirement{
+				{Key: "openebs.io/nodename", Operator: corev1.NodeSelectorOpIn, Values: []string{"node-1"}},
+			}}}}},
 		},
 		Status: corev1.PersistentVolumeStatus{Phase: corev1.VolumeBound},
 	}
-	return []client.Object{class, contract, attestation, pvc, pv}
+	volume := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "local.openebs.io/v1alpha1", "kind": "LVMVolume",
+		"metadata": map[string]any{"name": "pvc-volume-1", "namespace": pool.Namespace},
+		"spec": map[string]any{
+			"capacity": "10Gi", "ownerNodeID": "node-1", "shared": "yes", "thinProvision": "no",
+			"vgPattern": "^iterabase-data$", "volGroup": agentPoolWorkspaceVolumeGroup,
+		},
+		"status": map[string]any{"state": "Ready"},
+	}}
+	volume.SetGroupVersionKind(schema.GroupVersionKind{Group: "local.openebs.io", Version: "v1alpha1", Kind: "LVMVolume"})
+	node := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "local.openebs.io/v1alpha1", "kind": "LVMNode",
+		"metadata": map[string]any{"name": "node-1", "namespace": pool.Namespace},
+		"volumeGroups": []any{map[string]any{
+			"name": agentPoolWorkspaceVolumeGroup, "uuid": "vg-uuid", "missingPvCount": int64(0), "thinPools": []any{},
+		}},
+	}}
+	node.SetGroupVersionKind(schema.GroupVersionKind{Group: "local.openebs.io", Version: "v1alpha1", Kind: "LVMNode"})
+	return []client.Object{lvmAgentPoolClass(), pvc, pv, volume, node}
 }
 
-func storageTestReconciler(t *testing.T, objects ...client.Object) *AgentPoolReconciler {
+func storageReconciler(t *testing.T, objects ...client.Object) *AgentPoolReconciler {
 	t.Helper()
 	scheme := runtime.NewScheme()
-	require.NoError(t, clientgoscheme.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, storagev1.AddToScheme(scheme))
 	require.NoError(t, v1alpha1.AddToScheme(scheme))
-	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&v1alpha1.AgentPool{}).WithObjects(objects...).Build()
-	return &AgentPoolReconciler{Client: c, Scheme: scheme, APIReader: c}
+	return &AgentPoolReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build(), Scheme: scheme}
 }
 
-type workerDeleteFailureClient struct {
-	client.Client
+type staticWorkspaceCapacityReader struct {
+	status  gateway.WorkspaceCapacityStatus
+	err     error
+	poolKey string
 }
 
-func (c *workerDeleteFailureClient) Delete(ctx context.Context, obj client.Object, opts ...client.DeleteOption) error {
-	if _, ok := obj.(*corev1.Pod); ok {
-		return stderrors.New("simulated worker delete failure")
-	}
-	return c.Client.Delete(ctx, obj, opts...)
+func (r *staticWorkspaceCapacityReader) WorkspaceCapacityStatus(_ context.Context, poolKey string) (gateway.WorkspaceCapacityStatus, error) {
+	r.poolKey = poolKey
+	return r.status, r.err
 }
 
-func TestAssessExternalRWXStorageRequiresLiveClassBoundConformance(t *testing.T) {
-	pool := validAgentPool("external-pool", "platform")
-	pool.Spec.CredentialBindings = nil
-	pool.Spec.Sandbox.StorageClassName = "customer-rwx"
-	objects := storageTestObjects(pool, storageModeExternal, "customer-rwx", "customer.csi.example")
-	r := storageTestReconciler(t, objects...)
+type recordingWorkspaceStorageGate struct {
+	poolKeys  []string
+	decisions []bool
+	err       error
+}
 
+func (g *recordingWorkspaceStorageGate) SetAgentPoolStorageAuthorized(_ context.Context, poolKey string, authorized bool) error {
+	g.poolKeys = append(g.poolKeys, poolKey)
+	g.decisions = append(g.decisions, authorized)
+	return g.err
+}
+
+func TestWorkspaceCapacityConditionTransitionsPerPoolAndSurvivesReplacementBand(t *testing.T) {
+	now := time.Now()
+	reader := &staticWorkspaceCapacityReader{}
+	r := &AgentPoolReconciler{CapacityReader: reader}
+	pool := storagePool()
+
+	reader.status = gateway.WorkspaceCapacityStatus{Observed: true, FreeBytes: 24, CapacityBytes: 100, FreeRatio: 0.24, Warning: true, ObservedAt: &now}
+	notice := r.setWorkspaceCapacityCondition(context.Background(), pool)
+	assert.Equal(t, "iterabase-system/pool", reader.poolKey)
+	condition := meta.FindStatusCondition(pool.Status.Conditions, storageConditionWorkspaceCapacityHealthy)
+	require.NotNil(t, condition)
+	assert.Equal(t, metav1.ConditionFalse, condition.Status)
+	assert.Equal(t, storageReasonWorkspaceCapacityWarning, condition.Reason)
+	assert.Contains(t, notice, "credits remain open")
+
+	reader.status = gateway.WorkspaceCapacityStatus{Observed: true, FreeBytes: 20, CapacityBytes: 100, FreeRatio: 0.20, Warning: true, CreditGated: true, ObservedAt: &now}
+	r.setWorkspaceCapacityCondition(context.Background(), pool)
+	condition = meta.FindStatusCondition(pool.Status.Conditions, storageConditionWorkspaceCapacityHealthy)
+	require.NotNil(t, condition)
+	assert.Equal(t, storageReasonWorkspaceCapacityGated, condition.Reason)
+
+	reader.status = gateway.WorkspaceCapacityStatus{Observed: true, FreeBytes: 24, CapacityBytes: 100, FreeRatio: 0.24, Warning: true, CreditGated: true, ObservedAt: &now}
+	r.setWorkspaceCapacityCondition(context.Background(), pool)
+	condition = meta.FindStatusCondition(pool.Status.Conditions, storageConditionWorkspaceCapacityHealthy)
+	require.NotNil(t, condition)
+	assert.Equal(t, storageReasonWorkspaceCapacityGated, condition.Reason)
+
+	reader.status = gateway.WorkspaceCapacityStatus{Observed: true, FreeBytes: 25, CapacityBytes: 100, FreeRatio: 0.25, ObservedAt: &now}
+	assert.Empty(t, r.setWorkspaceCapacityCondition(context.Background(), pool))
+	condition = meta.FindStatusCondition(pool.Status.Conditions, storageConditionWorkspaceCapacityHealthy)
+	require.NotNil(t, condition)
+	assert.Equal(t, metav1.ConditionTrue, condition.Status)
+}
+
+func TestWorkspaceCapacityConditionFailsClosedOnUnavailableObservation(t *testing.T) {
+	reader := &staticWorkspaceCapacityReader{err: errors.New("database unavailable")}
+	r := &AgentPoolReconciler{CapacityReader: reader}
+	pool := storagePool()
+	notice := r.setWorkspaceCapacityCondition(context.Background(), pool)
+	condition := meta.FindStatusCondition(pool.Status.Conditions, storageConditionWorkspaceCapacityHealthy)
+	require.NotNil(t, condition)
+	assert.Equal(t, metav1.ConditionUnknown, condition.Status)
+	assert.Equal(t, storageReasonWorkspaceCapacityUnknown, condition.Reason)
+	assert.Contains(t, notice, "fails closed")
+}
+
+func TestAssessAgentPoolStorageAllowsInitialWaitForFirstConsumer(t *testing.T) {
+	pool := storagePool()
+	r := storageReconciler(t, lvmAgentPoolClass(), pendingWorkspacePVC(pool))
 	assessment := r.assessAgentPoolStorage(context.Background(), pool)
-	assert.True(t, assessment.Ready)
 	assert.True(t, assessment.CanMount)
+	assert.False(t, assessment.Ready)
+	assert.Equal(t, storageReasonPVCProvisioning, assessment.Reason)
+	assert.Contains(t, assessment.Message, "WaitForFirstConsumer")
+}
+
+func TestAssessAgentPoolStorageAcceptsBoundOpenEBSLVMVolume(t *testing.T) {
+	pool := storagePool()
+	r := storageReconciler(t, boundWorkspaceObjects(pool)...)
+	assessment := r.assessAgentPoolStorage(context.Background(), pool)
+	assert.True(t, assessment.CanMount)
+	assert.True(t, assessment.Ready)
 	assert.Equal(t, storageReasonReady, assessment.Reason)
-	assert.Equal(t, "pool-pv", assessment.PVName)
+	assert.Equal(t, "pvc-volume-1", assessment.VolumeHandle)
+	assert.Contains(t, assessment.Message, "shared=yes")
+	assert.Contains(t, assessment.Message, "vg=iterabase-data")
+	assert.Contains(t, assessment.Message, "expansion=true")
 }
 
-func TestAssessRWXStorageFailsClosedWithoutConformance(t *testing.T) {
-	pool := validAgentPool("pending-pool", "platform")
-	pool.Spec.CredentialBindings = nil
-	pool.Spec.Sandbox.StorageClassName = "customer-rwx"
-	objects := storageTestObjects(pool, storageModeExternal, "customer-rwx", "customer.csi.example")
-	objects = append(objects[:2], objects[3:]...) // remove the attestation
-	r := storageTestReconciler(t, objects...)
+func TestAssessAgentPoolStorageKeepsMountedWorkersDuringResizeAndRequiresFreshStatfs(t *testing.T) {
+	pool := storagePool()
+	pool.Spec.Sandbox.Size = resource.MustParse("20Gi")
+	objects := boundWorkspaceObjects(pool)
+	assessment := storageReconciler(t, objects...).assessAgentPoolStorage(context.Background(), pool)
+	assert.False(t, assessment.Ready)
+	assert.True(t, assessment.CanMount)
+	assert.True(t, assessment.SafeResize)
+	assert.False(t, storageQuiescenceRequired(assessment))
+	assert.Equal(t, storageReasonPVCExpansionPending, assessment.Reason)
 
+	started := time.Now().Add(-time.Second).UTC()
+	pvc := objects[1].(*corev1.PersistentVolumeClaim)
+	pvc.Spec.Resources.Requests[corev1.ResourceStorage] = resource.MustParse("20Gi")
+	pvc.Status.Capacity[corev1.ResourceStorage] = resource.MustParse("20Gi")
+	pvc.Annotations = map[string]string{
+		agentPoolResizeStartedAnnotation:          started.Format(time.RFC3339Nano),
+		agentPoolResizeBaselineCapacityAnnotation: "10",
+	}
+	objects[2].(*corev1.PersistentVolume).Spec.Capacity[corev1.ResourceStorage] = resource.MustParse("20Gi")
+	require.NoError(t, unstructured.SetNestedField(objects[3].(*unstructured.Unstructured).Object, "20Gi", "spec", "capacity"))
+
+	stale := started.Add(-time.Second)
+	r := storageReconciler(t, objects...)
+	r.CapacityReader = &staticWorkspaceCapacityReader{status: gateway.WorkspaceCapacityStatus{
+		Observed: true, FreeBytes: 15, CapacityBytes: 20, FreeRatio: 0.75, ObservedAt: &stale,
+	}}
+	assessment = r.assessAgentPoolStorage(context.Background(), pool)
+	assert.False(t, assessment.Ready)
+	assert.True(t, assessment.SafeResize)
+	assert.Contains(t, assessment.Message, "fresh valid mounted-filesystem statfs")
+
+	fresh := time.Now().UTC()
+	r.CapacityReader = &staticWorkspaceCapacityReader{status: gateway.WorkspaceCapacityStatus{
+		Observed: true, FreeBytes: 15, CapacityBytes: 20, FreeRatio: 0.75, ObservedAt: &fresh,
+	}}
+	assessment = r.assessAgentPoolStorage(context.Background(), pool)
+	assert.True(t, assessment.Ready, "%+v", assessment)
+	assert.False(t, assessment.SafeResize)
+
+	var completedPVC corev1.PersistentVolumeClaim
+	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(pvc), &completedPVC))
+	assert.NotContains(t, completedPVC.Annotations, agentPoolResizeStartedAnnotation)
+	assert.NotContains(t, completedPVC.Annotations, agentPoolResizeBaselineCapacityAnnotation)
+
+	volume := &unstructured.Unstructured{}
+	volume.SetGroupVersionKind(schema.GroupVersionKind{Group: "local.openebs.io", Version: "v1alpha1", Kind: "LVMVolume"})
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: pool.Namespace, Name: "pvc-volume-1"}, volume))
+	require.NoError(t, unstructured.SetNestedField(volume.Object, "Error", "status", "state"))
+	require.NoError(t, r.Update(context.Background(), volume))
+
+	assessment = r.assessAgentPoolStorage(context.Background(), pool)
+	assert.False(t, assessment.Ready)
+	assert.False(t, assessment.CanMount)
+	assert.False(t, assessment.SafeResize, "completed resize evidence must not retain workers through a later unrelated LVM failure")
+	assert.True(t, assessment.ConfirmedUnsafe)
+	assert.True(t, storageQuiescenceRequired(assessment))
+	assert.Equal(t, storageReasonPVCUnavailable, assessment.Reason)
+}
+
+type storageQueryClient struct {
+	client.Client
+	getByKind  map[string]int
+	listByKind map[string]int
+	failKind   string
+	failErr    error
+}
+
+func (c *storageQueryClient) Get(ctx context.Context, key types.NamespacedName, object client.Object, opts ...client.GetOption) error {
+	kind := object.GetObjectKind().GroupVersionKind().Kind
+	c.getByKind[kind]++
+	if c.failKind != "" && kind == c.failKind {
+		return c.failErr
+	}
+	return c.Client.Get(ctx, key, object, opts...)
+}
+
+func (c *storageQueryClient) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	kind := list.GetObjectKind().GroupVersionKind().Kind
+	c.listByKind[kind]++
+	return c.Client.List(ctx, list, opts...)
+}
+
+func TestAssessAgentPoolStorageUsesDirectSingleOpenEBSObservations(t *testing.T) {
+	pool := storagePool()
+	r := storageReconciler(t, boundWorkspaceObjects(pool)...)
+	queries := &storageQueryClient{Client: r.Client, getByKind: map[string]int{}, listByKind: map[string]int{}}
+	r.Client = queries
+	assessment := r.assessAgentPoolStorage(context.Background(), pool)
+	require.True(t, assessment.Ready, "%+v", assessment)
+	assert.Equal(t, 1, queries.getByKind["LVMVolume"])
+	assert.Equal(t, 1, queries.getByKind["LVMNode"])
+	assert.Zero(t, queries.listByKind["LVMVolumeList"])
+	assert.Zero(t, queries.listByKind["LVMNodeList"])
+}
+
+func TestStorageObservationErrorFailsClosedWithoutAuthorizingQuiescence(t *testing.T) {
+	pool := storagePool()
+	r := storageReconciler(t, boundWorkspaceObjects(pool)...)
+	queries := &storageQueryClient{
+		Client: r.Client, getByKind: map[string]int{}, listByKind: map[string]int{},
+		failKind: "LVMVolume", failErr: errors.New("cache transport unavailable"),
+	}
+	r.Client = queries
 	assessment := r.assessAgentPoolStorage(context.Background(), pool)
 	assert.False(t, assessment.Ready)
 	assert.False(t, assessment.CanMount)
-	assert.Equal(t, storageReasonConformancePending, assessment.Reason)
-	assert.Contains(t, assessment.Message, "live conformance attestation")
+	assert.True(t, assessment.ObservationUnknown)
+	assert.False(t, assessment.ConfirmedUnsafe)
+	assert.False(t, storageQuiescenceRequired(assessment), "unknown observations must retain healthy workers while withdrawing readiness")
+	assert.ErrorIs(t, assessment.ObservationErr, queries.failErr)
+
+	unsafe := assessment
+	unsafe.ObservationUnknown = false
+	unsafe.ConfirmedUnsafe = true
+	assert.True(t, storageQuiescenceRequired(unsafe), "positively observed drift must quiesce")
 }
 
-func TestAssessRWXStorageRejectsStaleClassUIDAttestation(t *testing.T) {
-	pool := validAgentPool("stale-pool", "platform")
-	pool.Spec.CredentialBindings = nil
-	pool.Spec.Sandbox.StorageClassName = "customer-rwx"
-	objects := storageTestObjects(pool, storageModeExternal, "customer-rwx", "customer.csi.example")
-	objects[2].(*corev1.ConfigMap).Data["storageClassUID"] = "recreated-class"
-	r := storageTestReconciler(t, objects...)
-
-	assessment := r.assessAgentPoolStorage(context.Background(), pool)
-	assert.Equal(t, storageReasonConformanceFailed, assessment.Reason)
-	assert.Contains(t, assessment.Message, "stale/mismatched")
-}
-
-func TestAssessRWXStorageRejectsCapacityBelowClaimRequest(t *testing.T) {
-	pool := validAgentPool("full-pool", "platform")
-	pool.Spec.CredentialBindings = nil
-	pool.Spec.Sandbox.StorageClassName = "customer-rwx"
-	objects := storageTestObjects(pool, storageModeExternal, "customer-rwx", "customer.csi.example")
-	objects[4].(*corev1.PersistentVolume).Spec.Capacity[corev1.ResourceStorage] = resource.MustParse("1Gi")
-	r := storageTestReconciler(t, objects...)
-
-	assessment := r.assessAgentPoolStorage(context.Background(), pool)
-	assert.False(t, assessment.Ready)
-	assert.Equal(t, storageReasonCapacity, assessment.Reason)
-	assert.Contains(t, assessment.Message, "physical headroom")
-}
-
-func TestAssessManagedRWXStorageRejectsDegradedBackend(t *testing.T) {
-	pool := validAgentPool("managed-pool", "platform")
-	pool.Spec.CredentialBindings = nil
-	pool.Spec.Sandbox.StorageClassName = managedLonghornStorageClass
-	objects := storageTestObjects(pool, storageModeManagedLonghorn, managedLonghornStorageClass, managedLonghornProvisioner)
-	volume := &unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": "longhorn.io/v1beta2", "kind": "Volume",
-		"metadata": map[string]any{"name": "pool-volume", "namespace": managedLonghornNamespace},
-		"status":   map[string]any{"robustness": "degraded", "state": "attached"},
+func TestStorageObservationErrorWithdrawsDispatchAuthorizationWithoutDeletingWorkers(t *testing.T) {
+	pool := validAgentPool("pool", "iterabase-system")
+	pool.UID = types.UID("pool-uid")
+	pool.Finalizers = []string{agentPoolFinalizer}
+	pool.Status.Ready = true
+	pool.Status.ReadyReplicas = 1
+	pool.Status.Conditions = []metav1.Condition{{
+		Type: storageConditionOperationalReadinessReached, Status: metav1.ConditionTrue,
+		Reason: storageReasonOperationalReadinessReached, LastTransitionTime: metav1.Now(),
 	}}
-	objects = append(objects, volume)
-	r := storageTestReconciler(t, objects...)
-
-	assessment := r.assessAgentPoolStorage(context.Background(), pool)
-	assert.False(t, assessment.Ready)
-	assert.False(t, assessment.CanMount)
-	assert.Equal(t, storageReasonBackendDegraded, assessment.Reason)
-	assert.Contains(t, assessment.Message, "replica/node/disk capacity")
-}
-
-func TestManagedRWXStorageRequiresReadyShareManagerWhenAttached(t *testing.T) {
-	pool := validAgentPool("managed-pool", "platform")
-	pool.Spec.CredentialBindings = nil
-	pool.Spec.Sandbox.StorageClassName = managedLonghornStorageClass
-	objects := storageTestObjects(pool, storageModeManagedLonghorn, managedLonghornStorageClass, managedLonghornProvisioner)
-	volume := &unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": "longhorn.io/v1beta2", "kind": "Volume",
-		"metadata": map[string]any{"name": "pool-volume", "namespace": managedLonghornNamespace},
-		"status":   map[string]any{"robustness": "healthy", "state": "attached"},
-	}}
-	objects = append(objects, volume)
-	r := storageTestReconciler(t, objects...)
-
-	assessment := r.assessAgentPoolStorage(context.Background(), pool)
-	assert.True(t, assessment.Ready, "initial attachment may proceed while the share-manager becomes Ready")
-	failure := r.managedLonghornVolumeHealth(context.Background(), "pool-volume", true)
-	require.NotNil(t, failure)
-	assert.Equal(t, storageReasonShareManagerDown, failure.Reason)
-
-	shareManager := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: "share-manager-pool-volume", Namespace: managedLonghornNamespace, Labels: map[string]string{longhornShareManagerComponentKey: longhornShareManagerComponent}},
+	worker := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "pool-worker-0", Namespace: pool.Namespace, Labels: poolLabels(pool)},
 		Status:     corev1.PodStatus{Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}},
 	}
-	require.NoError(t, r.Create(context.Background(), shareManager))
-	assessment = r.assessAgentPoolStorage(context.Background(), pool)
-	assert.True(t, assessment.Ready)
-	assert.Nil(t, r.managedLonghornVolumeHealth(context.Background(), "pool-volume", true))
+	objects := []client.Object{
+		pool,
+		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "platform-ca", Namespace: pool.Namespace}, Data: map[string][]byte{"tls.crt": []byte("c"), "tls.key": []byte("k")}},
+		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "graph-creds", Namespace: pool.Namespace}, Data: map[string][]byte{"token": []byte("v")}},
+		worker,
+	}
+	objects = append(objects, boundWorkspaceObjects(pool)...)
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, storagev1.AddToScheme(scheme))
+	require.NoError(t, v1alpha1.AddToScheme(scheme))
+	base := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&v1alpha1.AgentPool{}).WithObjects(objects...).Build()
+	injected := errors.New("cache transport unavailable")
+	queries := &storageQueryClient{
+		Client: base, getByKind: map[string]int{}, listByKind: map[string]int{},
+		failKind: "LVMVolume", failErr: injected,
+	}
+	gate := &recordingWorkspaceStorageGate{}
+	r := &AgentPoolReconciler{Client: queries, APIReader: base, Scheme: scheme, StorageGate: gate}
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: pool.Name, Namespace: pool.Namespace}})
+	require.ErrorIs(t, err, injected)
+	assert.Equal(t, []string{"iterabase-system/pool"}, gate.poolKeys)
+	assert.Equal(t, []bool{false}, gate.decisions, "unknown storage must close fresh dispatch credit")
+	var retained corev1.Pod
+	require.NoError(t, base.Get(context.Background(), types.NamespacedName{Name: worker.Name, Namespace: worker.Namespace}, &retained))
 }
 
-func TestEnsurePVCRefusesShrinkWithoutRecreation(t *testing.T) {
-	pool := validAgentPool("shrink", "platform")
+func TestSafeAgentPoolResizeClosesCreditWithoutDeletingMountedWorkers(t *testing.T) {
+	pool := validAgentPool("pool", "iterabase-system")
 	pool.UID = types.UID("pool-uid")
-	pool.Spec.Sandbox.AccessMode = corev1.ReadWriteOnce
-	pool.Spec.Sandbox.Size = resource.MustParse("5Gi")
-	class := pool.Spec.Sandbox.StorageClassName
-	pvc := &corev1.PersistentVolumeClaim{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: sandboxPVCName(pool), Namespace: pool.Namespace, UID: types.UID("pvc-uid"),
-			CreationTimestamp: metav1.NewTime(time.Now()),
-		},
-		Spec: corev1.PersistentVolumeClaimSpec{
-			StorageClassName: &class, AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
-			Resources: corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("10Gi")}},
-		},
+	pool.Finalizers = []string{agentPoolFinalizer}
+	pool.Status.Ready = true
+	pool.Status.ReadyReplicas = 1
+	pool.Status.Conditions = []metav1.Condition{{
+		Type: storageConditionOperationalReadinessReached, Status: metav1.ConditionTrue,
+		Reason: storageReasonOperationalReadinessReached, LastTransitionTime: metav1.Now(),
+	}}
+	pool.Spec.Sandbox.Size = resource.MustParse("20Gi")
+	worker := buildWorkerPod(pool, workerName(pool, 0), workerPodTemplateHash(pool, workerName(pool, 0)))
+	worker.UID = types.UID("worker-uid")
+	worker.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
+	objects := []client.Object{
+		pool,
+		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "platform-ca", Namespace: pool.Namespace}, Data: map[string][]byte{"tls.crt": []byte("c"), "tls.key": []byte("k")}},
+		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "graph-creds", Namespace: pool.Namespace}, Data: map[string][]byte{"token": []byte("v")}},
+		worker,
 	}
-	r := storageTestReconciler(t, pool, pvc)
-	err := r.ensurePVC(context.Background(), pool)
-	require.ErrorContains(t, err, "shrink")
-	var preserved corev1.PersistentVolumeClaim
-	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Name: pvc.Name, Namespace: pvc.Namespace}, &preserved))
-	assert.Equal(t, types.UID("pvc-uid"), preserved.UID)
-	preservedRequest := preserved.Spec.Resources.Requests[corev1.ResourceStorage]
-	assert.Equal(t, "10Gi", preservedRequest.String())
+	objects = append(objects, boundWorkspaceObjects(pool)...)
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, networkingv1.AddToScheme(scheme))
+	require.NoError(t, storagev1.AddToScheme(scheme))
+	require.NoError(t, v1alpha1.AddToScheme(scheme))
+	base := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&v1alpha1.AgentPool{}).WithObjects(objects...).Build()
+	gate := &recordingWorkspaceStorageGate{}
+	r := &AgentPoolReconciler{Client: base, APIReader: base, Scheme: scheme, StorageGate: gate}
+
+	result, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: pool.Name, Namespace: pool.Namespace}})
+	require.NoError(t, err)
+	assert.Equal(t, healthRequeueInterval, result.RequeueAfter)
+	assert.Equal(t, []bool{false}, gate.decisions)
+	var retained corev1.Pod
+	require.NoError(t, base.Get(context.Background(), types.NamespacedName{Name: worker.Name, Namespace: worker.Namespace}, &retained))
+	assert.Equal(t, types.UID("worker-uid"), retained.UID)
+	var pvc corev1.PersistentVolumeClaim
+	require.NoError(t, base.Get(context.Background(), types.NamespacedName{Name: sandboxPVCName(pool), Namespace: pool.Namespace}, &pvc))
+	request := pvc.Spec.Resources.Requests[corev1.ResourceStorage]
+	assert.Equal(t, "20Gi", request.String())
+	assert.NotEmpty(t, pvc.Annotations[agentPoolResizeStartedAnnotation])
+	assert.Equal(t, "10737418240", pvc.Annotations[agentPoolResizeBaselineCapacityAnnotation])
 }
 
-func TestReconcileReadyPoolRejectsPVCMutationWithCurrentStorageCondition(t *testing.T) {
-	tests := []struct {
-		name       string
-		mutatePool func(*v1alpha1.AgentPool)
-		wantReason string
-	}{
-		{
-			name: "shrink",
-			mutatePool: func(pool *v1alpha1.AgentPool) {
-				pool.Spec.Sandbox.Size = resource.MustParse("5Gi")
-			},
-			wantReason: storageReasonPVCExpansionFailed,
-		},
-		{
-			name: "immutable class change",
-			mutatePool: func(pool *v1alpha1.AgentPool) {
-				pool.Spec.Sandbox.StorageClassName = "replacement-class"
-			},
-			wantReason: storageReasonClassMismatch,
-		},
+func TestHealthyStorageObservationAuthorizesDispatch(t *testing.T) {
+	pool := validAgentPool("pool", "iterabase-system")
+	pool.UID = types.UID("pool-uid")
+	pool.Finalizers = []string{agentPoolFinalizer}
+	objects := []client.Object{
+		pool,
+		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "platform-ca", Namespace: pool.Namespace}, Data: map[string][]byte{"tls.crt": []byte("c"), "tls.key": []byte("k")}},
+		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "graph-creds", Namespace: pool.Namespace}, Data: map[string][]byte{"token": []byte("v")}},
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			pool := validAgentPool("mutation", "platform")
-			pool.Spec.CredentialBindings = nil
-			pool.Spec.GatewayGrants = nil
-			pool.Spec.Sandbox.Size = resource.MustParse("10Gi")
-			pool.Finalizers = []string{agentPoolFinalizer}
-			pool.Generation = 2
-			pool.Status.Ready = true
-			pool.Status.ReadyReplicas = 1
-			pool.Status.Conditions = []metav1.Condition{{
-				Type: "StorageReady", Status: metav1.ConditionTrue, Reason: storageReasonReady,
-				ObservedGeneration: 1,
-			}}
-			class := pool.Spec.Sandbox.StorageClassName
-			pvc := &corev1.PersistentVolumeClaim{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: sandboxPVCName(pool), Namespace: pool.Namespace, UID: "pvc-uid",
-					CreationTimestamp: metav1.NewTime(time.Now()),
-				},
-				Spec: corev1.PersistentVolumeClaimSpec{
-					StorageClassName: &class,
-					AccessModes:      []corev1.PersistentVolumeAccessMode{pool.Spec.Sandbox.AccessMode},
-					Resources:        corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("10Gi")}},
-				},
-			}
-			worker := &corev1.Pod{
-				ObjectMeta: metav1.ObjectMeta{Name: workerName(pool, 0), Namespace: pool.Namespace, Labels: poolLabels(pool)},
-				Status: corev1.PodStatus{Conditions: []corev1.PodCondition{{
-					Type: corev1.PodReady, Status: corev1.ConditionTrue,
-				}}},
-			}
-			ca := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: pool.Spec.Identity.CASecretRef.Name, Namespace: pool.Namespace}}
-			tt.mutatePool(pool)
-			r := storageTestReconciler(t, pool, pvc, worker, ca)
+	objects = append(objects, boundWorkspaceObjects(pool)...)
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, networkingv1.AddToScheme(scheme))
+	require.NoError(t, storagev1.AddToScheme(scheme))
+	require.NoError(t, v1alpha1.AddToScheme(scheme))
+	base := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&v1alpha1.AgentPool{}).WithObjects(objects...).Build()
+	gate := &recordingWorkspaceStorageGate{}
+	r := &AgentPoolReconciler{Client: base, APIReader: base, Scheme: scheme, StorageGate: gate}
 
-			result, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: pool.Name, Namespace: pool.Namespace}})
-			require.NoError(t, err)
-			assert.False(t, result.Requeue)
+	result, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: pool.Name, Namespace: pool.Namespace}})
+	require.NoError(t, err)
+	assert.Equal(t, healthRequeueInterval, result.RequeueAfter)
+	assert.Equal(t, []string{"iterabase-system/pool"}, gate.poolKeys)
+	assert.Equal(t, []bool{true}, gate.decisions, "only a complete authoritative storage assessment may reopen fresh credit")
+}
 
-			var got v1alpha1.AgentPool
-			require.NoError(t, r.Get(context.Background(), types.NamespacedName{Name: pool.Name, Namespace: pool.Namespace}, &got))
-			assert.False(t, got.Status.Ready)
-			assert.Zero(t, got.Status.ReadyReplicas)
-			assert.Equal(t, got.Generation, got.Status.ObservedGeneration)
-			condition := meta.FindStatusCondition(got.Status.Conditions, "StorageReady")
-			require.NotNil(t, condition)
-			assert.Equal(t, metav1.ConditionFalse, condition.Status)
-			assert.Equal(t, tt.wantReason, condition.Reason)
-			assert.Contains(t, condition.Message, "scheduling credit was removed before worker quiescing")
-
-			var removed corev1.Pod
-			err = r.Get(context.Background(), types.NamespacedName{Name: worker.Name, Namespace: worker.Namespace}, &removed)
-			assert.True(t, apierrors.IsNotFound(err), "ready worker must be quiesced after a rejected storage mutation")
+func TestAssessAgentPoolStorageRejectsCSIAndOpenEBSIdentityDrift(t *testing.T) {
+	pool := storagePool()
+	for _, tc := range []struct {
+		name   string
+		mutate func([]client.Object)
+		want   string
+	}{
+		{name: "host path", mutate: func(objects []client.Object) {
+			pv := objects[2].(*corev1.PersistentVolume)
+			pv.Spec.CSI = nil
+			pv.Spec.HostPath = &corev1.HostPathVolumeSource{Path: "/var/lib/rancher/k3s/storage"}
+		}, want: "OpenEBS CSI"},
+		{name: "wrong fs", mutate: func(objects []client.Object) { objects[2].(*corev1.PersistentVolume).Spec.CSI.FSType = "ext4" }, want: "fsType=xfs"},
+		{name: "wrong vg", mutate: func(objects []client.Object) {
+			objects[2].(*corev1.PersistentVolume).Spec.CSI.VolumeAttributes["openebs.io/volgroup"] = "root"
+		}, want: "volgroup=iterabase-data"},
+		{name: "thin volume", mutate: func(objects []client.Object) {
+			_ = unstructured.SetNestedField(objects[3].(*unstructured.Unstructured).Object, "yes", "spec", "thinProvision")
+		}, want: "thin=yes"},
+		{name: "wrong node", mutate: func(objects []client.Object) {
+			_ = unstructured.SetNestedField(objects[3].(*unstructured.Unstructured).Object, "node-2", "spec", "ownerNodeID")
+		}, want: "topology"},
+		{name: "extra topology", mutate: func(objects []client.Object) {
+			pv := objects[2].(*corev1.PersistentVolume)
+			pv.Spec.NodeAffinity.Required.NodeSelectorTerms[0].MatchExpressions = append(
+				pv.Spec.NodeAffinity.Required.NodeSelectorTerms[0].MatchExpressions,
+				corev1.NodeSelectorRequirement{Key: corev1.LabelHostname, Operator: corev1.NodeSelectorOpIn, Values: []string{"node-1"}},
+			)
+		}, want: "topology"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			objects := boundWorkspaceObjects(pool)
+			tc.mutate(objects)
+			assessment := storageReconciler(t, objects...).assessAgentPoolStorage(context.Background(), pool)
+			assert.False(t, assessment.CanMount)
+			assert.Equal(t, storageReasonPVCUnavailable, assessment.Reason)
+			assert.Contains(t, assessment.Message, tc.want)
 		})
 	}
 }
 
-func TestReconcileReadyPoolRecordsStorageMutationBeforeQuiesceFailure(t *testing.T) {
-	pool := validAgentPool("quiesce-failure", "platform")
-	pool.Spec.CredentialBindings = nil
-	pool.Spec.GatewayGrants = nil
-	pool.Spec.Sandbox.Size = resource.MustParse("5Gi")
-	pool.Finalizers = []string{agentPoolFinalizer}
-	pool.Generation = 2
-	pool.Status.Ready = true
-	pool.Status.ReadyReplicas = 1
-	pool.Status.Conditions = []metav1.Condition{{
-		Type: "StorageReady", Status: metav1.ConditionTrue, Reason: storageReasonReady,
-		ObservedGeneration: 1,
-	}}
-	class := pool.Spec.Sandbox.StorageClassName
-	pvc := &corev1.PersistentVolumeClaim{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: sandboxPVCName(pool), Namespace: pool.Namespace, UID: "pvc-uid",
-			CreationTimestamp: metav1.NewTime(time.Now()),
-		},
-		Spec: corev1.PersistentVolumeClaimSpec{
-			StorageClassName: &class,
-			AccessModes:      []corev1.PersistentVolumeAccessMode{pool.Spec.Sandbox.AccessMode},
-			Resources:        corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("10Gi")}},
-		},
+func TestValidateAgentPoolStorageClassExactContract(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*storagev1.StorageClass)
+	}{
+		{name: "wrong provisioner", mutate: func(c *storagev1.StorageClass) { c.Provisioner = "rancher.io/local-path" }},
+		{name: "default", mutate: func(c *storagev1.StorageClass) { c.Annotations["storageclass.kubernetes.io/is-default-class"] = "true" }},
+		{name: "non-expandable", mutate: func(c *storagev1.StorageClass) { no := false; c.AllowVolumeExpansion = &no }},
+		{name: "retain", mutate: func(c *storagev1.StorageClass) {
+			retain := corev1.PersistentVolumeReclaimRetain
+			c.ReclaimPolicy = &retain
+		}},
+		{name: "immediate", mutate: func(c *storagev1.StorageClass) {
+			immediate := storagev1.VolumeBindingImmediate
+			c.VolumeBindingMode = &immediate
+		}},
+		{name: "wrong filesystem", mutate: func(c *storagev1.StorageClass) { c.Parameters["fsType"] = "ext4" }},
+		{name: "thin", mutate: func(c *storagev1.StorageClass) { c.Parameters["thinProvision"] = "yes" }},
+		{name: "unshared", mutate: func(c *storagev1.StorageClass) { c.Parameters["shared"] = "no" }},
+		{name: "alternate vg", mutate: func(c *storagev1.StorageClass) { c.Parameters["vgpattern"] = ".*" }},
 	}
-	worker := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: workerName(pool, 0), Namespace: pool.Namespace, Labels: poolLabels(pool)},
-		Status: corev1.PodStatus{Conditions: []corev1.PodCondition{{
-			Type: corev1.PodReady, Status: corev1.ConditionTrue,
-		}}},
+	assert.Empty(t, validateAgentPoolStorageClass(lvmAgentPoolClass()))
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			class := lvmAgentPoolClass()
+			tc.mutate(class)
+			assert.NotEmpty(t, validateAgentPoolStorageClass(class))
+		})
 	}
-	ca := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: pool.Spec.Identity.CASecretRef.Name, Namespace: pool.Namespace}}
-	r := storageTestReconciler(t, pool, pvc, worker, ca)
-	r.Client = &workerDeleteFailureClient{Client: r.Client}
-
-	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: pool.Name, Namespace: pool.Namespace}})
-	require.ErrorContains(t, err, "simulated worker delete failure")
-
-	var got v1alpha1.AgentPool
-	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Name: pool.Name, Namespace: pool.Namespace}, &got))
-	assert.False(t, got.Status.Ready)
-	assert.Zero(t, got.Status.ReadyReplicas)
-	condition := meta.FindStatusCondition(got.Status.Conditions, "StorageReady")
-	require.NotNil(t, condition)
-	assert.Equal(t, metav1.ConditionFalse, condition.Status)
-	assert.Equal(t, storageReasonPVCExpansionFailed, condition.Reason)
-	assert.Contains(t, condition.Message, "scheduling credit was removed before worker quiescing")
-
-	var retained corev1.Pod
-	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Name: worker.Name, Namespace: worker.Namespace}, &retained), "the simulated delete failure should retain the worker while status remains fail-closed")
 }
 
-func TestQuiesceWorkersDeletesSchedulingCreditAfterStorageLoss(t *testing.T) {
-	pool := validAgentPool("lost-storage", "platform")
-	pods := []client.Object{
-		&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: workerName(pool, 0), Namespace: pool.Namespace, Labels: poolLabels(pool)}},
-		&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: workerName(pool, 1), Namespace: pool.Namespace, Labels: poolLabels(pool)}},
-	}
-	r := storageTestReconciler(t, pods...)
-	require.NoError(t, r.quiesceWorkers(context.Background(), pool))
-	var remaining corev1.PodList
-	require.NoError(t, r.List(context.Background(), &remaining, client.InNamespace(pool.Namespace)))
-	assert.Empty(t, remaining.Items)
+func TestAssessAgentPoolStorageRejectsOwnerDrift(t *testing.T) {
+	pool := storagePool()
+	objects := boundWorkspaceObjects(pool)
+	objects[1].(*corev1.PersistentVolumeClaim).OwnerReferences[0].UID = types.UID("foreign")
+	assessment := storageReconciler(t, objects...).assessAgentPoolStorage(context.Background(), pool)
+	assert.False(t, assessment.CanMount)
+	assert.True(t, assessment.ConfirmedUnsafe)
+	assert.True(t, storageQuiescenceRequired(assessment))
+	assert.Contains(t, assessment.Message, "ownership mutation")
 }
 
-func TestWorkerStorageFailureSurfacesMountRootDiagnostics(t *testing.T) {
-	pool := validAgentPool("unsafe-root", "platform")
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: workerName(pool, 0), Namespace: pool.Namespace, Labels: poolLabels(pool)},
-		Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{
-			Name: "supervisor", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
-				ExitCode: 1, Reason: "Error", Message: "mount root owned by 65534:65534",
-			}},
-		}}},
-	}
-	r := storageTestReconciler(t, pod)
-	message := workerStorageFailure(context.Background(), r.Client, pool)
-	assert.Contains(t, message, "root-squashed")
-	assert.Contains(t, message, "unsafe-root-worker-0")
-}
+func TestAssessAgentPoolStorageRejectsAccessAndClassDrift(t *testing.T) {
+	pool := storagePool()
+	pool.Spec.Sandbox.AccessMode = corev1.ReadWriteMany
+	assessment := storageReconciler(t).assessAgentPoolStorage(context.Background(), pool)
+	assert.False(t, assessment.CanMount)
+	assert.Contains(t, assessment.Message, "no V2 fallback")
 
-func TestStorageReadyConditionTransitionIsStable(t *testing.T) {
-	pool := validAgentPool("condition", "platform")
-	pool.Generation = 4
-	assessment := &agentPoolStorageAssessment{Ready: false, Reason: storageReasonPVCUnavailable, Message: "PVC lost"}
-	r := storageTestReconciler(t, pool)
-	require.NoError(t, r.patchStatus(context.Background(), pool, false, 0, assessment.Message, false, assessment))
-	var got v1alpha1.AgentPool
-	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Name: pool.Name, Namespace: pool.Namespace}, &got))
-	require.Len(t, got.Status.Conditions, 1)
-	assert.Equal(t, "StorageReady", got.Status.Conditions[0].Type)
-	assert.Equal(t, storageReasonPVCUnavailable, got.Status.Conditions[0].Reason)
-	assert.Equal(t, metav1.ConditionFalse, got.Status.Conditions[0].Status)
-	assert.WithinDuration(t, time.Now(), got.Status.Conditions[0].LastTransitionTime.Time, time.Minute)
+	pool = storagePool()
+	pool.Spec.Sandbox.StorageClassName = "local-path"
+	assessment = storageReconciler(t).assessAgentPoolStorage(context.Background(), pool)
+	assert.False(t, assessment.CanMount)
+	assert.Contains(t, assessment.Message, "no V2 fallback")
 }

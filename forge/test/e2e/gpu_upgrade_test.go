@@ -1,7 +1,6 @@
 package e2e
 
 import (
-	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -28,12 +27,27 @@ import (
 )
 
 const (
-	gpuUpgradeBaselineDriver  = "580.126.20"
-	gpuUpgradeCandidateDriver = "595.71.05"
-	gpuUpgradeNamespace       = "forge-gpu-upgrade"
-	gpuUpgradeWorkloadName    = "gpu-driver-upgrade-workload"
-	gpuUpgradeReadyPrefix     = "gpu-upgrade-ready "
+	gpuUpgradeBaselineDriver        = "580.126.20"
+	gpuUpgradeBaselineDriverSHA256  = "16b9830998d2f2795fe72e760169b51bd4185e3b412ea3d0c4e46f453af2cc30"
+	gpuUpgradeCandidateDriver       = "595.71.05"
+	gpuUpgradeCandidateDriverSHA256 = "d8c38c473375d7262e36ad100dc0732859592a5ff65b238e41057e1dc0763098"
+	gpuUpgradeNamespace             = "forge-gpu-upgrade"
+	gpuUpgradeWorkloadName          = "gpu-driver-upgrade-workload"
+	gpuUpgradeReadyPrefix           = "gpu-upgrade-ready "
 )
+
+func e2eGPUDriverSHA256(t *testing.T, version string) string {
+	t.Helper()
+	switch version {
+	case gpuUpgradeBaselineDriver:
+		return gpuUpgradeBaselineDriverSHA256
+	case gpuUpgradeCandidateDriver:
+		return gpuUpgradeCandidateDriverSHA256
+	default:
+		t.Fatalf("GPU driver %q has no reviewed Ubuntu 24.04 image digest", version)
+		return ""
+	}
+}
 
 type gpuUpgradeEvidence struct {
 	PodUID          types.UID
@@ -42,7 +56,7 @@ type gpuUpgradeEvidence struct {
 	DriverVersion   string
 }
 
-func recordGPUUpgradeInputsStage(t *testing.T, state *digitalOceanGPUState) {
+func recordGPUUpgradeInputsStage(t *testing.T, state *permanentGPUFixtureState) {
 	t.Helper()
 	identity, err := runForgeE(state.forgeBin, state.forgeHome, "version")
 	if err != nil {
@@ -55,7 +69,7 @@ func recordGPUUpgradeInputsStage(t *testing.T, state *digitalOceanGPUState) {
 	)
 }
 
-func startGPUUpgradeWorkloadStage(t *testing.T, state *digitalOceanGPUState) {
+func startGPUUpgradeWorkloadStage(t *testing.T, state *permanentGPUFixtureState) {
 	t.Helper()
 	clients := newGPUUpgradeClients(t, state)
 	ctx := context.Background()
@@ -78,16 +92,17 @@ func startGPUUpgradeWorkloadStage(t *testing.T, state *digitalOceanGPUState) {
 	t.Logf("baseline GPU workload ready: %+v", evidence)
 }
 
-func applyGPUDriverUpgradeStage(t *testing.T, state *digitalOceanGPUState) {
+func applyGPUDriverUpgradeStage(t *testing.T, state *permanentGPUFixtureState) {
 	t.Helper()
-	cfgPath := writeForgeConfigGPUDriver(t, state.runID, state.vm.IP, state.privKeyPath, gpuUpgradeCandidateDriver)
+	cfgPath := writeForgeConfigGPUDriver(t, state.runID, state.host.IP, state.privKeyPath, gpuUpgradeCandidateDriver)
 	t.Logf("reconciling exact GPU driver transition %s -> %s", gpuUpgradeBaselineDriver, gpuUpgradeCandidateDriver)
 	out := applyOnce(t, state.forgeBin, state.forgeHome, cfgPath)
 	assertApplyMarkers(t, out, "node ready: true", "gpu ready: true", "gpu driver: "+gpuUpgradeCandidateDriver)
+	state.bindKubeconfigTunnel(t)
 	t.Logf("driver upgrade apply output:\n%s", out)
 }
 
-func assertGPUDriverUpgradeStage(t *testing.T, state *digitalOceanGPUState) {
+func assertGPUDriverUpgradeStage(t *testing.T, state *permanentGPUFixtureState) {
 	t.Helper()
 	if state.upgradeEvidence == nil {
 		t.Fatal("baseline GPU workload evidence is missing")
@@ -140,7 +155,7 @@ type gpuUpgradeClients struct {
 	dynamic dynamic.Interface
 }
 
-func newGPUUpgradeClients(t *testing.T, state *digitalOceanGPUState) gpuUpgradeClients {
+func newGPUUpgradeClients(t *testing.T, state *permanentGPUFixtureState) gpuUpgradeClients {
 	t.Helper()
 	kubeconfig := filepath.Join(state.forgeHome, state.runID, "kubeconfig.yaml")
 	restConfig, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
@@ -160,10 +175,14 @@ func newGPUUpgradeClients(t *testing.T, state *digitalOceanGPUState) gpuUpgradeC
 }
 
 func gpuUpgradePVC() *corev1.PersistentVolumeClaim {
+	storageClass := "iterabase-lvm-xfs"
+	volumeMode := corev1.PersistentVolumeFilesystem
 	return &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{Name: gpuUpgradeWorkloadName + "-cache", Namespace: gpuUpgradeNamespace},
 		Spec: corev1.PersistentVolumeClaimSpec{
-			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			StorageClassName: &storageClass,
+			VolumeMode:       &volumeMode,
 			Resources: corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{
 				corev1.ResourceStorage: resource.MustParse("1Gi"),
 			}},
@@ -193,7 +212,7 @@ func gpuUpgradeDeployment(runID string) *appsv1.Deployment {
 					TerminationGracePeriodSeconds: &gracePeriod,
 					Containers: []corev1.Container{{
 						Name:  "inference",
-						Image: "nvidia/cuda:12.4.1-base-ubuntu22.04",
+						Image: "nvidia/cuda:12.4.1-base-ubuntu22.04@sha256:0f6bfcbf267e65123bcc2287e2153dedfc0f24772fb5ce84afe16ac4b2fada95",
 						Command: []string{"sh", "-ceu", `
 if [ ! -s /cache/owner ]; then
   printf '%s' "$POD_UID" > /cache/owner
@@ -313,7 +332,7 @@ func parseGPUUpgradeEvidence(logs string) (gpuUpgradeEvidence, error) {
 	return gpuUpgradeEvidence{}, fmt.Errorf("GPU upgrade readiness record not found")
 }
 
-func waitForGPUUpgradeNode(t *testing.T, state *digitalOceanGPUState, previousUID types.UID, timeout time.Duration) {
+func waitForGPUUpgradeNode(t *testing.T, state *permanentGPUFixtureState, previousUID types.UID, timeout time.Duration) {
 	t.Helper()
 	// A containerized driver replacement briefly restarts k3s on this single
 	// node. Observe that expected unavailable state through SSH, then parse one
@@ -348,7 +367,7 @@ printf '\n'
 	deadline := time.Now().Add(timeout)
 	lastObservation := "no coherent API observation"
 	for time.Now().Before(deadline) {
-		out, err := sshRun(t, state.vm.IP, state.privKeyPath, observe)
+		out, err := sshRun(t, state.host.IP, state.privKeyPath, observe)
 		if err != nil {
 			t.Fatalf("observe k3s during GPU driver upgrade: %v\n%s", err, out)
 		}
@@ -459,6 +478,7 @@ func readGPUUpgradePolicyReadiness(policy *unstructured.Unstructured, expectedDr
 	if err != nil {
 		return readiness, fmt.Errorf("read spec.driver.version: %w", err)
 	}
+	readiness.DriverVersion, _, _ = strings.Cut(readiness.DriverVersion, "@sha256:")
 	conditions, found, err := unstructured.NestedSlice(policy.Object, "status", "conditions")
 	if err != nil {
 		return readiness, fmt.Errorf("read status.conditions: %w", err)
@@ -551,25 +571,13 @@ func TestGPUUpgradePolicyReadinessAuthority(t *testing.T) {
 	}
 }
 
-func TestBrokenEmptyDirPolicyForgeBuild(t *testing.T) {
-	t.Setenv("FORGE_E2E_BINARY", "")
-	t.Setenv("FORGE_E2E_BREAK_DELETE_EMPTYDIR", "true")
-	bin := buildForge(t)
-	identity, err := runForgeE(bin, t.TempDir(), "version")
-	if err != nil || !strings.HasPrefix(identity, "forge ") {
-		t.Fatalf("intentional broken-policy Forge build is not runnable: err=%v output=%q", err, identity)
-	}
-	binary, err := os.ReadFile(bin)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Contains(binary, []byte("driver.upgradePolicy.gpuPodDeletion.deleteEmptyDir=false")) ||
-		bytes.Contains(binary, []byte("driver.upgradePolicy.gpuPodDeletion.deleteEmptyDir=true")) {
-		t.Fatal("intentional broken-policy Forge binary did not contain only the false policy value")
-	}
-}
-
 func TestGPUUpgradeDeploymentSeparatesDisposableAndPersistentState(t *testing.T) {
+	pvc := gpuUpgradePVC()
+	if pvc.Spec.StorageClassName == nil || *pvc.Spec.StorageClassName != "iterabase-lvm-xfs" ||
+		pvc.Spec.VolumeMode == nil || *pvc.Spec.VolumeMode != corev1.PersistentVolumeFilesystem ||
+		len(pvc.Spec.AccessModes) != 1 || pvc.Spec.AccessModes[0] != corev1.ReadWriteOnce {
+		t.Fatalf("GPU transition cache does not use the exact general LVM claim contract: %+v", pvc.Spec)
+	}
 	deployment := gpuUpgradeDeployment("test-run")
 	pod := deployment.Spec.Template.Spec
 	if pod.RuntimeClassName == nil || *pod.RuntimeClassName != "nvidia" {

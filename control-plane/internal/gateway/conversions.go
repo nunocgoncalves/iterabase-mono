@@ -67,12 +67,14 @@ func invocationStateToProto(s InvocationState) v1.InvokeState {
 // --- descriptor <-> tool version ---
 
 // toolVersionToDescriptor maps a stored ToolVersion to a proto ToolDescriptor.
-// Credential slots, artifact capabilities, and idempotency proof are
-// gateway-internal (used for authorization/credential resolution and retry
-// classification) and are NOT sent to callers or back to the runner — the
-// runner already declared them at registration, and the child must not see them.
+// Credential slots and idempotency proof are gateway-internal (used for
+// authorization/credential resolution and retry classification) and are NOT
+// sent to callers — the child must not see them. The non-secret artifact
+// read/write capability and accepted MIME types ARE reconstructed from
+// persistent state (HOR-546) so the child can forward matching artifact
+// references; gateway-side authorization and validation remain authoritative.
 func toolVersionToDescriptor(tv ToolVersion) *v1.ToolDescriptor {
-	return &v1.ToolDescriptor{
+	desc := &v1.ToolDescriptor{
 		Name:        tv.Name,
 		Version:     tv.Version,
 		Digest:      tv.Digest,
@@ -81,6 +83,34 @@ func toolVersionToDescriptor(tv ToolVersion) *v1.ToolDescriptor {
 		EffectClass: effectClassToProto(tv.EffectClass),
 		Timeout:     durationpb.New(time.Duration(tv.TimeoutMS) * time.Millisecond),
 	}
+	if caps, ok := artifactCapabilitiesFromStorage(tv.ArtifactCapabs); ok {
+		desc.ArtifactCapabilities = caps
+	}
+	return desc
+}
+
+// artifactCapabilitiesFromStorage reconstructs the non-secret
+// ArtifactCapabilities proto from a persisted ToolVersion's JSONB. ok is false
+// when the field is absent/empty or malformed — the capability is then simply
+// not asserted, so the child never forwards artifact references it was not
+// granted (fail-safe, consistent with gateway-side validation).
+func artifactCapabilitiesFromStorage(b []byte) (*v1.ArtifactCapabilities, bool) {
+	var caps struct {
+		Reads             bool     `json:"reads"`
+		Writes            bool     `json:"writes"`
+		AcceptedMIMETypes []string `json:"accepted_mime_types"`
+	}
+	if json.Unmarshal(b, &caps) != nil {
+		return nil, false
+	}
+	if !caps.Reads && !caps.Writes && len(caps.AcceptedMIMETypes) == 0 {
+		return nil, false
+	}
+	return &v1.ArtifactCapabilities{
+		ReadsArtifacts:    caps.Reads,
+		WritesArtifacts:   caps.Writes,
+		AcceptedMimeTypes: caps.AcceptedMIMETypes,
+	}, true
 }
 
 // descriptorToToolVersion maps a runner-supplied descriptor to a stored

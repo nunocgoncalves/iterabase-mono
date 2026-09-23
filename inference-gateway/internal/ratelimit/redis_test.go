@@ -15,7 +15,7 @@ func setupTestRedis(t *testing.T) (*redis.Client, func()) {
 	t.Helper()
 	ctx := context.Background()
 
-	redisContainer, err := tcredis.Run(ctx, "redis:7-alpine")
+	redisContainer, err := tcredis.Run(ctx, "redis:7-alpine@sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf")
 	require.NoError(t, err)
 
 	connStr, err := redisContainer.ConnectionString(ctx)

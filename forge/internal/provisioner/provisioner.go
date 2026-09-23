@@ -10,15 +10,122 @@ import (
 	"fmt"
 )
 
+// InotifyMaxUserInstancesRequired is the durable fs.inotify.max_user_instances
+// capacity Forge guarantees on every managed single-node Kubernetes host.
+// Kubernetes CRI log following creates one fsnotify watcher per followed
+// container log, and exhausting the per-user inotify *instance* ceiling returns
+// EMFILE ("too many open files") from fsnotify even when process and global
+// file-descriptor limits are healthy. The OPO1 incident exhausted Ubuntu's
+// default of 128 with K3s, containerd shims, and root containers.
+const InotifyMaxUserInstancesRequired = 8192
+
+// Fixed Platform V2 data-storage identities shared by Forge and its callers.
+const (
+	DataVolumeGroupName             = "iterabase-data"
+	AgentPoolStorageClass           = "iterabase-agentpool-lvm-xfs"
+	PlatformStorageClass            = "iterabase-lvm-xfs"
+	LVMStorageProvisioner           = "local.csi.openebs.io"
+	LVMStorageSubstrateChart        = "lvm-storage-substrate"
+	LVMStorageSubstrateFirstVersion = "0.4.0"
+)
+
+// DataStorageDevice is bounded, non-secret whole-disk and PV identity evidence.
+type DataStorageDevice struct {
+	Path      string
+	Resolved  string
+	Model     string
+	Serial    string
+	WWN       string
+	Transport string
+	SizeBytes uint64
+	PVUUID    string
+}
+
+// DataStorageSpec binds host reconciliation to one install and the exact
+// persisted canonical by-id device set. No method may discover replacements.
+type DataStorageSpec struct {
+	InstallName string
+	Devices     []string
+}
+
+// DataStorageState is bounded receipt/VG readiness and capacity evidence.
+type DataStorageState struct {
+	Devices   []DataStorageDevice
+	VGName    string
+	VGUUID    string
+	SizeBytes uint64
+	FreeBytes uint64
+	State     string
+}
+
+// LVMStorageReadiness is bounded cluster-side substrate and VG discovery
+// evidence returned after the chart-owned companion converges.
+type LVMStorageReadiness struct {
+	Ready     bool
+	NodeName  string
+	VGName    string
+	VGUUID    string
+	SizeBytes uint64
+	FreeBytes uint64
+	LVCount   int
+	PVCount   int
+}
+
 // HostState is the actual host-level state of k3s, read for reconcile.
 // Node-level state (labels/taints) is applied at install time via k3s flags in
 // v1 and reconciled via the API in a later version.
 type HostState struct {
-	Installed   bool   // k3s is installed on the host
-	Version     string // k3s version, e.g. "v1.31.5+k3s1"
-	ClusterCIDR string // as stored in config.yaml (comma-joined for dual-stack)
-	ServiceCIDR string
-	DualStack   bool
+	Installed            bool   // k3s is installed on the host
+	Version              string // k3s version, e.g. "v1.31.5+k3s1"
+	ClusterCIDR          string // as stored in config.yaml (comma-joined for dual-stack)
+	ServiceCIDR          string
+	DualStack            bool
+	LocalStorageDisabled bool
+}
+
+// HostInotifyState is one bounded observation of the live inotify instance
+// ceiling and the Forge-owned persistent drop-in. Effective is always the live
+// kernel value read back from /proc; Persisted is the value found in the
+// drop-in (0 when absent). DropInCanonical means the drop-in exists as a
+// regular file, is owned by root with mode 0644, and contains exactly the
+// canonical Forge setting.
+type HostInotifyState struct {
+	Effective       int
+	Persisted       int
+	DropInPresent   bool
+	DropInRegular   bool
+	DropInOwner     string
+	DropInMode      string
+	DropInCanonical bool
+}
+
+// Ready reports whether the live kernel value satisfies the Forge requirement
+// and the drop-in durably persists it. A live value above the requirement is
+// ready: Forge never lowers capacity that is already sufficient.
+func (s HostInotifyState) Ready() bool {
+	return s.Effective >= InotifyMaxUserInstancesRequired && s.DropInCanonical
+}
+
+// CapacityEvidence renders the live observed-versus-required counters shared
+// by the human status surface and the fail-closed evidence string.
+func (s HostInotifyState) CapacityEvidence() string {
+	return fmt.Sprintf("effective=%d required=%d persisted=%d", s.Effective, InotifyMaxUserInstancesRequired, s.Persisted)
+}
+
+// DropInEvidence renders the Forge-owned drop-in descriptor shared by the
+// human status surface and the fail-closed evidence string.
+func (s HostInotifyState) DropInEvidence() string {
+	if !s.DropInPresent {
+		return "missing"
+	}
+	return fmt.Sprintf("present regular=%t owner=%s mode=%s canonical=%t", s.DropInRegular, s.DropInOwner, s.DropInMode, s.DropInCanonical)
+}
+
+// String returns actionable observed-versus-required evidence for plan,
+// dry-run, status, and failure output. It is a thin wrapper over the shared
+// evidence fragments so the status and fail-closed surfaces cannot drift.
+func (s HostInotifyState) String() string {
+	return fmt.Sprintf("%s drop-in=%s ready=%t", s.CapacityEvidence(), s.DropInEvidence(), s.Ready())
 }
 
 // PreflightResult is the read-only host readiness check outcome.
@@ -30,10 +137,10 @@ type PreflightResult struct {
 	Installed              bool   // k3s already installed
 	HasIPv6                bool   // host has IPv6 (relevant when dualStack)
 	HasNVIDIAGPU           bool   // an NVIDIA GPU is on the PCI bus (GPU preflight; S11 passthrough precondition)
-	KernelHeadersInstalled bool   // linux-headers-$(uname -r) present (GPU driver build dep)
-	HasISCSI               bool   // iscsiadm exists and iscsid is active (managed Longhorn prerequisite)
-	HasNFSv4               bool   // mount.nfs exists (managed RWX client prerequisite)
-	HasMountPropagation    bool   // the host root mount is shared/rshared
+	KernelHeadersInstalled bool   // /lib/modules/$(uname -r)/build/Makefile exists (matching GPU driver build headers)
+	HasDKMS                bool   // dkms executable present (GPU driver build dep)
+	HasGCC                 bool   // gcc executable present (GPU driver build dep)
+	HasMake                bool   // make executable present (GPU driver build dep)
 }
 
 // GPUReadiness is one coherent observation of the GPU operator and the
@@ -74,14 +181,30 @@ func (r GPUReadiness) String() string {
 	)
 }
 
+// DataStoragePurger is the explicit destructive extension used only by the
+// data-storage purge command. Keeping it separate makes ordinary destroy
+// incapable of implying VG/PV removal.
+type DataStoragePurger interface {
+	// PurgeDataStorage revalidates the receipt, exact PV/VG identities, empty LV
+	// set, consumers, and device safety before removing only that VG and its PVs.
+	PurgeDataStorage(ctx context.Context, spec DataStorageSpec) error
+}
+
+// Rebooter is the explicit host-reboot extension used by `forge destroy
+// --reboot`. Reboot is never implied by destroy or data-storage purge.
+type Rebooter interface {
+	Reboot(ctx context.Context) error
+}
+
 // Provisioner abstracts host-level k3s operations. One instance is bound to a
 // single host at construction time (the SSH user/key/address).
 type Provisioner interface {
 	// Preflight runs read-only readiness checks against the host.
 	Preflight(ctx context.Context) (*PreflightResult, error)
-	// Install installs k3s with the given server args and version.
+	// Install verifies and installs the reviewed k3s executable and airgap image
+	// archive before the pinned service installer may start the given version.
 	Install(ctx context.Context, version string, serverArgs []string) error
-	// Upgrade upgrades k3s in-place to the given version via the install script.
+	// Upgrade upgrades k3s in-place through the same reviewed content path.
 	Upgrade(ctx context.Context, version string, serverArgs []string) error
 	// Uninstall runs k3s-uninstall.sh on the host.
 	Uninstall(ctx context.Context) error
@@ -92,14 +215,39 @@ type Provisioner interface {
 	// NodeReady reports whether the cluster node is Ready (via remote k3s kubectl).
 	NodeReady(ctx context.Context) (bool, error)
 	// EnsureDriverBuildDeps ensures the host can compile the NVIDIA kernel module
-	// via the GPU operator's driver container (installs matching linux-headers on
-	// Ubuntu). Idempotent. Only called when GPU is enabled.
+	// via the GPU operator's driver container (installs matching linux-headers,
+	// build-essential, and dkms on Ubuntu). Idempotent. Only called when GPU is enabled.
 	EnsureDriverBuildDeps(ctx context.Context) error
-	// EnsureRWXStoragePrerequisites idempotently installs and verifies the
-	// iSCSI/NFSv4/kernel/filesystem/mount-propagation capabilities required by
-	// the approved managed Longhorn reference substrate. It is derived from the
-	// chart storage selection; forge.yaml does not gain a provider toggle.
-	EnsureRWXStoragePrerequisites(ctx context.Context) error
+	// EnsureHostSwapDisabled disables active host swap, comments every active
+	// /etc/fstab swap entry, and verifies both authoritative states. It is called
+	// only for a fresh install, before package, disk, or k3s mutation.
+	EnsureHostSwapDisabled(ctx context.Context) error
+	// InspectHostInotify returns the live fs.inotify.max_user_instances value
+	// plus drop-in presence, type, ownership, mode, and content evidence without
+	// mutating the host. Used by the reconcile plan, dry-run, and status.
+	InspectHostInotify(ctx context.Context) (*HostInotifyState, error)
+	// ReconcileHostInotify durably writes the canonical root-owned inotify
+	// drop-in where needed, raises only a live value below the requirement, and
+	// verifies the read-back before returning. It runs on every non-dry-run
+	// apply and upgrade, including already-installed clusters.
+	ReconcileHostInotify(ctx context.Context) (*HostInotifyState, error)
+	// ListDataStorageDevices returns stable non-removable whole-disk identities
+	// for interactive selection. It is strictly read-only.
+	ListDataStorageDevices(ctx context.Context) ([]DataStorageDevice, error)
+	// InspectDataStorage runs the complete read-only set-wide identity/topology/
+	// in-use/partition/signature or receipt/PV/VG preflight used by dry-run/status.
+	InspectDataStorage(ctx context.Context, spec DataStorageSpec) (*DataStorageState, error)
+	// EnsureDataStorageTools installs/verifies lvm2 and XFS tooling and converges
+	// the superseded dm-snapshot module/configuration to absence. It never touches a selected disk.
+	EnsureDataStorageTools(ctx context.Context) error
+	// ReconcileDataStorage repeats complete-set safety before every pvcreate and
+	// crash-resumably creates only receipt-bound PVs and iterabase-data.
+	ReconcileDataStorage(ctx context.Context, spec DataStorageSpec) (*DataStorageState, error)
+	// WaitForLVMStorageReady rejects local-path/default and CSI/user snapshot
+	// surfaces, validates the inert LVMSnapshot CRD/read-only RBAC/deny-all/zero-
+	// instance boundary, and waits for exact volume CRDs, controller/node,
+	// CSI/classes, and VG discovery.
+	WaitForLVMStorageReady(ctx context.Context, namespace string, host *DataStorageState) (*LVMStorageReadiness, error)
 	// ReadGPUReadiness returns one coherent ClusterPolicy/node observation,
 	// evaluated against the requested driver. Missing resources and transitional
 	// states return Ready=false; query/parse failures return an error. Polled as

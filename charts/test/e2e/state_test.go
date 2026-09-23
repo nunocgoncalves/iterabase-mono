@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -25,6 +27,29 @@ import (
 )
 
 const testNamespace = "iterabase-system"
+
+// Chart-owned DES-HOR-545-01 storage expectations. The shared testkit helper
+// validates these through an LVMStorageContract that this owning suite
+// constructs; the exact product names and identities stay here (testkit/AGENTS.md).
+const (
+	PlatformDataStorageClass       = "iterabase-lvm-xfs"
+	AgentPoolWorkspaceStorageClass = "iterabase-agentpool-lvm-xfs"
+	lvmProvisioner                 = "local.csi.openebs.io"
+	lvmDataVolumeGroupName         = "iterabase-data"
+	lvmNodeTopologyKey             = "openebs.io/nodename"
+)
+
+func lvmStorageContract() kindcluster.LVMStorageContract {
+	return kindcluster.LVMStorageContract{
+		DataVolumeGroupName: lvmDataVolumeGroupName,
+		Provisioner:         lvmProvisioner,
+		NodeTopologyKey:     lvmNodeTopologyKey,
+		StorageClasses: []kindcluster.StorageClassExpectation{
+			{Name: PlatformDataStorageClass, Shared: false},
+			{Name: AgentPoolWorkspaceStorageClass, Shared: true},
+		},
+	}
+}
 
 const (
 	metalLBValidationPolicyValue = "metallb.crds.validationFailurePolicy"
@@ -68,7 +93,10 @@ type chartState struct {
 	forwards             []*kube.Forward
 	platform             kube.Chart
 	substrate            kube.Chart
+	lvmSubstrate         kube.Chart
+	lvmStorageReady      bool
 	transitionBaselines  map[string]transitionBaseline
+	runtimeImageDigests  map[string]string
 	snapshots            map[string]lifecycleSnapshot
 	internalIngressIP    string
 	internalPool         string
@@ -105,37 +133,35 @@ func newChartState(t *testing.T) *chartState {
 	redactor := redact.New()
 	state := &chartState{
 		ctx: context.Background(), chartsRoot: chartsRoot, outputDir: outputDir, diagnosticsDir: diagnosticsDir, redactor: redactor,
-		runner: process.Runner{Redactor: redactor, OutputDir: outputDir}, snapshots: make(map[string]lifecycleSnapshot),
+		runner:              process.Runner{Redactor: redactor, OutputDir: outputDir},
+		runtimeImageDigests: make(map[string]string), snapshots: make(map[string]lifecycleSnapshot),
 	}
-	state.platform, state.substrate = resolveCharts(t, chartsRoot)
+	state.platform, state.substrate, state.lvmSubstrate = resolveCharts(t, chartsRoot)
 	return state
 }
 
-func resolveCharts(t *testing.T, chartsRoot string) (kube.Chart, kube.Chart) {
+func resolveCharts(t *testing.T, _ string) (kube.Chart, kube.Chart, kube.Chart) {
 	t.Helper()
 	mode := sharede2e.FixtureMode(os.Getenv("ITERABASE_E2E_FIXTURE_MODE"))
 	switch mode {
-	case sharede2e.FixtureSource:
-		return kube.Chart{Mode: mode, LocalPath: filepath.Join(chartsRoot, "charts", "iterabase-platform")},
-			kube.Chart{Mode: mode, LocalPath: filepath.Join(chartsRoot, "charts", "cert-manager-substrate")}
-	case sharede2e.FixtureCandidate:
+	case sharede2e.FixtureSource, sharede2e.FixtureCandidate:
 		platform := os.Getenv("ITERABASE_PLATFORM_LOCAL_CHART")
 		if platform == "" {
-			t.Fatal("candidate charts scenario requires ITERABASE_PLATFORM_LOCAL_CHART")
+			t.Fatal("composed runtime requires ITERABASE_PLATFORM_LOCAL_CHART")
 		}
 		platform, err := filepath.Abs(platform)
 		if err != nil {
-			t.Fatalf("resolve candidate platform chart: %v", err)
+			t.Fatalf("resolve composed platform chart: %v", err)
 		}
 		substrate := filepath.Join(filepath.Dir(platform), "cert-manager-substrate")
-		return kube.Chart{Mode: mode, LocalPath: platform}, kube.Chart{Mode: mode, LocalPath: substrate}
+		lvmSubstrate := filepath.Join(filepath.Dir(platform), "lvm-storage-substrate")
+		return kube.Chart{Mode: mode, LocalPath: platform}, kube.Chart{Mode: mode, LocalPath: substrate}, kube.Chart{Mode: mode, LocalPath: lvmSubstrate}
 	case sharede2e.FixturePublished:
-		version := publishedPlatformVersion(t)
-		return kube.Chart{Mode: mode, Reference: "oci://ghcr.io/nunocgoncalves/iterabase-charts/iterabase-platform", Version: version},
-			kube.Chart{Mode: mode, Reference: "oci://ghcr.io/nunocgoncalves/iterabase-charts/cert-manager-substrate", Version: version}
+		t.Fatal("current chart scenarios do not advertise published mode until the same-version LVM storage companion is published")
+		return kube.Chart{}, kube.Chart{}, kube.Chart{}
 	default:
 		t.Fatalf("unsupported charts fixture mode %q", mode)
-		return kube.Chart{}, kube.Chart{}
+		return kube.Chart{}, kube.Chart{}, kube.Chart{}
 	}
 }
 
@@ -173,6 +199,60 @@ func createKindStage(t *testing.T, state *chartState) {
 	}
 	state.cluster = cluster
 	state.client = kube.Client{Executor: state.runner, Kubeconfig: cluster.Kubeconfig, Redactor: state.redactor}
+}
+
+func installLVMStorageStage(t *testing.T, state *chartState) {
+	t.Helper()
+	state.installLVMStorage(t)
+}
+
+func importRuntimeImagesStage(t *testing.T, state *chartState) {
+	t.Helper()
+	images := []struct {
+		name       string
+		artifact   string
+		prefix     string
+		archiveEnv string
+	}{
+		{name: "control-plane", artifact: "control-plane-image", prefix: "CONTROL_PLANE", archiveEnv: "FORGE_E2E_CONTROL_PLANE_IMAGE_ARCHIVE"},
+		{name: "inference-gateway", artifact: "inference-gateway-image", prefix: "INFERENCE_GATEWAY", archiveEnv: "FORGE_E2E_INFERENCE_IMAGE_ARCHIVE"},
+		{name: "harness", artifact: "harness-image", prefix: "HARNESS", archiveEnv: "FORGE_E2E_HARNESS_IMAGE_ARCHIVE"},
+		{name: "tool-runner", artifact: "tool-runner-image", prefix: "TOOL_RUNNER", archiveEnv: "FORGE_E2E_TOOL_RUNNER_IMAGE_ARCHIVE"},
+		{name: "runtime-fixture", artifact: "runtime-fixture-image", prefix: "FORGE_E2E_RUNTIME", archiveEnv: "FORGE_E2E_RUNTIME_IMAGE_ARCHIVE"},
+	}
+	imported := 0
+	for _, image := range images {
+		repository := os.Getenv(image.prefix + "_IMAGE_REPO")
+		tag := os.Getenv(image.prefix + "_IMAGE_TAG")
+		digest := os.Getenv(image.prefix + "_IMAGE_DIGEST")
+		configDigest := os.Getenv(image.prefix + "_IMAGE_CONFIG_DIGEST")
+		archive := os.Getenv(image.archiveEnv)
+		if repository == "" && tag == "" && digest == "" && configDigest == "" && archive == "" {
+			continue
+		}
+		if repository == "" || tag == "" || archive == "" ||
+			!regexp.MustCompile(`^sha256:[0-9a-f]{64}$`).MatchString(digest) ||
+			!regexp.MustCompile(`^sha256:[0-9a-f]{64}$`).MatchString(configDigest) {
+			t.Fatalf("composed %s runtime image has incomplete repository/tag/artifact-digest/config-digest/archive identity", image.name)
+		}
+		reference := repository + ":" + tag
+		identity, err := state.cluster.ImportImageArchive(state.ctx, archive, reference, configDigest)
+		if err != nil {
+			t.Fatalf("import composed %s image before chart install: %v", image.name, err)
+		}
+		if sourceSHA := os.Getenv(image.prefix + "_IMAGE_SOURCE_SHA"); sourceSHA != "" &&
+			identity.Labels["org.opencontainers.image.revision"] != sourceSHA {
+			t.Fatalf("imported %s image revision label=%q want=%q", image.name, identity.Labels["org.opencontainers.image.revision"], sourceSHA)
+		}
+		state.runtimeImageDigests[image.prefix] = identity.RuntimeDigest
+		if err := sharede2e.RecordRuntimeImageIdentity(image.artifact, identity.RuntimeDigest); err != nil {
+			t.Fatalf("record imported %s runtime identity: %v", image.name, err)
+		}
+		imported++
+	}
+	if imported == 0 && os.Getenv(sharede2e.RequiredEnv) == "true" {
+		t.Fatal("required composed chart runtime has no image archives to import")
+	}
 }
 
 func chartDiagnostics(t *testing.T, state *chartState) {
@@ -270,14 +350,25 @@ func assertCandidateImages(t *testing.T, state *chartState) {
 		{selector: "app.kubernetes.io/name=control-plane,app.kubernetes.io/component=api", prefix: "CONTROL_PLANE"},
 		{selector: "app.kubernetes.io/name=inference-gateway", prefix: "INFERENCE_GATEWAY"},
 	} {
-		digest := os.Getenv(image.prefix + "_IMAGE_DIGEST")
-		if digest == "" {
+		repository := os.Getenv(image.prefix + "_IMAGE_REPO")
+		tag := os.Getenv(image.prefix + "_IMAGE_TAG")
+		runtimeDigest := state.runtimeImageDigests[image.prefix]
+		if repository == "" && tag == "" && runtimeDigest == "" {
 			continue
 		}
+		if repository == "" || tag == "" || !regexp.MustCompile(`^sha256:[0-9a-f]{64}$`).MatchString(runtimeDigest) {
+			t.Fatalf("%s imported runtime request/digest identity is incomplete", image.prefix)
+		}
+		reference := repository + ":" + tag
+		requested := state.kubectl(t, 30*time.Second, "get", "pods", "-n", testNamespace, "-l", image.selector,
+			"-o", "jsonpath={.items[*].spec.containers[*].image} {.items[*].spec.initContainers[*].image}")
+		if !slices.Contains(strings.Fields(requested), reference) {
+			t.Fatalf("%s pods did not request exact composed reference %s: %s", image.prefix, reference, requested)
+		}
 		imageIDs := state.kubectl(t, 30*time.Second, "get", "pods", "-n", testNamespace, "-l", image.selector,
-			"-o", "jsonpath={.items[*].status.containerStatuses[*].imageID}")
-		if !strings.Contains(imageIDs, digest) {
-			t.Fatalf("%s pods do not run exact candidate digest %s: %s", image.prefix, digest, imageIDs)
+			"-o", "jsonpath={.items[*].status.containerStatuses[*].imageID} {.items[*].status.initContainerStatuses[*].imageID}")
+		if !strings.Contains(imageIDs, runtimeDigest) {
+			t.Fatalf("%s pods do not run imported runtime digest %s: %s", image.prefix, runtimeDigest, imageIDs)
 		}
 	}
 }
@@ -306,50 +397,16 @@ func runtimePlatformValues(t *testing.T) map[string]any {
 
 func applyRuntimeImages(t *testing.T, values map[string]any) {
 	t.Helper()
-	// Hold runtime artifacts constant while transition scenarios roll chart
-	// revisions backward and forward. Candidate mode does this through resolved
-	// image environment variables; source mode uses the equivalent immutable
-	// fixture inputs instead of accidentally exercising a database downgrade.
-	if sharede2e.FixtureMode(os.Getenv("ITERABASE_E2E_FIXTURE_MODE")) == sharede2e.FixtureSource {
-		path := os.Getenv("ITERABASE_E2E_SOURCE_INPUTS")
-		data, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatalf("read source runtime fixture: %v", err)
-		}
-		var fixture sharede2e.Fixture
-		if err := json.Unmarshal(data, &fixture); err != nil {
-			t.Fatalf("decode source runtime fixture: %v", err)
-		}
-		required := map[string]string{
-			"control-plane-image":     "control-plane",
-			"inference-gateway-image": "inference-gateway",
-		}
-		for _, input := range fixture.Inputs {
-			component, ok := required[input.Name]
-			if !ok {
-				continue
-			}
-			repository, tag, err := splitImageReference(input.Reference)
-			if err != nil {
-				t.Fatalf("source runtime fixture %s: %v", input.Name, err)
-			}
-			setPlatformImage(values, component, repository, tag)
-			delete(required, input.Name)
-		}
-		if len(required) != 0 {
-			t.Fatalf("source runtime fixture is missing image inputs: %v", required)
-		}
-		return
-	}
+	// Every workflow mode consumes the same composer-produced image identities;
+	// chart stages never substitute owner-local or stale published fixture bytes.
 	applyCandidateImages(values)
-}
-
-func splitImageReference(reference string) (string, string, error) {
-	separator := strings.LastIndexByte(reference, ':')
-	if separator <= strings.LastIndexByte(reference, '/') || separator == len(reference)-1 {
-		return "", "", fmt.Errorf("reference has no exact tag: %q", reference)
+	if os.Getenv(sharede2e.RequiredEnv) == "true" {
+		for _, prefix := range []string{"CONTROL_PLANE", "INFERENCE_GATEWAY"} {
+			if os.Getenv(prefix+"_IMAGE_REPO") == "" || os.Getenv(prefix+"_IMAGE_TAG") == "" {
+				t.Fatalf("composed runtime is missing %s image identity", prefix)
+			}
+		}
 	}
-	return reference[:separator], reference[separator+1:], nil
 }
 
 func setPlatformImage(values map[string]any, component, repository, tag string) {
@@ -369,6 +426,7 @@ func setPlatformImage(values map[string]any, component, repository, tag string) 
 	if tag != "" {
 		image["tag"] = tag
 	}
+	image["pullPolicy"] = "Never"
 }
 
 func applyCandidateImages(values map[string]any) {
@@ -383,19 +441,12 @@ func applyCandidateImages(values map[string]any) {
 	}
 }
 
-func TestUnitSourceRuntimeImagesRemainConstantAcrossChartTransitions(t *testing.T) {
-	fixture := filepath.Join(t.TempDir(), "source-fixture.json")
-	if err := os.WriteFile(fixture, []byte(`{
-		"mode":"published",
-		"inputs":[
-			{"name":"control-plane-image","kind":"published-image","reference":"registry.example/control-plane:0.0.30"},
-			{"name":"inference-gateway-image","kind":"published-image","reference":"registry.example/inference-gateway:0.2.7"}
-		]
-	}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
+func TestUnitComposedRuntimeImagesRemainConstantAcrossChartTransitions(t *testing.T) {
 	t.Setenv("ITERABASE_E2E_FIXTURE_MODE", string(sharede2e.FixtureSource))
-	t.Setenv("ITERABASE_E2E_SOURCE_INPUTS", fixture)
+	t.Setenv("CONTROL_PLANE_IMAGE_REPO", "registry.example/control-plane")
+	t.Setenv("CONTROL_PLANE_IMAGE_TAG", "0.0.30")
+	t.Setenv("INFERENCE_GATEWAY_IMAGE_REPO", "registry.example/inference-gateway")
+	t.Setenv("INFERENCE_GATEWAY_IMAGE_TAG", "0.2.7")
 
 	values := runtimePlatformValues(t)
 	for component, want := range map[string]string{
@@ -418,6 +469,64 @@ func (state *chartState) installSubstrate(t *testing.T, valueFiles ...string) {
 	})
 	if err != nil {
 		t.Fatalf("install certificate substrate: %v\n%s", err, out)
+	}
+}
+
+func (state *chartState) installLVMStorage(t *testing.T) {
+	t.Helper()
+	if state.lvmStorageReady {
+		return
+	}
+	if err := state.cluster.ConfigureLVMStorage(state.ctx, state.lvmSubstrate.LocalPath, testNamespace, testRelease+"-lvm-storage", lvmStorageContract()); err != nil {
+		t.Fatalf("install exact Kind OpenEBS LVM storage substrate: %v", err)
+	}
+	state.assertLVMSnapshotDependencyRBAC(t)
+	state.lvmStorageReady = true
+}
+
+func (state *chartState) assertLVMSnapshotDependencyRBAC(t *testing.T) {
+	t.Helper()
+	checkCanI := func(subject, verb, resource string, allNamespaces bool, want string) {
+		t.Helper()
+		scope := "--namespace=" + testNamespace
+		if allNamespaces {
+			scope = "--all-namespaces"
+		}
+		state.process(t, 30*time.Second, "bash", "-ceu", `
+set +e
+out=$(kubectl --kubeconfig "$1" auth can-i "$2" "$3" "$4" "$5" 2>/dev/null)
+rc=$?
+set -e
+test "$out" = "$6"
+if test "$6" = yes; then test "$rc" = 0; else test "$rc" = 1; fi
+`, "bounded-lvmsnapshot-rbac-check", state.cluster.Kubeconfig, verb, resource, "--as="+subject, scope, want)
+	}
+
+	controller := "system:serviceaccount:" + testNamespace + ":openebs-lvm-controller-sa"
+	for _, check := range []struct {
+		verb, resource string
+		allNamespaces  bool
+		want           string
+	}{
+		{verb: "list", resource: "secrets", allNamespaces: true, want: "no"},
+		{verb: "get", resource: "secrets", want: "no"},
+		{verb: "create", resource: "customresourcedefinitions.apiextensions.k8s.io", want: "no"},
+		{verb: "delete", resource: "customresourcedefinitions.apiextensions.k8s.io", want: "no"},
+		{verb: "get", resource: "lvmvolumes.local.openebs.io", want: "yes"},
+		{verb: "get", resource: "volumesnapshotclasses.snapshot.storage.k8s.io", want: "no"},
+	} {
+		checkCanI(controller, check.verb, check.resource, check.allNamespaces, check.want)
+	}
+	for _, subject := range []string{
+		controller,
+		"system:serviceaccount:" + testNamespace + ":openebs-lvm-node-sa",
+	} {
+		for _, verb := range []string{"list", "watch"} {
+			checkCanI(subject, verb, "lvmsnapshots.local.openebs.io", true, "yes")
+		}
+		for _, verb := range []string{"get", "create", "update", "patch", "delete"} {
+			checkCanI(subject, verb, "lvmsnapshots.local.openebs.io", true, "no")
+		}
 	}
 }
 
@@ -462,6 +571,7 @@ func (state *chartState) installPlatform(t *testing.T, timeout time.Duration, va
 // release/namespace and the given value files and --set-string overrides.
 func (state *chartState) helmUpgrade(t *testing.T, timeout time.Duration, valueFiles []string, values map[string]string) {
 	t.Helper()
+	state.installLVMStorage(t)
 	out, err := state.client.HelmUpgrade(state.ctx, kube.HelmOptions{
 		Release: testRelease, Namespace: testNamespace, Chart: state.platform,
 		ValueFiles: valueFiles, Values: values, Wait: true, Timeout: timeout,

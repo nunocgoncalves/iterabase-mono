@@ -1,8 +1,0 @@
-{{- include "rwx-storage-substrate.validate" . -}}
-{{- if eq (include "rwx-storage-substrate.internalTLSEnabled" .) "true" }}
-# DES-HOR-469-02: Longhorn loads this fixed-name optional Secret at process
-# startup. The pre-install/pre-upgrade bootstrap hook creates the same
-# Certificate and waits for all three key fields before Helm submits the
-# upstream workloads; this normal resource then owns renewal lifecycle.
-{{ include "rwx-storage-substrate.grpcCertificate" . }}
-{{- end }}

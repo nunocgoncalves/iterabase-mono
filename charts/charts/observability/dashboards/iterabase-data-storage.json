@@ -168,8 +168,8 @@
     },
     {
       "id": 4,
-      "title": "Longhorn managers available",
-      "type": "stat",
+      "title": "AgentPool PVC free bytes",
+      "type": "timeseries",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -182,7 +182,7 @@
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "short"
+          "unit": "bytes"
         },
         "overrides": []
       },
@@ -190,7 +190,7 @@
         "legend": {
           "displayMode": "table",
           "placement": "right",
-          "showLegend": false
+          "showLegend": true
         },
         "tooltip": {
           "mode": "multi"
@@ -199,17 +199,17 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "min(up{namespace=\"longhorn-system\",pod=~\"longhorn-manager-.*\"})",
+          "expr": "min by (pool) (control_plane_dispatch_workspace_free_bytes{namespace=~\"$namespace\"})",
           "legendFormat": "{{component}} {{model}} {{route}} {{result}} {{pod}}",
-          "range": false,
-          "instant": true
+          "range": true,
+          "instant": false
         }
       ]
     },
     {
       "id": 5,
-      "title": "Longhorn unhealthy volumes",
-      "type": "stat",
+      "title": "AgentPool PVC free ratio",
+      "type": "timeseries",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -222,7 +222,127 @@
       },
       "fieldConfig": {
         "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "min by (pool) (control_plane_dispatch_workspace_free_ratio{namespace=~\"$namespace\"})",
+          "legendFormat": "{{component}} {{model}} {{route}} {{result}} {{pod}}",
+          "range": true,
+          "instant": false
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "AgentPool capacity warnings",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 14
+      },
+      "fieldConfig": {
+        "defaults": {
           "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (pool) (control_plane_dispatch_workspace_capacity_warning{namespace=~\"$namespace\"})",
+          "legendFormat": "{{component}} {{model}} {{route}} {{result}} {{pod}}",
+          "range": true,
+          "instant": false
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "AgentPool credit gates",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 21
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (pool) (control_plane_dispatch_workspace_credit_gated{namespace=~\"$namespace\"})",
+          "legendFormat": "{{component}} {{model}} {{route}} {{result}} {{pod}}",
+          "range": true,
+          "instant": false
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "iterabase-data free bytes",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 21
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
         },
         "overrides": []
       },
@@ -239,7 +359,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(longhorn_volume_robustness{state=~\"degraded|faulted\"} == 1)",
+          "expr": "min(lvm_vg_free_size_bytes{namespace=~\"$namespace\",name=\"iterabase-data\"})",
           "legendFormat": "{{component}} {{model}} {{route}} {{result}} {{pod}}",
           "range": false,
           "instant": true
@@ -247,8 +367,8 @@
       ]
     },
     {
-      "id": 6,
-      "title": "Longhorn minimum node/disk headroom",
+      "id": 9,
+      "title": "iterabase-data free ratio",
       "type": "stat",
       "datasource": {
         "type": "prometheus",
@@ -257,8 +377,8 @@
       "gridPos": {
         "h": 7,
         "w": 12,
-        "x": 12,
-        "y": 14
+        "x": 0,
+        "y": 28
       },
       "fieldConfig": {
         "defaults": {
@@ -279,127 +399,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "min(((longhorn_node_storage_capacity_bytes - longhorn_node_storage_usage_bytes - longhorn_node_storage_reservation_bytes) / longhorn_node_storage_capacity_bytes) or ((longhorn_disk_capacity_bytes - longhorn_disk_usage_bytes - longhorn_disk_reservation_bytes) / longhorn_disk_capacity_bytes))",
-          "legendFormat": "{{component}} {{model}} {{route}} {{result}} {{pod}}",
-          "range": false,
-          "instant": true
-        }
-      ]
-    },
-    {
-      "id": 7,
-      "title": "Longhorn CSI unavailable nodes",
-      "type": "stat",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "gridPos": {
-        "h": 7,
-        "w": 12,
-        "x": 0,
-        "y": 21
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "right",
-          "showLegend": false
-        },
-        "tooltip": {
-          "mode": "multi"
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "clamp_min(kube_daemonset_status_desired_number_scheduled{namespace=\"longhorn-system\",daemonset=\"longhorn-csi-plugin\"} - kube_daemonset_status_number_ready{namespace=\"longhorn-system\",daemonset=\"longhorn-csi-plugin\"}, 0)",
-          "legendFormat": "{{component}} {{model}} {{route}} {{result}} {{pod}}",
-          "range": false,
-          "instant": true
-        }
-      ]
-    },
-    {
-      "id": 8,
-      "title": "Longhorn share-managers unavailable",
-      "type": "stat",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "gridPos": {
-        "h": 7,
-        "w": 12,
-        "x": 12,
-        "y": 21
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "right",
-          "showLegend": false
-        },
-        "tooltip": {
-          "mode": "multi"
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sum(kube_pod_status_ready{namespace=\"longhorn-system\",pod=~\"share-manager-.*\",condition=\"true\"} == 0)",
-          "legendFormat": "{{component}} {{model}} {{route}} {{result}} {{pod}}",
-          "range": false,
-          "instant": true
-        }
-      ]
-    },
-    {
-      "id": 9,
-      "title": "Longhorn replicas rebuilding",
-      "type": "stat",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "gridPos": {
-        "h": 7,
-        "w": 12,
-        "x": 0,
-        "y": 28
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "right",
-          "showLegend": false
-        },
-        "tooltip": {
-          "mode": "multi"
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sum(longhorn_replica_state{state=\"starting\"} == 1)",
+          "expr": "min(lvm_vg_free_size_bytes{namespace=~\"$namespace\",name=\"iterabase-data\"} / lvm_vg_total_size_bytes{namespace=~\"$namespace\",name=\"iterabase-data\"})",
           "legendFormat": "{{component}} {{model}} {{route}} {{result}} {{pod}}",
           "range": false,
           "instant": true

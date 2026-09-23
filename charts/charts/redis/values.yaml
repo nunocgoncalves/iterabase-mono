@@ -3,6 +3,7 @@ enabled: true
 image:
   repository: redis
   tag: "7-alpine"
+  digest: sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf
   pullPolicy: IfNotPresent
 
 # Redis is hot-path cache only (never source of truth); ephemeral storage in v1.
@@ -36,6 +37,7 @@ metrics:
   image:
     repository: oliver006/redis_exporter
     tag: "v1.67.0"
+    digest: sha256:120f7ec77293459ccfdad66bb1db75ab72e8bfeab99f58b1cc2564cadcd7a9e7
     pullPolicy: IfNotPresent
   resources: {}
   # scrapeInterval: 30s

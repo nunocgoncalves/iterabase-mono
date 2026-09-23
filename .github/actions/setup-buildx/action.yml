@@ -1,0 +1,21 @@
+name: Set up checksummed Buildx with immutable BuildKit
+description: Install the reviewed Buildx binary and create a builder from the reviewed BuildKit image index.
+runs:
+  using: composite
+  steps:
+    - name: Install checksummed Buildx
+      uses: ./.github/actions/setup-ci-tool
+      with:
+        name: buildx
+        version: 0.36.1
+    - name: Create immutable BuildKit builder
+      shell: bash
+      run: |
+        set -euo pipefail
+        builder="iterabase-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${GITHUB_JOB}"
+        docker buildx create \
+          --name "$builder" \
+          --driver docker-container \
+          --driver-opt 'image=moby/buildkit:buildx-stable-1@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8' \
+          --use
+        docker buildx inspect --bootstrap
