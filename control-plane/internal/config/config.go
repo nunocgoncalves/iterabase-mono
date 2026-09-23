@@ -9,6 +9,8 @@ package config
 
 import (
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -28,6 +30,7 @@ type Config struct {
 	JWT      JWTConfig      `yaml:"jwt"`
 	Identity IdentityConfig `yaml:"identity"`
 	Artifact ArtifactConfig `yaml:"artifact"`
+	Auth     AuthConfig     `yaml:"auth"`
 }
 
 // APIConfig configures the HTTP API server (cmd/api).
@@ -139,6 +142,49 @@ type ArtifactConfig struct {
 	SweepInterval    string `yaml:"sweep_interval"`
 }
 
+// AuthConfig configures the V2 browser-authentication journey
+// (docs/architecture/v2-authentication-authority.md). When enabled, a valid
+// public HTTPS origin, verified-TLS SMTP, and the bootstrap Admin email are
+// required and the API fails closed without them. When disabled, every
+// browser-authentication route returns the customer-safe unavailable state.
+type AuthConfig struct {
+	Enabled         bool                `yaml:"enabled"`
+	PublicOrigin    string              `yaml:"public_origin"`
+	Session         AuthSessionConfig   `yaml:"session"`
+	TrustedProxies  []string            `yaml:"trusted_proxies"`
+	ForwardedHeader string              `yaml:"forwarded_header"`
+	GeoIPDatabase   string              `yaml:"geoip_database"`
+	Email           AuthEmailConfig     `yaml:"email"`
+	Bootstrap       AuthBootstrapConfig `yaml:"bootstrap"`
+}
+
+// AuthSessionConfig may only tighten the approved session bounds
+// (12 h idle / 30 d absolute / 15 min recent password proof).
+type AuthSessionConfig struct {
+	IdleTTL       string `yaml:"idle_ttl"`
+	AbsoluteTTL   string `yaml:"absolute_ttl"`
+	RecentAuthTTL string `yaml:"recent_auth_ttl"`
+}
+
+// AuthEmailConfig is the transactional authentication-email transport. Both
+// modes require verified TLS; cleartext is rejected at startup. Secrets are
+// supplied through the environment/Secret, not the customer surface.
+type AuthEmailConfig struct {
+	Host     string `yaml:"host"`
+	Port     int    `yaml:"port"`
+	Mode     string `yaml:"mode"` // starttls | tls
+	From     string `yaml:"from"`
+	Username string `yaml:"username"`
+	Password string `yaml:"password"`
+}
+
+// AuthBootstrapConfig names the fresh-install Admin. It carries no secret: the
+// first Admin completes normal email setup and no credential is ever printed.
+type AuthBootstrapConfig struct {
+	AdminEmail  string `yaml:"admin_email"`
+	AdminLocale string `yaml:"admin_locale"`
+}
+
 // Load reads configuration from a YAML file (if path is non-empty), expands
 // environment variables in the file, applies env overrides, and validates.
 // If path is empty, only defaults and env vars are used.
@@ -193,6 +239,7 @@ func defaults() *Config {
 		JWT:      JWTConfig{TTL: "15m"},
 		Identity: IdentityConfig{Mode: "enrolled"},
 		Artifact: ArtifactConfig{Bucket: "iterabase-artifacts", MaxSizeBytes: 1 << 30, PendingTTL: "1h", SweepInterval: "1m"},
+		Auth:     AuthConfig{ForwardedHeader: "X-Forwarded-For", Bootstrap: AuthBootstrapConfig{AdminLocale: "en"}},
 	}
 }
 
@@ -306,6 +353,58 @@ func applyEnvOverrides(cfg *Config) {
 			cfg.Artifact.MaxSizeBytes = parsed
 		}
 	}
+	if v := os.Getenv("AUTH_ENABLED"); v != "" {
+		if parsed, err := strconv.ParseBool(v); err == nil {
+			cfg.Auth.Enabled = parsed
+		}
+	}
+	if v := os.Getenv("AUTH_PUBLIC_ORIGIN"); v != "" {
+		cfg.Auth.PublicOrigin = v
+	}
+	if v := os.Getenv("AUTH_SESSION_IDLE_TTL"); v != "" {
+		cfg.Auth.Session.IdleTTL = v
+	}
+	if v := os.Getenv("AUTH_SESSION_ABSOLUTE_TTL"); v != "" {
+		cfg.Auth.Session.AbsoluteTTL = v
+	}
+	if v := os.Getenv("AUTH_RECENT_AUTH_TTL"); v != "" {
+		cfg.Auth.Session.RecentAuthTTL = v
+	}
+	if v := os.Getenv("AUTH_TRUSTED_PROXIES"); v != "" {
+		cfg.Auth.TrustedProxies = strings.Split(v, ",")
+	}
+	if v := os.Getenv("AUTH_FORWARDED_HEADER"); v != "" {
+		cfg.Auth.ForwardedHeader = v
+	}
+	if v := os.Getenv("AUTH_GEOIP_DATABASE"); v != "" {
+		cfg.Auth.GeoIPDatabase = v
+	}
+	if v := os.Getenv("AUTH_SMTP_HOST"); v != "" {
+		cfg.Auth.Email.Host = v
+	}
+	if v := os.Getenv("AUTH_SMTP_PORT"); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil {
+			cfg.Auth.Email.Port = parsed
+		}
+	}
+	if v := os.Getenv("AUTH_SMTP_MODE"); v != "" {
+		cfg.Auth.Email.Mode = v
+	}
+	if v := os.Getenv("AUTH_SMTP_FROM"); v != "" {
+		cfg.Auth.Email.From = v
+	}
+	if v := os.Getenv("AUTH_SMTP_USERNAME"); v != "" {
+		cfg.Auth.Email.Username = v
+	}
+	if v := os.Getenv("AUTH_SMTP_PASSWORD"); v != "" {
+		cfg.Auth.Email.Password = v
+	}
+	if v := os.Getenv("AUTH_BOOTSTRAP_ADMIN_EMAIL"); v != "" {
+		cfg.Auth.Bootstrap.AdminEmail = v
+	}
+	if v := os.Getenv("AUTH_BOOTSTRAP_ADMIN_LOCALE"); v != "" {
+		cfg.Auth.Bootstrap.AdminLocale = v
+	}
 }
 
 func validate(cfg *Config) error {
@@ -360,6 +459,135 @@ func ValidateServe(cfg *Config) error {
 	// Exactly one set is a misconfig — fail loud rather than guess.
 	if (cfg.API.TLSCertFile == "") != (cfg.API.TLSKeyFile == "") {
 		return fmt.Errorf("api.tls_cert_file and api.tls_key_file must both be set (HTTPS) or both unset (HTTP)")
+	}
+	return ValidateAuthServe(cfg)
+}
+
+// AuthPublicOrigin parses and normalizes the configured public browser origin.
+// An enabled authentication surface without a valid exact HTTPS origin fails
+// closed rather than guessing.
+func AuthPublicOrigin(cfg *Config) (string, error) {
+	if strings.TrimSpace(cfg.Auth.PublicOrigin) == "" {
+		return "", fmt.Errorf("auth.public_origin (or AUTH_PUBLIC_ORIGIN) is required when auth.enabled is true")
+	}
+	parsed, err := url.Parse(cfg.Auth.PublicOrigin)
+	if err != nil {
+		return "", fmt.Errorf("auth.public_origin is not a valid URL: %w", err)
+	}
+	if parsed.Scheme != "https" {
+		return "", fmt.Errorf("auth.public_origin must be an absolute https origin")
+	}
+	if parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", fmt.Errorf("auth.public_origin must be an origin with a host and no userinfo, query, or fragment")
+	}
+	if parsed.Path != "" && parsed.Path != "/" {
+		return "", fmt.Errorf("auth.public_origin must not include a path")
+	}
+	return "https://" + parsed.Host, nil
+}
+
+// AuthSessionTTLs returns the configured session bounds, defaulting to the
+// approved maximums and refusing any value that would weaken them.
+func AuthSessionTTLs(cfg *Config) (idle, absolute, recent time.Duration, err error) {
+	idle, absolute, recent = 12*time.Hour, 30*24*time.Hour, 15*time.Minute
+	if cfg.Auth.Session.IdleTTL != "" {
+		idle, err = parseBoundedDuration("auth.session.idle_ttl", cfg.Auth.Session.IdleTTL, 12*time.Hour)
+		if err != nil {
+			return 0, 0, 0, err
+		}
+	}
+	if cfg.Auth.Session.AbsoluteTTL != "" {
+		absolute, err = parseBoundedDuration("auth.session.absolute_ttl", cfg.Auth.Session.AbsoluteTTL, 30*24*time.Hour)
+		if err != nil {
+			return 0, 0, 0, err
+		}
+	}
+	if cfg.Auth.Session.RecentAuthTTL != "" {
+		recent, err = parseBoundedDuration("auth.session.recent_auth_ttl", cfg.Auth.Session.RecentAuthTTL, 15*time.Minute)
+		if err != nil {
+			return 0, 0, 0, err
+		}
+	}
+	if absolute < idle {
+		return 0, 0, 0, fmt.Errorf("auth.session.absolute_ttl must not be shorter than auth.session.idle_ttl")
+	}
+	return idle, absolute, recent, nil
+}
+
+func parseBoundedDuration(field, value string, max time.Duration) (time.Duration, error) {
+	parsed, err := time.ParseDuration(value)
+	if err != nil {
+		return 0, fmt.Errorf("%s is not a valid duration: %w", field, err)
+	}
+	if parsed <= 0 {
+		return 0, fmt.Errorf("%s must be positive", field)
+	}
+	if parsed > max {
+		return 0, fmt.Errorf("%s must not exceed %s", field, max)
+	}
+	return parsed, nil
+}
+
+// AuthTrustedProxyNets parses the configured trusted-proxy CIDRs.
+func AuthTrustedProxyNets(cfg *Config) ([]*net.IPNet, error) {
+	var out []*net.IPNet
+	for _, raw := range cfg.Auth.TrustedProxies {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		_, network, err := net.ParseCIDR(raw)
+		if err != nil {
+			return nil, fmt.Errorf("auth.trusted_proxies entry %q is not a CIDR: %w", raw, err)
+		}
+		out = append(out, network)
+	}
+	return out, nil
+}
+
+// ValidateAuthServe validates the enabled browser-authentication prerequisites.
+// A disabled surface imposes no requirements and returns the customer-safe
+// unavailable state.
+func ValidateAuthServe(cfg *Config) error {
+	if !cfg.Auth.Enabled {
+		return nil
+	}
+	if _, err := AuthPublicOrigin(cfg); err != nil {
+		return err
+	}
+	if _, _, _, err := AuthSessionTTLs(cfg); err != nil {
+		return err
+	}
+	if _, err := AuthTrustedProxyNets(cfg); err != nil {
+		return err
+	}
+	if err := validateAuthEmail(cfg.Auth.Email); err != nil {
+		return err
+	}
+	if cfg.Auth.Bootstrap.AdminEmail == "" {
+		return fmt.Errorf("auth.bootstrap.admin_email is required when auth.enabled is true")
+	}
+	if cfg.Auth.Bootstrap.AdminLocale != "en" && cfg.Auth.Bootstrap.AdminLocale != "pt" {
+		return fmt.Errorf("auth.bootstrap.admin_locale must be en or pt")
+	}
+	return nil
+}
+
+func validateAuthEmail(email AuthEmailConfig) error {
+	if email.Host == "" || email.From == "" {
+		return fmt.Errorf("auth.email.host and auth.email.from are required when auth.enabled is true")
+	}
+	if email.Port <= 0 || email.Port > 65535 {
+		return fmt.Errorf("auth.email.port must be 1-65535")
+	}
+	if email.Mode != "starttls" && email.Mode != "tls" {
+		return fmt.Errorf("auth.email.mode must be starttls or tls (verified TLS is required)")
+	}
+	if strings.ContainsAny(email.Host+email.From, "\r\n") {
+		return fmt.Errorf("auth.email.host and auth.email.from must not contain line breaks")
+	}
+	if (email.Username == "") != (email.Password == "") {
+		return fmt.Errorf("auth.email.username and auth.email.password must be set together")
 	}
 	return nil
 }

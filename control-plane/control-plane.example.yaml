@@ -99,3 +99,29 @@ jwt:
 #              (deferred, HOR-313; the token endpoint returns 501).
 identity:
   mode: enrolled
+
+# V2 browser authentication (HOR-453; docs/architecture/v2-authentication-authority.md).
+# Disabled by default. When enabled, the api/bootstrap containers fail closed
+# without a valid exact public HTTPS origin, verified-TLS SMTP, and the
+# first-Admin Secret. Session bounds below may only tighten the approved
+# 12h idle / 720h absolute / 15m recent-password maximums.
+auth:
+  enabled: false
+  public_origin: "${AUTH_PUBLIC_ORIGIN}"   # e.g. https://app.example.com (no path)
+  session:
+    idle_ttl: ""            # <= 12h; empty uses the approved maximum
+    absolute_ttl: ""        # <= 720h; empty uses the approved maximum
+    recent_auth_ttl: ""     # <= 15m; empty uses the approved maximum
+  trusted_proxies: []       # exact reverse-proxy CIDRs; the direct peer is trusted otherwise
+  forwarded_header: "X-Forwarded-For"
+  geoip_database: ""        # optional operator-mounted local GeoIP database path (advisory only)
+  email:
+    host: "${AUTH_SMTP_HOST}"
+    port: 587
+    mode: "starttls"        # starttls | tls (verified TLS is required)
+    from: "${AUTH_SMTP_FROM}"
+    username: "${AUTH_SMTP_USERNAME}"
+    password: "${AUTH_SMTP_PASSWORD}"
+  bootstrap:
+    admin_email: "${AUTH_BOOTSTRAP_ADMIN_EMAIL}"
+    admin_locale: "en"      # en | pt

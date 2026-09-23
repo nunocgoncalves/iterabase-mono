@@ -125,19 +125,30 @@ func runServe(ctx context.Context, cfg *config.Config, logger *slog.Logger) erro
 		return fmt.Errorf("loading jwt issuer: %w", err)
 	}
 
+	store := identity.NewStore(pool)
+	authServices, authWorker, err := buildAuthServices(cfg, logger, store)
+	if err != nil {
+		return fmt.Errorf("configuring browser authentication: %w", err)
+	}
+	if authWorker != nil {
+		go authWorker.Run(ctx)
+		logger.Info("authentication-email worker started", "origin", cfg.Auth.PublicOrigin)
+	}
+
 	m := cpmetrics.New("api", version.Version(), version.Commit())
 	m.RegisterDatabasePool(pool)
 	httpSrv := &http.Server{
 		Addr: cfg.API.Addr,
 		Handler: server.New(server.Services{
 			Pool:        pool,
-			Store:       identity.NewStore(pool),
+			Store:       store,
 			Permissions: permissions.NewStore(pool),
 			Issuer:      issuer,
 			Mode:        cfg.Identity.Mode,
 			Work:        workstore.NewStore(pool),
 			Artifacts:   artifacts,
 			Metrics:     m,
+			Auth:        authServices,
 		}),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
@@ -208,20 +219,108 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "usage: control-plane-api [--config path] <serve | migrate up | migrate down [steps] | bootstrap [flags]>")
 }
 
-// runBootstrap creates (or, with --reset, re-issues credentials for) the admin
-// local user and any seeded service accounts, printing each full API key once.
-// It is the only way to obtain the first admin credential (no UI; S7 deferred).
+// buildAuthServices wires the browser-authentication surface. It fails closed
+// when an enabled surface lacks a valid origin, session bounds, trusted-proxy
+// configuration, GeoIP database, or verified-TLS SMTP transport.
+func buildAuthServices(cfg *config.Config, logger *slog.Logger, store *identity.Store) (*server.AuthServices, *identity.AuthEmailWorker, error) {
+	if !cfg.Auth.Enabled || store == nil {
+		return &server.AuthServices{Enabled: false, Store: store}, nil, nil
+	}
+	origin, err := config.AuthPublicOrigin(cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+	idle, absolute, recent, err := config.AuthSessionTTLs(cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+	proxies, err := config.AuthTrustedProxyNets(cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+	location, err := buildLocationResolver(cfg.Auth.GeoIPDatabase)
+	if err != nil {
+		return nil, nil, err
+	}
+	sender, err := identity.NewSMTPSender(identity.SMTPConfig{
+		Host:     cfg.Auth.Email.Host,
+		Port:     cfg.Auth.Email.Port,
+		Mode:     cfg.Auth.Email.Mode,
+		From:     cfg.Auth.Email.From,
+		Username: cfg.Auth.Email.Username,
+		Password: cfg.Auth.Email.Password,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	authServices := &server.AuthServices{
+		Enabled:         true,
+		PublicOrigin:    origin,
+		IdleTTL:         idle,
+		AbsoluteTTL:     absolute,
+		RecentAuthTTL:   recent,
+		TrustedProxies:  proxies,
+		ForwardedHeader: cfg.Auth.ForwardedHeader,
+		Store:           store,
+		Location:        location,
+		Now:             time.Now,
+	}
+	worker := &identity.AuthEmailWorker{
+		Store:  store,
+		Sender: sender,
+		Origin: origin,
+		Config: identity.AuthEmailWorkerConfig{
+			Owner:                bootstrapWorkerOwner(),
+			Interval:             5 * time.Second,
+			BatchSize:            20,
+			LeaseTTL:             5 * time.Minute,
+			MaxAttempts:          5,
+			HousekeepingInterval: 10 * time.Minute,
+		},
+		Logger: logger,
+		Now:    time.Now,
+	}
+	return authServices, worker, nil
+}
+
+func buildLocationResolver(path string) (identity.LocationResolver, error) {
+	if path == "" {
+		return identity.NoLocation{}, nil
+	}
+	return identity.OpenMaxMindLocation(path)
+}
+
+func bootstrapWorkerOwner() string {
+	host, err := os.Hostname()
+	if err != nil || host == "" {
+		host = "control-plane-api"
+	}
+	return fmt.Sprintf("%s/%d", host, os.Getpid())
+}
+
+// runBootstrap creates the first Admin through the normal email setup channel
+// when browser authentication is enabled (no credential is ever printed), or
+// runs the legacy API-key bootstrap for pre-V2 installs. --recover-admin is the
+// cluster-operator recovery path and is permitted only with no active Admin.
+//
+//nolint:gocyclo // explicit legacy/V2 branch; both contracts are fail-closed.
 func runBootstrap(cfg *config.Config, logger *slog.Logger, args []string) error {
 	fs := flag.NewFlagSet("bootstrap", flag.ContinueOnError)
 	var adminEmail string
+	var adminLocale string
+	var recoverAdmin bool
 	var reset bool
 	var serviceAccounts multiString
-	fs.StringVar(&adminEmail, "admin-email", "admin@control-plane.local",
+	fs.StringVar(&adminEmail, "admin-email", "",
 		"Email (and identity key) for the bootstrap admin user")
+	fs.StringVar(&adminLocale, "admin-locale", "",
+		"Locale (en|pt) for the bootstrap admin setup email")
+	fs.BoolVar(&recoverAdmin, "recover-admin", false,
+		"Cluster-operator recovery: only when no active Admin exists; revokes the named human's password, sessions, and owned keys")
 	fs.BoolVar(&reset, "reset", false,
-		"Revoke existing keys for the admin and seeded service accounts, then issue new ones")
+		"Legacy: revoke existing keys for the admin and seeded service accounts, then issue new ones")
 	fs.Var(&serviceAccounts, "service-account",
-		"Name of a service account to seed (repeatable); issues a token-scope key")
+		"Legacy: name of a service account to seed (repeatable); issues a token-scope key")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -236,6 +335,48 @@ func runBootstrap(cfg *config.Config, logger *slog.Logger, args []string) error 
 	defer pool.Close()
 	store := identity.NewStore(pool)
 
+	if cfg.Auth.Enabled {
+		if err := config.ValidateAuthServe(cfg); err != nil {
+			return fmt.Errorf("browser-auth bootstrap configuration: %w", err)
+		}
+		return runBrowserBootstrap(ctx, cfg, logger, store, adminEmail, adminLocale, recoverAdmin, reset, serviceAccounts)
+	}
+	if recoverAdmin {
+		return fmt.Errorf("bootstrap --recover-admin requires auth.enabled: V2 recovery uses the browser setup channel")
+	}
+	return runLegacyBootstrap(ctx, cfg, logger, store, adminEmail, reset, serviceAccounts)
+}
+
+func runBrowserBootstrap(ctx context.Context, cfg *config.Config, logger *slog.Logger, store *identity.Store, adminEmail, adminLocale string, recoverAdmin, reset bool, serviceAccounts []string) error {
+	if reset || len(serviceAccounts) > 0 {
+		return fmt.Errorf("bootstrap refuses to print or create API keys while auth.enabled is true; use --recover-admin for recovery")
+	}
+	if adminEmail == "" {
+		adminEmail = cfg.Auth.Bootstrap.AdminEmail
+	}
+	if adminLocale == "" {
+		adminLocale = cfg.Auth.Bootstrap.AdminLocale
+	}
+	result, err := store.BootstrapAdmin(ctx, identity.BootstrapOptions{
+		AdminEmail:  adminEmail,
+		AdminLocale: adminLocale,
+		Recover:     recoverAdmin,
+		Now:         time.Now().UTC(),
+	})
+	if err != nil {
+		return err
+	}
+	logger.Info("browser-auth bootstrap completed",
+		"state", result.State, "admin_email", result.AdminEmail, "recover", recoverAdmin)
+	fmt.Printf("Bootstrap %s for %s. First-time setup instructions are queued; no credential is printed and no browser session is created.\n",
+		result.State, result.AdminEmail)
+	return nil
+}
+
+func runLegacyBootstrap(ctx context.Context, cfg *config.Config, logger *slog.Logger, store *identity.Store, adminEmail string, reset bool, serviceAccounts []string) error {
+	if adminEmail == "" {
+		adminEmail = "admin@control-plane.local"
+	}
 	// Admin local user + admin-scope key.
 	admin, err := store.UpsertLocalUser(ctx, adminEmail, adminEmail, "admin")
 	if err != nil {
@@ -253,7 +394,6 @@ func runBootstrap(cfg *config.Config, logger *slog.Logger, args []string) error 
 
 	fmt.Println("Bootstrap complete. Store these securely; they will not be shown again.")
 	fmt.Printf("Admin (%s) API key (scope=admin): %s\n", adminEmail, adminFull)
-
 	// Seeded service accounts + token-scope keys.
 	for _, name := range serviceAccounts {
 		sa, err := store.UpsertServiceAccount(ctx, name, name)
