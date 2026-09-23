@@ -91,11 +91,19 @@ spec:
                   key: {{ .Values.postgresql.passwordKey }}
             - name: DATABASE_URL
               value: {{ include "control-plane.databaseURL" . | quote }}
-          {{- if (or .Values.tls.enabled (dig "internalTLS" "enabled" false (.Values.global | default (dict)))) }}
+            {{- include "control-plane.authEnv" . | nindent 12 }}
+          {{- if or (or .Values.tls.enabled (dig "internalTLS" "enabled" false (.Values.global | default (dict)))) .Values.auth.geoip.existingClaim }}
           volumeMounts:
+            {{- if (or .Values.tls.enabled (dig "internalTLS" "enabled" false (.Values.global | default (dict)))) }}
             - name: internal-ca
               mountPath: {{ dir .Values.tls.caMountPath }}
               readOnly: true
+            {{- end }}
+            {{- if .Values.auth.geoip.existingClaim }}
+            - name: auth-geoip
+              mountPath: {{ include "control-plane.authGeoIPMountPath" . }}
+              readOnly: true
+            {{- end }}
           {{- end }}
       containers:
         - name: api
@@ -135,6 +143,7 @@ spec:
               value: {{ .Values.logLevel | default "info" | quote }}
             - name: LOG_FORMAT
               value: {{ .Values.logFormat | default "json" | quote }}
+            {{- include "control-plane.authEnv" . | nindent 12 }}
             {{- if (or .Values.tls.enabled (dig "internalTLS" "enabled" false (.Values.global | default (dict)))) }}
             # Env-gated HTTPS: the api serves HTTPS when both are set (HOR-371),
             # plain HTTP otherwise. The chart mounts the leaf cert at these paths.
@@ -153,6 +162,11 @@ spec:
               readOnly: true
             - name: internal-ca
               mountPath: {{ dir .Values.tls.caMountPath }}
+              readOnly: true
+            {{- end }}
+            {{- if .Values.auth.geoip.existingClaim }}
+            - name: auth-geoip
+              mountPath: {{ include "control-plane.authGeoIPMountPath" . }}
               readOnly: true
             {{- end }}
           readinessProbe:
@@ -202,5 +216,11 @@ spec:
             items:
               - key: ca.crt
                 path: ca.crt
+        {{- end }}
+        {{- if .Values.auth.geoip.existingClaim }}
+        - name: auth-geoip
+          persistentVolumeClaim:
+            claimName: {{ .Values.auth.geoip.existingClaim | quote }}
+            readOnly: true
         {{- end }}
 {{- end }}

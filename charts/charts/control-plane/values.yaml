@@ -144,6 +144,46 @@ bootstrap:
   serviceAccounts:
     - agent-fleet
 
+# V2 browser authentication (HOR-453 / docs/architecture/v2-authentication-authority.md).
+# Disabled by default: pre-V2 installs keep the legacy API-key bootstrap and the
+# browser routes return the customer-safe unavailable state. When enabled, the
+# api/init containers fail closed without a valid HTTPS origin, verified-TLS
+# SMTP, and the first-Admin Secret.
+auth:
+  enabled: false
+  # Exact public HTTPS origin of the same-origin browser surface (no path).
+  publicOrigin: ""
+  # May only tighten the approved bounds (12h / 720h / 15m).
+  session:
+    idleTTL: ""
+    absoluteTTL: ""
+    recentAuthTTL: ""
+  # Trusted reverse-proxy CIDRs; the direct peer is trusted otherwise.
+  trustedProxies: []
+  forwardedHeader: X-Forwarded-For
+  # Optional operator-mounted local GeoIP database (advisory region only).
+  geoip:
+    existingClaim: ""
+    databaseFile: GeoLite2-City.mmdb
+    databasePath: ""
+  email:
+    host: ""
+    port: 587
+    mode: starttls # starttls | tls (verified TLS is required)
+    from: ""
+    username: ""
+    existingSecret: ""
+    passwordKey: smtp-password
+  # First Admin email/locale. The value is read from a Secret; the chart
+  # creates one from bootstrap.adminEmail unless existingSecret is supplied.
+  # Bootstrap never prints a credential: the Admin completes normal setup email.
+  bootstrap:
+    adminEmail: ""
+    adminLocale: en
+    existingSecret: ""
+    emailKey: admin-email
+    localeKey: admin-locale
+
 # PostgreSQL connection. Defaults match the bundled pgvector postgresql
 # subchart. To BYO: set postgresql.enabled=false and override host/secret.
 postgresql:
