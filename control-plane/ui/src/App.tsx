@@ -32,6 +32,9 @@ import type {
   WorkItem,
   WorkState,
 } from "./types";
+import AccountShell from "./auth/AccountShell";
+import PublicAuth from "./auth/PublicAuth";
+import { AuthProfile, probeSession } from "./auth/authApi";
 import "./styles.css";
 
 const states: WorkState[] = ["todo", "in_progress", "blocked", "done"];
@@ -1653,6 +1656,71 @@ function ValueModal({
 }
 
 export default function App() {
+  const [authState, setAuthState] = useState<
+    | { kind: "probing" }
+    | { kind: "anonymous"; message?: string }
+    | { kind: "authenticated"; profile: AuthProfile; csrfToken: string }
+    | { kind: "unavailable" }
+  >({ kind: "probing" });
+
+  useEffect(() => {
+    let cancelled = false;
+    void probeSession().then((result) => {
+      if (cancelled) return;
+      switch (result.kind) {
+        case "authenticated":
+          setAuthState({
+            kind: "authenticated",
+            profile: result.profile,
+            csrfToken: result.csrfToken,
+          });
+          break;
+        case "anonymous":
+          setAuthState({ kind: "anonymous" });
+          break;
+        default:
+          setAuthState({ kind: "unavailable" });
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  if (authState.kind === "probing") {
+    return (
+      <div className="auth-page">
+        <div className="auth-card" role="status" aria-busy="true">
+          {t("en").loading}
+        </div>
+      </div>
+    );
+  }
+  if (authState.kind === "anonymous") {
+    return (
+      <PublicAuth
+        initialMessage={authState.message}
+        onAuthenticated={(profile, csrfToken) =>
+          setAuthState({ kind: "authenticated", profile, csrfToken })
+        }
+      />
+    );
+  }
+  if (authState.kind === "authenticated") {
+    return (
+      <AccountShell
+        initialProfile={authState.profile}
+        initialCSRF={authState.csrfToken}
+        onSessionLost={(message) =>
+          setAuthState({ kind: "anonymous", message })
+        }
+      />
+    );
+  }
+  return <LegacyDashboard />;
+}
+
+function LegacyDashboard() {
   const [locale, setLocale] = useState<Locale>("en");
   const [token, setToken] = useState<string | null>(null);
   const [connectError, setConnectError] = useState("");

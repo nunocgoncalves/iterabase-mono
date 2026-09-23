@@ -74,6 +74,10 @@ function fetchMock(
   init?: RequestInit,
 ): Promise<Response> {
   const url = String(input);
+  // The V2 browser-session probe reports the disabled surface, so the legacy
+  // API-key dashboard remains the auth-unavailable path under test.
+  if (url === "/v1/profile")
+    return json({ error: "unavailable", code: "auth_unavailable" }, 503);
   if (url.startsWith("/v1/work-events"))
     return new Promise((_resolve, reject) =>
       init?.signal?.addEventListener("abort", () =>
@@ -203,7 +207,7 @@ function fetchMock(
 async function connect() {
   const user = userEvent.setup();
   render(<App />);
-  await user.type(screen.getByLabelText("Work API key"), "work_secret");
+  await user.type(await screen.findByLabelText("Work API key"), "work_secret");
   await user.click(screen.getByRole("button", { name: "Connect" }));
   await screen.findByText("Quotation request — ACME");
   return user;
@@ -247,7 +251,7 @@ describe("Platform v1 Dashboard", () => {
     });
     const user = userEvent.setup();
     render(<App />);
-    const key = screen.getByLabelText("Work API key");
+    const key = await screen.findByLabelText("Work API key");
     await user.type(key, "invalid");
     await user.click(screen.getByRole("button", { name: "Connect" }));
     expect(await screen.findByRole("alert")).toHaveTextContent(
@@ -324,6 +328,7 @@ describe("Platform v1 Dashboard", () => {
   it("presents Portuguese customer labels", async () => {
     const user = userEvent.setup();
     render(<App />);
+    await screen.findByLabelText("Work API key");
     await user.click(screen.getByRole("button", { name: "PT" }));
     expect(
       screen.getByRole("heading", { name: "Ligar ao Painel" }),
