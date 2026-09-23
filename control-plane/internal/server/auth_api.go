@@ -807,16 +807,19 @@ func (h *Handler) revokeSession(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) revokeOtherSessions(w http.ResponseWriter, r *http.Request) {
 	session, _ := sessionFromContext(r.Context())
 	now := h.authCfg.now()
-	audit := h.securityEvent(r, identity.SecurityEvent{
-		Event:             identity.EventSessionRevoked,
-		Outcome:           identity.OutcomeSuccess,
-		SubjectIdentityID: session.IdentityID,
-		BrowserSessionID:  session.ID,
-		CredentialKind:    identity.CredentialBrowser,
-		Detail:            map[string]any{"others": true},
-		CreatedAt:         now,
-	})
-	revoked, err := h.store.RevokeOtherSessionsWithAudit(r.Context(), session.IdentityID, session.ID, now, identity.TerminationRevoked, &audit)
+	revoked, err := h.store.RevokeOtherSessionsWithAudit(r.Context(), session.IdentityID, session.ID, now, identity.TerminationRevoked,
+		func(revoked int64) *identity.SecurityEvent {
+			event := h.securityEvent(r, identity.SecurityEvent{
+				Event:             identity.EventSessionRevoked,
+				Outcome:           identity.OutcomeSuccess,
+				SubjectIdentityID: session.IdentityID,
+				BrowserSessionID:  session.ID,
+				CredentialKind:    identity.CredentialBrowser,
+				Detail:            map[string]any{"others": revoked},
+				CreatedAt:         now,
+			})
+			return &event
+		})
 	if err != nil {
 		h.logWarn("revoking other sessions failed", err)
 		authError(w, http.StatusInternalServerError, "unavailable", "This is temporarily unavailable. Try again shortly.")
