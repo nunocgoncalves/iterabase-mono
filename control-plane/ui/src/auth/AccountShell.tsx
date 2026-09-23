@@ -183,13 +183,21 @@ export default function AccountShell({
         {view === "profile" && (
           <ProfilePanel
             profile={profile}
-            locale={locale}
             copy={c}
             busy={busy}
-            setLocale={setLocale}
             onSaved={(updated) => {
               setProfile(updated);
               setLocale(updated.locale);
+            }}
+            onReload={async () => {
+              try {
+                const refreshed = await authApi.profile();
+                setProfile(refreshed.profile);
+                setCSRF(refreshed.csrfToken);
+                setLocale(refreshed.profile.locale);
+              } catch (err) {
+                handleError(err);
+              }
             }}
             setNotice={setNotice}
             withCSRF={callWithCSRF}
@@ -267,11 +275,10 @@ export default function AccountShell({
 
 interface ProfilePanelProps {
   profile: AuthProfile;
-  locale: LocaleCode;
   copy: AuthCopy;
   busy: boolean;
-  setLocale: (locale: LocaleCode) => void;
   onSaved: (profile: AuthProfile) => void;
+  onReload: () => Promise<void>;
   setNotice: (notice: string) => void;
   withCSRF: <T>(action: (csrf: string) => Promise<T>) => Promise<T>;
   onError: (err: unknown) => void;
@@ -279,18 +286,28 @@ interface ProfilePanelProps {
 
 function ProfilePanel({
   profile,
-  locale,
   copy,
   busy,
-  setLocale,
   onSaved,
+  onReload,
   setNotice,
   withCSRF,
   onError,
 }: ProfilePanelProps) {
   const [displayName, setDisplayName] = useState(profile.displayName);
+  // The language is a pending value: the UI keeps the saved language until the
+  // server confirms the update (COV-PROFILE-001).
+  const [pendingLocale, setPendingLocale] = useState<LocaleCode>(
+    profile.locale,
+  );
   const [saving, setSaving] = useState(false);
   const [fieldError, setFieldError] = useState("");
+  const [conflict, setConflict] = useState(false);
+
+  useEffect(() => {
+    setDisplayName(profile.displayName);
+    setPendingLocale(profile.locale);
+  }, [profile]);
 
   async function submit(event: FormEvent) {
     event.preventDefault();
@@ -299,19 +316,27 @@ function ProfilePanel({
       return;
     }
     setFieldError("");
+    setConflict(false);
     setSaving(true);
     setNotice("");
     try {
       const result = await withCSRF((token) =>
         authApi.updateProfile(token, {
           displayName: displayName.trim(),
-          locale,
+          locale: pendingLocale,
+          expectedUpdatedAt: profile.updatedAt,
         }),
       );
       onSaved(result.profile);
-      setNotice(copy.profileSaved);
+      // The saved language becomes the active UI language, so the confirmation
+      // is rendered in that language too.
+      setNotice(authCopy(result.profile.locale).profileSaved);
     } catch (err) {
-      onError(err);
+      if (err instanceof AuthAPIError && err.code === "profile_conflict") {
+        setConflict(true);
+      } else {
+        onError(err);
+      }
     } finally {
       setSaving(false);
     }
@@ -326,6 +351,20 @@ function ProfilePanel({
           {fieldError}
         </div>
       )}
+      {conflict && (
+        <div className="form-error" role="alert">
+          {copy.profileConflict}{" "}
+          <button
+            type="button"
+            onClick={() => {
+              setConflict(false);
+              void onReload();
+            }}
+          >
+            {copy.retry}
+          </button>
+        </div>
+      )}
       <form className="auth-form" onSubmit={submit}>
         <label>
           <span>{copy.displayName}</span>
@@ -338,8 +377,10 @@ function ProfilePanel({
         <label>
           <span>{copy.language}</span>
           <select
-            value={locale}
-            onChange={(event) => setLocale(event.target.value as LocaleCode)}
+            value={pendingLocale}
+            onChange={(event) =>
+              setPendingLocale(event.target.value as LocaleCode)
+            }
           >
             <option value="en">English</option>
             <option value="pt">Português</option>

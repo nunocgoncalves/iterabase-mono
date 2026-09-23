@@ -61,6 +61,13 @@ export default function PublicAuth({ initialMessage, onAuthenticated }: Props) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [displayName, setDisplayName] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [passwordMismatch, setPasswordMismatch] = useState("");
+  const [setupContext, setSetupContext] = useState<{
+    email: string;
+    role: string;
+  } | null>(null);
+  const [contextLoading, setContextLoading] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(initialMessage || "");
   const [notice, setNotice] = useState("");
@@ -70,6 +77,41 @@ export default function PublicAuth({ initialMessage, onAuthenticated }: Props) {
   useEffect(() => {
     window.history.replaceState(null, "", window.location.pathname);
   }, []);
+
+  // A valid setup link discloses only its bounded read-only context: the
+  // verified work email and the approved role.
+  useEffect(() => {
+    if (view.kind !== "setup") return;
+    let cancelled = false;
+    setContextLoading(true);
+    void (async () => {
+      try {
+        const context = await authApi.setupContext(view.token);
+        if (!cancelled) setSetupContext(context);
+      } catch (err) {
+        if (cancelled) return;
+        const code = err instanceof AuthAPIError ? err.code : "unavailable";
+        if (
+          code === "expired" ||
+          code === "reused" ||
+          code === "superseded" ||
+          code === "ineligible" ||
+          code === "invalid"
+        ) {
+          setView({
+            kind: "setup-terminal",
+            reason: code === "invalid" ? "reused" : code,
+            token: view.token,
+          });
+        }
+      } finally {
+        if (!cancelled) setContextLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [view]);
 
   // Verify links are consumed on load; the waiting state polls the same
   // browser-held secret for the Admin outcome.
@@ -158,6 +200,11 @@ export default function PublicAuth({ initialMessage, onAuthenticated }: Props) {
   function onSetup(event: FormEvent) {
     event.preventDefault();
     if (view.kind !== "setup") return;
+    if (password !== confirmPassword) {
+      setPasswordMismatch(c.passwordMismatch);
+      return;
+    }
+    setPasswordMismatch("");
     const token = view.token;
     void run(async () => {
       try {
@@ -182,6 +229,11 @@ export default function PublicAuth({ initialMessage, onAuthenticated }: Props) {
   function onReset(event: FormEvent) {
     event.preventDefault();
     if (view.kind !== "reset") return;
+    if (password !== confirmPassword) {
+      setPasswordMismatch(c.passwordMismatch);
+      return;
+    }
+    setPasswordMismatch("");
     const token = view.token;
     void run(async () => {
       try {
@@ -318,6 +370,31 @@ export default function PublicAuth({ initialMessage, onAuthenticated }: Props) {
           <form className="auth-form" onSubmit={onSetup} aria-busy={busy}>
             <h2>{c.setupTitle}</h2>
             <p className="auth-intro">{c.setupIntro}</p>
+            {contextLoading && (
+              <p className="loading" role="status">
+                {c.loading}
+              </p>
+            )}
+            {setupContext && (
+              <>
+                <label>
+                  <span>{c.email}</span>
+                  <input value={setupContext.email} readOnly disabled />
+                </label>
+                <label>
+                  <span>{c.role}</span>
+                  <input
+                    value={
+                      setupContext.role === "admin"
+                        ? c.roleAdmin
+                        : c.roleOperator
+                    }
+                    readOnly
+                    disabled
+                  />
+                </label>
+              </>
+            )}
             <label>
               <span>{c.displayName}</span>
               <input
@@ -338,10 +415,19 @@ export default function PublicAuth({ initialMessage, onAuthenticated }: Props) {
                 <option value="pt">Português</option>
               </select>
             </label>
-            <PasswordField
+            <PasswordFields
               copy={c}
               password={password}
-              setPassword={setPassword}
+              confirm={confirmPassword}
+              setPassword={(value) => {
+                setPassword(value);
+                setPasswordMismatch("");
+              }}
+              setConfirm={(value) => {
+                setConfirmPassword(value);
+                setPasswordMismatch("");
+              }}
+              mismatch={passwordMismatch}
             />
             <button type="submit" disabled={busy}>
               {busy ? c.setupCompleting : c.finishSetup}
@@ -376,10 +462,19 @@ export default function PublicAuth({ initialMessage, onAuthenticated }: Props) {
           <form className="auth-form" onSubmit={onReset} aria-busy={busy}>
             <h2>{c.resetTitle}</h2>
             <p className="auth-intro">{c.resetIntro}</p>
-            <PasswordField
+            <PasswordFields
               copy={c}
               password={password}
-              setPassword={setPassword}
+              confirm={confirmPassword}
+              setPassword={(value) => {
+                setPassword(value);
+                setPasswordMismatch("");
+              }}
+              setConfirm={(value) => {
+                setConfirmPassword(value);
+                setPasswordMismatch("");
+              }}
+              mismatch={passwordMismatch}
             />
             <button type="submit" disabled={busy}>
               {busy ? c.resetCompleting : c.resetSubmit}
@@ -411,14 +506,20 @@ export default function PublicAuth({ initialMessage, onAuthenticated }: Props) {
   );
 }
 
-function PasswordField({
+function PasswordFields({
   copy,
   password,
+  confirm,
   setPassword,
+  setConfirm,
+  mismatch,
 }: {
   copy: AuthCopy;
   password: string;
+  confirm: string;
   setPassword: (value: string) => void;
+  setConfirm: (value: string) => void;
+  mismatch: string;
 }) {
   return (
     <>
@@ -435,6 +536,25 @@ function PasswordField({
           aria-describedby="password-guidance"
         />
       </label>
+      <label>
+        <span>{copy.confirmPassword}</span>
+        <input
+          type="password"
+          autoComplete="new-password"
+          minLength={12}
+          maxLength={128}
+          required
+          value={confirm}
+          onChange={(event) => setConfirm(event.target.value)}
+          aria-describedby="password-guidance"
+          aria-invalid={mismatch ? true : undefined}
+        />
+      </label>
+      {mismatch && (
+        <p className="form-error" role="alert">
+          {mismatch}
+        </p>
+      )}
       <p id="password-guidance" className="auth-guidance">
         {copy.passwordGuidance}
       </p>
@@ -698,7 +818,7 @@ function setupTitle(reason: string, copy: AuthCopy): string {
 }
 
 function setupBody(reason: string, copy: AuthCopy): string {
-  return reason === "ineligible" ? copy.setupIneligible : copy.setupResendSent;
+  return reason === "ineligible" ? copy.setupIneligible : copy.setupRecover;
 }
 
 function resetTitle(reason: string, copy: AuthCopy): string {
@@ -715,7 +835,7 @@ function resetTitle(reason: string, copy: AuthCopy): string {
 }
 
 function resetBody(reason: string, copy: AuthCopy): string {
-  return reason === "ineligible" ? copy.resetIneligible : copy.resetSuperseded;
+  return reason === "ineligible" ? copy.resetIneligible : copy.resetRecover;
 }
 
 function messageFor(code: string, copy: AuthCopy): string {

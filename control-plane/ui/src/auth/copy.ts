@@ -7,6 +7,8 @@ export interface AuthCopy {
   signInIntro: string;
   email: string;
   password: string;
+  confirmPassword: string;
+  passwordMismatch: string;
   signIn: string;
   signingIn: string;
   forgotPassword: string;
@@ -52,6 +54,7 @@ export interface AuthCopy {
   setupIneligible: string;
   setupResend: string;
   setupResendSent: string;
+  setupRecover: string;
   resetTitle: string;
   resetIntro: string;
   resetGuidance: string;
@@ -63,6 +66,7 @@ export interface AuthCopy {
   resetReused: string;
   resetSuperseded: string;
   resetIneligible: string;
+  resetRecover: string;
   passwordTooCommon: string;
   unavailableTitle: string;
   unavailableBody: string;
@@ -136,6 +140,8 @@ const en: AuthCopy = {
   signInIntro: "Use your work email and password to continue.",
   email: "Work email",
   password: "Password",
+  confirmPassword: "Confirm password",
+  passwordMismatch: "The passwords do not match.",
   signIn: "Sign in",
   signingIn: "Signing in…",
   forgotPassword: "Forgot password?",
@@ -156,7 +162,7 @@ const en: AuthCopy = {
     "If an eligible account exists, password-reset instructions will be sent. Your password and active sessions have not changed.",
   forgotSubmit: "Send reset instructions",
   forgotAccepted:
-    "If an eligible account exists, password-reset instructions will be sent.",
+    "If an eligible account exists, password-reset instructions will be sent. Your password and active sessions have not changed.",
   verifyChecking: "Checking this link…",
   verifyWaitingTitle: "Your request is waiting for review",
   verifyWaitingBody:
@@ -192,6 +198,7 @@ const en: AuthCopy = {
   setupResend: "Request new setup instructions",
   setupResendSent:
     "If eligible, new setup instructions will be sent to your email.",
+  setupRecover: "Request new setup instructions to continue.",
   resetTitle: "Choose a new password",
   resetIntro:
     "Resetting your password will sign out all browser sessions. API keys are not revoked.",
@@ -206,6 +213,7 @@ const en: AuthCopy = {
   resetReused: "This reset link was already used.",
   resetSuperseded: "A newer reset email was sent. Use the newest link.",
   resetIneligible: "This account cannot reset its password.",
+  resetRecover: "Request a new password-reset email and try again.",
   passwordTooCommon: "Choose a less common password.",
   unavailableTitle: "Sign-in is temporarily unavailable",
   unavailableBody:
@@ -286,6 +294,8 @@ const pt: AuthCopy = {
   signInIntro: "Use o seu email de trabalho e palavra-passe para continuar.",
   email: "Email de trabalho",
   password: "Palavra-passe",
+  confirmPassword: "Confirmar palavra-passe",
+  passwordMismatch: "As palavras-passe não coincidem.",
   signIn: "Iniciar sessão",
   signingIn: "A iniciar sessão…",
   forgotPassword: "Esqueceu-se da palavra-passe?",
@@ -304,10 +314,10 @@ const pt: AuthCopy = {
   invalidEmail: "Introduza um email de trabalho válido.",
   forgotTitle: "Repor a palavra-passe",
   forgotIntro:
-    "Se existir uma conta elegível, serão enviadas instruções para repor a palavra-passe.",
+    "Se existir uma conta elegível, serão enviadas instruções para repor a palavra-passe. A palavra-passe e as sessões ativas não foram alteradas.",
   forgotSubmit: "Enviar instruções",
   forgotAccepted:
-    "Se existir uma conta elegível, serão enviadas instruções para repor a palavra-passe.",
+    "Se existir uma conta elegível, serão enviadas instruções para repor a palavra-passe. A palavra-passe e as sessões ativas não foram alteradas.",
   verifyChecking: "A verificar este link…",
   verifyWaitingTitle: "O seu pedido aguarda análise",
   verifyWaitingBody:
@@ -346,6 +356,7 @@ const pt: AuthCopy = {
   setupResend: "Pedir novas instruções",
   setupResendSent:
     "Se elegível, serão enviadas novas instruções para o seu email.",
+  setupRecover: "Peça novas instruções de configuração para continuar.",
   resetTitle: "Escolher nova palavra-passe",
   resetIntro:
     "Repor a palavra-passe termina todas as sessões do browser. As chaves de API não são revogadas.",
@@ -361,6 +372,7 @@ const pt: AuthCopy = {
   resetSuperseded:
     "Foi enviado um email de reposição mais recente. Utilize o link mais recente.",
   resetIneligible: "Esta conta não pode repor a palavra-passe.",
+  resetRecover: "Peça um novo email de reposição e tente novamente.",
   passwordTooCommon: "Escolha uma palavra-passe menos comum.",
   unavailableTitle: "Início de sessão temporariamente indisponível",
   unavailableBody:

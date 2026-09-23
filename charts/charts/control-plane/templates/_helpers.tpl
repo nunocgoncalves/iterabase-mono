@@ -165,6 +165,9 @@ gateway:
 {{- if not (has .Values.auth.email.mode (list "starttls" "tls")) }}
 {{- fail "auth.email.mode must be starttls or tls (verified TLS is required)" }}
 {{- end }}
+{{- if not (regexMatch "^https://[^/?#]+$" (toString .Values.auth.publicOrigin)) }}
+{{- fail "auth.publicOrigin must be an absolute https origin without a path, query, or fragment" }}
+{{- end }}
 - name: AUTH_ENABLED
   value: "true"
 - name: AUTH_PUBLIC_ORIGIN
@@ -180,6 +183,9 @@ gateway:
 - name: AUTH_SMTP_FROM
   value: {{ required "auth.email.from is required when auth.enabled" .Values.auth.email.from | quote }}
 {{- if .Values.auth.email.username }}
+{{- if not .Values.auth.email.existingSecret }}
+{{- fail "auth.email.existingSecret is required when auth.email.username is set: the SMTP relay password is operator-owned and must not be generated" }}
+{{- end }}
 - name: AUTH_SMTP_USERNAME
   value: {{ .Values.auth.email.username | quote }}
 - name: AUTH_SMTP_PASSWORD

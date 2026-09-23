@@ -79,9 +79,11 @@ spec:
           command: ["/api"]
           args:
             - bootstrap
+            {{- if not .Values.auth.enabled }}
             {{- range .Values.bootstrap.serviceAccounts }}
             - --service-account
             - {{ . | quote }}
+            {{- end }}
             {{- end }}
           env:
             - name: PGPASSWORD
