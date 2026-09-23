@@ -1758,7 +1758,9 @@ def parser() -> argparse.ArgumentParser:
     validate = commands.add_parser("validate-results")
     validate.add_argument("--plan", type=Path, required=True)
     validate.add_argument("--results", type=Path, required=True)
-    validate.add_argument("--needs-file", type=Path)
+    needs = validate.add_mutually_exclusive_group()
+    needs.add_argument("--needs-env", default="")
+    needs.add_argument("--needs-file", type=Path)
     return value
 
 
@@ -1810,10 +1812,15 @@ def main() -> int:
             compose_runtime(args.plan, args.scenario, args.artifacts, args.output, args.env_output, root, contract)
         elif args.command == "validate-results":
             needs = None
-            if args.needs_file:
-                needs = read_object(args.needs_file)
+            if args.needs_env:
+                try:
+                    needs = json.loads(os.environ.get(args.needs_env, ""))
+                except json.JSONDecodeError as exc:
+                    raise E2EError(f"{args.needs_env} is not a needs object: {exc}") from exc
                 if not isinstance(needs, dict):
-                    raise E2EError("E2E aggregate needs record is not a needs object")
+                    raise E2EError(f"{args.needs_env} is not a needs object")
+            elif args.needs_file:
+                needs = read_object(args.needs_file)
             results = validate_results(args.plan, args.results, needs)
             print(compact({"validated_scenarios": [result["scenario_id"] for result in results]}))
     except E2EError as exc:

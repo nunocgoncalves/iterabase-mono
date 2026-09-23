@@ -25,11 +25,15 @@ source/base commits, retains deletion paths and both sides of moves, and emits a
 typed path record. `.github/scripts/select_ci.py` rejects empty, duplicated,
 non-canonical, traversing, and unknown input and classifies exactly one of
 `docs-only`, `release-only`, `selected`, or explicit manual `all`. Only a verified
-non-empty docs-only record can produce the ordinary zero-work result. CI and E2E
-aggregates re-check every selector boolean, matrix, selected/skipped job, and
-`needs` member against that record or generated plan; missing or malformed output
-fails closed. E2E scenario routing remains owned by `.github/scripts/e2e.py` and
-the compiled owner catalogue.
+non-empty docs-only record can produce the ordinary zero-work result. The CI
+aggregate re-checks every selector boolean, matrix, selected/skipped job, and
+`needs` member against that record; missing or malformed output fails closed. The
+E2E aggregate reads the retained plan and a compact, explicit job-result map from
+files rather than expanding the generated plan matrices into the process
+environment, re-checks every selected/skipped job and scalar plan output, and
+enforces scenario identity through the plan-hash-bound per-scenario result set;
+missing or malformed output fails closed there too. E2E scenario routing remains
+owned by `.github/scripts/e2e.py` and the compiled owner catalogue.
 
 ## One compiled execution plan
 
