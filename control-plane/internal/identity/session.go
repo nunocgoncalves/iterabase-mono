@@ -132,6 +132,9 @@ func (s *Store) CreateBrowserSession(ctx context.Context, params CreateBrowserSe
 		return "", BrowserSession{}, fmt.Errorf("create browser session: %w", err)
 	}
 	if params.Audit != nil {
+		// The caller cannot know the generated session id, and every other
+		// session event carries it, so the login evidence is linked here.
+		params.Audit.BrowserSessionID = session.ID
 		if err := AppendSecurityEventTx(ctx, tx, *params.Audit); err != nil {
 			return "", BrowserSession{}, err
 		}
@@ -278,7 +281,7 @@ func (s *Store) SetRecentPasswordWithAudit(ctx context.Context, sessionID string
 	rows, err := s.mutateSessionWithAudit(ctx, `
 		UPDATE identity.browser_sessions SET recent_password_at = $2
 		WHERE id = $1 AND terminated_at IS NULL`,
-		[]any{sessionID, now.UTC()}, event)
+		[]any{sessionID, now.UTC()}, fixedEvent(event))
 	if err != nil {
 		return fmt.Errorf("set recent password: %w", err)
 	}
@@ -311,7 +314,7 @@ func (s *Store) RevokeSessionWithAudit(ctx context.Context, sessionID string, no
 		UPDATE identity.browser_sessions
 		SET terminated_at = $2, termination_reason = $3
 		WHERE id = $1 AND terminated_at IS NULL`,
-		[]any{sessionID, now.UTC(), reason}, event)
+		[]any{sessionID, now.UTC(), reason}, fixedEvent(event))
 	if err != nil {
 		return false, fmt.Errorf("revoke session: %w", err)
 	}
@@ -330,7 +333,7 @@ func (s *Store) RevokeOwnedSessionWithAudit(ctx context.Context, identityID, ses
 		UPDATE identity.browser_sessions
 		SET terminated_at = $3, termination_reason = $4
 		WHERE id = $1 AND identity_id = $2 AND terminated_at IS NULL`,
-		[]any{sessionID, identityID, now.UTC(), reason}, event)
+		[]any{sessionID, identityID, now.UTC(), reason}, fixedEvent(event))
 	if err != nil {
 		return false, fmt.Errorf("revoke owned session: %w", err)
 	}
@@ -343,8 +346,9 @@ func (s *Store) RevokeOtherSessions(ctx context.Context, identityID, keepID stri
 }
 
 // RevokeOtherSessionsWithAudit is RevokeOtherSessions with atomic audit
-// evidence.
-func (s *Store) RevokeOtherSessionsWithAudit(ctx context.Context, identityID, keepID string, now time.Time, reason string, event *SecurityEvent) (int64, error) {
+// evidence. The builder receives the number of revoked rows so the event can
+// record the bounded count.
+func (s *Store) RevokeOtherSessionsWithAudit(ctx context.Context, identityID, keepID string, now time.Time, reason string, event func(revoked int64) *SecurityEvent) (int64, error) {
 	rows, err := s.mutateSessionWithAudit(ctx, `
 		UPDATE identity.browser_sessions
 		SET terminated_at = $3, termination_reason = $4
@@ -385,10 +389,18 @@ func (s *Store) RevokeSessionByToken(ctx context.Context, raw string, now time.T
 	return tag.RowsAffected() > 0, nil
 }
 
+// fixedEvent adapts a fixed event pointer to the builder shape used by
+// mutateSessionWithAudit when the count is not part of the evidence.
+func fixedEvent(event *SecurityEvent) func(int64) *SecurityEvent {
+	return func(int64) *SecurityEvent { return event }
+}
+
 // mutateSessionWithAudit runs one session mutation and, when it changed at
-// least one row and an event is supplied, appends the evidence in the same
-// transaction. A failed audit rolls the mutation back.
-func (s *Store) mutateSessionWithAudit(ctx context.Context, query string, args []any, event *SecurityEvent) (int64, error) {
+// least one row and an event builder is supplied, appends the evidence in the
+// same transaction. The builder receives the affected row count, so a
+// post-mutation count can be recorded atomically. A failed audit rolls the
+// mutation back.
+func (s *Store) mutateSessionWithAudit(ctx context.Context, query string, args []any, event func(int64) *SecurityEvent) (int64, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("begin session mutation: %w", err)
@@ -401,8 +413,10 @@ func (s *Store) mutateSessionWithAudit(ctx context.Context, query string, args [
 	}
 	rows := tag.RowsAffected()
 	if rows > 0 && event != nil {
-		if err := AppendSecurityEventTx(ctx, tx, *event); err != nil {
-			return 0, err
+		if ev := event(rows); ev != nil {
+			if err := AppendSecurityEventTx(ctx, tx, *ev); err != nil {
+				return 0, err
+			}
 		}
 	}
 	if err := tx.Commit(ctx); err != nil {

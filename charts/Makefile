@@ -157,7 +157,7 @@ check-manager-contract:
 check-workload-ca:
 	./scripts/check-workload-ca.sh
 
-check-auth-config:
+check-auth-config: build-deps
 	./scripts/check-auth-config.sh
 
 check-dup-yaml-keys: build-deps

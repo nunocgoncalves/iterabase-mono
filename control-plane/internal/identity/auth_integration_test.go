@@ -838,3 +838,63 @@ func TestSessionNetworkCoalescingAndAuditAtomicity(t *testing.T) {
 		WHERE event = 'session_revoked' AND browser_session_id = $1`, session.ID).Scan(&events))
 	assert.Equal(t, 1, events)
 }
+
+func TestSessionAuditLinkageAndRevokeOthersCount(t *testing.T) {
+	h := newAuthHarness(t)
+	ctx := context.Background()
+	user, err := h.store.UpsertLocalUser(ctx, "ada@example.com", "ada@example.com", "operator")
+	require.NoError(t, err)
+	setupToken := mustSetupToken(t, h.store, user.ID, h.now)
+	_, err = h.store.CompleteSetup(ctx, setupToken, "Ada", "en", "correct-horse-battery", h.now)
+	require.NoError(t, err)
+	active, err := h.store.FindLocalUserByEmail(ctx, "ada@example.com")
+	require.NoError(t, err)
+
+	// The login event is built before the row exists, so the store must link it.
+	login := SecurityEvent{
+		Event: EventLoginSucceeded, Outcome: OutcomeSuccess, SubjectIdentityID: active.ID,
+		CredentialKind: CredentialBrowser, CreatedAt: h.now,
+	}
+	raw, session, err := h.store.CreateBrowserSession(ctx, CreateBrowserSessionParams{
+		IdentityID: active.ID, CSRFHash: "h", IdleTTL: 12 * time.Hour, AbsoluteTTL: 30 * 24 * time.Hour,
+		Now: h.now, Audit: &login,
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, raw)
+
+	var linked *string
+	require.NoError(t, h.store.pool.QueryRow(ctx, `
+		SELECT browser_session_id::text FROM identity.security_events
+		WHERE event = 'login_succeeded'`).Scan(&linked))
+	require.NotNil(t, linked)
+	assert.Equal(t, session.ID, *linked)
+
+	// Revoke-others records the exact bounded count with the surviving session.
+	_, _, err = h.store.CreateBrowserSession(ctx, CreateBrowserSessionParams{
+		IdentityID: active.ID, CSRFHash: "h2", IdleTTL: 12 * time.Hour, AbsoluteTTL: 30 * 24 * time.Hour, Now: h.now,
+	})
+	require.NoError(t, err)
+	_, _, err = h.store.CreateBrowserSession(ctx, CreateBrowserSessionParams{
+		IdentityID: active.ID, CSRFHash: "h3", IdleTTL: 12 * time.Hour, AbsoluteTTL: 30 * 24 * time.Hour, Now: h.now,
+	})
+	require.NoError(t, err)
+
+	revoked, err := h.store.RevokeOtherSessionsWithAudit(ctx, active.ID, session.ID, h.now, TerminationRevoked,
+		func(revoked int64) *SecurityEvent {
+			return &SecurityEvent{
+				Event: EventSessionRevoked, Outcome: OutcomeSuccess, SubjectIdentityID: active.ID,
+				BrowserSessionID: session.ID, CredentialKind: CredentialBrowser,
+				Detail: map[string]any{"others": revoked}, CreatedAt: h.now,
+			}
+		})
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), revoked)
+
+	var eventSession string
+	var others string
+	require.NoError(t, h.store.pool.QueryRow(ctx, `
+		SELECT browser_session_id::text, detail->>'others' FROM identity.security_events
+		WHERE event = 'session_revoked' ORDER BY created_at DESC LIMIT 1`).Scan(&eventSession, &others))
+	assert.Equal(t, session.ID, eventSession)
+	assert.Equal(t, "2", others)
+}
