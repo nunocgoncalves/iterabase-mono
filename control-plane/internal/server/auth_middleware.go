@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net"
 	"net/http"
 	"strings"
@@ -40,6 +41,7 @@ type AuthServices struct {
 	ForwardedHeader string
 	Store           *identity.Store
 	Location        identity.LocationResolver
+	Logger          *slog.Logger
 	Now             func() time.Time
 }
 

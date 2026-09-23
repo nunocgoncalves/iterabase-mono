@@ -12,15 +12,15 @@
 -- ---------------------------------------------------------------------------
 
 -- Legacy `user` is the pre-epoch spelling of `operator` (DES-HOR-451-12). The
--- data migration is intentionally idempotent so a fresh install and an upgrade
--- converge on the same rows. The old constraint must be dropped before the
--- value rewrite and re-added afterwards so both directions validate existing
--- rows.
+-- data rewrite, default change, and exact `admin|operator` enforcement belong
+-- to the irreversible HOR-454 authority epoch (architecture 15.4), so this
+-- expand migration only widens the check to accept both spellings. Every V2
+-- authorization decision normalizes the legacy value through
+-- identity.NormalizeRole; HOR-454 completes the backfill and tightens the
+-- constraint at cutover.
 ALTER TABLE identity.local_users DROP CONSTRAINT local_users_role_check;
-UPDATE identity.local_users SET role = 'operator' WHERE role = 'user';
 ALTER TABLE identity.local_users ADD CONSTRAINT local_users_role_check
-    CHECK (role IN ('admin', 'operator'));
-ALTER TABLE identity.local_users ALTER COLUMN role SET DEFAULT 'operator';
+    CHECK (role IN ('admin', 'operator', 'user'));
 
 ALTER TABLE identity.local_users
     ADD COLUMN email_normalized text,

@@ -46,6 +46,7 @@ type LocalUser struct {
 	PasswordHash            string
 	PasswordChangedAt       *time.Time
 	CreatedAt               time.Time
+	UpdatedAt               time.Time
 	ApprovedAccessRequestID string
 }
 

@@ -256,6 +256,50 @@ func claimAuthLinkTx(ctx context.Context, tx pgx.Tx, raw, purpose string, now ti
 	return token, nil
 }
 
+// SetupContext is the bounded read-only context a valid first-time setup link
+// may disclose to its holder: the verified work email and the approved role.
+type SetupContext struct {
+	Email string
+	Role  string
+}
+
+// SetupContext resolves the bounded read-only context for a valid setup link.
+// Any other token state returns the matching bounded link error.
+func (s *Store) SetupContext(ctx context.Context, raw string) (SetupContext, error) {
+	if raw == "" {
+		return SetupContext{}, ErrAuthLinkInvalid
+	}
+	var purpose, email, role, status string
+	var expiresAt time.Time
+	var consumedAt, invalidatedAt *time.Time
+	err := s.pool.QueryRow(ctx, `
+		SELECT t.purpose, t.expires_at, t.consumed_at, t.invalidated_at,
+		       COALESCE(lu.email, ''), COALESCE(lu.role, ''), COALESCE(lu.status, '')
+		FROM identity.auth_link_tokens t
+		LEFT JOIN identity.local_users lu ON lu.identity_id = t.identity_id
+		WHERE t.token_hash = $1`, HashSecret(SecretDomainAuthLink, raw)).
+		Scan(&purpose, &expiresAt, &consumedAt, &invalidatedAt, &email, &role, &status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return SetupContext{}, ErrAuthLinkInvalid
+	}
+	if err != nil {
+		return SetupContext{}, fmt.Errorf("read setup context: %w", err)
+	}
+	switch {
+	case purpose != AuthLinkSetupPassword:
+		return SetupContext{}, ErrAuthLinkInvalid
+	case invalidatedAt != nil:
+		return SetupContext{}, ErrAuthLinkSuperseded
+	case consumedAt != nil:
+		return SetupContext{}, ErrAuthLinkConsumed
+	case !time.Now().UTC().Before(expiresAt):
+		return SetupContext{}, ErrAuthLinkExpired
+	case status != LocalUserSetupPending:
+		return SetupContext{}, ErrAccountNotEligible
+	}
+	return SetupContext{Email: email, Role: NormalizeRole(role)}, nil
+}
+
 func localUserInTx(ctx context.Context, tx pgx.Tx, identityID string) (LocalUser, error) {
 	user, err := scanLocalUser(tx.QueryRow(ctx, `
 		SELECT `+localUserColumns+`

@@ -752,3 +752,89 @@ func TestSecurityAuditNeverCarriesRawSecrets(t *testing.T) {
 		assert.Zero(t, stored, "%s raw value must not be persisted", name)
 	}
 }
+
+func TestSetupContextBoundedDisclosure(t *testing.T) {
+	h := newAuthHarness(t)
+	ctx := context.Background()
+	user, err := h.store.UpsertLocalUser(ctx, "ada@example.com", "ada@example.com", "operator")
+	require.NoError(t, err)
+	token := mustSetupToken(t, h.store, user.ID, h.now)
+
+	context, err := h.store.SetupContext(ctx, token)
+	require.NoError(t, err)
+	assert.Equal(t, "ada@example.com", context.Email)
+	assert.Equal(t, "operator", context.Role)
+
+	_, err = h.store.SetupContext(ctx, "not-a-token")
+	assert.ErrorIs(t, err, ErrAuthLinkInvalid)
+
+	_, err = h.store.CompleteSetup(ctx, token, "Ada", "en", "correct-horse-battery", h.now)
+	require.NoError(t, err)
+	_, err = h.store.SetupContext(ctx, token)
+	assert.ErrorIs(t, err, ErrAuthLinkConsumed)
+
+	// A disabled account cannot disclose its context even with a live link.
+	other, err := h.store.UpsertLocalUser(ctx, "bob@example.com", "bob@example.com", "operator")
+	require.NoError(t, err)
+	otherToken := mustSetupToken(t, h.store, other.ID, h.now)
+	_, err = h.store.pool.Exec(ctx, `UPDATE identity.local_users SET status = 'disabled' WHERE identity_id = $1`, other.ID)
+	require.NoError(t, err)
+	_, err = h.store.SetupContext(ctx, otherToken)
+	assert.ErrorIs(t, err, ErrAccountNotEligible)
+}
+
+func TestSessionNetworkCoalescingAndAuditAtomicity(t *testing.T) {
+	h := newAuthHarness(t)
+	ctx := context.Background()
+	user, err := h.store.UpsertLocalUser(ctx, "ada@example.com", "ada@example.com", "operator")
+	require.NoError(t, err)
+	setupToken := mustSetupToken(t, h.store, user.ID, h.now)
+	_, err = h.store.CompleteSetup(ctx, setupToken, "Ada", "en", "correct-horse-battery", h.now)
+	require.NoError(t, err)
+	active, err := h.store.FindLocalUserByEmail(ctx, "ada@example.com")
+	require.NoError(t, err)
+
+	raw, session, err := h.store.CreateBrowserSession(ctx, CreateBrowserSessionParams{
+		IdentityID: active.ID, CSRFHash: "h", IdleTTL: 12 * time.Hour, AbsoluteTTL: 30 * 24 * time.Hour,
+		Now: h.now, IP: net.ParseIP("198.51.100.10"),
+		Location: Location{Country: "PT", Region: "11"},
+	})
+	require.NoError(t, err)
+
+	// Inside the coalescing window the network evidence is unchanged.
+	_, err = h.store.ResolveBrowserSessionWithNetwork(ctx, raw, h.now.Add(time.Minute), SessionNetwork{
+		IP: net.ParseIP("203.0.113.99"), Location: Location{Country: "US", Region: "CA"}, HasLocation: true,
+	})
+	require.NoError(t, err)
+	resolved, err := h.store.ResolveBrowserSession(ctx, raw, h.now.Add(time.Minute))
+	require.NoError(t, err)
+	assert.Equal(t, "PT", resolved.LocationCountry)
+	assert.Equal(t, "198.51.100.10", resolved.CreatedIP)
+
+	// Past the window the coalesced IP/location advance with the activity stamp.
+	_, err = h.store.ResolveBrowserSessionWithNetwork(ctx, raw, h.now.Add(sessionActivityCoalesce+time.Minute), SessionNetwork{
+		IP: net.ParseIP("203.0.113.99"), Location: Location{Country: "US", Region: "CA"}, HasLocation: true,
+	})
+	require.NoError(t, err)
+	var lastIP, country, region string
+	require.NoError(t, h.store.pool.QueryRow(ctx, `
+		SELECT host(last_ip), location_country, location_region FROM identity.browser_sessions WHERE id = $1`,
+		session.ID).Scan(&lastIP, &country, &region))
+	assert.Equal(t, "203.0.113.99", lastIP)
+	assert.Equal(t, "US", country)
+	assert.Equal(t, "CA", region)
+
+	// The audit-carrying revocation commits evidence with the mutation.
+	event := SecurityEvent{
+		Event: EventSessionRevoked, Outcome: OutcomeSuccess, SubjectIdentityID: active.ID,
+		BrowserSessionID: session.ID, CredentialKind: CredentialBrowser, CreatedAt: h.now,
+	}
+	revoked, err := h.store.RevokeSessionWithAudit(ctx, session.ID, h.now, TerminationRevoked, &event)
+	require.NoError(t, err)
+	assert.True(t, revoked)
+	var events int
+	require.NoError(t, h.store.pool.QueryRow(ctx, `
+		SELECT count(*) FROM identity.security_events
+		WHERE event = 'session_revoked' AND browser_session_id = $1`, session.ID).Scan(&events))
+	assert.Equal(t, 1, events)
+}

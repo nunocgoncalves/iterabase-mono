@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // Local-user account states (architecture 6.2).
@@ -16,16 +17,20 @@ const (
 	LocalUserDisabled     = "disabled"
 )
 
+// ErrProfileConflict is returned when a profile update is based on a stale
+// version of the account row.
+var ErrProfileConflict = errors.New("identity: profile changed since it was loaded")
+
 const localUserColumns = `lu.identity_id, lu.email, lu.email_normalized, lu.display_name,
 	lu.role, lu.locale, lu.status, COALESCE(lu.password_hash, ''), lu.password_changed_at,
-	lu.created_at, COALESCE(lu.approved_access_request_id::text, ''),
+	lu.created_at, lu.updated_at, COALESCE(lu.approved_access_request_id::text, ''),
 	i.key, i.kind, i.source, i.display_name`
 
 func scanLocalUser(row pgx.Row) (LocalUser, error) {
 	var lu LocalUser
 	err := row.Scan(&lu.ID, &lu.Email, &lu.EmailNormalized, &lu.DisplayName,
 		&lu.Role, &lu.Locale, &lu.Status, &lu.PasswordHash, &lu.PasswordChangedAt,
-		&lu.CreatedAt, &lu.ApprovedAccessRequestID,
+		&lu.CreatedAt, &lu.UpdatedAt, &lu.ApprovedAccessRequestID,
 		&lu.Key, &lu.Kind, &lu.Source, &lu.Identity.DisplayName)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return LocalUser{}, ErrNotFound
@@ -50,20 +55,40 @@ func (s *Store) FindLocalUserByEmail(ctx context.Context, normalized string) (Lo
 
 // UpdateLocalUserProfile updates the editable display name and locale.
 func (s *Store) UpdateLocalUserProfile(ctx context.Context, identityID, displayName, locale string, now time.Time) (LocalUser, error) {
+	return s.UpdateLocalUserProfileVersioned(ctx, identityID, displayName, locale, nil, now)
+}
+
+// UpdateLocalUserProfileVersioned updates the profile only when the caller's
+// expected row version still matches, so a stale tab cannot silently overwrite
+// a newer change (COV-PROFILE-001 "Prof. conflict"). A nil expected version
+// skips the precondition.
+func (s *Store) UpdateLocalUserProfileVersioned(ctx context.Context, identityID, displayName, locale string, expected *time.Time, now time.Time) (LocalUser, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return LocalUser{}, fmt.Errorf("begin profile update: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	tag, err := tx.Exec(ctx, `
-		UPDATE identity.local_users
-		SET display_name = $2, locale = $3
-		WHERE identity_id = $1`, identityID, displayName, locale)
+	var tag pgconn.CommandTag
+	if expected != nil {
+		tag, err = tx.Exec(ctx, `
+			UPDATE identity.local_users
+			SET display_name = $2, locale = $3
+			WHERE identity_id = $1 AND updated_at = $4`,
+			identityID, displayName, locale, expected.UTC())
+	} else {
+		tag, err = tx.Exec(ctx, `
+			UPDATE identity.local_users
+			SET display_name = $2, locale = $3
+			WHERE identity_id = $1`, identityID, displayName, locale)
+	}
 	if err != nil {
 		return LocalUser{}, fmt.Errorf("update local user: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
+		if expected != nil {
+			return LocalUser{}, ErrProfileConflict
+		}
 		return LocalUser{}, ErrNotFound
 	}
 	if _, err := tx.Exec(ctx, `

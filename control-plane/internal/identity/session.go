@@ -74,7 +74,9 @@ const browserSessionColumns = `s.id, s.identity_id, s.csrf_hash, s.created_at, s
 	COALESCE(s.browser_label, ''), COALESCE(s.os_label, ''), COALESCE(s.device_label, '')`
 
 // CreateBrowserSessionParams describes one new session. Callers must revoke any
-// presented pre-login session first (login always replaces the token).
+// presented pre-login session first (login always replaces the token). When
+// Audit is set, the session insert and its core audit event commit atomically
+// and fail closed.
 type CreateBrowserSessionParams struct {
 	IdentityID  string
 	CSRFHash    string
@@ -84,6 +86,7 @@ type CreateBrowserSessionParams struct {
 	IP          net.IP
 	Labels      ClientLabels
 	Location    Location
+	Audit       *SecurityEvent
 }
 
 // CreateBrowserSession stores a hashed opaque session token and returns the raw
@@ -104,7 +107,13 @@ func (s *Store) CreateBrowserSession(ctx context.Context, params CreateBrowserSe
 		ip = params.IP.String()
 	}
 
-	session, err := scanBrowserSession(s.pool.QueryRow(ctx, `
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return "", BrowserSession{}, fmt.Errorf("begin browser session: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	session, err := scanBrowserSession(tx.QueryRow(ctx, `
 		WITH inserted AS (
 			INSERT INTO identity.browser_sessions (
 				token_hash, identity_id, csrf_hash, created_at, last_authorized_at,
@@ -122,13 +131,35 @@ func (s *Store) CreateBrowserSession(ctx context.Context, params CreateBrowserSe
 	if err != nil {
 		return "", BrowserSession{}, fmt.Errorf("create browser session: %w", err)
 	}
+	if params.Audit != nil {
+		if err := AppendSecurityEventTx(ctx, tx, *params.Audit); err != nil {
+			return "", BrowserSession{}, err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return "", BrowserSession{}, fmt.Errorf("commit browser session: %w", err)
+	}
 	return raw, session, nil
+}
+
+// SessionNetwork is the caller-derived network evidence for a session
+// authorization. It is advisory metadata only.
+type SessionNetwork struct {
+	IP          net.IP
+	Location    Location
+	HasLocation bool
 }
 
 // ResolveBrowserSession validates and, when due, coalesces session activity. It
 // resolves the current account state on every call and terminates sessions that
 // are expired or no longer eligible.
 func (s *Store) ResolveBrowserSession(ctx context.Context, raw string, now time.Time) (BrowserSession, error) {
+	return s.ResolveBrowserSessionWithNetwork(ctx, raw, now, SessionNetwork{})
+}
+
+// ResolveBrowserSessionWithNetwork additionally records the coalesced last
+// IP/location evidence for the authorized request (DES-HOR-451-07).
+func (s *Store) ResolveBrowserSessionWithNetwork(ctx context.Context, raw string, now time.Time, network SessionNetwork) (BrowserSession, error) {
 	if raw == "" {
 		return BrowserSession{}, ErrSessionInvalid
 	}
@@ -162,43 +193,49 @@ func (s *Store) ResolveBrowserSession(ctx context.Context, raw string, now time.
 		return BrowserSession{}, ErrSessionExpired
 	}
 
-	if now.Sub(session.LastAuthorizedAt) >= sessionActivityCoalesce {
-		idle := now.Add(session.IdleExpiresAt.Sub(session.LastAuthorizedAt))
-		if idle.After(session.AbsoluteExpiresAt) {
-			idle = session.AbsoluteExpiresAt
-		}
-		if _, err := s.pool.Exec(ctx, `
-			UPDATE identity.browser_sessions SET last_authorized_at = $2, idle_expires_at = $3
-			WHERE id = $1 AND terminated_at IS NULL`, session.ID, now, idle); err == nil {
-			session.LastAuthorizedAt = now
-			session.IdleExpiresAt = idle
-		}
-	}
-
+	session = s.coalesceSessionActivity(ctx, session, now, network)
 	session.Role = NormalizeRole(session.Role)
 	return session, nil
 }
 
-// TouchSessionNetwork records the coalesced last IP/location for an authorized
-// request supplied by the caller's trusted-proxy derivation.
-func (s *Store) TouchSessionNetwork(ctx context.Context, sessionID string, ip net.IP, location Location, hasLocation bool) error {
-	var ipValue any
-	if ip != nil {
-		ipValue = ip.String()
+// coalesceSessionActivity advances the coalesced activity stamp and network
+// evidence at most once per five-minute window. A failed update leaves the
+// resolved session unchanged so the next request retries.
+func (s *Store) coalesceSessionActivity(ctx context.Context, session BrowserSession, now time.Time, network SessionNetwork) BrowserSession {
+	if now.Sub(session.LastAuthorizedAt) < sessionActivityCoalesce {
+		return session
 	}
-	var country, region any
-	if hasLocation {
-		country, region = location.Country, location.Region
+	idle := now.Add(session.IdleExpiresAt.Sub(session.LastAuthorizedAt))
+	if idle.After(session.AbsoluteExpiresAt) {
+		idle = session.AbsoluteExpiresAt
+	}
+	var ipValue, country, region any
+	if network.IP != nil {
+		ipValue = network.IP.String()
+	}
+	if network.HasLocation {
+		country, region = network.Location.Country, network.Location.Region
 	}
 	if _, err := s.pool.Exec(ctx, `
 		UPDATE identity.browser_sessions
-		SET last_ip = COALESCE($2, last_ip),
-		    location_country = COALESCE($3, location_country),
-		    location_region = COALESCE($4, location_region)
-		WHERE id = $1 AND terminated_at IS NULL`, sessionID, ipValue, country, region); err != nil {
-		return fmt.Errorf("touch session network: %w", err)
+		SET last_authorized_at = $2, idle_expires_at = $3,
+		    last_ip = COALESCE($4, last_ip),
+		    location_country = COALESCE($5, location_country),
+		    location_region = COALESCE($6, location_region)
+		WHERE id = $1 AND terminated_at IS NULL`,
+		session.ID, now, idle, ipValue, country, region); err != nil {
+		return session
 	}
-	return nil
+	session.LastAuthorizedAt = now
+	session.IdleExpiresAt = idle
+	if ipValue != nil {
+		session.LastIP = ipValue.(string)
+	}
+	if network.HasLocation {
+		session.LocationCountry = network.Location.Country
+		session.LocationRegion = network.Location.Region
+	}
+	return session
 }
 
 // VerifySessionCSRF compares the presented CSRF token with the session-bound
@@ -232,13 +269,20 @@ func (s *Store) RotateSessionCSRF(ctx context.Context, sessionID string) (string
 // SetRecentPassword records bounded session-bound recent-password evidence. It
 // never creates another session.
 func (s *Store) SetRecentPassword(ctx context.Context, sessionID string, now time.Time) error {
-	tag, err := s.pool.Exec(ctx, `
+	return s.SetRecentPasswordWithAudit(ctx, sessionID, now, nil)
+}
+
+// SetRecentPasswordWithAudit records recent-password evidence and, when
+// supplied, its core audit event in the same transaction.
+func (s *Store) SetRecentPasswordWithAudit(ctx context.Context, sessionID string, now time.Time, event *SecurityEvent) error {
+	rows, err := s.mutateSessionWithAudit(ctx, `
 		UPDATE identity.browser_sessions SET recent_password_at = $2
-		WHERE id = $1 AND terminated_at IS NULL`, sessionID, now.UTC())
+		WHERE id = $1 AND terminated_at IS NULL`,
+		[]any{sessionID, now.UTC()}, event)
 	if err != nil {
 		return fmt.Errorf("set recent password: %w", err)
 	}
-	if tag.RowsAffected() == 0 {
+	if rows == 0 {
 		return ErrSessionInvalid
 	}
 	return nil
@@ -256,41 +300,60 @@ func (s BrowserSession) HasRecentPassword(window time.Duration, now time.Time) b
 // RevokeSession terminates one session idempotently. It never distinguishes a
 // missing row from an already-terminated one.
 func (s *Store) RevokeSession(ctx context.Context, sessionID string, now time.Time, reason string) (bool, error) {
-	tag, err := s.pool.Exec(ctx, `
+	return s.RevokeSessionWithAudit(ctx, sessionID, now, reason, nil)
+}
+
+// RevokeSessionWithAudit terminates one session and, when the call actually
+// terminated a live row, appends the core audit event in the same transaction
+// (architecture 11.2: a security mutation and its evidence commit atomically).
+func (s *Store) RevokeSessionWithAudit(ctx context.Context, sessionID string, now time.Time, reason string, event *SecurityEvent) (bool, error) {
+	rows, err := s.mutateSessionWithAudit(ctx, `
 		UPDATE identity.browser_sessions
 		SET terminated_at = $2, termination_reason = $3
-		WHERE id = $1 AND terminated_at IS NULL`, sessionID, now.UTC(), reason)
+		WHERE id = $1 AND terminated_at IS NULL`,
+		[]any{sessionID, now.UTC(), reason}, event)
 	if err != nil {
 		return false, fmt.Errorf("revoke session: %w", err)
 	}
-	return tag.RowsAffected() > 0, nil
+	return rows > 0, nil
 }
 
 // RevokeOwnedSession terminates one of the caller's own sessions. A session id
 // that belongs to someone else is indistinguishable from an already-ended one.
 func (s *Store) RevokeOwnedSession(ctx context.Context, identityID, sessionID string, now time.Time, reason string) (bool, error) {
-	tag, err := s.pool.Exec(ctx, `
+	return s.RevokeOwnedSessionWithAudit(ctx, identityID, sessionID, now, reason, nil)
+}
+
+// RevokeOwnedSessionWithAudit is RevokeOwnedSession with atomic audit evidence.
+func (s *Store) RevokeOwnedSessionWithAudit(ctx context.Context, identityID, sessionID string, now time.Time, reason string, event *SecurityEvent) (bool, error) {
+	rows, err := s.mutateSessionWithAudit(ctx, `
 		UPDATE identity.browser_sessions
 		SET terminated_at = $3, termination_reason = $4
 		WHERE id = $1 AND identity_id = $2 AND terminated_at IS NULL`,
-		sessionID, identityID, now.UTC(), reason)
+		[]any{sessionID, identityID, now.UTC(), reason}, event)
 	if err != nil {
 		return false, fmt.Errorf("revoke owned session: %w", err)
 	}
-	return tag.RowsAffected() > 0, nil
+	return rows > 0, nil
 }
 
 // RevokeOtherSessions terminates every live session except keepID.
 func (s *Store) RevokeOtherSessions(ctx context.Context, identityID, keepID string, now time.Time, reason string) (int64, error) {
-	tag, err := s.pool.Exec(ctx, `
+	return s.RevokeOtherSessionsWithAudit(ctx, identityID, keepID, now, reason, nil)
+}
+
+// RevokeOtherSessionsWithAudit is RevokeOtherSessions with atomic audit
+// evidence.
+func (s *Store) RevokeOtherSessionsWithAudit(ctx context.Context, identityID, keepID string, now time.Time, reason string, event *SecurityEvent) (int64, error) {
+	rows, err := s.mutateSessionWithAudit(ctx, `
 		UPDATE identity.browser_sessions
 		SET terminated_at = $3, termination_reason = $4
 		WHERE identity_id = $1 AND id <> $2 AND terminated_at IS NULL`,
-		identityID, keepID, now.UTC(), reason)
+		[]any{identityID, keepID, now.UTC(), reason}, event)
 	if err != nil {
 		return 0, fmt.Errorf("revoke other sessions: %w", err)
 	}
-	return tag.RowsAffected(), nil
+	return rows, nil
 }
 
 // RevokeAllSessionsForIdentity terminates every live session for an identity.
@@ -320,6 +383,32 @@ func (s *Store) RevokeSessionByToken(ctx context.Context, raw string, now time.T
 		return false, fmt.Errorf("revoke session by token: %w", err)
 	}
 	return tag.RowsAffected() > 0, nil
+}
+
+// mutateSessionWithAudit runs one session mutation and, when it changed at
+// least one row and an event is supplied, appends the evidence in the same
+// transaction. A failed audit rolls the mutation back.
+func (s *Store) mutateSessionWithAudit(ctx context.Context, query string, args []any, event *SecurityEvent) (int64, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("begin session mutation: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	tag, err := tx.Exec(ctx, query, args...)
+	if err != nil {
+		return 0, err
+	}
+	rows := tag.RowsAffected()
+	if rows > 0 && event != nil {
+		if err := AppendSecurityEventTx(ctx, tx, *event); err != nil {
+			return 0, err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("commit session mutation: %w", err)
+	}
+	return rows, nil
 }
 
 // ListActiveSessions returns the caller's live sessions, current first.
