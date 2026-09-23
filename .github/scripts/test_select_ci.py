@@ -205,6 +205,7 @@ class WorkflowContractTests(unittest.TestCase):
             "export FORGE_E2E_REQUIRE_CAPACITY=true",
             "uses: ./.github/actions/setup-permanent-fixture",
             "group: iterabase-permanent-fixture-${{ matrix.capacity }}",
+            "queue: max",
         ):
             self.assertIn(value, workflow)
         self.assertNotIn("DIGITALOCEAN_TOKEN", workflow)

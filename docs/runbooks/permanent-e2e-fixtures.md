@@ -2,8 +2,9 @@
 
 Authority: `DES-HOR-540-02`, `DES-HOR-545-02`, and `DES-HOR-545-03`. These hosts are dedicated,
 reimageable CI fixtures; they contain no customer data. Work is serialized per
-fixture by `iterabase-permanent-fixture-<capacity>` with cancellation disabled;
-independent CPU and GPU hosts may run concurrently.
+fixture by `iterabase-permanent-fixture-<capacity>` with cancellation disabled
+and FIFO `queue: max` pending runs; independent CPU and GPU hosts may run
+concurrently.
 
 ## Active evidence identities
 

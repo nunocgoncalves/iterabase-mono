@@ -135,8 +135,9 @@ artifacts.
    schema used by PR execution.
 4. **Execute the compiled union.** F2 and mandatory F3 jobs invoke the same owner
    scenario and stage graph. Each CPU/GPU path shares its literal
-   `iterabase-permanent-fixture-<capacity>` non-canceling lock across PR, master,
-   and candidate workflows. Independent CPU and GPU hosts may run concurrently.
+   `iterabase-permanent-fixture-<capacity>` non-canceling lock with FIFO
+   `queue: max` across PR, master, and candidate workflows. Independent CPU and
+   GPU hosts may run concurrently.
 5. **Reconcile actual evidence.** Candidate validation requires exactly one
    machine-readable result per planned scenario and one passed terminal result
    per declared stage. The aggregate reads the retained plan and a compact,

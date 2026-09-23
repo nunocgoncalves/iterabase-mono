@@ -1651,6 +1651,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             "uses: ./.github/actions/setup-permanent-fixture",
             "group: iterabase-permanent-fixture-${{ matrix.capacity }}",
             "cancel-in-progress: false",
+            "queue: max",
             "export FORGE_E2E_REQUIRE_CAPACITY=true",
         ):
             self.assertIn(value, workflow)
