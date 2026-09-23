@@ -263,6 +263,7 @@ func buildAuthServices(cfg *config.Config, logger *slog.Logger, store *identity.
 		ForwardedHeader: cfg.Auth.ForwardedHeader,
 		Store:           store,
 		Location:        location,
+		Logger:          logger,
 		Now:             time.Now,
 	}
 	worker := &identity.AuthEmailWorker{

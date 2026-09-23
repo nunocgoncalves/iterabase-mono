@@ -70,6 +70,7 @@ func (h *Handler) registerAuthRoutes(r chi.Router) {
 		r.Post("/v1/auth/request-status", h.accessRequestStatus)
 		r.Post("/v1/auth/setup", h.completeSetup)
 		r.Post("/v1/auth/setup/resend", h.resendSetup)
+		r.Post("/v1/auth/setup/context", h.setupContext)
 		r.Post("/v1/auth/sign-in", h.signIn)
 		r.Post("/v1/auth/password/forgot", h.forgotPassword)
 		r.Post("/v1/auth/password/reset", h.resetPassword)
@@ -137,7 +138,7 @@ func (h *Handler) requireBrowser(next http.Handler) http.Handler {
 			h.writeSessionError(r, w, err)
 			return
 		}
-		session, err := h.store.ResolveBrowserSession(r.Context(), token, h.authCfg.now())
+		session, err := h.store.ResolveBrowserSessionWithNetwork(r.Context(), token, h.authCfg.now(), h.sessionNetwork(r))
 		if err != nil {
 			h.writeSessionError(r, w, err)
 			return
@@ -196,28 +197,29 @@ func (h *Handler) requireRecentAuth(next http.Handler) http.Handler {
 // writeSessionError maps session failures to bounded states and records
 // security evidence for expiry/ineligibility.
 func (h *Handler) writeSessionError(r *http.Request, w http.ResponseWriter, err error) {
-	switch {
-	case errors.Is(err, ErrBearerNotAccepted):
+	if errors.Is(err, ErrBearerNotAccepted) {
 		authError(w, http.StatusUnauthorized, "bearer_not_accepted",
 			"This area requires a browser session; API keys are not accepted here.")
+		return
+	}
+	h.auditSessionRefusal(r, err)
+	authError(w, http.StatusUnauthorized, "session_expired", "Your session expired. Sign in again to continue.")
+}
+
+// sessionRefusalEvent maps a refused session to the one shared audit event, so
+// the refusal-evidence contract cannot drift between callers.
+func sessionRefusalEvent(err error, now time.Time) (identity.SecurityEvent, bool) {
+	switch {
 	case errors.Is(err, identity.ErrSessionExpired):
-		h.audit(r, identity.SecurityEvent{
-			Event:     identity.EventSessionExpired,
-			Outcome:   identity.OutcomeDenied,
-			Reason:    "expired",
-			CreatedAt: h.authCfg.now(),
-		})
-		authError(w, http.StatusUnauthorized, "session_expired", "Your session expired. Sign in again to continue.")
+		return identity.SecurityEvent{
+			Event: identity.EventSessionExpired, Outcome: identity.OutcomeDenied, Reason: "expired", CreatedAt: now,
+		}, true
 	case errors.Is(err, identity.ErrSessionIneligible):
-		h.audit(r, identity.SecurityEvent{
-			Event:     identity.EventSessionResolvedIneligible,
-			Outcome:   identity.OutcomeDenied,
-			Reason:    "account_not_active",
-			CreatedAt: h.authCfg.now(),
-		})
-		authError(w, http.StatusUnauthorized, "session_expired", "Your session expired. Sign in again to continue.")
+		return identity.SecurityEvent{
+			Event: identity.EventSessionResolvedIneligible, Outcome: identity.OutcomeDenied, Reason: "account_not_active", CreatedAt: now,
+		}, true
 	default:
-		authError(w, http.StatusUnauthorized, "session_expired", "Your session expired. Sign in again to continue.")
+		return identity.SecurityEvent{}, false
 	}
 }
 
@@ -245,7 +247,7 @@ func (h *Handler) authSession(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, authSessionResponse{Enabled: true})
 		return
 	}
-	session, err := h.store.ResolveBrowserSession(r.Context(), token, h.authCfg.now())
+	session, err := h.store.ResolveBrowserSessionWithNetwork(r.Context(), token, h.authCfg.now(), h.sessionNetwork(r))
 	if err != nil {
 		// An expired or ineligible browser session is the anonymous state for
 		// the bootstrap probe; the refusal is still audited.
@@ -296,7 +298,11 @@ func (h *Handler) requestAccess(w http.ResponseWriter, r *http.Request) {
 		authError(w, http.StatusInternalServerError, "unavailable", "This is temporarily unavailable. Try again shortly.")
 		return
 	}
-	h.record(r, entries)
+	if _, _, err := h.record(r, entries); err != nil {
+		h.logWarn("recording access-request throttle failed", err)
+		authError(w, http.StatusServiceUnavailable, "unavailable", "This is temporarily unavailable. Try again shortly.")
+		return
+	}
 	authWrite(w, http.StatusAccepted, map[string]string{"status": "accepted"})
 }
 
@@ -411,6 +417,23 @@ func (h *Handler) resendSetup(w http.ResponseWriter, r *http.Request) {
 	authWrite(w, http.StatusAccepted, map[string]string{"status": "accepted"})
 }
 
+// setupContext discloses only the bounded read-only context (verified work
+// email and approved role) authorized by a valid first-time setup link.
+func (h *Handler) setupContext(w http.ResponseWriter, r *http.Request) {
+	if !h.authReady(w) {
+		return
+	}
+	token, ok := h.tokenBody(w, r)
+	if !ok {
+		return
+	}
+	context, err := h.store.SetupContext(r.Context(), token)
+	h.writeAuthLinkError(w, err)
+	if err == nil {
+		authWrite(w, http.StatusOK, map[string]string{"email": context.Email, "role": context.Role})
+	}
+}
+
 func (h *Handler) signIn(w http.ResponseWriter, r *http.Request) {
 	if !h.authReady(w) {
 		return
@@ -446,12 +469,17 @@ func (h *Handler) signIn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.clearThrottle(r.Context(), entries)
+	if err := h.clearThrottle(r.Context(), entries); err != nil {
+		// The credential was valid; a failed counter cleanup leaves the
+		// attempt budget intact and must not turn a successful sign-in into a
+		// failure.
+		h.logWarn("clearing sign-in throttle failed", err)
+	}
 	h.finishSignIn(r, w, user, now)
 }
 
 func (h *Handler) failedSignIn(r *http.Request, w http.ResponseWriter, entries []throttleEntry, identityID string) {
-	blocked, retryAfter := h.record(r, entries)
+	blocked, retryAfter, err := h.record(r, entries)
 	h.audit(r, identity.SecurityEvent{
 		Event:             identity.EventLoginFailed,
 		Outcome:           identity.OutcomeFailure,
@@ -460,6 +488,13 @@ func (h *Handler) failedSignIn(r *http.Request, w http.ResponseWriter, entries [
 		CredentialKind:    identity.CredentialBrowser,
 		CreatedAt:         h.authCfg.now(),
 	})
+	if err != nil {
+		// The attempt could not be durably bounded, so deny rather than allow
+		// an unthrottled brute-force path (architecture §14 fail-closed).
+		h.logWarn("recording sign-in throttle failed", err)
+		authError(w, http.StatusServiceUnavailable, "unavailable", "This is temporarily unavailable. Try again shortly.")
+		return
+	}
 	if blocked {
 		authWrite(w, http.StatusTooManyRequests, authErrorBody{
 			Error:             "Too many attempts. Try again shortly.",
@@ -483,6 +518,14 @@ func (h *Handler) finishSignIn(r *http.Request, w http.ResponseWriter, user iden
 	}
 	ip := h.authCfg.ClientIP(r)
 	location, _ := h.authCfg.LocationFor(ip)
+	audit := h.securityEvent(r, identity.SecurityEvent{
+		Event:             identity.EventLoginSucceeded,
+		Outcome:           identity.OutcomeSuccess,
+		SubjectIdentityID: user.ID,
+		CredentialKind:    identity.CredentialBrowser,
+		Detail:            map[string]any{"role": identity.NormalizeRole(user.Role)},
+		CreatedAt:         now,
+	})
 	raw, session, err := h.store.CreateBrowserSession(r.Context(), identity.CreateBrowserSessionParams{
 		IdentityID:  user.ID,
 		CSRFHash:    csrfHash,
@@ -492,21 +535,16 @@ func (h *Handler) finishSignIn(r *http.Request, w http.ResponseWriter, user iden
 		IP:          ip,
 		Labels:      identity.ParseClientLabels(r.Header.Get("User-Agent")),
 		Location:    location,
+		Audit:       &audit,
 	})
 	if err != nil {
+		// The session insert and its evidence commit atomically: a failed
+		// audit leaves no session behind.
+		h.logWarn("creating browser session failed", err)
 		authError(w, http.StatusInternalServerError, "unavailable", "This is temporarily unavailable. Try again shortly.")
 		return
 	}
 	h.authCfg.setSessionCookie(w, raw, session.AbsoluteExpiresAt)
-	h.audit(r, identity.SecurityEvent{
-		Event:             identity.EventLoginSucceeded,
-		Outcome:           identity.OutcomeSuccess,
-		SubjectIdentityID: user.ID,
-		BrowserSessionID:  session.ID,
-		CredentialKind:    identity.CredentialBrowser,
-		Detail:            map[string]any{"role": identity.NormalizeRole(user.Role)},
-		CreatedAt:         now,
-	})
 	authWrite(w, http.StatusOK, signInResponse{
 		Profile:   profileFor(user),
 		CSRFToken: csrfRaw,
@@ -535,7 +573,11 @@ func (h *Handler) forgotPassword(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	h.record(r, entries)
+	if _, _, err := h.record(r, entries); err != nil {
+		h.logWarn("recording reset-request throttle failed", err)
+		authError(w, http.StatusServiceUnavailable, "unavailable", "This is temporarily unavailable. Try again shortly.")
+		return
+	}
 	// The same generic outcome applies to unknown, disabled, pending, and
 	// active accounts.
 	authWrite(w, http.StatusAccepted, map[string]string{"status": "accepted"})
@@ -569,15 +611,8 @@ func (h *Handler) auditSessionRefusal(r *http.Request, err error) {
 	if h.store == nil {
 		return
 	}
-	switch {
-	case errors.Is(err, identity.ErrSessionExpired):
-		h.audit(r, identity.SecurityEvent{
-			Event: identity.EventSessionExpired, Outcome: identity.OutcomeDenied, Reason: "expired", CreatedAt: h.authCfg.now(),
-		})
-	case errors.Is(err, identity.ErrSessionIneligible):
-		h.audit(r, identity.SecurityEvent{
-			Event: identity.EventSessionResolvedIneligible, Outcome: identity.OutcomeDenied, Reason: "account_not_active", CreatedAt: h.authCfg.now(),
-		})
+	if event, ok := sessionRefusalEvent(err, h.authCfg.now()); ok {
+		h.audit(r, event)
 	}
 }
 
@@ -606,8 +641,9 @@ func (h *Handler) getProfile(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) updateProfile(w http.ResponseWriter, r *http.Request) {
 	session, _ := sessionFromContext(r.Context())
 	var req struct {
-		DisplayName *string `json:"displayName"`
-		Locale      *string `json:"locale"`
+		DisplayName       *string    `json:"displayName"`
+		Locale            *string    `json:"locale"`
+		ExpectedUpdatedAt *time.Time `json:"expectedUpdatedAt,omitempty"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		authError(w, http.StatusBadRequest, "invalid_request", "Enter the requested details.")
@@ -630,22 +666,22 @@ func (h *Handler) updateProfile(w http.ResponseWriter, r *http.Request) {
 	if req.Locale != nil {
 		locale = normalizeLocale(*req.Locale)
 	}
-	updated, err := h.store.UpdateLocalUserProfile(r.Context(), session.IdentityID, displayName, locale, h.authCfg.now())
-	if err != nil {
+	updated, err := h.store.UpdateLocalUserProfileVersioned(r.Context(), session.IdentityID, displayName, locale, req.ExpectedUpdatedAt, h.authCfg.now())
+	switch {
+	case errors.Is(err, identity.ErrProfileConflict):
+		authError(w, http.StatusConflict, "profile_conflict",
+			"Your profile changed elsewhere. Reload to see the current values.")
+	case err != nil:
 		authError(w, http.StatusInternalServerError, "unavailable", "This is temporarily unavailable. Try again shortly.")
-		return
+	default:
+		authWrite(w, http.StatusOK, signInResponse{Profile: profileFor(updated)})
 	}
-	authWrite(w, http.StatusOK, signInResponse{Profile: profileFor(updated)})
 }
 
 func (h *Handler) signOut(w http.ResponseWriter, r *http.Request) {
 	session, _ := sessionFromContext(r.Context())
 	now := h.authCfg.now()
-	if _, err := h.store.RevokeSession(r.Context(), session.ID, now, identity.TerminationRevoked); err != nil {
-		authError(w, http.StatusInternalServerError, "unavailable", "This is temporarily unavailable. Try again shortly.")
-		return
-	}
-	h.audit(r, identity.SecurityEvent{
+	audit := h.securityEvent(r, identity.SecurityEvent{
 		Event:             identity.EventLogout,
 		Outcome:           identity.OutcomeSuccess,
 		SubjectIdentityID: session.IdentityID,
@@ -653,6 +689,11 @@ func (h *Handler) signOut(w http.ResponseWriter, r *http.Request) {
 		CredentialKind:    identity.CredentialBrowser,
 		CreatedAt:         now,
 	})
+	if _, err := h.store.RevokeSessionWithAudit(r.Context(), session.ID, now, identity.TerminationRevoked, &audit); err != nil {
+		h.logWarn("revoking session on sign-out failed", err)
+		authError(w, http.StatusInternalServerError, "unavailable", "This is temporarily unavailable. Try again shortly.")
+		return
+	}
 	h.authCfg.clearSessionCookie(w)
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -673,7 +714,11 @@ func (h *Handler) reauthenticate(w http.ResponseWriter, r *http.Request) {
 	}
 	user, err := h.store.FindLocalUserByEmail(r.Context(), session.EmailNormalized)
 	if err != nil || user.PasswordHash == "" || !identity.VerifyPassword(user.PasswordHash, req.Password) {
-		h.record(r, entries)
+		if _, _, recordErr := h.record(r, entries); recordErr != nil {
+			h.logWarn("recording reauthentication throttle failed", recordErr)
+			authError(w, http.StatusServiceUnavailable, "unavailable", "This is temporarily unavailable. Try again shortly.")
+			return
+		}
 		h.audit(r, identity.SecurityEvent{
 			Event:             identity.EventReauthenticationFailed,
 			Outcome:           identity.OutcomeFailure,
@@ -687,12 +732,7 @@ func (h *Handler) reauthenticate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := h.authCfg.now()
-	if err := h.store.SetRecentPassword(r.Context(), session.ID, now); err != nil {
-		h.writeSessionError(r, w, identity.ErrSessionInvalid)
-		return
-	}
-	h.clearThrottle(r.Context(), entries)
-	h.audit(r, identity.SecurityEvent{
+	audit := h.securityEvent(r, identity.SecurityEvent{
 		Event:             identity.EventReauthenticationSucceeded,
 		Outcome:           identity.OutcomeSuccess,
 		SubjectIdentityID: session.IdentityID,
@@ -700,6 +740,18 @@ func (h *Handler) reauthenticate(w http.ResponseWriter, r *http.Request) {
 		CredentialKind:    identity.CredentialBrowser,
 		CreatedAt:         now,
 	})
+	if err := h.store.SetRecentPasswordWithAudit(r.Context(), session.ID, now, &audit); err != nil {
+		if errors.Is(err, identity.ErrSessionInvalid) {
+			h.writeSessionError(r, w, identity.ErrSessionInvalid)
+			return
+		}
+		h.logWarn("recording recent-password evidence failed", err)
+		authError(w, http.StatusInternalServerError, "unavailable", "This is temporarily unavailable. Try again shortly.")
+		return
+	}
+	if err := h.clearThrottle(r.Context(), entries); err != nil {
+		h.logWarn("clearing reauthentication throttle failed", err)
+	}
 	authWrite(w, http.StatusOK, map[string]any{"recentPasswordAt": now})
 }
 
@@ -731,21 +783,19 @@ func (h *Handler) revokeSession(w http.ResponseWriter, r *http.Request) {
 	session, _ := sessionFromContext(r.Context())
 	target := chi.URLParam(r, "id")
 	now := h.authCfg.now()
-	revoked, err := h.store.RevokeOwnedSession(r.Context(), session.IdentityID, target, now, identity.TerminationRevoked)
-	if err != nil {
+	audit := h.securityEvent(r, identity.SecurityEvent{
+		Event:             identity.EventSessionRevoked,
+		Outcome:           identity.OutcomeSuccess,
+		SubjectIdentityID: session.IdentityID,
+		BrowserSessionID:  target,
+		CredentialKind:    identity.CredentialBrowser,
+		Detail:            map[string]any{"self": target == session.ID},
+		CreatedAt:         now,
+	})
+	if _, err := h.store.RevokeOwnedSessionWithAudit(r.Context(), session.IdentityID, target, now, identity.TerminationRevoked, &audit); err != nil {
+		h.logWarn("revoking own session failed", err)
 		authError(w, http.StatusInternalServerError, "unavailable", "This is temporarily unavailable. Try again shortly.")
 		return
-	}
-	if revoked {
-		h.audit(r, identity.SecurityEvent{
-			Event:             identity.EventSessionRevoked,
-			Outcome:           identity.OutcomeSuccess,
-			SubjectIdentityID: session.IdentityID,
-			BrowserSessionID:  target,
-			CredentialKind:    identity.CredentialBrowser,
-			Detail:            map[string]any{"self": target == session.ID},
-			CreatedAt:         now,
-		})
 	}
 	if target == session.ID {
 		h.authCfg.clearSessionCookie(w)
@@ -757,21 +807,20 @@ func (h *Handler) revokeSession(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) revokeOtherSessions(w http.ResponseWriter, r *http.Request) {
 	session, _ := sessionFromContext(r.Context())
 	now := h.authCfg.now()
-	revoked, err := h.store.RevokeOtherSessions(r.Context(), session.IdentityID, session.ID, now, identity.TerminationRevoked)
+	audit := h.securityEvent(r, identity.SecurityEvent{
+		Event:             identity.EventSessionRevoked,
+		Outcome:           identity.OutcomeSuccess,
+		SubjectIdentityID: session.IdentityID,
+		BrowserSessionID:  session.ID,
+		CredentialKind:    identity.CredentialBrowser,
+		Detail:            map[string]any{"others": true},
+		CreatedAt:         now,
+	})
+	revoked, err := h.store.RevokeOtherSessionsWithAudit(r.Context(), session.IdentityID, session.ID, now, identity.TerminationRevoked, &audit)
 	if err != nil {
+		h.logWarn("revoking other sessions failed", err)
 		authError(w, http.StatusInternalServerError, "unavailable", "This is temporarily unavailable. Try again shortly.")
 		return
-	}
-	if revoked > 0 {
-		h.audit(r, identity.SecurityEvent{
-			Event:             identity.EventSessionRevoked,
-			Outcome:           identity.OutcomeSuccess,
-			SubjectIdentityID: session.IdentityID,
-			BrowserSessionID:  session.ID,
-			CredentialKind:    identity.CredentialBrowser,
-			Detail:            map[string]any{"others": revoked},
-			CreatedAt:         now,
-		})
 	}
 	authWrite(w, http.StatusOK, map[string]int64{"revoked": revoked})
 }
@@ -859,6 +908,7 @@ type profileResponse struct {
 	DisplayName      string     `json:"displayName"`
 	Role             string     `json:"role"`
 	Locale           string     `json:"locale"`
+	UpdatedAt        time.Time  `json:"updatedAt"`
 	RecentPasswordAt *time.Time `json:"recentPasswordAt,omitempty"`
 }
 
@@ -888,6 +938,7 @@ func profileFor(user identity.LocalUser) profileResponse {
 		DisplayName: user.DisplayName,
 		Role:        identity.NormalizeRole(user.Role),
 		Locale:      user.Locale,
+		UpdatedAt:   user.UpdatedAt,
 	}
 }
 
@@ -1008,27 +1059,32 @@ func (h *Handler) throttleStatus(r *http.Request, entries []throttleEntry) (iden
 	return blocked, nil
 }
 
-// record increments every entry and reports whether a limit was crossed.
-func (h *Handler) record(r *http.Request, entries []throttleEntry) (bool, time.Duration) {
+// record increments every entry and reports whether a limit was crossed. A
+// persistence failure is returned so the caller can fail closed instead of
+// silently allowing an unbounded attempt budget.
+func (h *Handler) record(r *http.Request, entries []throttleEntry) (bool, time.Duration, error) {
 	var blocked bool
 	var retryAfter time.Duration
 	for _, entry := range entries {
 		state, err := h.store.RecordAuthAttempt(r.Context(), entry.rule, entry.subject, h.authCfg.now())
 		if err != nil {
-			continue
+			return false, 0, err
 		}
 		if state.Blocked && state.RetryAfter > retryAfter {
 			blocked = true
 			retryAfter = state.RetryAfter
 		}
 	}
-	return blocked, retryAfter
+	return blocked, retryAfter, nil
 }
 
-func (h *Handler) clearThrottle(ctx context.Context, entries []throttleEntry) {
+func (h *Handler) clearThrottle(ctx context.Context, entries []throttleEntry) error {
 	for _, entry := range entries {
-		_ = h.store.ClearAuthThrottle(ctx, entry.rule.Scope, entry.subject)
+		if err := h.store.ClearAuthThrottle(ctx, entry.rule.Scope, entry.subject); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 func (h *Handler) writeThrottled(w http.ResponseWriter, state identity.ThrottleState) {
@@ -1041,10 +1097,13 @@ func (h *Handler) writeThrottled(w http.ResponseWriter, state identity.ThrottleS
 	})
 }
 
-// audit writes secret-free security evidence with bounded network metadata.
-func (h *Handler) audit(r *http.Request, event identity.SecurityEvent) {
-	if h.store == nil {
-		return
+// securityEvent completes an event with the bounded network metadata and a
+// default outcome, without writing it. Callers committing a security mutation
+// pass the result to the store so the mutation and its evidence are one
+// transaction.
+func (h *Handler) securityEvent(r *http.Request, event identity.SecurityEvent) identity.SecurityEvent {
+	if event.Outcome == "" {
+		event.Outcome = identity.OutcomeSuccess
 	}
 	ip := h.authCfg.ClientIP(r)
 	if ip != nil {
@@ -1055,8 +1114,31 @@ func (h *Handler) audit(r *http.Request, event identity.SecurityEvent) {
 		}
 		event.Network = network
 	}
-	if event.Outcome == "" {
-		event.Outcome = identity.OutcomeSuccess
+	return event
+}
+
+// sessionNetwork is the caller-derived network evidence for session resolution.
+func (h *Handler) sessionNetwork(r *http.Request) identity.SessionNetwork {
+	ip := h.authCfg.ClientIP(r)
+	location, hasLocation := h.authCfg.LocationFor(ip)
+	return identity.SessionNetwork{IP: ip, Location: location, HasLocation: hasLocation}
+}
+
+// audit writes best-effort standalone security evidence. Failed-auth and
+// throttle evidence intentionally use a separate transaction (architecture
+// 11.2); persistence failures are logged, never silently discarded.
+func (h *Handler) audit(r *http.Request, event identity.SecurityEvent) {
+	if h.store == nil {
+		return
 	}
-	_ = h.store.AppendSecurityEvent(r.Context(), event)
+	if err := h.store.AppendSecurityEvent(r.Context(), h.securityEvent(r, event)); err != nil {
+		h.logWarn("appending security evidence failed: "+event.Event, err)
+	}
+}
+
+// logWarn records an operational warning through the configured logger.
+func (h *Handler) logWarn(message string, err error) {
+	if h.authCfg != nil && h.authCfg.Logger != nil {
+		h.authCfg.Logger.Warn(message, "error", err)
+	}
 }

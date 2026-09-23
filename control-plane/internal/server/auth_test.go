@@ -575,3 +575,63 @@ func TestAuthSessionProbeDisabledSurface(t *testing.T) {
 	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &body))
 	assert.Equal(t, false, body["enabled"])
 }
+
+func TestSetupContextEndpointDisclosesBoundedContext(t *testing.T) {
+	h := newAuthAPIHarness(t)
+	admin := h.provisionAdmin("admin@example.com", "admin-long-password")
+
+	require.Equal(t, http.StatusAccepted,
+		h.do(http.MethodPost, "/v1/auth/request-access", map[string]any{"email": "ada@example.com", "locale": "en"}, nil).status)
+	verifyToken := h.link("ada@example.com", identity.AuthLinkVerifyAccess)
+	require.Equal(t, http.StatusOK, h.do(http.MethodPost, "/v1/auth/verify", map[string]any{"token": verifyToken}, nil).status)
+	list := h.list("/v1/access-requests", admin.headers())
+	require.Len(t, list, 1)
+	h.reauthenticate(admin, "admin-long-password")
+	require.Equal(t, http.StatusOK, h.do(http.MethodPost, "/v1/access-requests/"+list[0]["id"].(string)+"/approve",
+		map[string]any{"role": "admin"}, admin.unsafeHeaders()).status)
+
+	setupToken := h.link("ada@example.com", identity.AuthLinkSetupPassword)
+	context := h.do(http.MethodPost, "/v1/auth/setup/context", map[string]any{"token": setupToken}, nil)
+	require.Equal(t, http.StatusOK, context.status, "%v", context.body)
+	assert.Equal(t, "ada@example.com", context.body["email"])
+	assert.Equal(t, "admin", context.body["role"])
+
+	// The host is the only holder of the link secret, so an unknown token is a
+	// bounded invalid state rather than an enumeration oracle.
+	unknown := h.do(http.MethodPost, "/v1/auth/setup/context", map[string]any{"token": "not-a-token"}, nil)
+	assert.Equal(t, http.StatusBadRequest, unknown.status)
+	assert.Equal(t, "invalid", unknown.body["code"])
+
+	require.Equal(t, http.StatusOK, h.do(http.MethodPost, "/v1/auth/setup", map[string]any{
+		"token": setupToken, "displayName": "Ada", "locale": "en", "password": "ada-long-password",
+	}, nil).status)
+	reused := h.do(http.MethodPost, "/v1/auth/setup/context", map[string]any{"token": setupToken}, nil)
+	assert.Equal(t, http.StatusGone, reused.status)
+	assert.Equal(t, "reused", reused.body["code"])
+}
+
+func TestProfileConflictOverHTTP(t *testing.T) {
+	h := newAuthAPIHarness(t)
+	user := h.activeUser("ada@example.com", "operator", "ada-long-password")
+	session := h.signIn("ada@example.com", "ada-long-password", user)
+
+	// The authenticated shell receives a fresh CSRF proof and the row version.
+	probe := h.do(http.MethodGet, "/v1/auth/session", nil, session.headers())
+	require.Equal(t, http.StatusOK, probe.status)
+	updatedAt, _ := probe.body["profile"].(map[string]any)["updatedAt"].(string)
+	require.NotEmpty(t, updatedAt)
+	csrf, _ := probe.body["csrfToken"].(string)
+	session.csrf = csrf
+
+	first := h.do(http.MethodPatch, "/v1/profile", map[string]any{
+		"displayName": "Ada One", "locale": "en", "expectedUpdatedAt": updatedAt,
+	}, session.unsafeHeaders())
+	require.Equal(t, http.StatusOK, first.status, "%v", first.body)
+
+	// The same stale version can no longer overwrite the newer row.
+	stale := h.do(http.MethodPatch, "/v1/profile", map[string]any{
+		"displayName": "Ada Stale", "locale": "en", "expectedUpdatedAt": updatedAt,
+	}, session.unsafeHeaders())
+	assert.Equal(t, http.StatusConflict, stale.status)
+	assert.Equal(t, "profile_conflict", stale.body["code"])
+}

@@ -32,4 +32,3 @@ ALTER TABLE identity.local_users DROP CONSTRAINT IF EXISTS local_users_role_chec
 UPDATE identity.local_users SET role = 'user' WHERE role = 'operator';
 ALTER TABLE identity.local_users ADD CONSTRAINT local_users_role_check
     CHECK (role IN ('admin', 'user'));
-ALTER TABLE identity.local_users ALTER COLUMN role SET DEFAULT 'user';

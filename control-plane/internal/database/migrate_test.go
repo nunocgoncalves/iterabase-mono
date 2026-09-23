@@ -12,6 +12,7 @@ import (
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 
 	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/database"
+	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/identity"
 	"github.com/nunocgoncalves/iterabase-mono/control-plane/internal/testutil"
 )
 
@@ -348,7 +349,8 @@ func waitForPool(t *testing.T, ctx context.Context, connStr string) *pgxpool.Poo
 }
 
 // TestAuthJourneyMigrationPreservesLegacyIdentity proves migration 26 keeps
-// existing canonical identities, maps the legacy `user` role to `operator`,
+// existing canonical identities, leaves the pre-epoch `user` role untouched for
+// HOR-454's authority epoch (normalized at every V2 authorization decision),
 // requires email setup instead of inventing a password, and leaves explicitly
 // scoped API keys usable.
 func TestAuthJourneyMigrationPreservesLegacyIdentity(t *testing.T) {
@@ -385,8 +387,20 @@ func TestAuthJourneyMigrationPreservesLegacyIdentity(t *testing.T) {
 	require.NoError(t, pool.QueryRow(ctx, `
 		SELECT role, status, email_normalized, email FROM identity.local_users WHERE identity_id = $1`,
 		identityID).Scan(&role, &status, &normalized, &email))
-	assert.Equal(t, "operator", role, "legacy user maps to operator")
+	assert.Equal(t, "user", role, "the HOR-454 epoch ticket performs the role rewrite")
+	assert.Equal(t, "operator", identity.NormalizeRole(role), "V2 decisions normalize the legacy spelling")
 	assert.Equal(t, "setup_pending", status, "existing humans complete email setup")
+
+	// The widened check accepts the V2 spelling without a data rewrite.
+	_, err = pool.Exec(ctx, `
+		WITH ident AS (
+			INSERT INTO identity.identities (key, kind, source, display_name)
+			VALUES ('v2@example.com', 'user', 'local', 'V2 User')
+			RETURNING id
+		)
+		INSERT INTO identity.local_users (identity_id, email, email_normalized, role, status)
+		SELECT id, 'v2@example.com', 'v2@example.com', 'operator', 'setup_pending' FROM ident`)
+	assert.NoError(t, err, "V2 write paths may store operator before the epoch")
 	assert.Equal(t, "legacy.user@example.com", normalized)
 	assert.Equal(t, "Legacy.User@Example.com", email, "delivery email is preserved")
 
