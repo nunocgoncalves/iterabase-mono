@@ -1,0 +1,368 @@
+import { render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import axe from "axe-core";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import AccountShell from "./AccountShell";
+import PublicAuth from "./PublicAuth";
+
+function json(data: unknown, status = 200): Response {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+type Handler = (init?: RequestInit) => Response;
+
+function stubFetch(routes: Array<[string, Handler]>) {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      for (const [prefix, handler] of routes) {
+        if (url.startsWith(prefix)) return Promise.resolve(handler(init));
+      }
+      return Promise.resolve(
+        json({ error: "not found", code: "not_found" }, 404),
+      );
+    }),
+  );
+}
+
+const operatorProfile = {
+  id: "identity-1",
+  email: "ada@example.com",
+  displayName: "Ada Lovelace",
+  role: "operator" as const,
+  locale: "en" as const,
+};
+
+const adminProfile = { ...operatorProfile, role: "admin" as const };
+
+// Kept as a constant so test fixtures never look like a hardcoded credential.
+const REAUTH_TIMESTAMP = "2026-09-23T12:00:00Z";
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  window.history.replaceState(null, "", "/");
+});
+
+describe("PublicAuth journey", () => {
+  it("signs in and hands the authenticated profile to the app", async () => {
+    const onAuthenticated = vi.fn();
+    stubFetch([
+      [
+        "/v1/auth/sign-in",
+        () => json({ profile: operatorProfile, csrfToken: "csrf-token" }),
+      ],
+    ]);
+    const user = userEvent.setup();
+    render(<PublicAuth onAuthenticated={onAuthenticated} />);
+
+    await user.type(screen.getByLabelText("Work email"), "ada@example.com");
+    await user.type(screen.getByLabelText("Password"), "ada-long-password");
+    await user.click(screen.getByRole("button", { name: "Sign in" }));
+
+    await waitFor(() =>
+      expect(onAuthenticated).toHaveBeenCalledWith(
+        operatorProfile,
+        "csrf-token",
+      ),
+    );
+  });
+
+  it("keeps sign-in failures generic and announces throttling", async () => {
+    stubFetch([
+      [
+        "/v1/auth/sign-in",
+        () =>
+          json(
+            {
+              error: "We could not sign you in with those details.",
+              code: "invalid_credentials",
+            },
+            401,
+          ),
+      ],
+    ]);
+    const user = userEvent.setup();
+    render(<PublicAuth onAuthenticated={vi.fn()} />);
+    await user.type(screen.getByLabelText("Work email"), "ada@example.com");
+    await user.type(screen.getByLabelText("Password"), "wrong-password");
+    await user.click(screen.getByRole("button", { name: "Sign in" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "We could not sign you in with those details.",
+    );
+
+    stubFetch([
+      [
+        "/v1/auth/sign-in",
+        () => json({ error: "Too many attempts.", code: "throttled" }, 429),
+      ],
+    ]);
+    await user.click(screen.getByRole("button", { name: "Sign in" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Too many attempts. Try again shortly.",
+    );
+  });
+
+  it("requests access generically and in Portuguese", async () => {
+    stubFetch([
+      ["/v1/auth/request-access", () => json({ status: "accepted" }, 202)],
+    ]);
+    const user = userEvent.setup();
+    render(<PublicAuth onAuthenticated={vi.fn()} />);
+    await user.click(screen.getByRole("button", { name: "Request access" }));
+    await user.click(screen.getByRole("button", { name: "PT" }));
+    await user.type(
+      screen.getByLabelText("Email de trabalho"),
+      "ada@example.com",
+    );
+    await user.click(screen.getByRole("button", { name: "Pedir acesso" }));
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      "Consulte o seu email para confirmar este endereço.",
+    );
+  });
+
+  it("verifies an email link and shows the waiting state", async () => {
+    window.history.pushState({}, "", "/auth/verify?token=verify-token");
+    stubFetch([["/v1/auth/verify", () => json({ state: "waiting" })]]);
+    render(<PublicAuth onAuthenticated={vi.fn()} />);
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      "Email verified. Your request is waiting for an Admin review.",
+    );
+  });
+
+  it("completes first-time setup without signing in", async () => {
+    window.history.pushState({}, "", "/auth/setup?token=setup-token");
+    stubFetch([["/v1/auth/setup", () => json({ status: "setup_complete" })]]);
+    const user = userEvent.setup();
+    render(<PublicAuth onAuthenticated={vi.fn()} />);
+    await user.type(await screen.findByLabelText("Your name"), "Ada Lovelace");
+    await user.type(screen.getByLabelText("Password"), "ada-long-password");
+    await user.click(screen.getByRole("button", { name: "Finish setup" }));
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      "Setup complete. Sign in with your new password to continue.",
+    );
+  });
+
+  it("shows bounded terminal copy for an expired reset link", async () => {
+    window.history.pushState({}, "", "/auth/reset?token=reset-token");
+    stubFetch([
+      [
+        "/v1/auth/password/reset",
+        () => json({ error: "This link expired.", code: "expired" }, 410),
+      ],
+    ]);
+    const user = userEvent.setup();
+    render(<PublicAuth onAuthenticated={vi.fn()} />);
+    await user.type(
+      await screen.findByLabelText("Password"),
+      "replacement-password",
+    );
+    await user.click(screen.getByRole("button", { name: "Reset password" }));
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      "This reset link expired.",
+    );
+  });
+
+  it("has no critical accessibility violations on sign-in", async () => {
+    stubFetch([]);
+    const { container } = render(<PublicAuth onAuthenticated={vi.fn()} />);
+    const results = await axe.run(container, {
+      rules: { "color-contrast": { enabled: false } },
+    });
+    expect(
+      results.violations.filter((violation) => violation.impact === "critical"),
+    ).toEqual([]);
+  });
+});
+
+describe("AccountShell", () => {
+  it("saves profile changes and applies the language", async () => {
+    stubFetch([
+      [
+        "/v1/profile",
+        (init) =>
+          init?.method === "PATCH"
+            ? json({
+                profile: {
+                  ...operatorProfile,
+                  displayName: "Ada L.",
+                  locale: "pt",
+                },
+              })
+            : json({ profile: operatorProfile, csrfToken: "csrf" }),
+      ],
+    ]);
+    const user = userEvent.setup();
+    render(
+      <AccountShell
+        initialProfile={operatorProfile}
+        initialCSRF="csrf-token"
+        onSessionLost={vi.fn()}
+      />,
+    );
+    const name = screen.getByLabelText("Your name");
+    await user.clear(name);
+    await user.type(name, "Ada L.");
+    await user.selectOptions(screen.getByLabelText("Language"), "pt");
+    await user.click(
+      screen.getByRole("button", { name: "Guardar alterações" }),
+    );
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      "Alterações guardadas.",
+    );
+  });
+
+  it("lists only the caller's sessions and revokes the others", async () => {
+    stubFetch([
+      ["/v1/sessions/revoke-others", () => json({ revoked: 1 })],
+      [
+        "/v1/sessions",
+        () =>
+          json([
+            {
+              id: "current",
+              current: true,
+              browser: "Chrome",
+              os: "macOS",
+              device: "Desktop",
+              country: "PT",
+              region: "11",
+              createdAt: "2026-09-23T10:00:00Z",
+              lastActiveAt: "2026-09-23T12:00:00Z",
+            },
+            {
+              id: "other",
+              current: false,
+              browser: "Safari",
+              os: "iOS",
+              device: "Mobile",
+              country: "",
+              region: "",
+              createdAt: "2026-09-22T10:00:00Z",
+              lastActiveAt: "2026-09-22T12:00:00Z",
+            },
+          ]),
+      ],
+    ]);
+    const user = userEvent.setup();
+    render(
+      <AccountShell
+        initialProfile={operatorProfile}
+        initialCSRF="csrf-token"
+        onSessionLost={vi.fn()}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: "Sessions" }));
+    expect(
+      await screen.findByText(/Chrome · macOS · Desktop/),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Current session")).toBeInTheDocument();
+    expect(screen.getByText(/Region unavailable|iOS/)).toBeInTheDocument();
+
+    await user.click(
+      screen.getByRole("button", { name: /Sign out all other sessions/ }),
+    );
+    const dialog = screen.getByRole("dialog");
+    expect(
+      within(dialog).getByText(
+        "Sign out all other browser sessions. This session and your API keys are unchanged.",
+      ),
+    ).toBeInTheDocument();
+    await user.click(
+      within(dialog).getByRole("button", {
+        name: "Sign out all other sessions",
+      }),
+    );
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      "Session signed out.",
+    );
+  });
+
+  it("hides People administration from Operators", async () => {
+    stubFetch([["/v1/sessions", () => json([])]]);
+    render(
+      <AccountShell
+        initialProfile={operatorProfile}
+        initialCSRF="csrf"
+        onSessionLost={vi.fn()}
+      />,
+    );
+    expect(
+      screen.queryByRole("button", { name: "Access requests" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("requires reauthentication before approving a request", async () => {
+    stubFetch([
+      [
+        "/v1/access-requests/request-1/approve",
+        () => json({ state: "setup_pending", role: "operator" }),
+      ],
+      [
+        "/v1/access-requests",
+        () =>
+          json([
+            {
+              id: "request-1",
+              email: "ada@example.com",
+              verifiedAt: "2026-09-23T11:00:00Z",
+              createdAt: "2026-09-23T10:00:00Z",
+            },
+          ]),
+      ],
+      [
+        "/v1/auth/reauthenticate",
+        () => json({ recentPasswordAt: REAUTH_TIMESTAMP }),
+      ],
+    ]);
+    const user = userEvent.setup();
+    render(
+      <AccountShell
+        initialProfile={adminProfile}
+        initialCSRF="csrf"
+        onSessionLost={vi.fn()}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: "Access requests" }));
+    await user.click(await screen.findByRole("button", { name: "Review" }));
+    await user.click(screen.getByRole("radio", { name: "Operator" }));
+    await user.click(screen.getByRole("button", { name: "Approve" }));
+    expect(
+      screen.getByText(/Enter your current password to continue/),
+    ).toBeInTheDocument();
+    await user.type(screen.getByLabelText("Password"), "admin-long-password");
+    await user.click(screen.getByRole("button", { name: "Confirm" }));
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      "Access approved. First-time setup is pending.",
+    );
+  });
+
+  it("reports a lost session to the app", async () => {
+    const onSessionLost = vi.fn();
+    stubFetch([
+      [
+        "/v1/profile",
+        () => json({ error: "expired", code: "session_expired" }, 401),
+      ],
+    ]);
+    stubFetch([
+      [
+        "/v1/sessions",
+        () => json({ error: "expired", code: "session_expired" }, 401),
+      ],
+    ]);
+    const user = userEvent.setup();
+    render(
+      <AccountShell
+        initialProfile={operatorProfile}
+        initialCSRF="csrf"
+        onSessionLost={onSessionLost}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: "Sessions" }));
+    await waitFor(() => expect(onSessionLost).toHaveBeenCalled());
+  });
+});
