@@ -26,9 +26,9 @@ repository secret supplies each fixture-scoped private key. These values are not
 workflow-dispatch inputs.
 
 Every fixture path uses its literal `iterabase-permanent-fixture-<capacity>`
-concurrency group with `cancel-in-progress: false` across PR, master, and
-candidate execution. Work targeting the same host is serial; the independent
-CPU and GPU hosts may overlap. Build/unit/F2 work remains parallel.
+concurrency group with `cancel-in-progress: false` and FIFO `queue: max` across
+PR, master, and candidate execution. Work targeting the same host is serial; the
+independent CPU and GPU hosts may overlap. Build/unit/F2 work remains parallel.
 
 Actions has no provider credential. It cannot list, create, delete, resize,
 power-cycle, rescue, reimage, or replace a fixture. If strict SSH cleanup and

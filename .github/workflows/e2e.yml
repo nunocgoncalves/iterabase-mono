@@ -11,7 +11,8 @@ permissions:
   packages: read
 
 # Each permanent fixture has one non-canceling lock shared by PR, master, and
-# candidate execution. Independent CPU and GPU hosts may run concurrently.
+# candidate execution. Pending contenders queue FIFO instead of being canceled.
+# Independent CPU and GPU hosts may run concurrently.
 
 env:
   GO_CACHE_DEPENDENCIES: |
@@ -269,6 +270,7 @@ jobs:
     concurrency:
       group: iterabase-permanent-fixture-${{ matrix.capacity }}
       cancel-in-progress: false
+      queue: max
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

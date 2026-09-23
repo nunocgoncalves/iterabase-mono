@@ -203,8 +203,9 @@ never becomes a skip.
 
 PR, master, and candidate work for a capacity use its literal
 `iterabase-permanent-fixture-<capacity>` concurrency group with
-`cancel-in-progress: false`. Work targeting the same host is serialized across
-workflows; the independent CPU and GPU hosts may run concurrently. Build,
+`cancel-in-progress: false` and `queue: max`. Contenders for the same host wait
+in FIFO order (up to GitHub's 100-pending-run limit) instead of replacing a
+pending run; the independent CPU and GPU hosts may run concurrently. Build,
 static, unit, fresh F2 Kind/browser, and other non-fixture exact-head work retain
 safe parallelism.
 
