@@ -21,6 +21,10 @@ const (
 // EnsureFlux installs only the repository-reviewed Flux executable, exports its
 // manifests without contacting the cluster, substitutes every controller image
 // with the reviewed digest, and applies that closed runtime set through k3s.
+// The exported root instance is namespace-scoped
+// (--watch-all-namespaces=false): it reconciles only Flux custom resources in
+// flux-system, so any root-managed Flux CR must live there or be applied by
+// Forge.
 func (p *SSHProvisioner) EnsureFlux(ctx context.Context, version string) error {
 	tool, installed, identityErr := p.installedReviewedTool(ctx, "flux", "/usr/local/bin/flux")
 	if identityErr != nil || !installed || tool.version != version {
@@ -45,7 +49,7 @@ func (p *SSHProvisioner) EnsureFlux(ctx context.Context, version string) error {
 	manifest = strings.TrimSpace(manifest)
 	defer p.removeRemoteContent(ctx, manifest)
 	pipeline := fmt.Sprintf(
-		"sudo /usr/local/bin/flux install --export --version=%s | %s > %s && "+
+		"sudo /usr/local/bin/flux install --export --watch-all-namespaces=false --version=%s | %s > %s && "+
 			"test \"$(grep -Ec '^[[:space:]]+image:' %s)\" -eq %d && "+
 			"! grep -E '^[[:space:]]+image:' %s | grep -v '@sha256:' && "+
 			"sudo /usr/local/bin/k3s kubectl apply -f %s",
