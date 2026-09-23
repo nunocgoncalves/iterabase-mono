@@ -1703,16 +1703,21 @@ def validate_results(plan_path: Path, results_dir: Path, needs: dict[str, Any] |
         if not isinstance(outputs, dict):
             raise E2EError("E2E plan job has no outputs")
         expected_outputs = {
-            "artifact_build_matrix": compact(execution["artifact_build_matrix"]),
-            "scenario_matrix": compact(execution["scenario_matrix"]),
-            "kind_matrix": compact(execution["kind_matrix"]),
-            "real_machine_matrix": compact(execution["real_machine_matrix"]),
             "has_artifacts": str(bool(execution["artifact_build_matrix"])).lower(),
             "has_scenarios": str(bool(execution["scenario_matrix"])).lower(),
             "has_kind": str(bool(execution["kind_matrix"])).lower(),
             "has_real_machine": str(bool(execution["real_machine_matrix"])).lower(),
             "scenario_total": str(execution["scenario_total"]),
         }
+        # The aggregate always receives the scalar plan outputs. Matrix outputs
+        # are compared only when the caller transports them: the PR workflow
+        # cannot place the escaped needs object in the process environment
+        # above the kernel's per-variable limit, and execution integrity is
+        # already enforced by the plan-hash-bound per-scenario result set
+        # above.
+        for name in ("artifact_build_matrix", "scenario_matrix", "kind_matrix", "real_machine_matrix"):
+            if name in outputs:
+                expected_outputs[name] = compact(execution[name])
         for name, expected_output in expected_outputs.items():
             if outputs.get(name) != expected_output:
                 raise E2EError(f"E2E plan output {name} is missing, malformed, or inconsistent")
@@ -1753,7 +1758,7 @@ def parser() -> argparse.ArgumentParser:
     validate = commands.add_parser("validate-results")
     validate.add_argument("--plan", type=Path, required=True)
     validate.add_argument("--results", type=Path, required=True)
-    validate.add_argument("--needs-env", default="")
+    validate.add_argument("--needs-file", type=Path)
     return value
 
 
@@ -1805,13 +1810,10 @@ def main() -> int:
             compose_runtime(args.plan, args.scenario, args.artifacts, args.output, args.env_output, root, contract)
         elif args.command == "validate-results":
             needs = None
-            if args.needs_env:
-                try:
-                    needs = json.loads(os.environ.get(args.needs_env, ""))
-                except json.JSONDecodeError as exc:
-                    raise E2EError(f"{args.needs_env} is not a needs object: {exc}") from exc
+            if args.needs_file:
+                needs = read_object(args.needs_file)
                 if not isinstance(needs, dict):
-                    raise E2EError(f"{args.needs_env} is not a needs object")
+                    raise E2EError("E2E aggregate needs record is not a needs object")
             results = validate_results(args.plan, args.results, needs)
             print(compact({"validated_scenarios": [result["scenario_id"] for result in results]}))
     except E2EError as exc:

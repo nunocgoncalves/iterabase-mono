@@ -1036,6 +1036,38 @@ class ResultReconciliationTests(unittest.TestCase):
                 with self.subTest(mutation=mutation), self.assertRaises(E2EError):
                     validate_results(plan_path, results, broken)
 
+    def test_aggregate_reconciles_compact_scalar_outputs_without_matrices(self) -> None:
+        with tempfile.TemporaryDirectory() as value:
+            plan_path, results, _ = self.fixture(Path(value))
+            plan = json.loads(plan_path.read_text())
+            outputs = {
+                "has_artifacts": str(bool(plan["artifact_build_matrix"])).lower(),
+                "has_scenarios": str(bool(plan["scenario_matrix"])).lower(),
+                "has_kind": str(bool(plan["kind_matrix"])).lower(),
+                "has_real_machine": str(bool(plan["real_machine_matrix"])).lower(),
+                "scenario_total": str(plan["scenario_total"]),
+            }
+            needs = {
+                "plan": {"result": "success", "outputs": outputs},
+                "runtime-contract": {"result": "success" if plan["scenario_matrix"] else "skipped"},
+                "artifacts": {"result": "success" if plan["artifact_build_matrix"] else "skipped"},
+                "kind": {"result": "success" if plan["kind_matrix"] else "skipped"},
+                "real-machine": {"result": "success" if plan["real_machine_matrix"] else "skipped"},
+            }
+            validate_results(plan_path, results, needs)
+            for name in outputs:
+                broken = copy.deepcopy(needs)
+                broken["plan"]["outputs"][name] = "false" if outputs[name] != "false" else "true"
+                with self.subTest(output=name), self.assertRaisesRegex(
+                    E2EError, f"E2E plan output {name} is missing, malformed, or inconsistent"
+                ):
+                    validate_results(plan_path, results, broken)
+            for name in ("runtime-contract", "artifacts", "kind", "real-machine"):
+                broken = copy.deepcopy(needs)
+                broken[name]["result"] = "failure"
+                with self.subTest(job=name), self.assertRaisesRegex(E2EError, f"required workflow job {name} is"):
+                    validate_results(plan_path, results, broken)
+
     def test_result_must_match_retained_runtime_artifact_identities(self) -> None:
         for field in ("reference", "digest", "config_digest", "checksum"):
             with self.subTest(field=field), tempfile.TemporaryDirectory() as value:
@@ -1203,6 +1235,13 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertNotIn("nightly", e2e)
         self.assertNotIn("control-plane-kind:", e2e)
         self.assertNotIn("charts-runtime:", e2e)
+
+    def test_e2e_aggregate_keeps_plan_matrices_out_of_the_environment(self) -> None:
+        e2e = (ROOT / ".github/workflows/e2e.yml").read_text(encoding="utf-8")
+        self.assertNotIn("toJSON(needs)", e2e)
+        self.assertNotIn("--needs-env", e2e)
+        self.assertIn("e2e-needs.json", e2e)
+        self.assertIn("--needs-file", e2e)
 
 
 if __name__ == "__main__":

@@ -381,9 +381,42 @@ jobs:
           path: ${{ runner.temp }}/results
       - name: Reconcile the exact plan, result set, stages, and identities
         env:
-          NEEDS: ${{ toJSON(needs) }}
-        run: >-
-          python3 .github/scripts/e2e.py validate-results
-          --plan '${{ runner.temp }}/plan/e2e-plan.json'
-          --results '${{ runner.temp }}/results'
-          --needs-env NEEDS
+          PLAN_RESULT: ${{ needs.plan.result }}
+          RUNTIME_CONTRACT_RESULT: ${{ needs.runtime-contract.result }}
+          ARTIFACTS_RESULT: ${{ needs.artifacts.result }}
+          KIND_RESULT: ${{ needs.kind.result }}
+          REAL_MACHINE_RESULT: ${{ needs.real-machine.result }}
+          PLAN_HAS_ARTIFACTS: ${{ needs.plan.outputs.has_artifacts }}
+          PLAN_HAS_SCENARIOS: ${{ needs.plan.outputs.has_scenarios }}
+          PLAN_HAS_KIND: ${{ needs.plan.outputs.has_kind }}
+          PLAN_HAS_REAL_MACHINE: ${{ needs.plan.outputs.has_real_machine }}
+          PLAN_SCENARIO_TOTAL: ${{ needs.plan.outputs.scenario_total }}
+        run: |
+          jq -n \
+            --arg plan_result "$PLAN_RESULT" \
+            --arg runtime_contract_result "$RUNTIME_CONTRACT_RESULT" \
+            --arg artifacts_result "$ARTIFACTS_RESULT" \
+            --arg kind_result "$KIND_RESULT" \
+            --arg real_machine_result "$REAL_MACHINE_RESULT" \
+            --arg has_artifacts "$PLAN_HAS_ARTIFACTS" \
+            --arg has_scenarios "$PLAN_HAS_SCENARIOS" \
+            --arg has_kind "$PLAN_HAS_KIND" \
+            --arg has_real_machine "$PLAN_HAS_REAL_MACHINE" \
+            --arg scenario_total "$PLAN_SCENARIO_TOTAL" \
+            '{
+              plan: {result: $plan_result, outputs: {
+                has_artifacts: $has_artifacts,
+                has_scenarios: $has_scenarios,
+                has_kind: $has_kind,
+                has_real_machine: $has_real_machine,
+                scenario_total: $scenario_total
+              }},
+              "runtime-contract": {result: $runtime_contract_result},
+              artifacts: {result: $artifacts_result},
+              kind: {result: $kind_result},
+              "real-machine": {result: $real_machine_result}
+            }' > '${{ runner.temp }}/e2e-needs.json'
+          python3 .github/scripts/e2e.py validate-results \
+            --plan '${{ runner.temp }}/plan/e2e-plan.json' \
+            --results '${{ runner.temp }}/results' \
+            --needs-file '${{ runner.temp }}/e2e-needs.json'
