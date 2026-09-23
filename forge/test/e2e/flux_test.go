@@ -57,6 +57,21 @@ func runFluxStage(t *testing.T, state *permanentCPUFixtureState) {
 		}
 	}
 
+	// Root-flux scoping contract (HOR-576): a second, tenant-owned Flux
+	// instance shares the cluster, so the root instance must be namespace-scoped
+	// — otherwise each source-controller overwrites the other instance's
+	// artifact URLs, and Flux's generated NetworkPolicies refuse the
+	// cross-namespace fetch.
+	for _, controller := range []string{"source-controller", "kustomize-controller", "helm-controller", "notification-controller"} {
+		args, err := sshOutput(sc, fmt.Sprintf("sudo k3s kubectl get deployment -n flux-system %s -o jsonpath='{.spec.template.spec.containers[*].args}'", controller))
+		if err != nil {
+			t.Fatalf("get %s args: %v\n%s", controller, err, args)
+		}
+		if !strings.Contains(args, "--watch-all-namespaces=false") {
+			t.Fatalf("%s is not namespace-scoped (args: %s)", controller, args)
+		}
+	}
+
 	// GitRepository becomes Ready + source-controller materializes the fork
 	// (.status.artifact.revision non-empty) — the HOR-351 in-cluster source
 	// contract. Poll: Flux reconciles async after the GitRepository is applied.

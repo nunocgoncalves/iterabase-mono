@@ -2394,6 +2394,11 @@ func TestFluxer_EnsureFlux_InstallsReviewedCLIAndDigestPinnedRuntime(t *testing.
 	for _, image := range []string{fluxHelmControllerImage, fluxKustomizeControllerImage, fluxNotificationControllerImage, fluxSourceControllerImage} {
 		assert.Contains(t, gotFluxInstall, image)
 	}
+	// Root-flux scoping contract: the exported controller args must be
+	// namespace-scoped, or the root and a tenant instance both template every
+	// Flux CR cluster-wide and overwrite each other's artifact URLs.
+	assert.Contains(t, gotFluxInstall, "flux install --export --watch-all-namespaces=false --version=")
+	assert.NotContains(t, gotFluxInstall, "--watch-all-namespaces=true")
 	assert.Contains(t, gotFluxInstall, "grep -v")
 	assert.Contains(t, gotFluxInstall, "@sha256:")
 	assert.Contains(t, gotFluxInstall, "sudo /usr/local/bin/k3s kubectl apply -f")
@@ -2431,6 +2436,7 @@ func TestFluxer_EnsureFlux_ReviewedCLIPresent(t *testing.T) {
 	assert.False(t, sawDownload)
 	assert.Contains(t, gotFluxInstall, "--version=")
 	assert.Contains(t, gotFluxInstall, "v2.4.0")
+	assert.Contains(t, gotFluxInstall, "--watch-all-namespaces=false")
 }
 
 func TestFluxer_EnsureFlux_ArchiveSubstitutionFailsBeforeExtraction(t *testing.T) {
