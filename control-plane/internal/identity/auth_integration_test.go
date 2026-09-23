@@ -187,11 +187,19 @@ func TestAccessRequestExpiredSupersededAndDeferred(t *testing.T) {
 	h := newAuthHarness(t)
 	ctx := context.Background()
 
-	_, err := h.store.CreateOrResendAccessRequest(ctx, "expired@example.com", "expired@example.com", "pt", h.now)
+	created, err := h.store.CreateOrResendAccessRequest(ctx, "expired@example.com", "expired@example.com", "pt", h.now)
 	require.NoError(t, err)
+	// access_requests.created_at is stamped by the database clock rather than
+	// the harness clock. Align to that durable instant before issuing the link
+	// so the 24 h expiry advance below is deterministic whenever the suite runs.
+	if created.CreatedAt.After(h.now) {
+		h.now = created.CreatedAt.UTC()
+	}
 	h.deliver(t)
 	expiredToken := h.sender.lastToken()
 
+	// The link lifetime is measured from issuance, and the request lifetime
+	// from the durable created_at; 25 h crosses both 24 h bounds.
 	h.advance(25 * time.Hour)
 	_, err = h.store.VerifyAccessRequest(ctx, expiredToken, h.now)
 	assert.ErrorIs(t, err, ErrAuthLinkExpired)
