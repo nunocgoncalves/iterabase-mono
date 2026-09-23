@@ -7,6 +7,7 @@ export interface AuthProfile {
   displayName: string;
   role: Role;
   locale: LocaleCode;
+  updatedAt: string;
 }
 
 export interface SessionInfo {
@@ -101,6 +102,11 @@ export const authApi = {
       method: "POST",
       body: JSON.stringify({ token, displayName, locale, password }),
     }),
+  setupContext: (token: string) =>
+    request<{ email: string; role: Role }>("/v1/auth/setup/context", {
+      method: "POST",
+      body: JSON.stringify({ token }),
+    }),
   resendSetup: (token: string) =>
     request<{ status: string }>("/v1/auth/setup/resend", {
       method: "POST",
@@ -125,7 +131,11 @@ export const authApi = {
     }),
   updateProfile: (
     csrf: string,
-    body: { displayName?: string; locale?: LocaleCode },
+    body: {
+      displayName?: string;
+      locale?: LocaleCode;
+      expectedUpdatedAt?: string;
+    },
   ) =>
     request<{ profile: AuthProfile }>(
       "/v1/profile",

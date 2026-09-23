@@ -35,6 +35,7 @@ const operatorProfile = {
   displayName: "Ada Lovelace",
   role: "operator" as const,
   locale: "en" as const,
+  updatedAt: "2026-09-23T10:00:00Z",
 };
 
 const adminProfile = { ...operatorProfile, role: "admin" as const };
@@ -133,17 +134,63 @@ describe("PublicAuth journey", () => {
     );
   });
 
-  it("completes first-time setup without signing in", async () => {
+  it("completes first-time setup with read-only context and confirmation", async () => {
     window.history.pushState({}, "", "/auth/setup?token=setup-token");
-    stubFetch([["/v1/auth/setup", () => json({ status: "setup_complete" })]]);
+    stubFetch([
+      [
+        "/v1/auth/setup/context",
+        () => json({ email: "ada@example.com", role: "operator" }),
+      ],
+      ["/v1/auth/setup", () => json({ status: "setup_complete" })],
+    ]);
     const user = userEvent.setup();
     render(<PublicAuth onAuthenticated={vi.fn()} />);
-    await user.type(await screen.findByLabelText("Your name"), "Ada Lovelace");
+    expect(
+      await screen.findByDisplayValue("ada@example.com"),
+    ).toBeInTheDocument();
+    expect(screen.getByDisplayValue("Operator")).toBeInTheDocument();
+    await user.type(screen.getByLabelText("Your name"), "Ada Lovelace");
     await user.type(screen.getByLabelText("Password"), "ada-long-password");
+    await user.type(
+      screen.getByLabelText("Confirm password"),
+      "ada-long-password",
+    );
     await user.click(screen.getByRole("button", { name: "Finish setup" }));
     expect(await screen.findByRole("status")).toHaveTextContent(
       "Setup complete. Sign in with your new password to continue.",
     );
+  });
+
+  it("blocks setup submission when the passwords do not match", async () => {
+    window.history.pushState({}, "", "/auth/setup?token=setup-token");
+    stubFetch([
+      [
+        "/v1/auth/setup/context",
+        () => json({ email: "ada@example.com", role: "admin" }),
+      ],
+      ["/v1/auth/setup", () => json({ status: "setup_complete" })],
+    ]);
+    const user = userEvent.setup();
+    render(<PublicAuth onAuthenticated={vi.fn()} />);
+    await screen.findByDisplayValue("ada@example.com");
+    expect(screen.getByDisplayValue("Admin")).toBeInTheDocument();
+    await user.type(screen.getByLabelText("Your name"), "Ada Lovelace");
+    await user.type(screen.getByLabelText("Password"), "ada-long-password");
+    await user.type(
+      screen.getByLabelText("Confirm password"),
+      "ada-different-password",
+    );
+    await user.click(screen.getByRole("button", { name: "Finish setup" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "The passwords do not match.",
+    );
+    const calls = vi.mocked(fetch).mock.calls;
+    expect(
+      calls.some(
+        ([url, init]) =>
+          String(url) === "/v1/auth/setup" && init?.method === "POST",
+      ),
+    ).toBe(false);
   });
 
   it("shows bounded terminal copy for an expired reset link", async () => {
@@ -158,6 +205,10 @@ describe("PublicAuth journey", () => {
     render(<PublicAuth onAuthenticated={vi.fn()} />);
     await user.type(
       await screen.findByLabelText("Password"),
+      "replacement-password",
+    );
+    await user.type(
+      screen.getByLabelText("Confirm password"),
       "replacement-password",
     );
     await user.click(screen.getByRole("button", { name: "Reset password" }));
@@ -207,11 +258,46 @@ describe("AccountShell", () => {
     await user.clear(name);
     await user.type(name, "Ada L.");
     await user.selectOptions(screen.getByLabelText("Language"), "pt");
-    await user.click(
-      screen.getByRole("button", { name: "Guardar alterações" }),
-    );
+    // The pending language is not applied before the server confirms it.
+    expect(
+      screen.getByRole("heading", { name: "Profile" }),
+    ).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
     expect(await screen.findByRole("status")).toHaveTextContent(
       "Alterações guardadas.",
+    );
+  });
+
+  it("surfaces a profile conflict instead of overwriting a newer change", async () => {
+    stubFetch([
+      [
+        "/v1/profile",
+        (init) =>
+          init?.method === "PATCH"
+            ? json(
+                {
+                  error: "Your profile changed elsewhere.",
+                  code: "profile_conflict",
+                },
+                409,
+              )
+            : json({ profile: operatorProfile, csrfToken: "csrf" }),
+      ],
+    ]);
+    const user = userEvent.setup();
+    render(
+      <AccountShell
+        initialProfile={operatorProfile}
+        initialCSRF="csrf-token"
+        onSessionLost={vi.fn()}
+      />,
+    );
+    const name = screen.getByLabelText("Your name");
+    await user.clear(name);
+    await user.type(name, "Ada L.");
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Your profile changed elsewhere. Reload to see the current values.",
     );
   });
 

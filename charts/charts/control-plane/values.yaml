@@ -172,6 +172,8 @@ auth:
     mode: starttls # starttls | tls (verified TLS is required)
     from: ""
     username: ""
+    # REQUIRED when username is set: the relay password is operator-owned and
+    # the chart never generates it. The render fails closed without this Secret.
     existingSecret: ""
     passwordKey: smtp-password
   # First Admin email/locale. The value is read from a Secret; the chart
