@@ -33,6 +33,7 @@ type Services struct {
 	Work        *workstore.Store
 	Artifacts   *artifactstore.Service
 	Metrics     *cpmetrics.Metrics
+	Auth        *AuthServices
 }
 
 type contextKey string
@@ -50,6 +51,7 @@ type Handler struct {
 	resolver  *identity.Resolver
 	work      *workstore.Store
 	artifacts *artifactstore.Service
+	authCfg   *AuthServices
 }
 
 // New builds the HTTP API router.
@@ -102,7 +104,10 @@ func New(svc Services) http.Handler {
 		resolver:  identity.NewResolver(svc.Store, svc.Mode),
 		work:      svc.Work,
 		artifacts: svc.Artifacts,
+		authCfg:   svc.Auth,
 	}
+
+	h.registerAuthRoutes(r)
 
 	r.Get("/.well-known/jwks.json", h.jwks)
 
@@ -266,12 +271,14 @@ func (h *Handler) createUser(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, errorBody{Error: "email is required"})
 		return
 	}
+	// Legacy spelling: the V2 local-role contract is exactly admin|operator;
+	// `user` is accepted as its pre-epoch alias and stored as operator.
 	role := req.Role
-	if role == "" {
-		role = "user"
+	if role == "" || role == "user" {
+		role = "operator"
 	}
-	if role != "admin" && role != "user" {
-		writeJSON(w, http.StatusBadRequest, errorBody{Error: "role must be admin or user"})
+	if role != "admin" && role != "operator" {
+		writeJSON(w, http.StatusBadRequest, errorBody{Error: "role must be admin or operator"})
 		return
 	}
 
@@ -466,7 +473,10 @@ type userResponse struct {
 }
 
 func toUserResponse(u identity.LocalUser) userResponse {
-	return userResponse{ID: u.ID, Key: u.Key, Email: u.Email, Role: u.Role, DisplayName: u.DisplayName}
+	return userResponse{
+		ID: u.ID, Key: u.Key, Email: u.Email,
+		Role: identity.NormalizeRole(u.Role), DisplayName: u.DisplayName,
+	}
 }
 
 func toAPIKeyResponse(k identity.APIKey) apiKeyResponse {
