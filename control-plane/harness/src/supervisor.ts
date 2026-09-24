@@ -62,9 +62,52 @@ export type ChildEvent =
   | { kind: "event"; payload: TurnEventPayload }
   | { kind: "tokenDelta"; contentIndex: number; deltaType: "TEXT" | "THINKING"; delta: string };
 
+/** Machine-searchable reason for a supervisor-initiated child abort (HOR-551). */
+export type ChildAbortReason =
+  | "watchdog_stale_heartbeat" // no heartbeat within the liveness window while turn work is in flight
+  | "watchdog_post_completion_timeout" // terminal phase: no heartbeat within the bounded post-completion window
+  | "control_plane_cancel" // CP AbortTurn
+  | "stream_loss" // Work stream lost / connect failure (fail-closed)
+  | "worker_drain" // supervisor shutdown drain
+  | "rpc_protocol_error" // malformed/undecodable child RPC frame on fd 4
+  | "rpc_backlog_overflow"; // fd-5 response backlog exceeded the hard bound
+
+/** Bounded, non-secret child abort diagnostics (HOR-551): timing + lifecycle
+ * state only — never prompts, model bodies, tool arguments/results, or
+ * credentials. Recorded on abort initiation, structured-logged, and carried by
+ * the terminal outcome so operators can distinguish a false watchdog reap from
+ * control-plane cancellation, stream loss/drain, protocol failure, and a
+ * genuinely stale child. */
+export interface ChildAbortRecord {
+  reason: ChildAbortReason;
+  /** Bounded caller detail (no payloads). */
+  detail?: string;
+  initiatedAtMs: number;
+  /** Time since the last child heartbeat at abort initiation (negative while the startup grace is still in effect). */
+  sinceHeartbeatMs: number;
+  livenessIntervalMs: number;
+  abortGraceMs: number;
+  /** Effective no-heartbeat window for the phase (liveness, or liveness + grace in the terminal phase). */
+  effectiveWindowMs: number;
+  /** Terminal phase: durable complete_step or a provisional result was observed. */
+  terminalPhase: boolean;
+  /** The child reported complete_step over fd 4 (durability not yet confirmed). */
+  stepCompletionObserved: boolean;
+  /** The supervisor durably accepted (WAL-appended) and acked complete_step. */
+  stepCompletionDurable: boolean;
+  provisionalResultObserved: boolean;
+  /** Signals actually delivered, in order. */
+  signals: Array<{ signal: "SIGTERM" | "SIGKILL"; sentAtMs: number }>;
+  /** Final exit classification (set once the child exits). */
+  finalCode?: number | null;
+  finalSignal?: NodeJS.Signals | null;
+}
+
 export interface ChildResult {
   outcome: Outcome;
   message?: string;
+  /** Bounded abort diagnostics when the supervisor initiated child abort escalation. */
+  abort?: ChildAbortRecord;
 }
 /** A child→supervisor RPC request (fd 4) — model/tool/cancel (HOR-395). */
 export type ChildRpcRequest =
@@ -74,7 +117,10 @@ export type ChildRpcRequest =
   | { type: "stepCompletion"; requestId: string; outcome: string; summary: string; outputJson: string; artifactRefs: Array<{artifactId:string;role:string;metadataJson:string}> }
   | { type: "cancel"; requestId: string };
 export interface Child {
-  abort(): void;
+  /** Begin bounded abort escalation (SIGTERM → SIGKILL after abortGraceMs) with a machine-searchable reason (HOR-551). */
+  abort(reason: ChildAbortReason, detail?: string): void;
+  /** Mark the child's complete_step report durably accepted (WAL-appended). */
+  noteStepCompletionDurable(): void;
   events: AsyncIterable<ChildEvent>;
   /** child→supervisor RPC requests (fd 4) — model/tool calls (HOR-395). */
   rpcRequests: AsyncIterable<ChildRpcRequest>;
@@ -191,7 +237,7 @@ export class Supervisor {
     this.state.beginDrain();
     this.d.probes.setReady(false);
     this.d.metrics?.dispatchConnected.set(0);
-    this.abortActiveTurn();
+    this.abortActiveTurn("worker_drain");
     await this.awaitChildTermination();
     this.stream?.close();
   }
@@ -236,7 +282,7 @@ export class Supervisor {
         void this.handleAssignTurn(msg.kind.value);
         return;
       case "abortTurn":
-        if (this.turn && this.turn.turnId === msg.kind.value.turnId) this.abortActiveTurn();
+        if (this.turn && this.turn.turnId === msg.kind.value.turnId) this.abortActiveTurn("control_plane_cancel");
         return;
       case "eventAck": {
         this.onEventAck(msg.kind.value.turnId, Number(msg.kind.value.throughSequence));
@@ -395,6 +441,7 @@ export class Supervisor {
       }
       const result = await child.result;
       await rpcDone;
+      if (result.abort) this.d.metrics?.childAborts.labels(result.abort.reason).inc();
       observedResult = outcomeMetric(result.outcome);
       this.d.metrics?.childProcesses.labels(observedResult).inc();
       this.emitOutcome(result.outcome, result.message);
@@ -465,6 +512,16 @@ export class Supervisor {
           break;
         }
         this.turn.completionReported = true;
+        // The WAL append below (sendChildEvent -> outbox.append) is the durable
+        // acceptance point. From here the child is in its terminal phase and
+        // the liveness watchdog applies the bounded post-completion window
+        // instead of the ordinary liveness window (HOR-551).
+        //
+        // OPEN DESIGN QUESTION (recorded, deliberately not resolved): whether a
+        // durably accepted complete_step should itself become the terminal turn
+        // boundary. HOR-551 keeps the clean-exit requirement and the
+        // completion/abort semantics unchanged; adopting that model needs
+        // separate explicit architecture approval.
         this.sendChildEvent({
           case: "stepCompletion",
           value: create(StepCompletionSchema, {
@@ -474,6 +531,7 @@ export class Supervisor {
             artifactRefs: req.artifactRefs.map((ref) => create(StepArtifactRefSchema, ref)),
           }),
         });
+        child.noteStepCompletionDurable();
         child.rpcSend({ type: "stepCompletionAck", requestId: req.requestId });
         continue;
       }
@@ -765,10 +823,10 @@ export class Supervisor {
     this.emitOutcome(Outcome.FAILED, message);
   }
 
-  private abortActiveTurn(): void {
+  private abortActiveTurn(reason: ChildAbortReason): void {
     if (this.turn) this.turn.aborted = true;
     this.turn?.discoveryAc?.abort();
-    this.currentChild?.abort();
+    this.currentChild?.abort(reason);
   }
 
   /** Await bounded child termination after abort (SIGTERM → SIGKILL within abortGraceMs). */
@@ -814,7 +872,7 @@ export class Supervisor {
    */
   private async failClosed(err: unknown): Promise<void> {
     this.d.metrics?.dispatchConnected.set(0);
-    this.abortActiveTurn();
+    this.abortActiveTurn("stream_loss");
     this.stopHeartbeat();
     await this.awaitChildTermination(); // bounded: SIGTERM → SIGKILL before reconnecting
     if (this.outbox && this.turn) {

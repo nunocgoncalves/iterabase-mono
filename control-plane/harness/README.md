@@ -130,6 +130,27 @@ streams (ARCH-011).
   best-effort; the worker's late outcome is `after_terminal` (first-terminal-writer).
 - **Outcomes:** `COMPLETED` only after `agent_settled` + flush + `session_shutdown`
   + dispose + clean exit + ACK; a successful message + failed cleanup = `FAILED`.
+- **Child liveness and abort diagnostics (HOR-551):** while turn work is in
+  flight the supervisor aborts a child that stops heartbeating within
+  `child.livenessIntervalMs`. Once `complete_step` is durably accepted (WAL
+  append + ACK, or a provisional `result` was observed) the turn is in its
+  terminal phase and the abort window becomes the bounded
+  `child.livenessIntervalMs + child.abortGraceMs`, so an ordinary
+  post-completion teardown is not reaped as `ABORTED`; a child that exceeds the
+  window still escalates `SIGTERM` → `SIGKILL` and resolves `ABORTED`. Every
+  initiated abort records a machine-searchable reason — `watchdog_stale_heartbeat`,
+  `watchdog_post_completion_timeout`, `control_plane_cancel`, `stream_loss`,
+  `worker_drain`, `rpc_protocol_error`, `rpc_backlog_overflow` — with heartbeat
+  age, configured liveness/abort-grace, observed `complete_step`/provisional-result
+  state, delivered signals, and final exit classification. The record is emitted
+  as a structured `[harness:child-abort]` log line, counted as
+  `control_plane_harness_child_aborts_total{reason}`, and appended to the
+  terminal outcome message, so the durable evidence is not limited to the bare
+  string `child killed by SIGKILL`.
+- **Open design question (recorded, not resolved):** whether a durably accepted
+  `complete_step` should itself become the terminal turn boundary. HOR-551 keeps
+  the clean-exit requirement and the completion/abort semantics unchanged;
+  adopting that model needs separate explicit architecture approval.
 
 ## Internals (`src/`)
 

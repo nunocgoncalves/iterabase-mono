@@ -187,9 +187,11 @@ try {
     const factory = createChildFactory(cfg(), hangScript, launchStub);
     const sandbox = { root: join(dir, "sess-a"), home: "", tmp: "", session: "", workspace: "" };
     const child = factory(assignment(), sandbox as never, "");
-    setTimeout(() => child.abort(), 50);
+    setTimeout(() => child.abort("control_plane_cancel"), 50);
     const result = await child.result;
     expect(result.outcome).toBe(Outcome.ABORTED);
+    expect(result.abort?.reason).toBe("control_plane_cancel");
+    expect(result.message).toContain("abort=control_plane_cancel");
   });
 
   it("fails the turn closed when the fd-5 response backlog overflows (HOR-395 bounded buffering)", async () => {
@@ -213,6 +215,90 @@ try {
     ]);
     expect(result.outcome).toBe(Outcome.FAILED);
     expect(result.message).toMatch(/backlog|not draining/i);
-    child.abort();
+    expect(result.abort?.reason).toBe("rpc_backlog_overflow");
+    child.abort("worker_drain");
   }, 5000);
+
+  it("HOR-551: a genuinely stale child still escalates SIGTERM → SIGKILL and resolves ABORTED with diagnostics", async () => {
+    // The fix must not convert genuine liveness loss into success: a child that
+    // stops heartbeating with no durable complete_step and no result is reaped
+    // with bounded escalation, and the abort record identifies the watchdog
+    // trigger and the signal sequence.
+    const staleCfg = cfg();
+    staleCfg.child = { livenessIntervalMs: 500, abortGraceMs: 500 };
+    const staleScript = join(dir, "stale.cjs");
+    writeFileSync(
+      staleScript,
+      `const fs = require('fs');
+function frame(obj){const j=Buffer.from(JSON.stringify(obj));const h=Buffer.alloc(4);h.writeUInt32BE(j.length,0);fs.writeSync(3,Buffer.concat([h,j]));}
+frame({type:'heartbeat'});
+process.on('SIGTERM', () => {});
+setInterval(()=>{}, 1000);\n`,
+    );
+    const factory = createChildFactory(staleCfg, staleScript, launchStub);
+    const sandbox = { root: join(dir, "sess-a"), home: "", tmp: "", session: "", workspace: "" };
+    const child = factory(assignment(), sandbox as never, "");
+    const result = await child.result;
+    expect(result.outcome).toBe(Outcome.ABORTED);
+    expect(result.abort?.reason).toBe("watchdog_stale_heartbeat");
+    expect(result.abort?.terminalPhase).toBe(false);
+    expect(result.abort?.stepCompletionObserved).toBe(false);
+    expect(result.abort?.stepCompletionDurable).toBe(false);
+    expect(result.abort?.provisionalResultObserved).toBe(false);
+    expect(result.abort?.signals.map((s) => s.signal)).toEqual(["SIGTERM", "SIGKILL"]);
+    expect(result.abort?.finalSignal).toBe("SIGKILL");
+    expect(result.message).toContain("abort=watchdog_stale_heartbeat");
+    expect(result.message).toContain("signals=SIGTERM+SIGKILL");
+  }, 10_000);
+
+  it("HOR-551: the terminal phase gets a bounded post-completion window instead of the liveness window", async () => {
+    // A durable complete_step moves the child into its terminal phase: crossing
+    // the ordinary liveness window during post-completion teardown must not be
+    // reaped as ABORTED, while a clean exit still resolves the provisional
+    // COMPLETED (the clean-exit contract is unchanged).
+    const terminalCfg = cfg();
+    terminalCfg.child = { livenessIntervalMs: 500, abortGraceMs: 1000 };
+    const terminalScript = join(dir, "post-completion.cjs");
+    writeFileSync(
+      terminalScript,
+      `const fs = require('fs');
+function frame(obj){const j=Buffer.from(JSON.stringify(obj));const h=Buffer.alloc(4);h.writeUInt32BE(j.length,0);fs.writeSync(3,Buffer.concat([h,j]));}
+frame({type:'heartbeat'});
+setTimeout(() => { frame({type:'result', outcome:1}); process.exit(0); }, 900);\n`,
+    );
+    const factory = createChildFactory(terminalCfg, terminalScript, launchStub);
+    const sandbox = { root: join(dir, "sess-a"), home: "", tmp: "", session: "", workspace: "" };
+    const child = factory(assignment(), sandbox as never, "");
+    child.noteStepCompletionDurable();
+    const result = await child.result;
+    expect(result.outcome).toBe(Outcome.COMPLETED);
+    expect(result.abort).toBeUndefined();
+  }, 10_000);
+
+  it("HOR-551: a child stuck after durable complete_step still fails closed with a distinct post-completion reason", async () => {
+    const timeoutCfg = cfg();
+    timeoutCfg.child = { livenessIntervalMs: 500, abortGraceMs: 500 };
+    const stuckScript = join(dir, "stuck-after-complete.cjs");
+    writeFileSync(
+      stuckScript,
+      `const fs = require('fs');
+function frame(obj){const j=Buffer.from(JSON.stringify(obj));const h=Buffer.alloc(4);h.writeUInt32BE(j.length,0);fs.writeSync(3,Buffer.concat([h,j]));}
+frame({type:'heartbeat'});
+process.on('SIGTERM', () => {});
+setInterval(()=>{}, 1000);\n`,
+    );
+    const factory = createChildFactory(timeoutCfg, stuckScript, launchStub);
+    const sandbox = { root: join(dir, "sess-a"), home: "", tmp: "", session: "", workspace: "" };
+    const child = factory(assignment(), sandbox as never, "");
+    child.noteStepCompletionDurable();
+    const result = await child.result;
+    expect(result.outcome).toBe(Outcome.ABORTED);
+    expect(result.abort?.reason).toBe("watchdog_post_completion_timeout");
+    expect(result.abort?.terminalPhase).toBe(true);
+    expect(result.abort?.stepCompletionDurable).toBe(true);
+    expect(result.abort?.effectiveWindowMs).toBe(1000);
+    expect(result.abort?.signals.map((s) => s.signal)).toEqual(["SIGTERM", "SIGKILL"]);
+    expect(result.message).toContain("abort=watchdog_post_completion_timeout");
+    expect(result.message).toContain("complete_step=durable");
+  }, 10_000);
 });
