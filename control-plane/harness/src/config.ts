@@ -61,7 +61,7 @@ export interface HarnessConfig {
   /** Child lifecycle (IPC heartbeat + abort/shutdown escalation). */
   child: {
     livenessIntervalMs: number; // IPC heartbeat from the child (stale -> terminate)
-    abortGraceMs: number; // graceful abort -> SIGTERM -> SIGKILL
+    abortGraceMs: number; // graceful abort -> SIGTERM -> SIGKILL; also extends the post-completion no-heartbeat window (HOR-551)
   };
   /** Bounded in-memory outbox (+ WAL). Overflow fails the assignment, never drops audit silently. */
   outbox: { bound: number };

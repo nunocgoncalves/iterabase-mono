@@ -45,6 +45,12 @@ export class HarnessMetrics {
     labelNames: ["result"] as const,
     registers: [this.registry],
   });
+  readonly childAborts = new Counter({
+    name: "control_plane_harness_child_aborts_total",
+    help: "Supervisor-initiated child abort escalations by machine-searchable reason (HOR-551).",
+    labelNames: ["reason"] as const,
+    registers: [this.registry],
+  });
   readonly childRPC = new Counter({
     name: "control_plane_harness_child_rpc_requests_total",
     help: "Child-to-supervisor RPC requests by bounded operation.",

@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { createRouterTransport } from "@connectrpc/connect";
 import { create } from "@bufbuild/protobuf";
-import { mkdtempSync, rmSync, chmodSync, mkdirSync, existsSync, lstatSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { mkdtempSync, rmSync, chmodSync, mkdirSync, existsSync, lstatSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, basename } from "node:path";
 import {
@@ -22,6 +23,7 @@ import {
   type WorkerMessage,
 } from "./gen/iterabase/harness/v1/harness_pb.js";
 import { Supervisor, type Child, type ChildEvent, type ChildResult, type TurnEventPayload } from "./supervisor.js";
+import { createChildFactory } from "./child-process.js";
 import { Probes } from "./probes.js";
 import { EventOutbox } from "./event-outbox.js";
 import type { HarnessConfig } from "./config.js";
@@ -61,7 +63,7 @@ function fakeChild(events: ChildEvent[], outcome: Outcome, message?: string): Ch
   const rpcQ = new Q<import("./supervisor.js").ChildRpcRequest>();
   rpcQ.close(); // no RPC requests in these tests
   const result = Promise.resolve<ChildResult>({ outcome, message });
-  return { abort: () => {}, events: q, rpcRequests: rpcQ, rpcSend: () => {}, result };
+  return { abort: () => {}, noteStepCompletionDurable: () => {}, events: q, rpcRequests: rpcQ, rpcSend: () => {}, result };
 }
 
 const UID = process.getuid();
@@ -493,6 +495,131 @@ describe("Supervisor turn loop", () => {
     );
     expect(hasHarnessError).toBe(true);
   });
+
+  it("HOR-551: does not reap a durable complete_step as ABORTED when the post-completion lifecycle crosses the 5s liveness window", async () => {
+    // Production-like watchdog settings: the ticket explicitly rejects hiding
+    // the boundary behind the existing 60s test configuration. The stub child
+    // heartbeats once, durably reports complete_step (WAL append + ack), then
+    // goes silent for 9s (> one 5s liveness interval and past the pre-fix 5-7.5s
+    // abort tick) before emitting its terminal result and exiting cleanly.
+    const cfg = makeCfg(sandboxParent, walDir);
+    cfg.child = { livenessIntervalMs: 5_000, abortGraceMs: 10_000 };
+    const stubScript = join(sandboxParent, "hor551-post-completion-child.cjs");
+    writeFileSync(
+      stubScript,
+      `
+const fs = require('fs');
+const net = require('net');
+function frame(fd, obj) {
+  const j = Buffer.from(JSON.stringify(obj));
+  const h = Buffer.alloc(4);
+  h.writeUInt32BE(j.length, 0);
+  fs.writeSync(fd, Buffer.concat([h, j]));
+}
+frame(3, { type: 'heartbeat' });
+process.stdin.on('data', () => {});
+let buf = Buffer.alloc(0);
+// Mirror the production child: read fd 5 as a non-blocking uv_pipe so the
+// later releasePerTurnIpc + process.exit(0) clean exit is not blocked by a
+// pending libuv threadpool read (HOR-434).
+const rpc = new net.Socket({ fd: 5, readable: true, writable: false });
+rpc.on('data', (chunk) => {
+  buf = Buffer.concat([buf, chunk]);
+  while (buf.length >= 4) {
+    const len = buf.readUInt32BE(0);
+    if (buf.length < 4 + len) break;
+    const msg = JSON.parse(buf.subarray(4, 4 + len).toString('utf8'));
+    buf = buf.subarray(4 + len);
+    if (msg.type === 'gatewayTools') {
+      frame(4, { type: 'stepCompletion', requestId: 'c1', outcome: 'completed', summary: 'done', outputJson: '{}', artifactRefs: [] });
+    } else if (msg.type === 'stepCompletionAck') {
+      setTimeout(() => {
+        frame(3, { type: 'result', outcome: 1 });
+        try { rpc.removeAllListeners(); rpc.destroy(); } catch {}
+        try { fs.closeSync(5); } catch {}
+        process.stdin.removeAllListeners();
+        try { process.stdin.destroy(); } catch {}
+        process.exit(0);
+      }, 9000);
+    }
+  }
+});
+`,
+    );
+
+    const received: WorkerMessage[] = [];
+    let assignTurnSent = false;
+    let stepCompletionAt = 0;
+    let outcomeAt = 0;
+    let outcomeSeen!: () => void;
+    const outcomeReceived = new Promise<void>((resolve) => (outcomeSeen = resolve));
+    const transport = createRouterTransport((router) => {
+      router.service(Harness, {
+        async *work(req) {
+          yield create(ControlMessageSchema, {
+            kind: {
+              case: "welcome",
+              value: create(WelcomeSchema, { protocolVersion: "1", fencingGeneration: 1n, heartbeatIntervalMs: 60000, leaseTimeoutMs: 120000 }),
+            },
+          });
+          for await (const m of req) {
+            received.push(m);
+            if (m.kind.case === "ready" && !assignTurnSent) {
+              assignTurnSent = true;
+              yield assignTurn(sandboxId, true);
+            } else if (m.kind.case === "turnEvent") {
+              const te = m.kind.value;
+              if (te.kind.case === "stepCompletion") stepCompletionAt = Date.now();
+              if (te.kind.case === "workerOutcome") {
+                outcomeAt = Date.now();
+                yield create(ControlMessageSchema, {
+                  kind: { case: "eventAck", value: create(EventAckSchema, { turnId: te.turnId, throughSequence: te.sequence }) },
+                });
+                outcomeSeen();
+              }
+            }
+          }
+        },
+      });
+    });
+
+    const sup = new Supervisor({
+      cfg,
+      hello: create(WorkerMessageSchema, { kind: { case: "hello", value: create(HelloSchema, { workerId: "pod-1", poolId: "pool-1" }) } }),
+      childFactory: createChildFactory(cfg, stubScript, (opts) =>
+        spawn(process.execPath, [opts.script], {
+          cwd: join(opts.sandboxRoot, opts.workingDir),
+          stdio: opts.stdio as never,
+          env: { ...opts.env, PATH: process.env.PATH ?? "" },
+        }),
+      ),
+      probes,
+      transport: () => transport,
+      gatewayClient: fakeGatewayClient(),
+      modelStream: fakeModelStream(),
+    });
+
+    const runP = sup.run();
+    await outcomeReceived;
+    await sup.drain();
+    await runP;
+
+    // complete_step was accepted and durably emitted (WAL append) before the
+    // crossing, and the post-completion lifecycle really crossed one liveness
+    // interval before the terminal result arrived.
+    const stepEvent = received.find((m) => m.kind.case === "turnEvent" && m.kind.value.kind.case === "stepCompletion");
+    expect(stepEvent).toBeDefined();
+    expect(outcomeAt - stepCompletionAt).toBeGreaterThanOrEqual(5_000);
+    const outcomes = received
+      .filter((m) => m.kind.case === "turnEvent" && m.kind.value.kind.case === "workerOutcome")
+      .map((m) => m.kind!.value!.kind!.value as { outcome: Outcome; message?: string });
+    // Exactly one terminal outcome, and it is the COMPLETED one — the durable
+    // complete_step is never later replaced by an ABORTED projection.
+    expect(outcomes).toHaveLength(1);
+    const outcome = outcomes[0];
+    expect(outcome?.message ?? "").not.toContain("abort=");
+    expect(outcome?.outcome).toBe(Outcome.COMPLETED);
+  }, 30_000);
 });
 
 describe("Supervisor crash recovery", () => {
@@ -619,7 +746,7 @@ function fakeToolCallChild(toolName: string): Child & { sent: unknown[] } {
   rpcQ.close();
   const sent: unknown[] = [];
   const result = new Promise<ChildResult>(() => {}); // never resolves (test drains)
-  return { abort: () => {}, events: q, rpcRequests: rpcQ, rpcSend: (f) => sent.push(f), result, sent } as Child & { sent: unknown[] };
+  return { abort: () => {}, noteStepCompletionDurable: () => {}, events: q, rpcRequests: rpcQ, rpcSend: (f) => sent.push(f), result, sent } as Child & { sent: unknown[] };
 }
 
 describe("Supervisor RPC dispatch (HOR-395)", () => {
@@ -702,7 +829,7 @@ describe("Supervisor RPC dispatch (HOR-395)", () => {
     requests.push({ type: "toolCall", requestId: "after", toolCallId: "tc-after", toolName: "graph.write", toolVersionDigest: "sha256:xyz", argumentsJson: "{}" });
     requests.close();
     const sent: unknown[] = [];
-    const child: Child = { abort: () => {}, events, rpcRequests: requests, rpcSend: (frame) => sent.push(frame), result: new Promise<ChildResult>(() => {}) };
+    const child: Child = { abort: () => {}, noteStepCompletionDurable: () => {}, events, rpcRequests: requests, rpcSend: (frame) => sent.push(frame), result: new Promise<ChildResult>(() => {}) };
     let invoked = false;
     const sup = new Supervisor({
       cfg: makeCfg(sandboxParent, walDir),
@@ -754,7 +881,7 @@ describe("Supervisor RPC dispatch (HOR-395)", () => {
     rpcQ.push({ type: "toolCall", requestId: "dup", toolCallId: "tc-2", toolName: "graph.read", toolVersionDigest: "sha256:xyz", argumentsJson: "{}", idempotencyKey: "tc-2" });
     rpcQ.close();
     const sent: unknown[] = [];
-    const child: Child & { sent: unknown[] } = { abort: () => {}, events: q, rpcRequests: rpcQ, rpcSend: (f) => sent.push(f), result: new Promise<ChildResult>(() => {}), sent } as Child & { sent: unknown[] };
+    const child: Child & { sent: unknown[] } = { abort: () => {}, noteStepCompletionDurable: () => {}, events: q, rpcRequests: rpcQ, rpcSend: (f) => sent.push(f), result: new Promise<ChildResult>(() => {}), sent } as Child & { sent: unknown[] };
     let invokeCount = 0;
     const sup = new Supervisor({
       cfg: makeCfg(sandboxParent, walDir),

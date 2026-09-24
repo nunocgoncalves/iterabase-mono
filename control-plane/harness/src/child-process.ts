@@ -27,7 +27,7 @@ import type { Readable, Writable } from "node:stream";
 import { fromJson, type JsonValue } from "@bufbuild/protobuf";
 import { TurnEventSchema, Outcome, type AssignTurn } from "./gen/iterabase/harness/v1/harness_pb.js";
 import { launchChild, type LaunchOptions } from "./launcher.js";
-import type { Child, ChildEvent, ChildResult, ChildFactory, ChildRpcRequest } from "./supervisor.js";
+import type { Child, ChildAbortReason, ChildAbortRecord, ChildEvent, ChildResult, ChildFactory, ChildRpcRequest } from "./supervisor.js";
 import type { HarnessConfig } from "./config.js";
 import type { SandboxPaths } from "./sandbox.js";
 import { AsyncQueue } from "./async-queue.js";
@@ -99,10 +99,15 @@ export function createChildFactory(cfg: HarnessConfig, script: string, launch: L
             // droppable audit frame. The child is now waiting on a response
             // that will never come, so terminate the turn fail-closed (HOR-395:
             // runtime validation must be bounded fail-closed, not a silent drop).
-            settle({ outcome: Outcome.FAILED, message: "invalid child RPC frame on fd 4" });
-            forceAbort();
+            const record = forceAbort("rpc_protocol_error", "invalid child RPC frame on fd 4");
+            settle({
+              outcome: Outcome.FAILED,
+              message: `invalid child RPC frame on fd 4${record ? ` (abort=${record.reason})` : ""}`,
+              ...(record ? { abort: record } : {}),
+            });
             return;
           }
+          if (f.type === "stepCompletion") stepCompletionObserved = true;
           rpcRequests.push(f as ChildRpcRequest);
         },
         // Strict mode for fd 4 (HOR-395 bounded fail-closed): framing/JSON/
@@ -111,8 +116,12 @@ export function createChildFactory(cfg: HarnessConfig, script: string, launch: L
         // that never comes while its heartbeat stays healthy. Report every
         // such error to the turn failure + abort path.
         (reason) => {
-          settle({ outcome: Outcome.FAILED, message: `invalid child RPC frame on fd 4: ${reason}` });
-          forceAbort();
+          const record = forceAbort("rpc_protocol_error", `invalid child RPC frame on fd 4: ${reason}`);
+          settle({
+            outcome: Outcome.FAILED,
+            message: `invalid child RPC frame on fd 4: ${reason}${record ? ` (abort=${record.reason})` : ""}`,
+            ...(record ? { abort: record } : {}),
+          });
         },
       );
       (rpcReqStream as Readable).on("data", (chunk: Buffer) => rpcReader.feed(chunk));
@@ -151,8 +160,12 @@ export function createChildFactory(cfg: HarnessConfig, script: string, launch: L
               // fd 5 is not draining — bound supervisor memory by failing the
               // turn closed instead of queueing more response frames.
               rpcOverflowed = true;
-              settle({ outcome: Outcome.FAILED, message: "fd 5 response backlog overflow (child not draining)" });
-              forceAbort();
+              const record = forceAbort("rpc_backlog_overflow", "fd 5 response backlog overflow (child not draining)");
+              settle({
+                outcome: Outcome.FAILED,
+                message: `fd 5 response backlog overflow (child not draining)${record ? ` (abort=${record.reason})` : ""}`,
+                ...(record ? { abort: record } : {}),
+              });
             }
           }
           return ok;
@@ -184,16 +197,26 @@ export function createChildFactory(cfg: HarnessConfig, script: string, launch: L
     let lastHeartbeat = Date.now();
     let watchdog: ReturnType<typeof setInterval> | null = null;
     let killTimer: ReturnType<typeof setTimeout> | null = null;
-    let aborting = false;
+    let exited = false;
+    let stepCompletionObserved = false;
+    let stepCompletionDurable = false;
+    let abortRecord: ChildAbortRecord | null = null;
 
     const startWatchdog = (): void => {
       if (watchdog) return;
       watchdog = setInterval(() => {
-        if (resultResolved) return;
-        if (Date.now() - lastHeartbeat > livenessMs) {
-          // Stale child — begin bounded escalation.
-          forceAbort();
-        }
+        if (resultResolved || exited) return;
+        const silentMs = Date.now() - lastHeartbeat;
+        if (silentMs <= livenessMs) return;
+        // OPEN DESIGN QUESTION (HOR-551, recorded but deliberately not
+        // resolved): whether a durably accepted complete_step should itself
+        // become the terminal turn boundary. Until that is decided by a
+        // separate architecture approval, the clean-exit contract stands and
+        // the terminal phase only gets a bounded post-completion window so an
+        // ordinary post-completion teardown is not reaped as ABORTED.
+        const terminalPhase = stepCompletionDurable || provisional !== null;
+        if (terminalPhase && silentMs <= livenessMs + graceMs) return;
+        forceAbort(terminalPhase ? "watchdog_post_completion_timeout" : "watchdog_stale_heartbeat");
       }, Math.max(50, Math.floor(livenessMs / 2)));
       watchdog.unref?.();
     };
@@ -242,23 +265,46 @@ export function createChildFactory(cfg: HarnessConfig, script: string, launch: L
     proc.stdout?.on("data", (d: Buffer) => console.error(`[child:stdout] ${d.toString("utf8").trimEnd()}`));
     proc.stderr?.on("data", (d: Buffer) => console.error(`[child:stderr] ${d.toString("utf8").trimEnd()}`));
 
-    const forceAbort = (): void => {
-      if (aborting) return;
-      aborting = true;
+    const sendSignal = (signal: "SIGTERM" | "SIGKILL"): void => {
       try {
-        proc.kill("SIGTERM");
+        // Record only signals actually delivered (a dead child returns false).
+        if (proc.kill(signal)) abortRecord?.signals.push({ signal, sentAtMs: Date.now() });
       } catch {
         /* already dead */
       }
+    };
+
+    /**
+     * Begin bounded abort escalation (SIGTERM → SIGKILL after abortGraceMs) and
+     * record bounded, machine-searchable diagnostics (HOR-551). The first
+     * caller wins: later aborts keep the original reason. No payloads, prompts,
+     * arguments, results, or credentials are recorded.
+     */
+    const forceAbort = (reason: ChildAbortReason, detail?: string): ChildAbortRecord | null => {
+      if (abortRecord) return abortRecord;
+      if (exited) return null; // already reaped — nothing to abort
+      const now = Date.now();
+      const terminalPhase = stepCompletionDurable || provisional !== null;
+      abortRecord = {
+        reason,
+        ...(detail ? { detail: detail.slice(0, 200) } : {}),
+        initiatedAtMs: now,
+        sinceHeartbeatMs: now - lastHeartbeat,
+        livenessIntervalMs: livenessMs,
+        abortGraceMs: graceMs,
+        effectiveWindowMs: terminalPhase ? livenessMs + graceMs : livenessMs,
+        terminalPhase,
+        stepCompletionObserved,
+        stepCompletionDurable,
+        provisionalResultObserved: provisional !== null,
+        signals: [],
+      };
+      logChildAbort("initiated", abortRecord);
+      sendSignal("SIGTERM");
       // Bounded escalation: SIGKILL after the grace if still alive.
-      killTimer = setTimeout(() => {
-        try {
-          proc.kill("SIGKILL");
-        } catch {
-          /* already dead */
-        }
-      }, graceMs);
+      killTimer = setTimeout(() => sendSignal("SIGKILL"), graceMs);
       killTimer.unref?.();
+      return abortRecord;
     };
 
     proc.on("error", (err) => {
@@ -267,14 +313,27 @@ export function createChildFactory(cfg: HarnessConfig, script: string, launch: L
       settle({ outcome: Outcome.FAILED, message: `spawn error: ${err.message}` });
     });
     proc.on("exit", (code, signal) => {
+      exited = true;
       events.close();
       rpcRequests.close();
       if (killTimer) clearTimeout(killTimer);
       if (watchdog) clearInterval(watchdog);
+      if (abortRecord) {
+        // Final exit classification for the abort diagnostics (HOR-551).
+        abortRecord.finalCode = code;
+        abortRecord.finalSignal = signal;
+        logChildAbort("exited", abortRecord);
+      }
       if (resultResolved) return;
-      if (signal || aborting) {
-        // Aborted (SIGTERM/SIGKILL) or killed by signal.
-        settle({ outcome: Outcome.ABORTED, message: signal ? `child killed by ${signal}` : "aborted" });
+      if (signal || abortRecord) {
+        // Aborted (SIGTERM/SIGKILL) or killed by a signal. The message carries
+        // the bounded, machine-searchable abort context so operators do not
+        // have to rely on the bare terminal string `child killed by SIGKILL`.
+        settle({
+          outcome: Outcome.ABORTED,
+          message: abortMessage(signal, abortRecord),
+          ...(abortRecord ? { abort: abortRecord } : {}),
+        });
       } else if (code === 0 && provisional) {
         // Clean exit with an explicit valid result — resolve the provisional.
         settle(provisional);
@@ -289,6 +348,12 @@ export function createChildFactory(cfg: HarnessConfig, script: string, launch: L
 
     return {
       abort: forceAbort,
+      noteStepCompletionDurable: () => {
+        // The supervisor WAL-appended (durably accepted) and acked the child's
+        // complete_step report. The child is now in its terminal phase: the
+        // liveness watchdog applies the bounded post-completion window (HOR-551).
+        stepCompletionDurable = true;
+      },
       events,
       rpcRequests,
       rpcSend,
@@ -296,6 +361,25 @@ export function createChildFactory(cfg: HarnessConfig, script: string, launch: L
       result,
     };
   };
+}
+
+/** Structured, bounded abort diagnostics line (HOR-551): a machine-searchable
+ * JSON record with timing + lifecycle state only — no payloads, prompts, model
+ * bodies, arguments, results, or credentials. */
+function logChildAbort(phase: "initiated" | "exited", record: ChildAbortRecord): void {
+  console.error(`[harness:child-abort] ${JSON.stringify({ phase, ...record })}`);
+}
+
+/** Compact machine-searchable abort context appended to the terminal outcome
+ * message so the durable evidence does not reduce to the bare string
+ * `child killed by SIGKILL` (HOR-551 acceptance). */
+function abortMessage(signal: NodeJS.Signals | null, record: ChildAbortRecord | null): string {
+  const cause = signal ? `child killed by ${signal}` : "aborted";
+  if (!record) return cause;
+  const completeStep = record.stepCompletionDurable ? "durable" : record.stepCompletionObserved ? "observed" : "none";
+  const signals = record.signals.map((s) => s.signal).join("+") || "none";
+  const detail = record.detail ? `; detail=${record.detail}` : "";
+  return `${cause} [abort=${record.reason}; since_heartbeat_ms=${record.sinceHeartbeatMs}; liveness_ms=${record.livenessIntervalMs}; abort_grace_ms=${record.abortGraceMs}; terminal_phase=${record.terminalPhase}; complete_step=${completeStep}; provisional_result=${record.provisionalResultObserved}; signals=${signals}${detail}]`;
 }
 
 /** Serialize an AssignTurn to JSON for the child (the child reconstructs it). */
