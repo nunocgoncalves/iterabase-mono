@@ -28,7 +28,7 @@ func NewMinIO(t *testing.T) MinIOConfig {
 	ctx := context.Background()
 	const access = "artifact-test-access"
 	const secret = "artifact-test-secret-key"
-	container, err := testcontainers.Run(ctx, "quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e",
+	container, err := testcontainers.Run(ctx, "ghcr.io/nunocgoncalves/iterabase-third-party/minio:RELEASE.2025-09-07T16-13-09Z@sha256:786c852164a4fab14fd194fdbe6b4ed6f34934fcf6e4556aa9368432081719e9",
 		testcontainers.WithExposedPorts("9000/tcp"),
 		testcontainers.WithEnv(map[string]string{"MINIO_ROOT_USER": access, "MINIO_ROOT_PASSWORD": secret}),
 		testcontainers.WithCmd("server", "/data"),

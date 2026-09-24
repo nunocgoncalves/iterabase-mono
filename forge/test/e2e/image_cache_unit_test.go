@@ -12,7 +12,7 @@ func TestPinnedImageCacheManifestParsesTheSeededContract(t *testing.T) {
 		"generation": "` + strings.Repeat("a", 64) + `",
 		"cache_root": "/var/lib/iterabase-e2e/image-cache",
 		"images": [
-			{"reference": "quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e", "digest": "sha256:` + strings.Repeat("b", 64) + `", "archive": "quay.io_minio_minio-abc.tar"}
+			{"reference": "ghcr.io/nunocgoncalves/iterabase-third-party/minio:RELEASE.2025-09-07T16-13-09Z@sha256:786c852164a4fab14fd194fdbe6b4ed6f34934fcf6e4556aa9368432081719e9", "digest": "sha256:` + strings.Repeat("b", 64) + `", "archive": "ghcr.io_nunocgoncalves_iterabase-third-party_minio-abc.tar"}
 		]
 	}`
 	manifest, err := parsePinnedImageCacheManifest("cpu", []byte(valid))
