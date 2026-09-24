@@ -12,6 +12,13 @@
 // Liveness: the child emits a heartbeat frame every livenessIntervalMs/2; if
 // the supervisor sees no heartbeat within livenessIntervalMs it aborts —
 // graceful SIGTERM, then SIGKILL after abortGraceMs (bounded escalation).
+// Terminal-phase exception (HOR-551): once `complete_step` is durably accepted
+// (supervisor WAL append + ack) or a provisional result was observed, the
+// no-heartbeat window becomes the bounded livenessIntervalMs + abortGraceMs so
+// an ordinary post-completion teardown is not reaped as ABORTED; a child that
+// exceeds the window still escalates SIGTERM → SIGKILL and resolves ABORTED.
+// Every initiated abort records a machine-searchable reason + bounded context
+// (see ChildAbortRecord).
 //
 // Outcome classification: a `result` frame is PROVISIONAL. Success resolves
 // only after a clean process exit (code 0) with an explicit valid result; an
@@ -99,12 +106,7 @@ export function createChildFactory(cfg: HarnessConfig, script: string, launch: L
             // droppable audit frame. The child is now waiting on a response
             // that will never come, so terminate the turn fail-closed (HOR-395:
             // runtime validation must be bounded fail-closed, not a silent drop).
-            const record = forceAbort("rpc_protocol_error", "invalid child RPC frame on fd 4");
-            settle({
-              outcome: Outcome.FAILED,
-              message: `invalid child RPC frame on fd 4${record ? ` (abort=${record.reason})` : ""}`,
-              ...(record ? { abort: record } : {}),
-            });
+            failWithAbort("rpc_protocol_error", "invalid child RPC frame on fd 4");
             return;
           }
           if (f.type === "stepCompletion") stepCompletionObserved = true;
@@ -116,12 +118,7 @@ export function createChildFactory(cfg: HarnessConfig, script: string, launch: L
         // that never comes while its heartbeat stays healthy. Report every
         // such error to the turn failure + abort path.
         (reason) => {
-          const record = forceAbort("rpc_protocol_error", `invalid child RPC frame on fd 4: ${reason}`);
-          settle({
-            outcome: Outcome.FAILED,
-            message: `invalid child RPC frame on fd 4: ${reason}${record ? ` (abort=${record.reason})` : ""}`,
-            ...(record ? { abort: record } : {}),
-          });
+          failWithAbort("rpc_protocol_error", `invalid child RPC frame on fd 4: ${reason}`);
         },
       );
       (rpcReqStream as Readable).on("data", (chunk: Buffer) => rpcReader.feed(chunk));
@@ -160,12 +157,7 @@ export function createChildFactory(cfg: HarnessConfig, script: string, launch: L
               // fd 5 is not draining — bound supervisor memory by failing the
               // turn closed instead of queueing more response frames.
               rpcOverflowed = true;
-              const record = forceAbort("rpc_backlog_overflow", "fd 5 response backlog overflow (child not draining)");
-              settle({
-                outcome: Outcome.FAILED,
-                message: `fd 5 response backlog overflow (child not draining)${record ? ` (abort=${record.reason})` : ""}`,
-                ...(record ? { abort: record } : {}),
-              });
+              failWithAbort("rpc_backlog_overflow", "fd 5 response backlog overflow (child not draining)");
             }
           }
           return ok;
@@ -305,6 +297,19 @@ export function createChildFactory(cfg: HarnessConfig, script: string, launch: L
       killTimer = setTimeout(() => sendSignal("SIGKILL"), graceMs);
       killTimer.unref?.();
       return abortRecord;
+    };
+
+    /** Fail the turn closed on a bounded abort path: initiate the abort with its
+     * machine-searchable reason + bounded detail, then settle FAILED with the
+     * diagnostic suffix and record. Single-sites the `abort=<reason>` suffix and
+     * the null-record (already exited) case across the bounded-failure paths. */
+    const failWithAbort = (reason: ChildAbortReason, message: string): void => {
+      const record = forceAbort(reason, message);
+      settle({
+        outcome: Outcome.FAILED,
+        message: record ? `${message} (abort=${record.reason})` : message,
+        ...(record ? { abort: record } : {}),
+      });
     };
 
     proc.on("error", (err) => {

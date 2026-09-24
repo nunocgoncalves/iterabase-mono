@@ -18,6 +18,7 @@ import {
   AssistantMessageSchema,
   SessionEndSchema,
   WorkspaceStatusSchema,
+  AbortTurnSchema,
   Outcome,
   type AssignTurn,
   type WorkerMessage,
@@ -749,6 +750,39 @@ function fakeToolCallChild(toolName: string): Child & { sent: unknown[] } {
   return { abort: () => {}, noteStepCompletionDurable: () => {}, events: q, rpcRequests: rpcQ, rpcSend: (f) => sent.push(f), result, sent } as Child & { sent: unknown[] };
 }
 
+/** A fake Child that records every abort reason the supervisor passes and stays
+ * in flight until `release()` (HOR-551 caller→reason mapping tests). */
+function recordingChild(): Child & { aborts: string[]; aborted: Promise<string>; release: () => void } {
+  const q = new Q<ChildEvent>();
+  const rpcQ = new Q<import("./supervisor.js").ChildRpcRequest>();
+  rpcQ.close();
+  const aborts: string[] = [];
+  let resolveAborted!: (reason: string) => void;
+  const aborted = new Promise<string>((r) => (resolveAborted = r));
+  let finish!: () => void;
+  const result = new Promise<ChildResult>((resolve) => {
+    finish = () => {
+      q.close();
+      resolve({ outcome: Outcome.ABORTED });
+    };
+  });
+  return {
+    abort: (reason: string) => {
+      aborts.push(reason);
+      resolveAborted(reason);
+    },
+    noteStepCompletionDurable: () => {},
+    events: q,
+    rpcRequests: rpcQ,
+    rpcSend: () => {},
+    rpcOnDrain: () => () => {},
+    result,
+    aborts,
+    aborted,
+    release: () => finish(),
+  } as Child & { aborts: string[]; aborted: Promise<string>; release: () => void };
+}
+
 describe("Supervisor RPC dispatch (HOR-395)", () => {
   let sandboxParent: string;
   let walDir: string;
@@ -908,6 +942,152 @@ describe("Supervisor RPC dispatch (HOR-395)", () => {
     expect(invokeCount).toBe(1);
   }, 5_000);
 });
+
+/**
+ * HOR-551 caller→reason mapping. The child-process unit tests call
+ * child.abort("<reason>") directly; these assert that the supervisor's three
+ * explicit abort callers actually pass their distinct reason across the
+ * boundary, so a future refactor cannot silently drop or mis-map it.
+ */
+describe("Supervisor abort reason mapping (HOR-551)", () => {
+  let sandboxParent: string;
+  let walDir: string;
+  let sandboxId: string;
+  let probes: Probes;
+
+  beforeEach(() => {
+    sandboxParent = mkdtempSync(join(tmpdir(), "harness-sup-abort-"));
+    walDir = mkdtempSync(join(tmpdir(), "harness-wal-abort-"));
+    sandboxId = "sess-a";
+    probes = new Probes();
+  });
+  afterEach(() => {
+    rmSync(sandboxParent, { recursive: true, force: true });
+    rmSync(walDir, { recursive: true, force: true });
+  });
+
+  it("AbortTurn passes control_plane_cancel to the child abort", async () => {
+    let assignTurnSent = false;
+    let childCreated!: () => void;
+    const created = new Promise<void>((r) => (childCreated = r));
+    const child = recordingChild();
+    const transport = createRouterTransport((router) => {
+      router.service(Harness, {
+        async *work(req) {
+          yield create(ControlMessageSchema, {
+            kind: { case: "welcome", value: create(WelcomeSchema, { fencingGeneration: 1n }) as never } as never,
+          });
+          for await (const m of req) {
+            if (m.kind.case === "ready" && !assignTurnSent) {
+              assignTurnSent = true;
+              yield assignTurn(sandboxId);
+              await created; // the supervisor now owns an active turn
+              yield create(ControlMessageSchema, { kind: { case: "abortTurn", value: create(AbortTurnSchema, { turnId: "turn-1" }) } });
+            } else if (m.kind.case === "turnEvent" && m.kind.value.kind.case === "workerOutcome") {
+              yield create(ControlMessageSchema, {
+                kind: { case: "eventAck", value: create(EventAckSchema, { turnId: m.kind.value.turnId, throughSequence: m.kind.value.sequence }) },
+              });
+            }
+          }
+        },
+      });
+    });
+    const sup = new Supervisor({
+      cfg: makeCfg(sandboxParent, walDir),
+      hello: create(WorkerMessageSchema, { kind: { case: "hello", value: create(HelloSchema, { workerId: "pod-1", poolId: "pool-1" }) } }),
+      childFactory: () => { childCreated(); return child; },
+      probes,
+      transport: () => transport,
+      gatewayClient: fakeGatewayClient(),
+      modelStream: fakeModelStream(),
+    });
+    const runP = sup.run();
+    await child.aborted;
+    expect(child.aborts).toEqual(["control_plane_cancel"]);
+    child.release();
+    await sup.drain();
+    await runP;
+  }, 10_000);
+
+  it("drain passes worker_drain to the child abort", async () => {
+    let assignTurnSent = false;
+    let childCreated!: () => void;
+    const created = new Promise<void>((r) => (childCreated = r));
+    const child = recordingChild();
+    const transport = createRouterTransport((router) => {
+      router.service(Harness, {
+        async *work(req) {
+          yield create(ControlMessageSchema, {
+            kind: { case: "welcome", value: create(WelcomeSchema, { fencingGeneration: 1n }) as never } as never,
+          });
+          for await (const m of req) {
+            if (m.kind.case === "ready" && !assignTurnSent) {
+              assignTurnSent = true;
+              yield assignTurn(sandboxId);
+            }
+          }
+        },
+      });
+    });
+    const sup = new Supervisor({
+      cfg: makeCfg(sandboxParent, walDir),
+      hello: create(WorkerMessageSchema, { kind: { case: "hello", value: create(HelloSchema, { workerId: "pod-1", poolId: "pool-1" }) } }),
+      childFactory: () => { childCreated(); return child; },
+      probes,
+      transport: () => transport,
+      gatewayClient: fakeGatewayClient(),
+      modelStream: fakeModelStream(),
+    });
+    const runP = sup.run();
+    await created; // currentChild is set before this continuation resumes
+    const drainP = sup.drain();
+    await child.aborted;
+    expect(child.aborts).toEqual(["worker_drain"]);
+    child.release();
+    await drainP;
+    await runP;
+  }, 10_000);
+
+  it("stream loss passes stream_loss to the child abort", async () => {
+    let assignTurnSent = false;
+    let childCreated!: () => void;
+    const created = new Promise<void>((r) => (childCreated = r));
+    const child = recordingChild();
+    const transport = createRouterTransport((router) => {
+      router.service(Harness, {
+        async *work(req) {
+          yield create(ControlMessageSchema, {
+            kind: { case: "welcome", value: create(WelcomeSchema, { fencingGeneration: 1n }) as never } as never,
+          });
+          for await (const m of req) {
+            if (m.kind.case === "ready" && !assignTurnSent) {
+              assignTurnSent = true;
+              yield assignTurn(sandboxId);
+              await created;
+              return; // control stream ends while the turn is active → fail-closed
+            }
+          }
+        },
+      });
+    });
+    const sup = new Supervisor({
+      cfg: makeCfg(sandboxParent, walDir),
+      hello: create(WorkerMessageSchema, { kind: { case: "hello", value: create(HelloSchema, { workerId: "pod-1", poolId: "pool-1" }) } }),
+      childFactory: () => { childCreated(); return child; },
+      probes,
+      transport: () => transport,
+      gatewayClient: fakeGatewayClient(),
+      modelStream: fakeModelStream(),
+    });
+    const runP = sup.run();
+    await child.aborted;
+    expect(child.aborts).toEqual(["stream_loss"]);
+    child.release();
+    await sup.drain();
+    await runP.catch(() => {});
+  }, 10_000);
+});
+
 /** A no-op model stream (tests that don't exercise model calls). */
 function fakeModelStream(): typeof import("./model-bridge.js").streamModel {
   return async () => {};
