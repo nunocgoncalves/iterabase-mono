@@ -93,13 +93,17 @@ def load_runtime_images(root: Path) -> list[dict[str, str]]:
 def select_images(
     images: list[dict[str, str]], capacity: str
 ) -> list[dict[str, str]]:
-    """Return the pinned images a fixture capacity must cache."""
+    """Return the pinned images a fixture capacity caches.
+
+    GPU-only images (nvcr.io/NVIDIA/vLLM) stay registry pulls for now: the GPU
+    fixture's 96 GB root disk cannot hold the 46 GB cache and its imported copy
+    at the same time. The shared platform set is cached on both capacities,
+    which removes the MinIO/quay wall and most pull time.
+    """
     if capacity not in CAPACITIES:
         raise FixtureImageCacheError(
             f"unsupported capacity {capacity!r}; expected one of {CAPACITIES}"
         )
-    if capacity == "gpu":
-        return list(images)
     return [image for image in images if not is_gpu_only(image["reference"])]
 
 
