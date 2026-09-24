@@ -167,6 +167,22 @@ class FixtureImageCacheTests(unittest.TestCase):
             with self.assertRaises(fixture_image_cache.FixtureImageCacheError):
                 fixture_image_cache.rewrite_docker_manifest(payload, "busybox:1.37.0")
 
+    def test_docker_manifest_config_digest_reads_the_config(self) -> None:
+        config = "sha256:" + "b" * 64
+        manifest = json.dumps(
+            [{"Config": config, "RepoTags": ["busybox:1.37.0"], "Layers": ["436a1b1f.tar.gz"]}]
+        ).encode()
+        self.assertEqual(
+            fixture_image_cache.docker_manifest_config_digest(manifest, "busybox:1.37.0"), config
+        )
+        for payload in (
+            b"{not json",
+            json.dumps([{"RepoTags": ["busybox:1.37.0"], "Layers": ["436a1b1f.tar.gz"]}]).encode(),
+            json.dumps([{"Config": "sha256:short", "Layers": ["436a1b1f.tar.gz"]}]).encode(),
+        ):
+            with self.assertRaises(fixture_image_cache.FixtureImageCacheError):
+                fixture_image_cache.docker_manifest_config_digest(payload, "busybox:1.37.0")
+
     def test_unknown_capacity_is_rejected(self) -> None:
         images = fixture_image_cache.load_runtime_images(ROOT)
         with self.assertRaisesRegex(

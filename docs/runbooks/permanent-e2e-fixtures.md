@@ -163,30 +163,41 @@ gh secret list --repo nunocgoncalves/iterabase-mono
 
 ## Pinned image cache
 
-Every pinned runtime image in `.github/inputs/remote-content.json` is cached on
-each fixture host so applies never depend on public registries, whose per-IP
-anonymous quotas can fail a run mid-apply (`401`/rate-limit responses).
+The shared platform image set pinned in `.github/inputs/remote-content.json` is
+cached on each fixture host so the platform applies never pull those images from
+public registries, whose per-IP anonymous quotas can fail a run mid-apply
+(`401`/rate-limit responses). GPU-only pins (`nvcr.io`, `nvidia/*`, vLLM) are
+not cached: they remain per-run registry pulls on the GPU capacity until that
+fixture has a dedicated cache volume.
 
 - Layout: `/var/lib/iterabase-e2e/image-cache/<capacity>/<generation>/` holds
   `generation.json` (emitted by
-  `.github/scripts/fixture_image_cache.py manifest --capacity <capacity>`) and
-  `images/<archive>.tar`, one digest-pinned image per archive.
-- Capacity sets: the GPU fixture caches every pinned image; the CPU fixture
-  caches every image except GPU-only registries/repositories (`nvcr.io`,
-  `nvidia/*`, vLLM).
+  `.github/scripts/fixture_image_cache.py manifest --capacity <capacity>`, plus
+  the per-image config digest recorded at seed time) and `images/<archive>.tar`,
+  one digest-pinned image per archive.
+- Capacity sets: both capacities cache the same shared set (49 images at this
+  head, ~4.5 GB). GPU-only registries/repositories (`nvcr.io`, `nvidia/*`,
+  vLLM) are excluded because the GPU fixture's 96 GB root disk cannot hold the
+  full ~46 GB cache plus its imported copy.
 - Seeding: dispatch the `Fixture image cache` workflow with `capacity` and the
   repository `ref` whose pinned-list generation is required. The job shares the
   `iterabase-permanent-fixture-<capacity>` lock, pulls each image by digest with
-  the reviewed `crane` binary directly on the host, verifies the generation
-  marker, and leaves a matching generation untouched. Seeding is required again
-  only when the pinned list changes (new generation).
+  the reviewed `crane` binary directly on the host, stages
+  `.staging-<generation>`, writes `generation.json`, swaps it into place, and
+  only then prunes superseded generations. Seeding is required again only when
+  the pinned list changes (new generation); a matching generation is left
+  untouched.
+- Failed seeds: staging happens before any prune, so a seed that fails partway
+  leaves the previous generation intact and usable. Re-run the workflow to
+  retry; the next run discards the failed staging directory.
 - Per run: real-machine PR and candidate jobs derive the generation from
-  `remote-content.json`, and the harness imports and verifies every reference
-  before the first apply. A missing or mismatched generation fails the scenario
-  with an actionable message instead of falling back to registries.
-- Retention: prune old generations once the pinned list moves; keep the
-  generation referenced by the checked-out source. The seed workflow reports the
-  retained generation sizes.
+  `remote-content.json`, and the harness imports and verifies every reference —
+  including the recorded config digest, not just the tag — before the first
+  apply. A missing or mismatched generation or image fails the scenario with an
+  actionable message instead of falling back to registries.
+- Retention: superseded generations are pruned only after a new generation is
+  finalized; keep the generation referenced by the checked-out source. The seed
+  workflow reports the retained generation sizes.
 - The cache is a derived artifact of `remote-content.json`; never hand-edit it
   and never place credentials or customer data in it.
 - MinIO provenance: `ghcr.io/nunocgoncalves/iterabase-third-party/minio:RELEASE.2025-09-07T16-13-09Z`
