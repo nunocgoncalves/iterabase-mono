@@ -18,22 +18,23 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class FixtureImageCacheTests(unittest.TestCase):
-    def test_capacities_partition_the_pinned_runtime_authority(self) -> None:
+    def test_capacities_cache_the_shared_platform_authority(self) -> None:
         images = fixture_image_cache.load_runtime_images(ROOT)
         cpu = fixture_image_cache.select_images(images, "cpu")
         gpu = fixture_image_cache.select_images(images, "gpu")
 
-        self.assertEqual(len(gpu), len(images))
+        self.assertEqual(len(gpu), len(cpu))
         cpu_refs = {image["reference"] for image in cpu}
         gpu_refs = {image["reference"] for image in gpu}
-        self.assertTrue(cpu_refs.issubset(gpu_refs))
-        self.assertTrue(any(fixture_image_cache.is_gpu_only(ref) for ref in gpu_refs))
+        self.assertEqual(cpu_refs, gpu_refs)
+        self.assertFalse(any(fixture_image_cache.is_gpu_only(ref) for ref in gpu_refs))
+        gpu_only = [image["reference"] for image in images if fixture_image_cache.is_gpu_only(image["reference"])]
+        self.assertTrue(gpu_only)
+        for reference in gpu_only:
+            self.assertNotIn(reference, gpu_refs)
         for image in images:
-            reference = image["reference"]
-            if fixture_image_cache.is_gpu_only(reference):
-                self.assertNotIn(reference, cpu_refs)
-            else:
-                self.assertIn(reference, cpu_refs)
+            if not fixture_image_cache.is_gpu_only(image["reference"]):
+                self.assertIn(image["reference"], gpu_refs)
 
     def test_gpu_only_classification_matches_reviewed_authority(self) -> None:
         images = fixture_image_cache.load_runtime_images(ROOT)
