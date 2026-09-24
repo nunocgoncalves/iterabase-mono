@@ -65,6 +65,12 @@ func resetPermanentGPUFixtureStage(t *testing.T, state *permanentGPUFixtureState
 
 func applyGPUSubstrateStage(t *testing.T, state *permanentGPUFixtureState) {
 	cfgPath := writeForgeConfigGPUDriver(t, state.runID, state.host.IP, state.privKeyPath, gpuUpgradeBaselineDriver)
+	// Bring up K3s first so the pinned-image cache is imported and verified
+	// before the GPU operator (or any chart) can consult a public registry.
+	bootstrap := applyOnceArgs(t, state.forgeBin, state.forgeHome, cfgPath,
+		"--skip-gpu", "--skip-chart", "--skip-overlay", "--skip-secrets", "--skip-flux")
+	assertApplyMarkers(t, bootstrap, "action:     install", "node ready: true", "data storage: iterabase-data")
+	preparePinnedImageCache(t, state.host.IP, state.privKeyPath, "gpu")
 	out := applyOnce(t, state.forgeBin, state.forgeHome, cfgPath)
 	assertApplyMarkers(t, out, "node ready: true", "data storage: iterabase-data", "gpu ready: true", "gpu driver: "+gpuUpgradeBaselineDriver)
 	state.bindKubeconfigTunnel(t)
