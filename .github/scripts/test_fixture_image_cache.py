@@ -112,7 +112,7 @@ class FixtureImageCacheTests(unittest.TestCase):
                 crane=Path("/tmp/crane"),
                 dry_run=True,
             )
-        self.assertEqual(len(commands), len(manifest["images"]) * 7 + 6)
+        self.assertEqual(len(commands), len(manifest["images"]) * 7 + 9)
         printed = output.getvalue()
         for image in manifest["images"]:
             self.assertIn(f"{image['reference']}@{image['digest']}", printed)
@@ -136,7 +136,7 @@ class FixtureImageCacheTests(unittest.TestCase):
             dry_run=True,
             runner=failing_runner,
         )
-        self.assertEqual(len(commands), len(manifest["images"]) * 7 + 6)
+        self.assertEqual(len(commands), len(manifest["images"]) * 7 + 9)
 
     def test_rewrite_docker_manifest_binds_the_exact_reference(self) -> None:
         manifest = json.dumps(
