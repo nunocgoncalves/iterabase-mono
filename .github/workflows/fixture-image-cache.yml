@@ -1,0 +1,77 @@
+name: Fixture image cache
+
+on:
+  workflow_dispatch:
+    inputs:
+      capacity:
+        description: Permanent fixture capacity whose pinned images are cached
+        type: choice
+        options:
+          - cpu
+          - gpu
+        required: true
+      ref:
+        description: Repository ref whose pinned image authority is seeded
+        type: string
+        required: false
+        default: master
+
+permissions:
+  contents: read
+
+# Share the capacity lock with real-machine E2E and candidate runs so seeding
+# never overlaps a lifecycle that imports from the same cache directory.
+concurrency:
+  group: iterabase-permanent-fixture-${{ inputs.capacity }}
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  seed:
+    name: seed-${{ inputs.capacity }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+      - name: Verify source checkout
+        env:
+          SOURCE_REF: ${{ inputs.ref }}
+        run: test "$(git rev-parse HEAD)" = "$(git rev-parse "$SOURCE_REF"^{commit})"
+      - name: Install repository-locked crane
+        run: .github/scripts/install_ci_tool.sh crane v0.22.1
+      - name: Bind the fixed permanent fixture
+        uses: ./.github/actions/setup-permanent-fixture
+        with:
+          capacity: ${{ inputs.capacity }}
+          address: ${{ inputs.capacity == 'cpu' && vars.FORGE_E2E_CPU_ADDRESS || vars.FORGE_E2E_GPU_ADDRESS }}
+          ssh-user: ${{ inputs.capacity == 'cpu' && vars.FORGE_E2E_CPU_SSH_USER || vars.FORGE_E2E_GPU_SSH_USER }}
+          ssh-private-key: ${{ inputs.capacity == 'cpu' && secrets.FORGE_E2E_CPU_SSH_KEY || secrets.FORGE_E2E_GPU_SSH_KEY }}
+          ssh-host-key: ${{ inputs.capacity == 'cpu' && vars.FORGE_E2E_CPU_SSH_HOST_KEY || vars.FORGE_E2E_GPU_SSH_HOST_KEY }}
+          data-storage-device: ${{ inputs.capacity == 'cpu' && vars.FORGE_E2E_CPU_DATA_STORAGE_DEVICE || vars.FORGE_E2E_GPU_DATA_STORAGE_DEVICE }}
+          model-cache-device: ${{ inputs.capacity == 'gpu' && vars.FORGE_E2E_GPU_MODEL_CACHE_DEVICE || '' }}
+          model-cache-uuid: ${{ inputs.capacity == 'gpu' && vars.FORGE_E2E_GPU_MODEL_CACHE_UUID || '' }}
+      - name: Seed the pinned image cache over SSH
+        env:
+          CAPACITY: ${{ inputs.capacity }}
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/fixture_image_cache.py seed \
+            --capacity "$CAPACITY" \
+            --address "$FORGE_E2E_FIXTURE_ADDRESS" \
+            --user "$FORGE_E2E_FIXTURE_SSH_USER" \
+            --key "$FORGE_E2E_FIXTURE_SSH_KEY_PATH" \
+            --host-key "$FORGE_E2E_FIXTURE_SSH_HOST_KEY" \
+            --crane "$(command -v crane)"
+      - name: Report retained cache generations
+        if: always()
+        env:
+          CAPACITY: ${{ inputs.capacity }}
+        run: |
+          set -euo pipefail
+          ssh -i "$FORGE_E2E_FIXTURE_SSH_KEY_PATH" \
+            -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+            -o "UserKnownHostsFile=$FORGE_E2E_FIXTURE_SSH_HOST_KEY" \
+            "$FORGE_E2E_FIXTURE_SSH_USER@$FORGE_E2E_FIXTURE_ADDRESS" \
+            "sudo du -sh /var/lib/iterabase-e2e/image-cache/$CAPACITY/* 2>/dev/null || true"

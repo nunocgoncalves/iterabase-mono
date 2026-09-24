@@ -90,6 +90,14 @@ case "$name" in
     "$destination/$name" --version | grep -F "${version#v}" >/dev/null
     echo "$destination" >> "$GITHUB_PATH"
     ;;
+  crane)
+    destination="$install_root/bin"
+    mkdir -p "$destination"
+    tar -xzf "$artifact" -C "$destination" crane
+    chmod 0755 "$destination/crane"
+    "$destination/crane" version | grep -F "${version#v}" >/dev/null
+    echo "$destination" >> "$GITHUB_PATH"
+    ;;
   *)
     echo "no reviewed installer for CI tool $name" >&2
     exit 1
