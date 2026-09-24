@@ -4,57 +4,67 @@ on:
   workflow_dispatch:
     inputs:
       capacity:
-        description: Permanent fixture capacity whose pinned images are cached
+        description: Fixture capacity to seed
         type: choice
         options:
+          - both
           - cpu
           - gpu
-        required: true
+        required: false
+        default: both
       ref:
         description: Repository ref whose pinned image authority is seeded
         type: string
         required: false
         default: master
+  # Temporary rollout trigger for the HOR-588 branch so the cache can be seeded
+  # before this workflow exists on the default branch. Removed before merge.
+  push:
+    branches: [HOR-588-fixture-image-cache]
 
 permissions:
   contents: read
 
-# Share the capacity lock with real-machine E2E and candidate runs so seeding
-# never overlaps a lifecycle that imports from the same cache directory.
-concurrency:
-  group: iterabase-permanent-fixture-${{ inputs.capacity }}
-  cancel-in-progress: false
-  queue: max
-
 jobs:
   seed:
-    name: seed-${{ inputs.capacity }}
+    name: seed-${{ matrix.capacity }}
+    if: github.event_name == 'push' || inputs.capacity == 'both' || inputs.capacity == matrix.capacity
     runs-on: ubuntu-latest
     timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        capacity: [cpu, gpu]
+    # Share the capacity lock with real-machine E2E and candidate runs so
+    # seeding never overlaps a lifecycle that imports from the same directory.
+    concurrency:
+      group: iterabase-permanent-fixture-${{ matrix.capacity }}
+      cancel-in-progress: false
+      queue: max
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.ref }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.ref }}
       - name: Verify source checkout
         env:
-          SOURCE_REF: ${{ inputs.ref }}
-        run: test "$(git rev-parse HEAD)" = "$(git rev-parse "$SOURCE_REF"^{commit})"
+          SOURCE_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.ref_name }}
+        run: test "$(git rev-parse HEAD)" = "$(git rev-parse "$SOURCE_REF^{commit}")"
       - name: Install repository-locked crane
         run: .github/scripts/install_ci_tool.sh crane v0.22.1
       - name: Bind the fixed permanent fixture
         uses: ./.github/actions/setup-permanent-fixture
         with:
-          capacity: ${{ inputs.capacity }}
-          address: ${{ inputs.capacity == 'cpu' && vars.FORGE_E2E_CPU_ADDRESS || vars.FORGE_E2E_GPU_ADDRESS }}
-          ssh-user: ${{ inputs.capacity == 'cpu' && vars.FORGE_E2E_CPU_SSH_USER || vars.FORGE_E2E_GPU_SSH_USER }}
-          ssh-private-key: ${{ inputs.capacity == 'cpu' && secrets.FORGE_E2E_CPU_SSH_KEY || secrets.FORGE_E2E_GPU_SSH_KEY }}
-          ssh-host-key: ${{ inputs.capacity == 'cpu' && vars.FORGE_E2E_CPU_SSH_HOST_KEY || vars.FORGE_E2E_GPU_SSH_HOST_KEY }}
-          data-storage-device: ${{ inputs.capacity == 'cpu' && vars.FORGE_E2E_CPU_DATA_STORAGE_DEVICE || vars.FORGE_E2E_GPU_DATA_STORAGE_DEVICE }}
-          model-cache-device: ${{ inputs.capacity == 'gpu' && vars.FORGE_E2E_GPU_MODEL_CACHE_DEVICE || '' }}
-          model-cache-uuid: ${{ inputs.capacity == 'gpu' && vars.FORGE_E2E_GPU_MODEL_CACHE_UUID || '' }}
+          capacity: ${{ matrix.capacity }}
+          address: ${{ matrix.capacity == 'cpu' && vars.FORGE_E2E_CPU_ADDRESS || vars.FORGE_E2E_GPU_ADDRESS }}
+          ssh-user: ${{ matrix.capacity == 'cpu' && vars.FORGE_E2E_CPU_SSH_USER || vars.FORGE_E2E_GPU_SSH_USER }}
+          ssh-private-key: ${{ matrix.capacity == 'cpu' && secrets.FORGE_E2E_CPU_SSH_KEY || secrets.FORGE_E2E_GPU_SSH_KEY }}
+          ssh-host-key: ${{ matrix.capacity == 'cpu' && vars.FORGE_E2E_CPU_SSH_HOST_KEY || vars.FORGE_E2E_GPU_SSH_HOST_KEY }}
+          data-storage-device: ${{ matrix.capacity == 'cpu' && vars.FORGE_E2E_CPU_DATA_STORAGE_DEVICE || vars.FORGE_E2E_GPU_DATA_STORAGE_DEVICE }}
+          model-cache-device: ${{ matrix.capacity == 'gpu' && vars.FORGE_E2E_GPU_MODEL_CACHE_DEVICE || '' }}
+          model-cache-uuid: ${{ matrix.capacity == 'gpu' && vars.FORGE_E2E_GPU_MODEL_CACHE_UUID || '' }}
       - name: Seed the pinned image cache over SSH
         env:
-          CAPACITY: ${{ inputs.capacity }}
+          CAPACITY: ${{ matrix.capacity }}
         run: |
           set -euo pipefail
           python3 .github/scripts/fixture_image_cache.py seed \
@@ -67,7 +77,7 @@ jobs:
       - name: Report retained cache generations
         if: always()
         env:
-          CAPACITY: ${{ inputs.capacity }}
+          CAPACITY: ${{ matrix.capacity }}
         run: |
           set -euo pipefail
           ssh -i "$FORGE_E2E_FIXTURE_SSH_KEY_PATH" \
