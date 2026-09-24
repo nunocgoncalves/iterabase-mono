@@ -112,7 +112,7 @@ class FixtureImageCacheTests(unittest.TestCase):
                 crane=Path("/tmp/crane"),
                 dry_run=True,
             )
-        self.assertEqual(len(commands), len(manifest["images"]) * 6 + 6)
+        self.assertEqual(len(commands), len(manifest["images"]) * 7 + 6)
         printed = output.getvalue()
         for image in manifest["images"]:
             self.assertIn(f"{image['reference']}@{image['digest']}", printed)
@@ -136,49 +136,35 @@ class FixtureImageCacheTests(unittest.TestCase):
             dry_run=True,
             runner=failing_runner,
         )
-        self.assertEqual(len(commands), len(manifest["images"]) * 6 + 6)
+        self.assertEqual(len(commands), len(manifest["images"]) * 7 + 6)
 
-    def test_annotate_oci_index_binds_the_exact_reference(self) -> None:
-        index = {
-            "schemaVersion": 2,
-            "manifests": [
+    def test_rewrite_docker_manifest_binds_the_exact_reference(self) -> None:
+        manifest = json.dumps(
+            [
                 {
-                    "mediaType": "application/vnd.oci.image.manifest.v1+json",
-                    "digest": "sha256:" + "a" * 64,
-                    "platform": {"os": "linux", "architecture": "amd64"},
+                    "Config": "sha256:" + "b" * 64,
+                    "RepoTags": ["index.docker.io/library/busybox:i-was-a-digest"],
+                    "Layers": ["436a1b1f.tar.gz"],
                 }
-            ],
-        }
-        annotated = fixture_image_cache.annotate_oci_index(
-            json.dumps(index).encode(), "quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z"
+            ]
+        ).encode()
+        rewritten = json.loads(
+            fixture_image_cache.rewrite_docker_manifest(manifest, "busybox:1.37.0")
         )
-        parsed = json.loads(annotated)
-        annotations = parsed["manifests"][0]["annotations"]
-        self.assertEqual(
-            annotations["io.containerd.image.name"],
-            "quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z",
-        )
-        self.assertEqual(
-            annotations["org.opencontainers.image.ref.name"],
-            "RELEASE.2025-09-07T16-13-09Z",
-        )
+        self.assertEqual(rewritten[0]["RepoTags"], ["busybox:1.37.0"])
+        self.assertEqual(rewritten[0]["Config"], "sha256:" + "b" * 64)
+        self.assertEqual(rewritten[0]["Layers"], ["436a1b1f.tar.gz"])
 
-    def test_annotate_oci_index_rejects_ambiguous_or_invalid_indexes(self) -> None:
-        ambiguous = {
-            "schemaVersion": 2,
-            "manifests": [
-                {"digest": "sha256:" + "a" * 64},
-                {"digest": "sha256:" + "b" * 64},
-            ],
-        }
-        for payload, reference in (
-            (b"{not json", "busybox:1.37.0"),
-            (json.dumps(ambiguous).encode(), "busybox:1.37.0"),
-            (json.dumps({"schemaVersion": 2}).encode(), "busybox:1.37.0"),
-            (json.dumps({"manifests": [{"digest": "x"}]}).encode(), "busybox"),
+    def test_rewrite_docker_manifest_rejects_ambiguous_manifests(self) -> None:
+        valid_entry = {"Config": "sha256:" + "b" * 64, "Layers": ["436a1b1f.tar.gz"]}
+        for payload in (
+            b"{not json",
+            json.dumps([valid_entry, valid_entry]).encode(),
+            json.dumps([{"RepoTags": ["busybox:1.37.0"], "Layers": ["436a1b1f.tar.gz"]}]).encode(),
+            json.dumps([{"Config": "sha256:" + "b" * 64, "Layers": []}]).encode(),
         ):
             with self.assertRaises(fixture_image_cache.FixtureImageCacheError):
-                fixture_image_cache.annotate_oci_index(payload, reference)
+                fixture_image_cache.rewrite_docker_manifest(payload, "busybox:1.37.0")
 
     def test_unknown_capacity_is_rejected(self) -> None:
         images = fixture_image_cache.load_runtime_images(ROOT)
