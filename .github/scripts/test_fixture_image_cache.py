@@ -50,7 +50,7 @@ class FixtureImageCacheTests(unittest.TestCase):
         self.assertTrue(any(ref.startswith("nvcr.io/") for ref in gpu_only))
         self.assertTrue(any(ref.startswith("nvidia/") for ref in gpu_only))
         self.assertTrue(any("vllm" in ref for ref in gpu_only))
-        self.assertTrue(any(ref.startswith("quay.io/minio/") for ref in shared))
+        self.assertTrue(any(ref.startswith("ghcr.io/nunocgoncalves/iterabase-third-party/minio") for ref in shared))
 
     def test_generation_is_order_independent_and_capacity_bound(self) -> None:
         images = fixture_image_cache.load_runtime_images(ROOT)
