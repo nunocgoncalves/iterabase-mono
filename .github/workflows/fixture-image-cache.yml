@@ -3,15 +3,6 @@ name: Fixture image cache
 on:
   workflow_dispatch:
     inputs:
-      capacity:
-        description: Fixture capacity to seed
-        type: choice
-        options:
-          - both
-          - cpu
-          - gpu
-        required: false
-        default: both
       ref:
         description: Repository ref whose pinned image authority is seeded
         type: string
@@ -28,7 +19,6 @@ permissions:
 jobs:
   seed:
     name: seed-${{ matrix.capacity }}
-    if: github.event_name == 'push' || inputs.capacity == 'both' || inputs.capacity == matrix.capacity
     runs-on: ubuntu-latest
     timeout-minutes: 180
     strategy:
