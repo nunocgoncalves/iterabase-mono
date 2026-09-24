@@ -278,6 +278,17 @@ def seed_fixture_image_cache(
                 )
                 return commands
 
+    execute(ssh_command(f"sudo mkdir -p {remote_root}"))
+    # Prune every other generation and stale staging directory first: an
+    # incompatible or superseded cache can otherwise fill the fixture disk
+    # before the new generation is staged.
+    execute(
+        ssh_command(
+            f"sudo find {remote_root} -mindepth 1 -maxdepth 1 -type d "
+            f"! -name {shlex.quote(generation)} -exec rm -rf {{}} +"
+        )
+    )
+    execute(ssh_command(f"df -h {remote_root}"))
     execute(ssh_command(f"sudo rm -rf {staging_dir} && sudo mkdir -p {staging_dir}/images"))
     execute(
         [
