@@ -310,6 +310,14 @@ jobs:
           data-storage-device: ${{ matrix.capacity == 'cpu' && vars.FORGE_E2E_CPU_DATA_STORAGE_DEVICE || vars.FORGE_E2E_GPU_DATA_STORAGE_DEVICE }}
           model-cache-device: ${{ matrix.capacity == 'gpu' && vars.FORGE_E2E_GPU_MODEL_CACHE_DEVICE || '' }}
           model-cache-uuid: ${{ matrix.capacity == 'gpu' && vars.FORGE_E2E_GPU_MODEL_CACHE_UUID || '' }}
+      - name: Compute pinned image cache identity
+        env:
+          CAPACITY: ${{ matrix.capacity }}
+        run: |
+          set -euo pipefail
+          manifest="$(python3 .github/scripts/fixture_image_cache.py manifest --capacity "$CAPACITY")"
+          printf 'FORGE_E2E_IMAGE_CACHE_ROOT=%s\n' "$(jq -r '.cache_root' <<<"$manifest")" >> "$GITHUB_ENV"
+          printf 'FORGE_E2E_IMAGE_CACHE_GENERATION=%s\n' "$(jq -r '.generation' <<<"$manifest")" >> "$GITHUB_ENV"
       - name: Compose and run every scenario for this fixture serially
         env:
           SCENARIOS: ${{ toJSON(matrix.scenarios) }}
