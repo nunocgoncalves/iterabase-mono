@@ -25,7 +25,7 @@ from typing import Any
 SCHEMA_VERSION = 1
 # Bump when the on-host archive format or naming changes so every fixture
 # re-seeds instead of trusting an incompatible generation.
-SEED_FORMAT_VERSION = 2
+SEED_FORMAT_VERSION = 3
 CACHE_ROOT = "/var/lib/iterabase-e2e/image-cache"
 CAPACITIES = ("cpu", "gpu")
 SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -127,33 +127,30 @@ def generation(capacity: str, images: list[dict[str, str]]) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def annotate_oci_index(data: bytes, reference: str) -> bytes:
-    """Bind the exact manifest reference into a single-manifest OCI index.
+def rewrite_docker_manifest(data: bytes, reference: str) -> bytes:
+    """Bind the exact reference into a docker-save `manifest.json`.
 
-    `crane pull --format=oci` writes an OCI layout whose manifest descriptors do
-    not carry `io.containerd.image.name`, so a `ctr images import` of the packed
-    archive would register no usable name. This mirrors
-    `.github/scripts/e2e.py:bind_image_archive_tag` for the fixture cache.
+    k3s's containerd imports docker-format archives by `RepoTags` and normalizes
+    the resulting name (`busybox:1.37.0` -> `docker.io/library/busybox:1.37.0`),
+    which is the same form `crictl` and kubelet resolve. crane names
+    digest-pulled images `i-was-a-digest`, so the tag must be rewritten before
+    the archive is imported.
     """
     try:
-        index = json.loads(data)
+        manifest = json.loads(data)
     except (json.JSONDecodeError, UnicodeDecodeError) as error:
-        raise FixtureImageCacheError(f"decode OCI index for {reference}: {error}") from error
-    if not isinstance(index, dict):
-        raise FixtureImageCacheError(f"OCI index for {reference} is not an object")
-    descriptors = index.get("manifests")
-    if not isinstance(descriptors, list) or len(descriptors) != 1 or not isinstance(descriptors[0], dict):
-        raise FixtureImageCacheError(f"OCI index for {reference} is ambiguous")
-    last_segment = reference.rsplit("/", 1)[-1]
-    if ":" not in last_segment:
-        raise FixtureImageCacheError(f"pinned image {reference} has no tag")
-    tag = last_segment.rsplit(":", 1)[1]
-    annotations = descriptors[0].setdefault("annotations", {})
-    if not isinstance(annotations, dict):
-        raise FixtureImageCacheError(f"OCI index for {reference} has invalid annotations")
-    annotations["io.containerd.image.name"] = reference
-    annotations["org.opencontainers.image.ref.name"] = tag
-    return json.dumps(index, separators=(",", ":")).encode("utf-8")
+        raise FixtureImageCacheError(f"decode docker manifest for {reference}: {error}") from error
+    if not isinstance(manifest, list) or len(manifest) != 1 or not isinstance(manifest[0], dict):
+        raise FixtureImageCacheError(f"docker manifest for {reference} is ambiguous")
+    entry = manifest[0]
+    if (
+        not isinstance(entry.get("Config"), str)
+        or not isinstance(entry.get("Layers"), list)
+        or not entry["Layers"]
+    ):
+        raise FixtureImageCacheError(f"docker manifest for {reference} has no config or layers")
+    entry["RepoTags"] = [reference]
+    return json.dumps(manifest, separators=(",", ":")).encode("utf-8")
 
 
 def build_manifest(root: Path, capacity: str) -> dict[str, Any]:
@@ -297,24 +294,23 @@ def seed_fixture_image_cache(
         execute(ssh_command(f"sudo rm -rf {workdir} && sudo mkdir -p {workdir}"))
         execute(
             ssh_command(
-                f"sudo {crane_remote} pull --format=oci --annotate-ref --platform {platform} "
-                f"{shlex.quote(reference)} {workdir}"
+                f"sudo {crane_remote} pull --platform {platform} "
+                f"{shlex.quote(reference)} {workdir}/image.tar"
             )
         )
-        index_bytes = capture(ssh_command(f"sudo cat {workdir}/index.json"))
+        execute(ssh_command(f"sudo tar -xf {workdir}/image.tar -C {workdir}"))
+        manifest_bytes = capture(ssh_command(f"sudo cat {workdir}/manifest.json"))
         if dry_run:
-            execute(ssh_command(f"sudo tee {workdir}/index.json >/dev/null"))
+            execute(ssh_command(f"sudo tee {workdir}/manifest.json >/dev/null"))
         else:
-            annotated = annotate_oci_index(index_bytes.encode("utf-8"), image["reference"])
+            rewritten = rewrite_docker_manifest(
+                manifest_bytes.encode("utf-8"), image["reference"]
+            )
             execute(
-                ssh_command(f"sudo tee {workdir}/index.json >/dev/null"),
-                stdin_text=annotated.decode("utf-8") + "\n",
+                ssh_command(f"sudo tee {workdir}/manifest.json >/dev/null"),
+                stdin_text=rewritten.decode("utf-8") + "\n",
             )
-        execute(
-            ssh_command(
-                f"sudo tar -C {workdir} -cf {shlex.quote(archive)} oci-layout index.json blobs"
-            )
-        )
+        execute(ssh_command(f"sudo tar -C {workdir} -cf {shlex.quote(archive)} ."))
         execute(ssh_command(f"sudo rm -rf {workdir}"))
 
     rendered_manifest = json.dumps(manifest, indent=2) + "\n"
