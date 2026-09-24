@@ -19,9 +19,10 @@ var pinnedImageCacheGenerationPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 var pinnedImageCacheDigestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 
 type pinnedImageCacheImage struct {
-	Reference string `json:"reference"`
-	Digest    string `json:"digest"`
-	Archive   string `json:"archive"`
+	Reference    string `json:"reference"`
+	Digest       string `json:"digest"`
+	ConfigDigest string `json:"config_digest"`
+	Archive      string `json:"archive"`
 }
 
 type pinnedImageCacheManifest struct {
@@ -53,6 +54,9 @@ func parsePinnedImageCacheManifest(capacity string, data []byte) (pinnedImageCac
 	for _, image := range manifest.Images {
 		if image.Reference == "" || !pinnedImageCacheDigestPattern.MatchString(image.Digest) {
 			return manifest, fmt.Errorf("pinned image %q has an incomplete digest identity", image.Reference)
+		}
+		if !pinnedImageCacheDigestPattern.MatchString(image.ConfigDigest) {
+			return manifest, fmt.Errorf("pinned image %q has an incomplete config digest", image.Reference)
 		}
 		if image.Archive == "" || path.Base(image.Archive) != image.Archive || !strings.HasSuffix(image.Archive, ".tar") {
 			return manifest, fmt.Errorf("pinned image %q has an unsafe archive name %q", image.Reference, image.Archive)
@@ -102,17 +106,26 @@ func preparePinnedImageCache(t *testing.T, ip, keyPath, capacity string) {
 
 	imported := 0
 	for _, image := range manifest.Images {
-		if _, err := sshOutput(client, "sudo k3s crictl inspecti "+candidateShellQuote(image.Reference)); err == nil {
-			continue
+		verified := false
+		if output, err := sshOutput(client, "sudo k3s crictl inspecti "+candidateShellQuote(image.Reference)); err == nil {
+			_, _, configErr := importedRuntimeImageConfig([]byte(output), image.ConfigDigest)
+			verified = configErr == nil
 		}
-		archive := path.Join(root, capacity, generation, "images", image.Archive)
-		if output, err := sshOutput(client, "sudo k3s ctr images import "+candidateShellQuote(archive)); err != nil {
-			t.Fatalf("import pinned image %s from %s: %v\n%s", image.Reference, archive, err, output)
+		if !verified {
+			archive := path.Join(root, capacity, generation, "images", image.Archive)
+			if output, err := sshOutput(client, "sudo k3s ctr images import "+candidateShellQuote(archive)); err != nil {
+				t.Fatalf("import pinned image %s from %s: %v\n%s", image.Reference, archive, err, output)
+			}
+			output, err := sshOutput(client, "sudo k3s crictl inspecti "+candidateShellQuote(image.Reference))
+			if err != nil {
+				t.Fatalf("pinned image %s is absent after import from %s: %v\n%s", image.Reference, archive, err, output)
+			}
+			if _, _, err := importedRuntimeImageConfig([]byte(output), image.ConfigDigest); err != nil {
+				t.Fatalf("pinned image %s does not match the cached config digest %s: %v\n%s",
+					image.Reference, image.ConfigDigest, err, output)
+			}
+			imported++
 		}
-		if output, err := sshOutput(client, "sudo k3s crictl inspecti "+candidateShellQuote(image.Reference)); err != nil {
-			t.Fatalf("pinned image %s is absent after import from %s: %v\n%s", image.Reference, archive, err, output)
-		}
-		imported++
 	}
-	t.Logf("pinned image cache generation %s ready: %d images (%d imported this run)", generation, len(manifest.Images), imported)
+	t.Logf("pinned image cache generation %s ready: %d images verified (%d imported this run)", generation, len(manifest.Images), imported)
 }

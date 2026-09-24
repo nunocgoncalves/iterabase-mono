@@ -25,7 +25,7 @@ from typing import Any
 SCHEMA_VERSION = 1
 # Bump when the on-host archive format or naming changes so every fixture
 # re-seeds instead of trusting an incompatible generation.
-SEED_FORMAT_VERSION = 3
+SEED_FORMAT_VERSION = 4
 CACHE_ROOT = "/var/lib/iterabase-e2e/image-cache"
 CAPACITIES = ("cpu", "gpu")
 SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -157,6 +157,25 @@ def rewrite_docker_manifest(data: bytes, reference: str) -> bytes:
     return json.dumps(manifest, separators=(",", ":")).encode("utf-8")
 
 
+def docker_manifest_config_digest(data: bytes, reference: str) -> str:
+    """Return the config digest recorded in a docker-save `manifest.json`.
+
+    The consume side compares this against the imported image's CRI config
+    digest, so a stale image under the same tag cannot silently satisfy the
+    cache.
+    """
+    try:
+        manifest = json.loads(data)
+    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+        raise FixtureImageCacheError(f"decode docker manifest for {reference}: {error}") from error
+    if not isinstance(manifest, list) or len(manifest) != 1 or not isinstance(manifest[0], dict):
+        raise FixtureImageCacheError(f"docker manifest for {reference} is ambiguous")
+    config = manifest[0].get("Config")
+    if not isinstance(config, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", config):
+        raise FixtureImageCacheError(f"docker manifest for {reference} has an invalid config digest")
+    return config
+
+
 def build_manifest(root: Path, capacity: str) -> dict[str, Any]:
     """Build the deterministic cache manifest a fixture capacity must hold."""
     images = select_images(load_runtime_images(root), capacity)
@@ -283,15 +302,6 @@ def seed_fixture_image_cache(
                 return commands
 
     execute(ssh_command(f"sudo mkdir -p {remote_root}"))
-    # Prune every other generation and stale staging directory first: an
-    # incompatible or superseded cache can otherwise fill the fixture disk
-    # before the new generation is staged.
-    execute(
-        ssh_command(
-            f"sudo find {remote_root} -mindepth 1 -maxdepth 1 -type d "
-            f"! -name {shlex.quote(generation)} -exec rm -rf {{}} +"
-        )
-    )
     execute(ssh_command(f"df -h {remote_root}"))
     execute(ssh_command(f"sudo rm -rf {staging_dir} && sudo mkdir -p {staging_dir}/images"))
     execute(
@@ -325,6 +335,9 @@ def seed_fixture_image_cache(
                 ssh_command(f"sudo tee {workdir}/manifest.json >/dev/null"),
                 stdin_text=rewritten.decode("utf-8") + "\n",
             )
+            image["config_digest"] = docker_manifest_config_digest(
+                manifest_bytes.encode("utf-8"), image["reference"]
+            )
         execute(ssh_command(f"sudo tar -C {workdir} -cf {shlex.quote(archive)} ."))
         execute(ssh_command(f"sudo rm -rf {workdir}"))
 
@@ -334,6 +347,14 @@ def seed_fixture_image_cache(
         stdin_text=rendered_manifest,
     )
     execute(ssh_command(f"sudo rm -rf {remote_dir} && sudo mv {staging_dir} {remote_dir}"))
+    # Prune only after the new generation is in place, so a failed seed leaves
+    # the previous generation intact and usable.
+    execute(
+        ssh_command(
+            f"sudo find {remote_root} -mindepth 1 -maxdepth 1 -type d "
+            f"! -name {shlex.quote(generation)} -exec rm -rf {{}} +"
+        )
+    )
     execute(ssh_command(f"rm -f {crane_remote}"))
     return commands
 
