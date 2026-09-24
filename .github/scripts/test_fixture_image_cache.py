@@ -112,7 +112,7 @@ class FixtureImageCacheTests(unittest.TestCase):
                 crane=Path("/tmp/crane"),
                 dry_run=True,
             )
-        self.assertEqual(len(commands), len(manifest["images"]) + 6)
+        self.assertEqual(len(commands), len(manifest["images"]) * 6 + 6)
         printed = output.getvalue()
         for image in manifest["images"]:
             self.assertIn(f"{image['reference']}@{image['digest']}", printed)
@@ -136,7 +136,49 @@ class FixtureImageCacheTests(unittest.TestCase):
             dry_run=True,
             runner=failing_runner,
         )
-        self.assertEqual(len(commands), len(manifest["images"]) + 6)
+        self.assertEqual(len(commands), len(manifest["images"]) * 6 + 6)
+
+    def test_annotate_oci_index_binds_the_exact_reference(self) -> None:
+        index = {
+            "schemaVersion": 2,
+            "manifests": [
+                {
+                    "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                    "digest": "sha256:" + "a" * 64,
+                    "platform": {"os": "linux", "architecture": "amd64"},
+                }
+            ],
+        }
+        annotated = fixture_image_cache.annotate_oci_index(
+            json.dumps(index).encode(), "quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z"
+        )
+        parsed = json.loads(annotated)
+        annotations = parsed["manifests"][0]["annotations"]
+        self.assertEqual(
+            annotations["io.containerd.image.name"],
+            "quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z",
+        )
+        self.assertEqual(
+            annotations["org.opencontainers.image.ref.name"],
+            "RELEASE.2025-09-07T16-13-09Z",
+        )
+
+    def test_annotate_oci_index_rejects_ambiguous_or_invalid_indexes(self) -> None:
+        ambiguous = {
+            "schemaVersion": 2,
+            "manifests": [
+                {"digest": "sha256:" + "a" * 64},
+                {"digest": "sha256:" + "b" * 64},
+            ],
+        }
+        for payload, reference in (
+            (b"{not json", "busybox:1.37.0"),
+            (json.dumps(ambiguous).encode(), "busybox:1.37.0"),
+            (json.dumps({"schemaVersion": 2}).encode(), "busybox:1.37.0"),
+            (json.dumps({"manifests": [{"digest": "x"}]}).encode(), "busybox"),
+        ):
+            with self.assertRaises(fixture_image_cache.FixtureImageCacheError):
+                fixture_image_cache.annotate_oci_index(payload, reference)
 
     def test_unknown_capacity_is_rejected(self) -> None:
         images = fixture_image_cache.load_runtime_images(ROOT)
