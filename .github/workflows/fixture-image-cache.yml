@@ -10,8 +10,11 @@ on:
         default: master
   # Temporary rollout trigger for the HOR-588 branch so the cache can be seeded
   # before this workflow exists on the default branch. Removed before merge.
+  # Only re-seed when the pinned authority actually changes.
   push:
     branches: [HOR-588-fixture-image-cache]
+    paths:
+      - .github/inputs/remote-content.json
 
 permissions:
   contents: read
