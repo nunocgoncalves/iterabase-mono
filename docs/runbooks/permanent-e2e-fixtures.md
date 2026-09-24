@@ -161,6 +161,35 @@ gh variable list --repo nunocgoncalves/iterabase-mono
 gh secret list --repo nunocgoncalves/iterabase-mono
 ```
 
+## Pinned image cache
+
+Every pinned runtime image in `.github/inputs/remote-content.json` is cached on
+each fixture host so applies never depend on public registries, whose per-IP
+anonymous quotas can fail a run mid-apply (`401`/rate-limit responses).
+
+- Layout: `/var/lib/iterabase-e2e/image-cache/<capacity>/<generation>/` holds
+  `generation.json` (emitted by
+  `.github/scripts/fixture_image_cache.py manifest --capacity <capacity>`) and
+  `images/<archive>.tar`, one digest-pinned image per archive.
+- Capacity sets: the GPU fixture caches every pinned image; the CPU fixture
+  caches every image except GPU-only registries/repositories (`nvcr.io`,
+  `nvidia/*`, vLLM).
+- Seeding: dispatch the `Fixture image cache` workflow with `capacity` and the
+  repository `ref` whose pinned-list generation is required. The job shares the
+  `iterabase-permanent-fixture-<capacity>` lock, pulls each image by digest with
+  the reviewed `crane` binary directly on the host, verifies the generation
+  marker, and leaves a matching generation untouched. Seeding is required again
+  only when the pinned list changes (new generation).
+- Per run: real-machine PR and candidate jobs derive the generation from
+  `remote-content.json`, and the harness imports and verifies every reference
+  before the first apply. A missing or mismatched generation fails the scenario
+  with an actionable message instead of falling back to registries.
+- Retention: prune old generations once the pinned list moves; keep the
+  generation referenced by the checked-out source. The seed workflow reports the
+  retained generation sizes.
+- The cache is a derived artifact of `remote-content.json`; never hand-edit it
+  and never place credentials or customer data in it.
+
 ## Normal lifecycle
 
 Every selected scenario performs this lifecycle before apply and again after

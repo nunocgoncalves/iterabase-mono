@@ -88,7 +88,12 @@ runtime, Playwright's browser/headless/FFmpeg archives, immutable BuildKit,
 SHA-256-pinned external Helm archives, and the Forge K3s/Helm/Flux executable
 archives plus the K3s airgap image set and service installer. It also names the
 repository Go modules and npm package lock that govern controller/code-generation
-tools, plus the product dependency and model locks. Chart builders do not trust mutable repository indexes: they
+tools, plus the product dependency and model locks. Permanent fixtures retain a
+generation-stamped pinned-image cache
+(`/var/lib/iterabase-e2e/image-cache/<capacity>/<generation>`) seeded by the
+`Fixture image cache` workflow; real-machine jobs import and verify the cached
+archives before any apply, so fixture applies never pull public registries, and a
+missing generation fails the scenario rather than falling back. Chart builders do not trust mutable repository indexes: they
 download an exact archive, fail
 immediately on changed bytes, and only retry transport. Dockerfiles require
 reviewed tag-plus-digest identities; control-plane and protobuf Go tools install
@@ -246,6 +251,7 @@ automatic scenario retries, pass-on-retry semantics, or accepted flakes.
 ```bash
 python3 .github/scripts/test_select_ci.py
 python3 .github/scripts/test_e2e.py
+python3 .github/scripts/test_fixture_image_cache.py
 python3 .github/scripts/test_release.py
 python3 .github/scripts/test_remote_content.py
 python3 .github/scripts/remote_content.py validate
