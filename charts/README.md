@@ -400,6 +400,40 @@ revision's hooks would try to recreate objects that the kept release still owns.
 Always recover via forward re-upgrade rather than re-applying the predecessor's
 raw manifests.
 
+### Internal CA authority (HOR-528)
+
+`global.internalTLS.ca.commonName` and `global.internalTLS.ca.duration` are the
+shared internal-CA identity contract. The ordered `cert-manager-substrate`
+companion and the platform's `cert-issuers` subchart both render the root
+Certificate from the same resolution order — this global value, then a legacy
+`cert-issuers.internal.ca.{commonName,duration}` (its pre-HOR-528 location, still
+honored so existing overlays keep working), then the chart default — so there is
+exactly one definition of the authority no matter which release applies first.
+
+The companion's bootstrap hook applies the platform-owned bootstrap
+ClusterIssuer, root Certificate, and `internal-ca` ClusterIssuer before
+dependent workloads start; the platform chart owns them afterwards. Because both
+writers resolve one identity, the platform's adoption never changes a spec field,
+so a reconcile cannot make cert-manager re-issue (rotate) the root behind running
+workloads — a rotation would invalidate every leaf already signed by the current
+key. That guarantee is enforced by:
+
+- `make check-certificate-substrate`: the hook manifest and the platform chart
+must render identical CA specs, for the defaults, a global override, a legacy
+override, and both set (they must also agree that values are strings, not YAML
+scalars);
+- `make test-e2e-internal-tls` and `make test-e2e-observability-tls`: exactly one
+root authority on its first revision, every issued workload leaf chains to the
+mounted root, and (internal TLS) a substrate + platform reconcile leaves the root
+object identity and key material unchanged.
+
+**Changing the shared identity on a running installation is not a supported
+operation.** Cert-manager re-issues the root whenever its spec changes, and while
+the companion holds the object's applied spec the platform's server-side apply
+fails closed on a field-ownership conflict instead. Neither path is an
+implemented rotation flow: intentional rotation is out of scope for HOR-528, so
+perform an explicit migration/redeploy rather than editing these values in place.
+
 ### Historical certificate ownership handoff from platform 0.2.2 or earlier
 
 This is retained evidence for the 0.3 line, not a supported path into 0.4.0.

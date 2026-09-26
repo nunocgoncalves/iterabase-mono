@@ -5,6 +5,8 @@
 {{- $root := printf "%s-internal-ca-root" $platformRelease }}
 {{- $bootstrap := printf "%s-internal-ca-bootstrap" $platformRelease }}
 {{- $issuer := include "cert-manager-substrate.internalTLSIssuer" . }}
+{{- $caCommonName := include "cert-manager-substrate.caCommonName" . }}
+{{- $caDuration := include "cert-manager-substrate.caDuration" . }}
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -37,11 +39,23 @@ spec:
         - name: bootstrap
           image: "{{ .Values.internalCABootstrap.image.repository }}:{{ .Values.internalCABootstrap.image.tag }}@{{ .Values.internalCABootstrap.image.digest }}"
           imagePullPolicy: {{ .Values.internalCABootstrap.image.pullPolicy }}
+          # HOR-528: the shared internal-CA identity reaches the script through the
+          # container environment, never interpolated into shell source. The value
+          # comes from the deployment's values, and this hook holds cluster-scoped
+          # write access to the CA objects, so a `$`/backtick sequence in the value
+          # must not be able to execute here.
+          env:
+            - name: CA_COMMON_NAME
+              value: {{ $caCommonName | quote }}
+            - name: CA_DURATION
+              value: {{ $caDuration | quote }}
           command: [/bin/bash, -ceu]
           args:
             - |
               owner_release={{ $platformRelease | quote }}
               owner_namespace={{ .Release.Namespace | quote }}
+              ca_common_name="${CA_COMMON_NAME:?CA_COMMON_NAME is required}"
+              ca_duration="${CA_DURATION:?CA_DURATION is required}"
 
               check_owner() {
                 kind="$1"
@@ -97,9 +111,9 @@ spec:
                   meta.helm.sh/release-namespace: {{ .Release.Namespace }}
               spec:
                 isCA: true
-                duration: 87600h
+                duration: {{ $caDuration | quote }}
                 secretName: {{ $root }}
-                commonName: iterabase-internal-ca
+                commonName: {{ $caCommonName | quote }}
                 issuerRef:
                   name: {{ $bootstrap }}
                   kind: ClusterIssuer
@@ -120,6 +134,11 @@ spec:
                   secretName: {{ $root }}
               YAML
 
+              # The platform release owns these objects and renders the same shared
+              # identity; this ordered companion applies the identical spec so a
+              # dependent workload can start before the platform install. Both
+              # writers stay byte-compatible because they resolve one identity
+              # (HOR-528), so neither apply can make cert-manager re-issue the root.
               for attempt in $(seq 1 120); do
                 if kubectl apply -f "$manifest"; then
                   break
@@ -137,7 +156,7 @@ spec:
                 value="$(kubectl get secret/{{ $root }} --namespace {{ .Release.Namespace }} -o "jsonpath={.data.${key//./\\.}}")"
                 [[ -n "$value" ]] || { echo "internal CA Secret is missing $key" >&2; exit 1; }
               done
-              echo "internal-ca-bootstrap=pass owner=${owner_release}/${owner_namespace} issuer={{ $issuer }}"
+              echo "internal-ca-bootstrap=pass owner=${owner_release}/${owner_namespace} issuer={{ $issuer }} common-name=${ca_common_name} duration=${ca_duration}"
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
