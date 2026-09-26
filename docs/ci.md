@@ -35,6 +35,75 @@ enforces scenario identity through the plan-hash-bound per-scenario result set;
 missing or malformed output fails closed there too. E2E scenario routing remains
 owned by `.github/scripts/e2e.py` and the compiled owner catalogue.
 
+## Go module lint ownership
+
+`make lint` is the canonical local Go lint matrix: the root Makefile
+`GO_MODULES` variable lists every module, and each module is linted by running
+`golangci-lint run ./...` inside that module's directory (the component
+`make lint` targets do the same for `control-plane`, `inference-gateway`, and
+`forge`). CI installs the repository-pinned linter — version-locked by
+`.github/tools/go.mod` and installed by `.github/scripts/install_go_tool.sh` —
+and runs those same commands, so the required aggregate resolves the same
+linter policy as the local matrix. A local run uses the `golangci-lint` found on
+`PATH`; `control-plane/Makefile` documents the expected pin in
+`GOLANGCI_LINT_VERSION`, which `.github/scripts/test_lint_parity.py` keeps equal
+to the tool module. Compiling a module or running its tests is not lint
+enforcement, so each module has one explicit pull-request owner and one explicit
+release-candidate owner, recorded in `.github/ci/go-lint-owners.json`:
+
+| Module | Pull request (`CI / required`) | Release candidate (`Candidate validation / required`) |
+| -- | -- | -- |
+| `control-plane` | `control-plane` | `control-plane-source` |
+| `inference-gateway` | `inference-gateway` | `inference-gateway-source` |
+| `forge` | `forge` | `forge-source` |
+| `forge/test/e2e` | `nested-go-lint` | `nested-go-lint` |
+| `testkit/e2e` | `nested-go-lint` | `nested-go-lint` |
+| `control-plane/test/e2e` | `nested-go-lint` | `nested-go-lint` |
+| `charts/test/e2e` | `nested-go-lint` | `nested-go-lint` |
+
+The four nested Go modules are linted by the dedicated `nested-go-lint` job,
+which installs the pinned linter once and runs `golangci-lint run ./...` inside
+each module directory. A change confined to one of those modules selects it, and
+a linter-configuration edit, shared `testkit/e2e`, root `Makefile`/`go.work`,
+selector, or `ci.yml` contract change fans out to it, so `CI / required` cannot
+pass while a nested-module lint invocation fails. The same job is always selected
+for a release candidate and runs against the exact requested `master_sha`, so
+candidate validation cannot promote past a nested lint failure.
+
+Because golangci-lint resolves the nearest parent configuration, a nested module
+would otherwise inherit the component exclusions that discard test sources. Each
+nested module therefore carries a reviewed resolution:
+
+| Nested module | Resolved configuration | Policy relative to the component |
+| -- | -- | -- |
+| `charts/test/e2e` | none (built-in default policy) | none |
+| `testkit/e2e` | none (built-in default policy) | none |
+| `forge/test/e2e` | `forge/test/e2e/.golangci.yml` | same linters; gocyclo ceiling 25; six harness-inapplicable gosec rules excluded |
+| `control-plane/test/e2e` | `control-plane/test/e2e/.golangci.yml` | same linters; gocyclo ceiling 25; six harness-inapplicable gosec rules excluded |
+
+The two test-module configurations exist because the component configurations
+deliberately exclude test code, which made the nested invocation analyze nothing
+while still reporting success. They enable the component linter set — a nested
+configuration may not add or drop a linter — and change only the settings a test
+harness requires: the complexity ceiling is 25 instead of the product-code
+default of 15, and the gosec rules whose threat model does not exist in a test
+harness are excluded with a recorded reason (`G101` intentional fixture secrets,
+`G204` harness command construction, `G306` executable stubs and fixture bundles,
+`G703` fixture paths, `G705` loopback test servers, `G122` single-writer evidence
+trees).
+
+`.github/scripts/test_lint_parity.py` verifies each recorded resolution against
+the real configuration search, requires a tracked `analysis_waiver` whenever a
+resolved configuration still excludes a module's sources, requires the recorded
+configuration to be disclosed here, and requires the nested linter set to equal
+its component's. A silently vacuous gate, an unreviewed change of analysis scope,
+or a quietly disabled linter therefore fails the contract test.
+
+`.github/scripts/test_lint_parity.py` fails when a module is added to the root
+`GO_MODULES` matrix without a named pull-request and release-candidate lint
+owner, when an owner job stops installing the pinned linter or linting its
+module, or when a required aggregate stops consuming the owner.
+
 ## One compiled execution plan
 
 Every runnable owner registration declares, in compiled Go metadata:
@@ -252,6 +321,7 @@ automatic scenario retries, pass-on-retry semantics, or accepted flakes.
 
 ```bash
 python3 .github/scripts/test_select_ci.py
+python3 .github/scripts/test_lint_parity.py
 python3 .github/scripts/test_e2e.py
 python3 .github/scripts/test_fixture_image_cache.py
 python3 .github/scripts/test_release.py
@@ -263,9 +333,9 @@ make release-check
 ```
 
 Infrastructure scenarios still require Docker/Kind or the founder-configured
-permanent CPU/GPU fixtures. The commands above validate selection, recipes,
-composition contracts, strict result reconciliation, and compiled owner
-entrypoints without contacting a fixture.
+permanent CPU/GPU fixtures. The commands above validate selection, Go lint
+ownership, recipes, composition contracts, strict result reconciliation, and
+compiled owner entrypoints without contacting a fixture.
 
 ## Branch-protection audit
 
